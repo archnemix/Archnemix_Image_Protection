@@ -59,11 +59,14 @@ map onto this library's design.
 | A20 | Repeated extraction probing until a race, fallback, or read-back route succeeds | medium | unlimited silent attempts |
 | A21 | Recovering a decoded bitmap or clean working canvas retained in browser memory after display | high | long-lived decoded pixels + memory/process access |
 | A22 | Taking many screenshots while moving an inspection lens and stitching the sharp regions | low–medium (manual) / high (automated) | a user-controlled sharp viewport |
+| A23 | Browser-privileged capture: screenshot extension (`captureVisibleTab`-style APIs), DevTools “Capture screenshot”, remote debugging/CDP, browser automation screenshot | low–medium | control of the browser itself, above page JavaScript |
+| A24 | View Page Source / save-page / inspect static assets looking for the image or a reusable signed URL | low | secrets or usable URLs accidentally present in HTML |
+| A25 | Cross-device analog capture: phone/camera photographing or filming another device's screen | none–low | photons leaving a display (**physically unstoppable/undetectable by the page**) |
 
-The design goal follows directly: **A1–A11, A13 and A16–A20 should yield
-nothing clean or reusable; A12/A14/A15/A21/A22 must be pushed toward at most a
-server-authorized, screen-resolution, visibly/forensically marked copy whose
-production is slow, noisy, and attributable.**
+The design goal follows directly: **A1–A11, A13, A16–A20 and A24 should yield
+nothing clean or reusable; A12/A14/A15/A21–A23/A25 must be pushed toward at
+most a server-authorized, screen-resolution, visibly/forensically marked copy
+whose production is slow, noisy, and attributable.**
 
 ## 2. What production platforms actually do
 
@@ -235,6 +238,73 @@ image at a time after generating suspicious events. That is materially
 different from promising that pixels can be both shown to and withheld from
 the same untrusted machine.
 
+### 2.8 Screenshot privilege levels — what can and cannot be “stopped”
+
+Screenshot requests often get collapsed into one feature request, but they
+sit at four different privilege levels:
+
+1. **Page-level extraction** (`canvas.toDataURL`, DOM downloaders, injected
+   page scripts): the site controls this layer. Archx can and does poison
+   read-back, seal internals, audit hooks, and make Vault read-back black.
+2. **Browser-privileged capture** (screenshot extensions, DevTools screenshot,
+   CDP/automation): the capture runs outside the page's JavaScript sandbox.
+   A site cannot reliably enumerate extensions, receive a veto callback, or
+   distinguish a privileged capture from ordinary compositing. Closed shadow
+   DOM and view-source hygiene still deny the *file/URL*, but the visible tab
+   can be photographed by the browser that rendered it.
+3. **OS-level capture** (PrintScreen, Snipping Tool, macOS Screenshot,
+   compositor recorders): the operating system owns the final pixels. Some
+   shortcuts/focus transitions leak a signal to the page; many are consumed
+   before the page can react or the desktop is frozen at invocation. Archx
+   listens on keydown/keyup, blur/focus, visibility, print and page-freeze
+   paths and blackouts/blurs when a signal arrives, but this is best-effort,
+   not a capture API.
+4. **Physical capture** (phone/camera pointed at another screen): no signal
+   exists in the displaying device. There is nothing to detect. The only web
+   defenses are not showing the whole sharp image at once, capping/marking
+   the derivative, and changing attribution over time.
+
+That analysis produced two Fortress additions. **Lens** changes the visible
+frame itself, so every capture class inherits the degradation. **Dynamic
+capture trace** adds a slowly drifting session/time DOM trace above the image
+(optionally with a shifting temporal phase pattern): privileged screenshots
+and camera photos carry attribution, and captures taken seconds apart do not
+line up as one clean stitching set. Neither should be marketed as “screenshot
+blocking”; only a trusted OS/DRM display path could make that claim.
+
+### 2.9 Why protected rendering looked slurry — and the quality fix
+
+Protection quality is not determined by tile permutation (which is lossless).
+Measurements isolated four lossy stages:
+
+- **Derivative encode quality.** The old q82 scrambled WebP spent bits on 64
+  artificial tile boundaries and chroma detail. On the 800 px watch image,
+  reconstruction improved from **36.6 dB PSNR / 2.56 MAD at q82 to 41.0 dB /
+  1.43 MAD at q95**. The server/CLI now default to q95 with high-quality
+  chroma handling, and offer WebP/PNG lossless delivery for bit-exact pixels
+  at the chosen derivative size.
+- **Width-only sizing under `object-fit: cover`.** Asking only for the host's
+  CSS width is wrong when the host box is squarer/taller than the source: the
+  browser crops the derivative and then upscales it. Token requests now carry
+  the display box and fit mode; the server uses source aspect to sign the
+  cover-safe width, still subject to entitlement caps.
+- **Display density and resampling count.** A DPR cap of 2 makes modern 3×
+  screens upscale the canvas. Archx now allows DPR 3, requests a supersampled
+  derivative (2× for hero images, 1.5× in the gallery helper), reassembles
+  tiles at native/oversampled resolution, and does one progressive
+  high-quality final downscale instead of scaling every shuffled tile
+  directly to its final rectangle.
+- **WebGL filtering.** One bilinear tap softens 1:1 detail and aliases when
+  minifying. The shader now uses exact `texelFetch` around 1:1 footprints and
+  2×2 supersampling when minifying a scrambled texture (whose mipmaps would
+  bleed across shuffled tiles); unscrambled textures can use trilinear mips.
+
+The important boundary is unchanged: “original quality” means the pixels of
+the **authorized displayed derivative** can be lossless and rendered as
+faithfully as an ordinary image at that CSS/DPR size. It cannot mean sending
+the full master merely so the browser can downscale it—that would defeat the
+resolution boundary. Sites choose the derivative ceiling per viewer.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -246,6 +316,8 @@ the same untrusted machine.
 | Token thief | replay/share a captured delivery URL or inflate its derivative size | Short expiry + optional one-time nonce, IP/User-Agent binding, origin checks, and signed server-side entitlement width |
 | Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
 | Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic marks; Lens prevents one screenshot from containing the whole sharp image |
+| Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens-degraded + dynamically traced |
+| Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, and Lens reducing resale value |
 
 Non-goals: hiding that protection exists, DRM-level guarantees, stopping a
 camera pointed at a monitor, proving browser integrity on a machine the
@@ -313,45 +385,67 @@ deployment error — see the README checklist).
     API therefore exposes the granularity (`forensicPerToken`, static CLI
     marks, normal vs strict memory, `lite` vs `fortress`) rather than forcing
     maximum paranoia onto 500 catalogue thumbnails.
+11. **Quality is also a protection feature.** If protected images look slurry,
+    sites will publish an unprotected copy beside them. Delivery therefore
+    defaults to q95, offers lossless derivatives, sizes by display box +
+    source aspect rather than width alone, renders at up to DPR 3, reassembles
+    tiles before the final resample, and uses footprint-aware WebGL sampling.
+    Security comes from withholding the master and controlling derivative
+    entitlement—not from needlessly recompressing/resampling the derivative.
+12. **Do not pretend page JS outranks the OS, browser chrome, or physics.**
+    Screenshot shortcuts and blur/freeze signals are used opportunistically,
+    but the robust anti-capture controls change what is visible (Lens),
+    when attribution changes (dynamic trace), and what resolution was ever
+    authorized (server entitlement). This avoids brittle “disable F12” theatre
+    while making every privileged/physical capture class inherit the same
+    value limits.
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 13 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 14 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
-  master ≈ 55/255 on photo content) while un-scrambling restores them
-  (MAD < 6 lossless, ≈ 5–8 through the full browser pipeline incl. watermark
-  and WebP q82); encrypted payloads don't parse as images and fail closed
-  under wrong keys; tokens reject tampering, expiry and id-swaps; the HTTP
-  flow serves only down-scaled `.archx` containers. The hardened middleware
-  tests also prove that an entitlement's 180 px cap overrides a browser's
-  900 px request, a disallowed/missing origin fails, the wrong User-Agent
-  cannot spend a bound token, the right browser can spend it only once, and
-  the payload advertises server `wm`/`fx` embedding. A separate reconstruction
-  test verifies the actual visible watermark and a >0.7 forensic correlation
-  remain after offline un-shuffling—not just that header flags were set.
-- **Real browser (headless Chromium, 52 checks):** a page with 7 protected
+  master ≈ 55/255 on photo content) while un-scrambling restores them;
+  encrypted payloads don't parse as images and fail closed under wrong keys;
+  tokens reject tampering, expiry and id-swaps; the HTTP flow serves only
+  down-scaled `.archx` containers. Delivery-quality tests prove the new q95
+  default retains materially more fine-line/text detail than q82 and that
+  lossless WebP reconstruction is **pixel-exact (MAD 0)** at the delivered
+  size. Cover-aware token sizing is regression-tested (a 4:3 source in a
+  120×120 box signs 160 px, not a crop-then-upscale 120 px). The hardened
+  middleware tests also prove that an entitlement's 180 px cap overrides a
+  browser's 900 px request, a disallowed/missing origin fails, the wrong
+  User-Agent cannot spend a bound token, the right browser can spend it only
+  once, and the payload advertises server `wm`/`fx` embedding. A separate
+  reconstruction test verifies the actual visible watermark and a >0.7
+  forensic correlation remain after offline un-shuffling—not just flags.
+- **Real browser (headless Chromium, 55 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
   no `__archx` expando, `Archx._instances` is absent, public option/config
   views redact secrets, instances expose no public canvas property, and
-  `_debug()` is null without explicit per-instance opt-in. `toDataURL`/
-  `toBlob`/`getImageData` all return decoys and fire attempt events; repeated
-  probes trigger the configured strike blackout. Replacing `fetch` is both
-  reported by `auditIntegrity()` and causes Fortress to fail closed; restoring
-  it returns a clean audit. Trusted pointer movement positions the Lens while
-  a synthetic untrusted event does not; strict mode reports the bitmap
-  released and the GPU source scrambled, including for a plain client-only
-  image. The WebGL prototype bypass returns **pure black** (mean RGB ≈ 0),
-  split mode uses 9 separately poisoned canvases, right-click/drag guards,
-  window-blur protection and print blackout engage, and the browser network
-  checks confirm a marked mosaic payload, one-time replay rejection, and
-  wrong-User-Agent rejection.
-- **Performance:** 100/100 gallery images loaded+painted in **~1.4–1.5 s** in
-  headless Chromium with 0 `<img>` tags; browser bundle **44.1 kB minified /
-  15.5 kB gzipped**. Static/per-image server outputs remain cacheable;
-  per-token marks/keys intentionally trade cache hits for attribution.
+  `_debug()` is null without explicit per-instance opt-in. At native element
+  resolution the Shield render now measures **7.03 MAD and 0.85 gradient-detail
+  ratio** versus the ordinary `<img>` (the cover/quality work moved this from
+  11.28 / 0.53 in the failing intermediate measurement). `toDataURL`/`toBlob`/
+  `getImageData` all return decoys and fire attempt events; repeated probes
+  trigger the configured strike blackout. Replacing `fetch` is both reported
+  by `auditIntegrity()` and causes Fortress to fail closed. Trusted pointer
+  movement positions the Lens while a synthetic untrusted event does not; the
+  dynamic capture trace is active with session/time text, and a PrintScreen
+  signal immediately blackouts. Strict mode reports the bitmap released and
+  the GPU source scrambled. The WebGL prototype bypass returns **pure black**
+  (mean RGB ≈ 0), split mode uses 9 separately poisoned canvases, guards and
+  print blackout engage, and network checks confirm a marked mosaic payload,
+  one-time replay rejection, and wrong-User-Agent rejection.
+- **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
+  about **2.1 s** in the deliberately non-lazy headless test with high-quality
+  derivatives and 0 `<img>` tags; browser bundle **49.5 kB minified / 17.2 kB
+  gzipped**. The 900 px q95 server pipeline measured ~147 ms one-time per
+  cached variant. Static/per-image server outputs remain cacheable; per-token
+  marks/keys and lossless payloads intentionally trade bytes/cache hits for
+  attribution and exactness.
 
 ## 6. Sources
 
@@ -389,3 +483,12 @@ deployment error — see the README checklist).
   disposal) —
   https://developer.mozilla.org/en-US/docs/Web/API/Event/isTrusted
   · https://developer.mozilla.org/en-US/docs/Web/API/ImageBitmap/close
+- Chrome Extensions API, `tabs.captureVisibleTab` (privileged visible-tab
+  capture available to extensions, not vetoable by page content) —
+  https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab
+- MDN, Page Lifecycle / `Document` `freeze` event, `Window.devicePixelRatio`,
+  and `CanvasRenderingContext2D.imageSmoothingQuality` (the platform signals
+  and quality knobs used by the capture/quality paths) —
+  https://developer.mozilla.org/en-US/docs/Web/API/Document/freeze_event
+  · https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio
+  · https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/imageSmoothingQuality

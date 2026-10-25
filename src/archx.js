@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID,
 } from './scramble.js';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -171,7 +171,9 @@ const DEFAULTS = {
   splitCanvases: false,         // shield+: one canvas per tile (hero images)
   splitGrid: 3,
   maxBackingWidth: 1920,        // never paint a wider backing store than this
-  dprCap: 2,
+  dprCap: 3,                    // match modern retina/mobile displays instead of upscaling a 2x canvas
+  sourceOversample: 2,          // fetch a 2x derivative then supersample down (server entitlement still caps the signed width)
+  maxSourceWidth: 2560,         // client-side ceiling before the server's own entitlement cap
   watermark: null,              // string | { text, opacity, tile, corner }
   forensic: true,               // invisible per-session block pattern (shield/vault/fortress)
   sessionId: null,              // defaults to a random per-page-view id
@@ -183,6 +185,7 @@ const DEFAULTS = {
   memory: 'standard',           // 'standard' | 'strict' — strict wipes decoded bitmaps ASAP
   localScramble: false,         // fortress: GPU texture holds scrambled pixels even for plain sources
   lens: null,                   // anti-screenshot pointer lens: true | { radius, idlePixelate }
+  captureShield: null,          // true | { dynamicTrace, temporalPattern, text, opacity } (fortress enables)
   strikes: null,                // attempt lockout: { blurAt, lockAt, lockMs } (fortress enables)
   debug: false,                 // enables _debug() internals hook — NEVER in production
   guards: {
@@ -241,6 +244,7 @@ function mergeOptions(opts = {}) {
     if (clean.memory === undefined) merged.memory = 'strict';
     if (clean.localScramble === undefined) merged.localScramble = true;
     if (clean.forensic === undefined) merged.forensic = true;
+    if (clean.captureShield === undefined) merged.captureShield = true;
     if (clean.strikes === undefined) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 30000 };
     if (!opts.guards || opts.guards.devtools === undefined) merged.guards.devtools = true;
   }
@@ -305,20 +309,33 @@ function installGlobalGuards() {
 
   const blackoutAll = (ms, kind) => instances.forEach((i) => i._momentaryBlackout(ms, kind));
 
-  window.addEventListener('keydown', (e) => {
-    const shotKey = e.key === 'PrintScreen' || e.code === 'PrintScreen';
-    const macShot = e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key);
-    const winSnip = e.metaKey && e.shiftKey && (e.key === 'S' || e.key === 's');
-    if (shotKey || macShot || winSnip) {
-      blackoutAll(900, 'screenshot-key');
-      if (shotKey && navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText('').catch(() => {});
-      }
+  let lastCaptureKeyAt = 0;
+  const onCaptureKey = (e) => {
+    const key = String(e.key || '');
+    const shotKey = key === 'PrintScreen' || e.code === 'PrintScreen';
+    const macShot = e.metaKey && e.shiftKey && ['3', '4', '5'].includes(key);
+    // Windows Snipping Tool (Win+Shift+S), Firefox Screenshots and several
+    // extension defaults (Ctrl/Cmd+Shift+S). Many OS/browser shortcuts never
+    // reach the page at all; when one does, react before/while capture UI opens.
+    const snipShortcut = (e.metaKey || e.ctrlKey) && e.shiftKey && key.toLowerCase() === 's';
+    if (!shotKey && !macShot && !snipShortcut) return;
+    if (shotKey && navigator.clipboard?.writeText) {
+      // Best effort only: the OS may already own the clipboard, and browsers
+      // can deny clipboard writes without a user gesture/permission.
+      navigator.clipboard.writeText('').catch(() => {});
     }
-  }, true);
+    const now = Date.now();
+    if (now - lastCaptureKeyAt < 250) return; // keydown+keyup are one gesture
+    lastCaptureKeyAt = now;
+    blackoutAll(1200, 'screenshot-key');
+  };
+  window.addEventListener('keydown', onCaptureKey, true);
+  window.addEventListener('keyup', onCaptureKey, true);
+  // Some capture/tab-freeze paths freeze JS before a normal blur is useful.
+  document.addEventListener('freeze', () => blackoutAll(1500, 'screenshot-key'), true);
 
-  window.addEventListener('blur', () => instances.forEach((i) => i._setRisk('blur', true)));
-  window.addEventListener('focus', () => instances.forEach((i) => i._setRisk('blur', false)));
+  window.addEventListener('blur', () => instances.forEach((i) => i._setRisk('blur', true)), true);
+  window.addEventListener('focus', () => instances.forEach((i) => i._setRisk('blur', false)), true);
   document.addEventListener('visibilitychange', () => {
     instances.forEach((i) => i._setRisk('hidden', document.hidden));
   });
@@ -335,11 +352,16 @@ function installGlobalGuards() {
 let devtoolsTimer = null;
 function ensureDevtoolsWatcher() {
   if (devtoolsTimer) return;
-  devtoolsTimer = setInterval(() => {
+  const check = () => {
+    // Docked DevTools changes the viewport/outer-size relationship. Undocked
+    // DevTools and remote/CDP capture cannot be detected by page JavaScript.
     const open = (window.outerWidth - window.innerWidth > 170) ||
                  (window.outerHeight - window.innerHeight > 200);
     instances.forEach((i) => { if (i.options.guards.devtools) i._setRisk('devtools', open); });
-  }, 1000);
+  };
+  check();
+  window.addEventListener('resize', check, true);
+  devtoolsTimer = setInterval(check, 400);
 }
 
 /* WebGL context budget (browsers allow ~8–16; stay conservative) */
@@ -382,14 +404,59 @@ async function fetchWithRetries(url, options, retries) {
   throw lastErr;
 }
 
+function setSmoothing(ctx, enabled) {
+  ctx.imageSmoothingEnabled = enabled;
+  if (enabled) {
+    try { ctx.imageSmoothingQuality = 'high'; } catch {}
+  }
+}
+
+/**
+ * Draw with browser-native high-quality resampling. Large reductions are
+ * halved progressively instead of asking one drawImage call to jump, say,
+ * 2400px -> 340px; that preserves edges/text much better in canvas engines.
+ */
+function drawImageHighQuality(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh) {
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+  const scaleX = dw / sw;
+  const scaleY = dh / sh;
+  const exact = Math.abs(scaleX - 1) < 0.01 && Math.abs(scaleY - 1) < 0.01;
+  if (scaleX >= 0.5 || scaleY >= 0.5) {
+    setSmoothing(ctx, !exact);
+    nativeDrawImage(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh);
+    return;
+  }
+
+  let current = makeCanvas();
+  current.width = Math.max(1, Math.ceil(sw));
+  current.height = Math.max(1, Math.ceil(sh));
+  let currentCtx = getNativeContext(current, '2d');
+  setSmoothing(currentCtx, true);
+  nativeDrawImage(currentCtx, source, sx, sy, sw, sh, 0, 0, current.width, current.height);
+
+  while (current.width > dw * 2 || current.height > dh * 2) {
+    const next = makeCanvas();
+    next.width = Math.max(Math.ceil(dw), Math.ceil(current.width / 2));
+    next.height = Math.max(Math.ceil(dh), Math.ceil(current.height / 2));
+    const nextCtx = getNativeContext(next, '2d');
+    setSmoothing(nextCtx, true);
+    nativeDrawImage(nextCtx, current, 0, 0, current.width, current.height, 0, 0, next.width, next.height);
+    current.width = 0; current.height = 0;
+    current = next;
+  }
+  setSmoothing(ctx, true);
+  nativeDrawImage(ctx, current, 0, 0, current.width, current.height, dx, dy, dw, dh);
+  current.width = 0; current.height = 0;
+}
+
 /** Un-scramble a bitmap onto a private offscreen canvas (capped size). */
 function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   const canvas = makeCanvas();
   canvas.width = Math.max(1, targetW);
   canvas.height = Math.max(1, targetH);
   const ctx = getNativeContext(canvas, '2d');
-  if (!meta.plan) { // not scrambled — single draw
-    nativeDrawImage(ctx, bitmap, 0, 0, targetW, targetH);
+  if (!meta.plan) { // not scrambled — single high-quality draw
+    drawImageHighQuality(ctx, bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, targetW, targetH);
     return canvas;
   }
   const { plan, origW, origH, padW, padH } = meta;
@@ -398,16 +465,28 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   // Reassemble on an intermediate canvas whose tile size is an INTEGER number
   // of pixels. Fractional tile origins make browsers paint semi-transparent
   // edge coverage and blend pixels from neighbouring *scrambled* tiles,
-  // which shows up as a visible grid of seams. Integer tiles + a final clean
-  // smoothing pass (where neighbours are once again true neighbours) avoid it.
-  const tileW = Math.max(1, Math.round((targetW * (padW / origW)) / plan.grid));
-  const tileH = Math.max(1, Math.round((targetH * (padH / origH)) / plan.grid));
+  // which shows up as a visible grid of seams.
+  //
+  // Quality matters here: scaling every shuffled tile straight to its final
+  // size throws away detail 64 separate times and looks slurry. Prefer the
+  // decoded bitmap's native resolution (or at most 2x the final size for a
+  // very large source), reassemble there, then perform ONE high-quality
+  // downscale after neighbouring pixels are true neighbours again.
+  const targetPadW = targetW * (padW / origW);
+  const targetPadH = targetH * (padH / origH);
+  const intermediateScale = Math.max(0.05, Math.min(
+    2,
+    bitmap.width / Math.max(1, targetPadW),
+    bitmap.height / Math.max(1, targetPadH),
+  ));
+  const tileW = Math.max(1, Math.round((targetPadW * intermediateScale) / plan.grid));
+  const tileH = Math.max(1, Math.round((targetPadH * intermediateScale) / plan.grid));
   const padded = makeCanvas();
   padded.width = tileW * plan.grid;
   padded.height = tileH * plan.grid;
   const pctx = getNativeContext(padded, '2d');
   const exactScale = Math.abs(tileW - twSrc) < 0.01 && Math.abs(tileH - thSrc) < 0.01;
-  pctx.imageSmoothingEnabled = !exactScale;
+  setSmoothing(pctx, !exactScale);
   // Half-pixel source inset when scaling: prevents smoothing from sampling
   // the unrelated tile next door in the scrambled bitmap. At exact scale we
   // copy pixels 1:1, so no inset (and no geometric shift) is needed.
@@ -427,10 +506,8 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
       0, 0, tileW, tileH);
     pctx.restore();
   }
-  // Crop away the padding strip and scale to the exact requested size.
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  nativeDrawImage(ctx, padded,
+  // Crop away the padding strip and scale once to the exact requested size.
+  drawImageHighQuality(ctx, padded,
     0, 0, padded.width * (origW / padW), padded.height * (origH / padH),
     0, 0, targetW, targetH);
   padded.width = 0; padded.height = 0;
@@ -449,11 +526,13 @@ function scrambleCanvasLocally(source, grid, key) {
   const cleanPadded = makeCanvas();
   cleanPadded.width = pw; cleanPadded.height = ph;
   const cctx = getNativeContext(cleanPadded, '2d');
+  setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
   cctx.fillStyle = '#000'; cctx.fillRect(0, 0, pw, ph);
   nativeDrawImage(cctx, source, 0, 0);
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
   const ctx = getNativeContext(scrambled, '2d');
+  setSmoothing(ctx, false); // tiles are copied 1:1; never resample them here
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, pw, ph);
   for (let dest = 0; dest < plan.count; dest++) {
     const orig = plan.order[dest];
@@ -486,6 +565,27 @@ const SHADOW_CSS = `
   .tiles { display:grid; }
   .tiles canvas { width:100%; height:100%; display:block; }
   .shield { position:absolute; inset:0; z-index:3; background:transparent; }
+  .trace { position:absolute; inset:-20%; z-index:2; pointer-events:none; overflow:hidden; opacity:0; }
+  .wrap.trace-on:not(.loading) .trace { opacity:1; }
+  .wrap.blackout .trace { opacity:0 !important; }
+  .trace.temporal::before { content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(90deg, rgba(255,255,255,.028) 0 1px, transparent 1px 5px);
+    animation:archx-trace-phase 1.4s linear infinite; }
+  .trace-inner { position:absolute; inset:0; display:flex; flex-direction:column;
+    justify-content:space-around; align-items:center; white-space:nowrap;
+    color:rgba(255,255,255,var(--trace-opacity,.08));
+    text-shadow:0 1px 2px rgba(0,0,0,.18);
+    font:700 14px/1.2 system-ui,sans-serif; letter-spacing:.04em;
+    transform:rotate(-17deg); transform-origin:center;
+    animation:archx-trace-drift 14s ease-in-out infinite alternate; }
+  @keyframes archx-trace-drift {
+    from { transform:rotate(-17deg) translate(-1.5%,-1%); }
+    to { transform:rotate(-17deg) translate(1.5%,1%); }
+  }
+  @keyframes archx-trace-phase { to { background-position:15px 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .trace-inner, .trace.temporal::before { animation:none; }
+  }
   .risk { position:absolute; inset:0; z-index:4; pointer-events:none; opacity:0; transition:opacity .18s;
     backdrop-filter: blur(18px) brightness(.25) saturate(0); background:rgba(0,0,0,.55); }
   .wrap.risk-on .risk { opacity:1; }
@@ -521,6 +621,7 @@ export class ProtectedImage {
   #glProg = null; #glLoc = null; #glTex = null; #glMap = null; #glWm = null; #glWmOn = 0;
   #glSource = null; #glMeta = null; #frameCanvas = null; #lensBase = null;
   #lensPoint = null; #lensRaf = 0; #lensCells = [];
+  #traceEl = null; #traceTimer = 0;
   #strikes = 0; #lockedUntil = 0; #lockTimer = 0; #integrityIssues = [];
   #bitmapReleased = false;
 
@@ -541,6 +642,7 @@ export class ProtectedImage {
     }
     this._buildDom();
     this._attachGuards();
+    this._startCaptureTrace();
     instances.add(this);
     installGlobalGuards();
     if (this.#options.guards.devtools) ensureDevtoolsWatcher();
@@ -569,6 +671,7 @@ export class ProtectedImage {
       <div class="tiles" hidden></div>
       <canvas class="main" aria-hidden="true"></canvas>
       <div class="badge">ARCHX&nbsp;PROTECTED</div>
+      <div class="trace" aria-hidden="true"><div class="trace-inner"><span></span><span></span><span></span><span></span><span></span></div></div>
       <div class="shield"></div>
       <div class="risk"></div>
       <div class="err"><span>⚠<br>Protected image unavailable</span></div>`;
@@ -577,6 +680,7 @@ export class ProtectedImage {
     this.#canvas = wrap.querySelector('canvas.main');
     this.#tilesEl = wrap.querySelector('.tiles');
     this.#shieldEl = wrap.querySelector('.shield');
+    this.#traceEl = wrap.querySelector('.trace');
     if (o.aspectRatio) this.#host.style.aspectRatio = String(o.aspectRatio);
     if (o.width) this.#host.style.width = typeof o.width === 'number' ? o.width + 'px' : o.width;
     if (o.height) this.#host.style.height = typeof o.height === 'number' ? o.height + 'px' : o.height;
@@ -644,6 +748,42 @@ export class ProtectedImage {
         this.#requestLensFrame();
       }, sig);
     }
+  }
+
+  /**
+   * Dynamic capture trace (Fortress / captureShield): a low-opacity,
+   * slowly drifting session+time code above the pixels. It cannot stop an
+   * OS screenshot, browser-extension capture, DevTools/CDP capture, or a
+   * camera pointed at another screen — no web API can — but it makes those
+   * captures attributable and makes multi-frame/multi-device stitching less
+   * clean. `temporalPattern` adds a shifting phase pattern for the same reason.
+   */
+  _startCaptureTrace() {
+    const raw = this.#options.captureShield;
+    if (!raw || !this.#traceEl || this.#traceTimer) return;
+    const cfg = raw === true ? {} : raw;
+    if (!cfg || cfg.dynamicTrace === false) return;
+    this.#wrap.classList.add('trace-on');
+    this.#traceEl.classList.toggle('temporal', !!cfg.temporalPattern);
+    this.#traceEl.style.setProperty('--trace-opacity', String(cfg.opacity ?? 0.08));
+    const update = () => {
+      if (this.#destroyed || !this.#traceEl) return;
+      const wm = this.#options.watermark;
+      const wmText = typeof wm === 'string' ? wm : wm?.text;
+      let template = cfg.text || wmText || `${this.#options.brand} · {session} · {time}`;
+      if (!template.includes('{time}')) template += ' · {time}';
+      const text = String(template)
+        .replaceAll('{session}', sessionId().slice(0, 6))
+        .replaceAll('{time}', new Date().toISOString().slice(11, 19));
+      const inner = this.#traceEl.querySelector('.trace-inner');
+      if (inner) {
+        const width = this.#wrap.clientWidth || this.#host.clientWidth || 320;
+        inner.style.fontSize = `${Math.max(10, Math.min(24, Math.round(width / 18)))}px`;
+        inner.querySelectorAll('span').forEach((span) => { span.textContent = text; });
+      }
+    };
+    update();
+    this.#traceTimer = setInterval(update, Math.max(1000, cfg.updateMs ?? 4000));
   }
 
   /** Strike accounting: repeated extraction attempts escalate to lockout. */
@@ -749,11 +889,21 @@ export class ProtectedImage {
         !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id) {
       const endpoint = src.tokenEndpoint || o.tokenEndpoint;
       if (!endpoint) throw new Error('Archx: tokenEndpoint required for {id} sources');
-      const w = Math.min(o.maxBackingWidth, Math.ceil((this.#host.clientWidth || 800) * Math.min(devicePixelRatio || 1, o.dprCap)));
+      const rect = this.#host.getBoundingClientRect?.();
+      const cssWidth = rect?.width || this.#host.clientWidth || 800;
+      const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
+      const pixelScale = Math.min(devicePixelRatio || 1, o.dprCap) * Math.max(1, o.sourceOversample || 1);
+      const maxSourceWidth = o.maxSourceWidth || 2560;
+      const boxW = Math.min(maxSourceWidth, Math.ceil(cssWidth * pixelScale));
+      const boxH = Math.min(maxSourceWidth, Math.ceil(cssHeight * pixelScale));
+      // Send the display box, not just a width: for cover-fit, the server must
+      // account for the source aspect or a landscape image in a squarer box
+      // gets cropped and then upscaled (a major source of slurry detail).
+      const tokenQuery = `?w=${boxW}&bw=${boxW}&bh=${boxH}&fit=${encodeURIComponent(o.fit || 'cover')}`;
       let lastErr;
       for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
         try {
-          const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + '?w=' + w,
+          const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + tokenQuery,
             { credentials: o.credentials, signal: this.#abort.signal }, o.retries);
           const token = await res.json();
           const imgRes = await nativeFetch(token.url, {
@@ -967,6 +1117,7 @@ export class ProtectedImage {
       frame.width = w; frame.height = h;
       const fctx = getNativeContext(frame, '2d');
       fctx.fillStyle = '#000'; fctx.fillRect(0, 0, w, h);
+      setSmoothing(fctx, true);
       nativeDrawImage(fctx, full, fit.sx * (full.width / this.#meta.origW), fit.sy * (full.height / this.#meta.origH),
         fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
         fit.dx, fit.dy, fit.dw, fit.dh);
@@ -990,6 +1141,7 @@ export class ProtectedImage {
     }
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, w, h);
+    setSmoothing(ctx, true);
     nativeDrawImage(ctx, full, fit.sx * (full.width / this.#meta.origW), fit.sy * (full.height / this.#meta.origH),
       fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
       fit.dx, fit.dy, fit.dw, fit.dh);
@@ -1012,7 +1164,7 @@ export class ProtectedImage {
     // Pixelated base everywhere…
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
     if (this.#lensBase) {
-      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingEnabled = false; // deliberately blocky outside the lens
       nativeDrawImage(ctx, this.#lensBase, 0, 0, w, h);
       ctx.fillStyle = 'rgba(4,6,12,0.18)';
       ctx.fillRect(0, 0, w, h);
@@ -1046,6 +1198,7 @@ export class ProtectedImage {
     composed.width = w; composed.height = h;
     const cctx = getNativeContext(composed, '2d');
     cctx.fillStyle = '#000'; cctx.fillRect(0, 0, w, h);
+    setSmoothing(cctx, true);
     nativeDrawImage(cctx, full, fit.sx * (full.width / this.#meta.origW), fit.sy * (full.height / this.#meta.origH),
       fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
       fit.dx, fit.dy, fit.dw, fit.dh);
@@ -1317,6 +1470,50 @@ export class ProtectedImage {
       uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
+      vec2 mapToSource(vec2 imageUv){
+        vec2 srcUv = imageUv;
+        if(uScrambled>0.5){
+          vec2 paddedUv = imageUv * uCrop; // orig->padded space
+          vec2 tile = floor(paddedUv*uGrid);
+          vec2 local = fract(paddedUv*uGrid);
+          vec4 m = texelFetch(uMap, ivec2(tile), 0);
+          vec2 srcTile = m.rg*255.0;
+          if(m.b>0.5) local.x = 1.0-local.x;
+          if(m.a>0.5) local.y = 1.0-local.y;
+          srcUv = (srcTile+local)/uGrid;
+          // Clamp inside the source tile so filtering never blends across
+          // scrambled-tile boundaries -> no seams.
+          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
+          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
+        }
+        return srcUv;
+      }
+      vec4 sampleImage(vec2 imageUv){
+        vec2 texSize = vec2(textureSize(uTex, 0));
+        vec2 srcUv = mapToSource(imageUv);
+        vec2 srcPx = srcUv * texSize;
+        float footprint = max(length(dFdx(srcPx)), length(dFdy(srcPx)));
+        // At ~1:1, fetch the exact texel instead of bilinear-blending two
+        // neighbours; this is the difference between crisp type/edges and mush.
+        if(footprint > 0.70 && footprint < 1.45){
+          ivec2 p = ivec2(clamp(floor(srcPx), vec2(0.0), texSize - 1.0));
+          return texelFetch(uTex, p, 0);
+        }
+        // When minifying, a small 2x2 supersample around the fragment footprint
+        // preserves substantially more detail than one bilinear tap (and, for a
+        // scrambled texture, avoids cross-tile mipmap bleeding).
+        if(footprint >= 1.45){
+          vec2 duvX = dFdx(imageUv);
+          vec2 duvY = dFdy(imageUv);
+          vec4 sum = vec4(0.0);
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX + 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX + 0.25*duvY));
+          return sum * 0.25;
+        }
+        return texture(uTex, srcUv);
+      }
       void main(){
         if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
         vec2 uv = vUv*uFitScale + uFitOffset;
@@ -1338,22 +1535,7 @@ export class ProtectedImage {
             lensOutside = 1.0;
           }
         }
-        vec2 srcUv = effUv;
-        if(uScrambled>0.5){
-          vec2 paddedUv = effUv * uCrop; // orig->padded space
-          vec2 tile = floor(paddedUv*uGrid);
-          vec2 local = fract(paddedUv*uGrid);
-          vec4 m = texelFetch(uMap, ivec2(tile), 0);
-          vec2 srcTile = m.rg*255.0;
-          if(m.b>0.5) local.x = 1.0-local.x;
-          if(m.a>0.5) local.y = 1.0-local.y;
-          srcUv = (srcTile+local)/uGrid;
-          // Clamp inside the source tile (half-texel inset) so LINEAR
-          // filtering never blends across scrambled-tile boundaries -> no seams.
-          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
-          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
-        }
-        vec4 c = texture(uTex, srcUv);
+        vec4 c = sampleImage(effUv);
         c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
         if(lensOutside>0.5) c.rgb *= 0.82;
         if(uWmOn>0.5){
@@ -1408,6 +1590,15 @@ export class ProtectedImage {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    if (!meta.plan) {
+      // A clean (unscrambled) texture can use real trilinear mipmaps. A
+      // scrambled texture deliberately cannot: mip levels would blend across
+      // neighbouring shuffled tiles; sampleImage() supersamples instead.
+      try {
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      } catch {}
+    }
     // Tile map: for each ORIGINAL tile -> scrambled source tile + flips
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.#glMap);
@@ -1563,6 +1754,8 @@ export class ProtectedImage {
       lens: this.#lensPoint ? { ...this.#lensPoint } : null,
       bitmapReleased: this.#bitmapReleased,
       glScrambledTexture: !!(this.#glMeta && this.#glMeta.plan),
+      captureTraceOn: this.#wrap.classList.contains('trace-on'),
+      traceText: this.#traceEl?.textContent?.trim() || '',
     };
   }
   async reload(newSource) {
@@ -1589,6 +1782,8 @@ export class ProtectedImage {
     if (this.#frameCanvas) { this.#frameCanvas.width = 0; this.#frameCanvas.height = 0; this.#frameCanvas = null; }
     if (this.#lensBase) { this.#lensBase.width = 0; this.#lensBase.height = 0; this.#lensBase = null; }
     if (this.#lensRaf) cancelAnimationFrame(this.#lensRaf);
+    if (this.#traceTimer) clearInterval(this.#traceTimer);
+    this.#traceTimer = 0;
     clearTimeout(this.#lockTimer);
     // Only strict (uncached) bitmaps are exclusively ours to close; a
     // standard-mode bitmap may be shared from the LRU by other instances.
@@ -1615,7 +1810,7 @@ function loadImage(target, source, options) {
 function loadGallery(container, items, options = {}) {
   const host = $(container);
   if (!host) throw new Error('Archx: gallery container not found');
-  const galleryDefaults = { mode: 'lite', unloadOnExit: true };
+  const galleryDefaults = { mode: 'lite', unloadOnExit: true, sourceOversample: 1.5 };
   const made = items.map((item) => {
     const cell = document.createElement('div');
     cell.className = options.itemClass || 'archx-gallery-item';
@@ -1651,7 +1846,7 @@ function defineElement() {
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'mode', 'watermark', 'alt', 'fit', 'grid', 'key', 'on-extract']; }
+    static get observedAttributes() { return ['src', 'image-id', 'mode', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'on-extract', 'token-endpoint']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -1669,6 +1864,7 @@ function defineElement() {
         key: this.getAttribute('key') || undefined,
         scrambled: this.hasAttribute('scrambled'),
         lens: this.hasAttribute('lens') ? true : undefined,
+        captureShield: this.hasAttribute('capture-shield') ? true : undefined,
         onExtract: this.getAttribute('on-extract') || undefined,
         tokenEndpoint: this.getAttribute('token-endpoint') || undefined,
       });

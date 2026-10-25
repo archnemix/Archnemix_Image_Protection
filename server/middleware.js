@@ -47,7 +47,9 @@ export function createArchxMiddleware(options = {}) {
   const ttlMs = (options.ttlSec ?? 120) * 1000;
   const grid = options.grid ?? 8;
   const maxWidthCap = options.maxWidthCap ?? 1920;
-  const quality = options.quality ?? 82;
+  const quality = options.quality ?? 95; // 'lossless' is also accepted
+  const lossless = !!options.lossless;
+  const format = options.format ?? 'webp'; // 'webp' | 'png' | 'jpeg'
   const scrambleKeyMode = options.scrambleKeyMode || 'per-image'; // | 'per-token'
   const encrypt = !!options.encrypt;
   // authorize: async (req,id) => boolean | { allow?, viewerId?, maxWidth?, watermark? }
@@ -95,6 +97,7 @@ export function createArchxMiddleware(options = {}) {
       .digest().toString('base64');
 
   const masterCache = new Map(); // id -> {mtimeMs, bytes}
+  const dimensionCache = new Map(); // id -> {mtimeMs, width, height}
   const outputCache = new Map(); // cacheKey -> Buffer  (LRU-ish, capped)
   const OUTPUT_CACHE_MAX = options.outputCacheMax ?? 100;
   const rateMap = new Map(); // kind:ip -> number[] timestamps
@@ -107,6 +110,25 @@ export function createArchxMiddleware(options = {}) {
     const ba = Buffer.from(String(a)); const bb = Buffer.from(String(b));
     return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
   };
+
+  async function imageDimensions(id) {
+    const filePath = index.get(id);
+    if (!filePath) return null;
+    const stat = fs.statSync(filePath);
+    const cached = dimensionCache.get(id);
+    if (cached && cached.mtimeMs === stat.mtimeMs) return cached;
+    const sharp = (await import('sharp')).default;
+    const meta = await sharp(filePath).metadata();
+    if (!meta.width || !meta.height) return null;
+    const rotated = meta.orientation >= 5 && meta.orientation <= 8;
+    const dims = {
+      mtimeMs: stat.mtimeMs,
+      width: rotated ? meta.height : meta.width,
+      height: rotated ? meta.width : meta.height,
+    };
+    dimensionCache.set(id, dims);
+    return dims;
+  }
 
   function originAllowed(req) {
     if (!allowedOrigins || !allowedOrigins.length) return true;
@@ -183,7 +205,27 @@ export function createArchxMiddleware(options = {}) {
         // The BROWSER asks for a width; the SERVER's entitlement caps it.
         // A tampered client can no longer "just ask for 1920px" beyond policy.
         const widthCap = Math.min(maxWidthCap, entitlement.maxWidth || maxWidthCap);
-        const w = Math.max(64, Math.min(widthCap, parseInt(url.searchParams.get('w') || '1200', 10) || 1200));
+        let requestedW = parseInt(url.searchParams.get('w') || url.searchParams.get('bw') || '1200', 10) || 1200;
+        const boxW = parseInt(url.searchParams.get('bw') || '', 10);
+        const boxH = parseInt(url.searchParams.get('bh') || '', 10);
+        if (boxW > 0 && boxH > 0) {
+          try {
+            const dims = await imageDimensions(id);
+            if (dims) {
+              const aspect = dims.width / dims.height;
+              const fit = String(url.searchParams.get('fit') || 'cover').toLowerCase();
+              // For cover, derivative width must satisfy BOTH box dimensions.
+              // Width-only sizing crops a landscape source and then upscales
+              // it in a squarer/taller host, visibly softening detail.
+              requestedW = fit === 'contain'
+                ? Math.min(boxW, boxH * aspect)
+                : fit === 'fill'
+                  ? boxW
+                  : Math.max(boxW, boxH * aspect);
+            }
+          } catch { /* fall back to width-only sizing */ }
+        }
+        const w = Math.max(64, Math.min(widthCap, Math.ceil(requestedW)));
         const nonce = crypto.randomBytes(9).toString('base64url');
         const exp = Date.now() + ttlMs;
         const watermark = await resolveWatermark(
@@ -258,6 +300,8 @@ export function createArchxMiddleware(options = {}) {
             key: scrambleKey,
             maxWidth: Math.min(maxWidthCap, payload.w || 1200),
             quality,
+            lossless,
+            format,
             aesKey: encrypt ? deriveAesKey(id, payload.n) : null,
             watermark: payload.wm || null,
             forensicSeed,

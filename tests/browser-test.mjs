@@ -157,6 +157,31 @@ try {
   mad /= rawNormal.length;
   check('shield image matches the original photo visually (scramble round-trip in browser)', mad < 38, `mean abs diff=${mad.toFixed(1)} (watermark+re-encode tolerant)`);
 
+  // Native-resolution detail retention: protection must not turn fine detail
+  // into slurry. Compare the actual 340px renders, not a tiny thumbnail.
+  async function boxNative(selector) {
+    const el = await page.$(selector);
+    const { data, info } = await sharp(await el.screenshot()).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    let detail = 0;
+    for (let y = 1; y < info.height - 1; y++) {
+      for (let x = 1; x < info.width - 1; x++) {
+        const i = (y * info.width + x) * 3;
+        for (let c = 0; c < 3; c++) {
+          detail += Math.abs(data[i + c] - data[i - 3 + c]) + Math.abs(data[i + c] - data[i - info.width * 3 + c]);
+        }
+      }
+    }
+    return { data, detail, w: info.width, h: info.height };
+  }
+  const [normalNative, shieldNative] = [await boxNative('#normal'), await boxNative('#t-shield')];
+  let nativeMad = 0;
+  for (let i = 0; i < normalNative.data.length; i++) nativeMad += Math.abs(normalNative.data[i] - shieldNative.data[i]);
+  nativeMad /= normalNative.data.length;
+  const detailRatio = shieldNative.detail / normalNative.detail;
+  check('shield retains native rendered detail (no slurry from scramble/re-encode/resample)',
+    nativeMad < 10 && detailRatio > 0.8,
+    `native MAD=${nativeMad.toFixed(2)}, gradient-detail ratio=${detailRatio.toFixed(2)}`);
+
   console.log('\n[3] Poisoned read-back — canvas grabbers get decoys');
   const poison = await page.evaluate(async () => {
     const canvas = window.__instances.shield._debug().canvas;
@@ -272,7 +297,14 @@ try {
     // Synthetic (script-fired) pointer events are untrusted and must be ignored.
     shield.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 1, clientY: 1 }));
     const afterSynthetic = window.__instances.fortress._debug().lens;
-    return { before, afterSynthetic, bitmapReleased: dbg.bitmapReleased, glScrambled: dbg.glScrambledTexture };
+    return {
+      before,
+      afterSynthetic,
+      bitmapReleased: dbg.bitmapReleased,
+      glScrambled: dbg.glScrambledTexture,
+      captureTraceOn: dbg.captureTraceOn,
+      traceText: dbg.traceText,
+    };
   });
   check('trusted pointer input activates the fortress lens near the pointer',
     lensState.before && Math.abs(lensState.before.x - 0.5) < 0.25 && Math.abs(lensState.before.y - 0.5) < 0.25,
@@ -281,6 +313,20 @@ try {
     JSON.stringify(lensState.afterSynthetic) === JSON.stringify(lensState.before));
   check('fortress strict-memory released the decoded bitmap after upload', lensState.bitmapReleased === true);
   check('fortress GPU texture is scrambled', lensState.glScrambled === true);
+  check('fortress dynamic capture trace is active for OS/extension/camera captures',
+    lensState.captureTraceOn === true && /TEST/.test(lensState.traceText || ''),
+    (lensState.traceText || '').slice(0, 80));
+
+  const captureKey = await page.evaluate(() => {
+    window.__attempts.length = 0;
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PrintScreen', code: 'PrintScreen', bubbles: true }));
+    const dbg = window.__instances.shield._debug();
+    return { blackout: dbg.wrap.classList.contains('blackout'), attempts: window.__attempts.slice() };
+  });
+  check('screenshot-key signal immediately blackouts protected images',
+    captureKey.blackout === true && captureKey.attempts.includes('screenshot-key'),
+    JSON.stringify(captureKey));
+  await new Promise((r) => setTimeout(r, 1300)); // let the momentary blackout expire
 
   const localScramble = await page.evaluate(async () => {
     const host = document.createElement('div');

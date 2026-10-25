@@ -283,7 +283,7 @@ function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
 }
 
 // src/archx.js
-var VERSION = "1.1.0";
+var VERSION = "1.2.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -400,7 +400,12 @@ var DEFAULTS = {
   splitGrid: 3,
   maxBackingWidth: 1920,
   // never paint a wider backing store than this
-  dprCap: 2,
+  dprCap: 3,
+  // match modern retina/mobile displays instead of upscaling a 2x canvas
+  sourceOversample: 2,
+  // fetch a 2x derivative then supersample down (server entitlement still caps the signed width)
+  maxSourceWidth: 2560,
+  // client-side ceiling before the server's own entitlement cap
   watermark: null,
   // string | { text, opacity, tile, corner }
   forensic: true,
@@ -420,6 +425,8 @@ var DEFAULTS = {
   // fortress: GPU texture holds scrambled pixels even for plain sources
   lens: null,
   // anti-screenshot pointer lens: true | { radius, idlePixelate }
+  captureShield: null,
+  // true | { dynamicTrace, temporalPattern, text, opacity } (fortress enables)
   strikes: null,
   // attempt lockout: { blurAt, lockAt, lockMs } (fortress enables)
   debug: false,
@@ -476,6 +483,7 @@ function mergeOptions(opts = {}) {
     if (clean.memory === void 0) merged.memory = "strict";
     if (clean.localScramble === void 0) merged.localScramble = true;
     if (clean.forensic === void 0) merged.forensic = true;
+    if (clean.captureShield === void 0) merged.captureShield = true;
     if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
     if (!opts.guards || opts.guards.devtools === void 0) merged.guards.devtools = true;
   }
@@ -532,20 +540,27 @@ function installGlobalGuards() {
   if (globalGuardsInstalled || typeof window === "undefined") return;
   globalGuardsInstalled = true;
   const blackoutAll = (ms, kind) => instances.forEach((i) => i._momentaryBlackout(ms, kind));
-  window.addEventListener("keydown", (e) => {
-    const shotKey = e.key === "PrintScreen" || e.code === "PrintScreen";
-    const macShot = e.metaKey && e.shiftKey && ["3", "4", "5"].includes(e.key);
-    const winSnip = e.metaKey && e.shiftKey && (e.key === "S" || e.key === "s");
-    if (shotKey || macShot || winSnip) {
-      blackoutAll(900, "screenshot-key");
-      if (shotKey && navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText("").catch(() => {
-        });
-      }
+  let lastCaptureKeyAt = 0;
+  const onCaptureKey = (e) => {
+    const key = String(e.key || "");
+    const shotKey = key === "PrintScreen" || e.code === "PrintScreen";
+    const macShot = e.metaKey && e.shiftKey && ["3", "4", "5"].includes(key);
+    const snipShortcut = (e.metaKey || e.ctrlKey) && e.shiftKey && key.toLowerCase() === "s";
+    if (!shotKey && !macShot && !snipShortcut) return;
+    if (shotKey && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText("").catch(() => {
+      });
     }
-  }, true);
-  window.addEventListener("blur", () => instances.forEach((i) => i._setRisk("blur", true)));
-  window.addEventListener("focus", () => instances.forEach((i) => i._setRisk("blur", false)));
+    const now = Date.now();
+    if (now - lastCaptureKeyAt < 250) return;
+    lastCaptureKeyAt = now;
+    blackoutAll(1200, "screenshot-key");
+  };
+  window.addEventListener("keydown", onCaptureKey, true);
+  window.addEventListener("keyup", onCaptureKey, true);
+  document.addEventListener("freeze", () => blackoutAll(1500, "screenshot-key"), true);
+  window.addEventListener("blur", () => instances.forEach((i) => i._setRisk("blur", true)), true);
+  window.addEventListener("focus", () => instances.forEach((i) => i._setRisk("blur", false)), true);
   document.addEventListener("visibilitychange", () => {
     instances.forEach((i) => i._setRisk("hidden", document.hidden));
   });
@@ -560,12 +575,15 @@ function installGlobalGuards() {
 var devtoolsTimer = null;
 function ensureDevtoolsWatcher() {
   if (devtoolsTimer) return;
-  devtoolsTimer = setInterval(() => {
+  const check = () => {
     const open = window.outerWidth - window.innerWidth > 170 || window.outerHeight - window.innerHeight > 200;
     instances.forEach((i) => {
       if (i.options.guards.devtools) i._setRisk("devtools", open);
     });
-  }, 1e3);
+  };
+  check();
+  window.addEventListener("resize", check, true);
+  devtoolsTimer = setInterval(check, 400);
 }
 var glContextsInUse = 0;
 var GL_CONTEXT_BUDGET = 8;
@@ -601,26 +619,74 @@ async function fetchWithRetries(url, options, retries) {
   }
   throw lastErr;
 }
+function setSmoothing(ctx, enabled) {
+  ctx.imageSmoothingEnabled = enabled;
+  if (enabled) {
+    try {
+      ctx.imageSmoothingQuality = "high";
+    } catch {
+    }
+  }
+}
+function drawImageHighQuality(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh) {
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+  const scaleX = dw / sw;
+  const scaleY = dh / sh;
+  const exact = Math.abs(scaleX - 1) < 0.01 && Math.abs(scaleY - 1) < 0.01;
+  if (scaleX >= 0.5 || scaleY >= 0.5) {
+    setSmoothing(ctx, !exact);
+    nativeDrawImage(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh);
+    return;
+  }
+  let current = makeCanvas();
+  current.width = Math.max(1, Math.ceil(sw));
+  current.height = Math.max(1, Math.ceil(sh));
+  let currentCtx = getNativeContext(current, "2d");
+  setSmoothing(currentCtx, true);
+  nativeDrawImage(currentCtx, source, sx, sy, sw, sh, 0, 0, current.width, current.height);
+  while (current.width > dw * 2 || current.height > dh * 2) {
+    const next = makeCanvas();
+    next.width = Math.max(Math.ceil(dw), Math.ceil(current.width / 2));
+    next.height = Math.max(Math.ceil(dh), Math.ceil(current.height / 2));
+    const nextCtx = getNativeContext(next, "2d");
+    setSmoothing(nextCtx, true);
+    nativeDrawImage(nextCtx, current, 0, 0, current.width, current.height, 0, 0, next.width, next.height);
+    current.width = 0;
+    current.height = 0;
+    current = next;
+  }
+  setSmoothing(ctx, true);
+  nativeDrawImage(ctx, current, 0, 0, current.width, current.height, dx, dy, dw, dh);
+  current.width = 0;
+  current.height = 0;
+}
 function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   const canvas = makeCanvas();
   canvas.width = Math.max(1, targetW);
   canvas.height = Math.max(1, targetH);
   const ctx = getNativeContext(canvas, "2d");
   if (!meta.plan) {
-    nativeDrawImage(ctx, bitmap, 0, 0, targetW, targetH);
+    drawImageHighQuality(ctx, bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, targetW, targetH);
     return canvas;
   }
   const { plan, origW, origH, padW, padH } = meta;
   const twSrc = bitmap.width / plan.grid;
   const thSrc = bitmap.height / plan.grid;
-  const tileW = Math.max(1, Math.round(targetW * (padW / origW) / plan.grid));
-  const tileH = Math.max(1, Math.round(targetH * (padH / origH) / plan.grid));
+  const targetPadW = targetW * (padW / origW);
+  const targetPadH = targetH * (padH / origH);
+  const intermediateScale = Math.max(0.05, Math.min(
+    2,
+    bitmap.width / Math.max(1, targetPadW),
+    bitmap.height / Math.max(1, targetPadH)
+  ));
+  const tileW = Math.max(1, Math.round(targetPadW * intermediateScale / plan.grid));
+  const tileH = Math.max(1, Math.round(targetPadH * intermediateScale / plan.grid));
   const padded = makeCanvas();
   padded.width = tileW * plan.grid;
   padded.height = tileH * plan.grid;
   const pctx = getNativeContext(padded, "2d");
   const exactScale = Math.abs(tileW - twSrc) < 0.01 && Math.abs(tileH - thSrc) < 0.01;
-  pctx.imageSmoothingEnabled = !exactScale;
+  setSmoothing(pctx, !exactScale);
   const insetX = exactScale ? 0 : Math.min(0.5, twSrc * 0.01);
   const insetY = exactScale ? 0 : Math.min(0.5, thSrc * 0.01);
   for (let orig = 0; orig < plan.count; orig++) {
@@ -646,9 +712,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
     );
     pctx.restore();
   }
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  nativeDrawImage(
+  drawImageHighQuality(
     ctx,
     padded,
     0,
@@ -672,6 +736,7 @@ function scrambleCanvasLocally(source, grid, key) {
   cleanPadded.width = pw;
   cleanPadded.height = ph;
   const cctx = getNativeContext(cleanPadded, "2d");
+  setSmoothing(cctx, false);
   cctx.fillStyle = "#000";
   cctx.fillRect(0, 0, pw, ph);
   nativeDrawImage(cctx, source, 0, 0);
@@ -679,6 +744,7 @@ function scrambleCanvasLocally(source, grid, key) {
   scrambled.width = pw;
   scrambled.height = ph;
   const ctx = getNativeContext(scrambled, "2d");
+  setSmoothing(ctx, false);
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, pw, ph);
   for (let dest = 0; dest < plan.count; dest++) {
@@ -712,6 +778,27 @@ var SHADOW_CSS = `
   .tiles { display:grid; }
   .tiles canvas { width:100%; height:100%; display:block; }
   .shield { position:absolute; inset:0; z-index:3; background:transparent; }
+  .trace { position:absolute; inset:-20%; z-index:2; pointer-events:none; overflow:hidden; opacity:0; }
+  .wrap.trace-on:not(.loading) .trace { opacity:1; }
+  .wrap.blackout .trace { opacity:0 !important; }
+  .trace.temporal::before { content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(90deg, rgba(255,255,255,.028) 0 1px, transparent 1px 5px);
+    animation:archx-trace-phase 1.4s linear infinite; }
+  .trace-inner { position:absolute; inset:0; display:flex; flex-direction:column;
+    justify-content:space-around; align-items:center; white-space:nowrap;
+    color:rgba(255,255,255,var(--trace-opacity,.08));
+    text-shadow:0 1px 2px rgba(0,0,0,.18);
+    font:700 14px/1.2 system-ui,sans-serif; letter-spacing:.04em;
+    transform:rotate(-17deg); transform-origin:center;
+    animation:archx-trace-drift 14s ease-in-out infinite alternate; }
+  @keyframes archx-trace-drift {
+    from { transform:rotate(-17deg) translate(-1.5%,-1%); }
+    to { transform:rotate(-17deg) translate(1.5%,1%); }
+  }
+  @keyframes archx-trace-phase { to { background-position:15px 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .trace-inner, .trace.temporal::before { animation:none; }
+  }
   .risk { position:absolute; inset:0; z-index:4; pointer-events:none; opacity:0; transition:opacity .18s;
     backdrop-filter: blur(18px) brightness(.25) saturate(0); background:rgba(0,0,0,.55); }
   .wrap.risk-on .risk { opacity:1; }
@@ -730,7 +817,7 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, securityGate_fn, releaseSourceBitmap_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, securityGate_fn, releaseSourceBitmap_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -774,6 +861,8 @@ var ProtectedImage = class {
     __privateAdd(this, _lensPoint, null);
     __privateAdd(this, _lensRaf, 0);
     __privateAdd(this, _lensCells, []);
+    __privateAdd(this, _traceEl, null);
+    __privateAdd(this, _traceTimer, 0);
     __privateAdd(this, _strikes, 0);
     __privateAdd(this, _lockedUntil, 0);
     __privateAdd(this, _lockTimer, 0);
@@ -792,6 +881,7 @@ var ProtectedImage = class {
     }
     this._buildDom();
     this._attachGuards();
+    this._startCaptureTrace();
     instances.add(this);
     installGlobalGuards();
     if (__privateGet(this, _options).guards.devtools) ensureDevtoolsWatcher();
@@ -824,6 +914,7 @@ var ProtectedImage = class {
       <div class="tiles" hidden></div>
       <canvas class="main" aria-hidden="true"></canvas>
       <div class="badge">ARCHX&nbsp;PROTECTED</div>
+      <div class="trace" aria-hidden="true"><div class="trace-inner"><span></span><span></span><span></span><span></span><span></span></div></div>
       <div class="shield"></div>
       <div class="risk"></div>
       <div class="err"><span>\u26A0<br>Protected image unavailable</span></div>`;
@@ -832,6 +923,7 @@ var ProtectedImage = class {
     __privateSet(this, _canvas, wrap.querySelector("canvas.main"));
     __privateSet(this, _tilesEl, wrap.querySelector(".tiles"));
     __privateSet(this, _shieldEl, wrap.querySelector(".shield"));
+    __privateSet(this, _traceEl, wrap.querySelector(".trace"));
     if (o.aspectRatio) __privateGet(this, _host).style.aspectRatio = String(o.aspectRatio);
     if (o.width) __privateGet(this, _host).style.width = typeof o.width === "number" ? o.width + "px" : o.width;
     if (o.height) __privateGet(this, _host).style.height = typeof o.height === "number" ? o.height + "px" : o.height;
@@ -913,6 +1005,41 @@ var ProtectedImage = class {
       }, sig);
     }
   }
+  /**
+   * Dynamic capture trace (Fortress / captureShield): a low-opacity,
+   * slowly drifting session+time code above the pixels. It cannot stop an
+   * OS screenshot, browser-extension capture, DevTools/CDP capture, or a
+   * camera pointed at another screen — no web API can — but it makes those
+   * captures attributable and makes multi-frame/multi-device stitching less
+   * clean. `temporalPattern` adds a shifting phase pattern for the same reason.
+   */
+  _startCaptureTrace() {
+    const raw = __privateGet(this, _options).captureShield;
+    if (!raw || !__privateGet(this, _traceEl) || __privateGet(this, _traceTimer)) return;
+    const cfg = raw === true ? {} : raw;
+    if (!cfg || cfg.dynamicTrace === false) return;
+    __privateGet(this, _wrap).classList.add("trace-on");
+    __privateGet(this, _traceEl).classList.toggle("temporal", !!cfg.temporalPattern);
+    __privateGet(this, _traceEl).style.setProperty("--trace-opacity", String(cfg.opacity ?? 0.08));
+    const update = () => {
+      if (__privateGet(this, _destroyed) || !__privateGet(this, _traceEl)) return;
+      const wm = __privateGet(this, _options).watermark;
+      const wmText = typeof wm === "string" ? wm : wm?.text;
+      let template = cfg.text || wmText || `${__privateGet(this, _options).brand} \xB7 {session} \xB7 {time}`;
+      if (!template.includes("{time}")) template += " \xB7 {time}";
+      const text = String(template).replaceAll("{session}", sessionId().slice(0, 6)).replaceAll("{time}", (/* @__PURE__ */ new Date()).toISOString().slice(11, 19));
+      const inner = __privateGet(this, _traceEl).querySelector(".trace-inner");
+      if (inner) {
+        const width = __privateGet(this, _wrap).clientWidth || __privateGet(this, _host).clientWidth || 320;
+        inner.style.fontSize = `${Math.max(10, Math.min(24, Math.round(width / 18)))}px`;
+        inner.querySelectorAll("span").forEach((span) => {
+          span.textContent = text;
+        });
+      }
+    };
+    update();
+    __privateSet(this, _traceTimer, setInterval(update, Math.max(1e3, cfg.updateMs ?? 4e3)));
+  }
   _onVisibility(visible) {
     __privateSet(this, _visible, visible);
     if (visible && !__privateGet(this, _loaded) && !__privateGet(this, _loading)) this._load();
@@ -950,12 +1077,19 @@ var ProtectedImage = class {
     if (src && typeof src === "object" && !(src instanceof Blob) && !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id) {
       const endpoint = src.tokenEndpoint || o.tokenEndpoint;
       if (!endpoint) throw new Error("Archx: tokenEndpoint required for {id} sources");
-      const w = Math.min(o.maxBackingWidth, Math.ceil((__privateGet(this, _host).clientWidth || 800) * Math.min(devicePixelRatio || 1, o.dprCap)));
+      const rect = __privateGet(this, _host).getBoundingClientRect?.();
+      const cssWidth = rect?.width || __privateGet(this, _host).clientWidth || 800;
+      const cssHeight = rect?.height || __privateGet(this, _host).clientHeight || cssWidth * 0.75;
+      const pixelScale = Math.min(devicePixelRatio || 1, o.dprCap) * Math.max(1, o.sourceOversample || 1);
+      const maxSourceWidth = o.maxSourceWidth || 2560;
+      const boxW = Math.min(maxSourceWidth, Math.ceil(cssWidth * pixelScale));
+      const boxH = Math.min(maxSourceWidth, Math.ceil(cssHeight * pixelScale));
+      const tokenQuery = `?w=${boxW}&bw=${boxW}&bh=${boxH}&fit=${encodeURIComponent(o.fit || "cover")}`;
       let lastErr;
       for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
         try {
           const res = await fetchWithRetries(
-            endpoint + encodeURIComponent(src.id) + "?w=" + w,
+            endpoint + encodeURIComponent(src.id) + tokenQuery,
             { credentials: o.credentials, signal: __privateGet(this, _abort).signal },
             o.retries
           );
@@ -1148,6 +1282,7 @@ var ProtectedImage = class {
       const fctx = getNativeContext(frame, "2d");
       fctx.fillStyle = "#000";
       fctx.fillRect(0, 0, w, h);
+      setSmoothing(fctx, true);
       nativeDrawImage(
         fctx,
         full,
@@ -1183,6 +1318,7 @@ var ProtectedImage = class {
     }
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, w, h);
+    setSmoothing(ctx, true);
     nativeDrawImage(
       ctx,
       full,
@@ -1212,6 +1348,7 @@ var ProtectedImage = class {
     const cctx = getNativeContext(composed, "2d");
     cctx.fillStyle = "#000";
     cctx.fillRect(0, 0, w, h);
+    setSmoothing(cctx, true);
     nativeDrawImage(
       cctx,
       full,
@@ -1496,6 +1633,50 @@ var ProtectedImage = class {
       uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
+      vec2 mapToSource(vec2 imageUv){
+        vec2 srcUv = imageUv;
+        if(uScrambled>0.5){
+          vec2 paddedUv = imageUv * uCrop; // orig->padded space
+          vec2 tile = floor(paddedUv*uGrid);
+          vec2 local = fract(paddedUv*uGrid);
+          vec4 m = texelFetch(uMap, ivec2(tile), 0);
+          vec2 srcTile = m.rg*255.0;
+          if(m.b>0.5) local.x = 1.0-local.x;
+          if(m.a>0.5) local.y = 1.0-local.y;
+          srcUv = (srcTile+local)/uGrid;
+          // Clamp inside the source tile so filtering never blends across
+          // scrambled-tile boundaries -> no seams.
+          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
+          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
+        }
+        return srcUv;
+      }
+      vec4 sampleImage(vec2 imageUv){
+        vec2 texSize = vec2(textureSize(uTex, 0));
+        vec2 srcUv = mapToSource(imageUv);
+        vec2 srcPx = srcUv * texSize;
+        float footprint = max(length(dFdx(srcPx)), length(dFdy(srcPx)));
+        // At ~1:1, fetch the exact texel instead of bilinear-blending two
+        // neighbours; this is the difference between crisp type/edges and mush.
+        if(footprint > 0.70 && footprint < 1.45){
+          ivec2 p = ivec2(clamp(floor(srcPx), vec2(0.0), texSize - 1.0));
+          return texelFetch(uTex, p, 0);
+        }
+        // When minifying, a small 2x2 supersample around the fragment footprint
+        // preserves substantially more detail than one bilinear tap (and, for a
+        // scrambled texture, avoids cross-tile mipmap bleeding).
+        if(footprint >= 1.45){
+          vec2 duvX = dFdx(imageUv);
+          vec2 duvY = dFdy(imageUv);
+          vec4 sum = vec4(0.0);
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX + 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX + 0.25*duvY));
+          return sum * 0.25;
+        }
+        return texture(uTex, srcUv);
+      }
       void main(){
         if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
         vec2 uv = vUv*uFitScale + uFitOffset;
@@ -1517,22 +1698,7 @@ var ProtectedImage = class {
             lensOutside = 1.0;
           }
         }
-        vec2 srcUv = effUv;
-        if(uScrambled>0.5){
-          vec2 paddedUv = effUv * uCrop; // orig->padded space
-          vec2 tile = floor(paddedUv*uGrid);
-          vec2 local = fract(paddedUv*uGrid);
-          vec4 m = texelFetch(uMap, ivec2(tile), 0);
-          vec2 srcTile = m.rg*255.0;
-          if(m.b>0.5) local.x = 1.0-local.x;
-          if(m.a>0.5) local.y = 1.0-local.y;
-          srcUv = (srcTile+local)/uGrid;
-          // Clamp inside the source tile (half-texel inset) so LINEAR
-          // filtering never blends across scrambled-tile boundaries -> no seams.
-          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
-          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
-        }
-        vec4 c = texture(uTex, srcUv);
+        vec4 c = sampleImage(effUv);
         c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
         if(lensOutside>0.5) c.rgb *= 0.82;
         if(uWmOn>0.5){
@@ -1604,6 +1770,13 @@ var ProtectedImage = class {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    if (!meta.plan) {
+      try {
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      } catch {
+      }
+    }
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glMap));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -1781,7 +1954,9 @@ var ProtectedImage = class {
       locked: Date.now() < __privateGet(this, _lockedUntil),
       lens: __privateGet(this, _lensPoint) ? { ...__privateGet(this, _lensPoint) } : null,
       bitmapReleased: __privateGet(this, _bitmapReleased),
-      glScrambledTexture: !!(__privateGet(this, _glMeta) && __privateGet(this, _glMeta).plan)
+      glScrambledTexture: !!(__privateGet(this, _glMeta) && __privateGet(this, _glMeta).plan),
+      captureTraceOn: __privateGet(this, _wrap).classList.contains("trace-on"),
+      traceText: __privateGet(this, _traceEl)?.textContent?.trim() || ""
     };
   }
   async reload(newSource) {
@@ -1825,6 +2000,8 @@ var ProtectedImage = class {
       __privateSet(this, _lensBase, null);
     }
     if (__privateGet(this, _lensRaf)) cancelAnimationFrame(__privateGet(this, _lensRaf));
+    if (__privateGet(this, _traceTimer)) clearInterval(__privateGet(this, _traceTimer));
+    __privateSet(this, _traceTimer, 0);
     clearTimeout(__privateGet(this, _lockTimer));
     if (__privateGet(this, _options).memory === "strict") {
       try {
@@ -1874,6 +2051,8 @@ _lensBase = new WeakMap();
 _lensPoint = new WeakMap();
 _lensRaf = new WeakMap();
 _lensCells = new WeakMap();
+_traceEl = new WeakMap();
+_traceTimer = new WeakMap();
 _strikes = new WeakMap();
 _lockedUntil = new WeakMap();
 _lockTimer = new WeakMap();
@@ -1974,7 +2153,7 @@ paintLens2d_fn = function() {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
   if (__privateGet(this, _lensBase)) {
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false;
     nativeDrawImage(ctx, __privateGet(this, _lensBase), 0, 0, w, h);
     ctx.fillStyle = "rgba(4,6,12,0.18)";
     ctx.fillRect(0, 0, w, h);
@@ -2036,7 +2215,7 @@ function loadImage(target, source, options) {
 function loadGallery(container, items, options = {}) {
   const host = $(container);
   if (!host) throw new Error("Archx: gallery container not found");
-  const galleryDefaults = { mode: "lite", unloadOnExit: true };
+  const galleryDefaults = { mode: "lite", unloadOnExit: true, sourceOversample: 1.5 };
   const made = items.map((item) => {
     const cell = document.createElement("div");
     cell.className = options.itemClass || "archx-gallery-item";
@@ -2066,7 +2245,7 @@ function defineElement() {
   const elementInstances = /* @__PURE__ */ new WeakMap();
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
-      return ["src", "image-id", "mode", "watermark", "alt", "fit", "grid", "key", "on-extract"];
+      return ["src", "image-id", "mode", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "on-extract", "token-endpoint"];
     }
     connectedCallback() {
       if (elementInstances.has(this)) return;
@@ -2086,6 +2265,7 @@ function defineElement() {
         key: this.getAttribute("key") || void 0,
         scrambled: this.hasAttribute("scrambled"),
         lens: this.hasAttribute("lens") ? true : void 0,
+        captureShield: this.hasAttribute("capture-shield") ? true : void 0,
         onExtract: this.getAttribute("on-extract") || void 0,
         tokenEndpoint: this.getAttribute("token-endpoint") || void 0
       });

@@ -59,17 +59,29 @@ function padRaw(raw, w, h, pw, ph) {
 
 /**
  * @param {Buffer} input master image bytes
- * @param {object} opts { grid, key, maxWidth, quality, format, aesKey, container }
+ * @param {object} opts { grid, key, maxWidth, quality, lossless, format, aesKey, container }
+ * `quality` defaults to 95 (delivery-size pixels should look like the source,
+ * not like a recompressed thumbnail); pass `lossless:true` for bit-exact
+ * WebP/PNG pixels at the delivered size when payload size matters less.
  * @returns {Promise<{bytes:Buffer, header:object}>} bytes = .archx container (or plain scrambled image when container:false)
  */
 export async function scrambleImage(input, opts = {}) {
   const grid = opts.grid ?? 8;
   const key = opts.key ?? '';
   const maxWidth = opts.maxWidth ?? 1600;
-  const quality = opts.quality ?? 82;
+  const lossless = !!opts.lossless || opts.quality === 'lossless';
+  const quality = lossless
+    ? 100
+    : Math.max(1, Math.min(100, Number(opts.quality ?? 95) || 95));
 
   let pipeline = sharp(input).rotate(); // bake EXIF orientation, drop metadata
-  if (maxWidth) pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
+  if (maxWidth) {
+    pipeline = pipeline.resize({
+      width: maxWidth,
+      withoutEnlargement: true,
+      kernel: sharp.kernel.lanczos3, // high-quality downscale, like a good <img> pipeline
+    });
+  }
 
   // Server-baked visible watermark: composited pre-scramble so that NO
   // extraction route — screenshot, canvas grab, or full payload
@@ -113,7 +125,16 @@ export async function scrambleImage(input, opts = {}) {
 
   const format = opts.format ?? 'webp';
   let encoder = sharp(Buffer.from(scrambled), { raw: { width: pw, height: ph, channels: 4 } });
-  encoder = format === 'png' ? encoder.png() : format === 'jpeg' ? encoder.jpeg({ quality }) : encoder.webp({ quality });
+  if (format === 'png') {
+    encoder = encoder.png({ compressionLevel: 9, adaptiveFiltering: true });
+  } else if (format === 'jpeg') {
+    // 4:4:4 keeps colour edges/text crisp instead of chroma-subsampled slurry.
+    encoder = encoder.jpeg({ quality, chromaSubsampling: '4:4:4', mozjpeg: true });
+  } else if (lossless) {
+    encoder = encoder.webp({ lossless: true, alphaQuality: 100, effort: 4 });
+  } else {
+    encoder = encoder.webp({ quality, alphaQuality: 100, smartSubsample: true, effort: 4 });
+  }
   let payload = await encoder.toBuffer();
   const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp';
 

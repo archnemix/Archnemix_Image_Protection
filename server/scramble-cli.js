@@ -32,7 +32,9 @@ if (!input || !output || args.help) {
   --key <secret>       scramble key (required in spirit — use a long random one)
   --grid <n>           tiles per side (default 8)
   --max-width <px>     down-scale master to this width first (default 1600)
-  --quality <1-100>    WebP quality (default 82)
+  --quality <1-100>    WebP/JPEG quality (default 95; use --lossless for exact pixels)
+  --lossless           lossless WebP/PNG at the delivered size (larger payload)
+  --format <fmt>       webp (default), png, or jpeg
   --encrypt            AES-GCM-encrypt the payload (prints the key — store it safely)
   --watermark <text>   bake a visible watermark in before scrambling
   --forensic-seed <s>  bake a seeded forensic block mark in before scrambling`);
@@ -46,7 +48,9 @@ const opts = {
   key,
   grid: args.grid ? Number(args.grid) : 8,
   maxWidth: args['max-width'] ? Number(args['max-width']) : 1600,
-  quality: args.quality ? Number(args.quality) : 82,
+  quality: args.quality === 'lossless' ? 'lossless' : (args.quality ? Number(args.quality) : 95),
+  lossless: !!args.lossless,
+  format: args.format || 'webp',
   aesKey,
   watermark: args.watermark || null,
   forensicSeed: args['forensic-seed'] || null,

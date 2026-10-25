@@ -38,6 +38,7 @@ const archx = createArchxMiddleware({
   ],
   ttlSec: 120,
   grid: 8,
+  quality: 95, // high-fidelity delivered pixels (set lossless:true for exact-size pixels)
   // Determined-attacker hardening (all on for the demo):
   oneTimeTokens: true,                    // a captured signed URL cannot be replayed
   bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it

@@ -143,6 +143,41 @@ test('encrypted .archx: payload is ciphertext, decrypt+unscramble restores the i
   await assert.rejects(decryptPayload(payload, generateKeyBase64(), header.iv));
 });
 
+test('delivery quality: default WebP is visibly cleaner than q82; lossless is pixel-exact', async () => {
+  // Fine lines/text are where low-quality scrambled WebP turns into slurry.
+  const details = Array.from({ length: 28 }, (_, i) =>
+    `<line x1="${8 + i * 11}" y1="8" x2="${28 + i * 11}" y2="150" stroke="${i % 2 ? '#ffffff' : '#00e0ff'}" stroke-width="1"/>`).join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240">
+    <rect width="320" height="240" fill="#182238"/>${details}
+    <text x="18" y="202" font-family="sans-serif" font-size="25" font-weight="700" fill="#ffe14d">DETAILS 0123456789</text>
+    <text x="18" y="228" font-family="sans-serif" font-size="13" fill="white">small sharp text should survive delivery</text>
+  </svg>`;
+  const master = await sharp(Buffer.from(svg)).png().toBuffer();
+  const reference = await sharp(master).removeAlpha().raw().toBuffer();
+  const restoreRaw = async (result) => {
+    const { payload, header } = decodeContainer(result.bytes);
+    const restored = await unscrambleImage(Buffer.from(payload), {
+      grid: header.grid, key: 'quality-key', w: header.w, h: header.h,
+    });
+    return sharp(restored).removeAlpha().raw().toBuffer();
+  };
+  const mad = (raw) => {
+    let sum = 0;
+    for (let i = 0; i < reference.length; i++) sum += Math.abs(reference[i] - raw[i]);
+    return sum / reference.length;
+  };
+
+  const oldDefault = await scrambleImage(master, { key: 'quality-key', grid: 8, maxWidth: 320, quality: 82 });
+  const newDefault = await scrambleImage(master, { key: 'quality-key', grid: 8, maxWidth: 320 });
+  const lossless = await scrambleImage(master, { key: 'quality-key', grid: 8, maxWidth: 320, lossless: true });
+
+  const oldMad = mad(await restoreRaw(oldDefault));
+  const newMad = mad(await restoreRaw(newDefault));
+  const losslessMad = mad(await restoreRaw(lossless));
+  assert.ok(newMad < oldMad * 0.85, `default quality should retain more detail (q82 MAD=${oldMad.toFixed(2)}, default MAD=${newMad.toFixed(2)})`);
+  assert.equal(losslessMad, 0, 'lossless delivery must reproduce the delivered-size pixels exactly');
+});
+
 test('server-baked watermark survives into the un-scrambled reconstruction', async () => {
   const dark = await sharp({ create: { width: 320, height: 240, channels: 3, background: { r: 8, g: 10, b: 18 } } }).png().toBuffer();
   const plain = await scrambleImage(dark, { key: 'wm-key', grid: 8, format: 'png', maxWidth: 320 });
@@ -238,7 +273,13 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   assert.ok((await meanAbsDiff(master, Buffer.from(payload), 150, 112)) > 25);
   // ...but unscramble with the token key restores it
   const restored = await unscrambleImage(Buffer.from(payload), { grid: header.grid, key: token.key, w: header.w, h: header.h });
-  assert.ok((await meanAbsDiff(master, restored, 150, 112)) < 22, 'webp q82 tolerance');
+  assert.ok((await meanAbsDiff(master, restored, 150, 112)) < 22, 'high-quality WebP tolerance');
+
+  // Cover-aware sizing: a 320x240 source in a 120x120 box needs a 160px-wide
+  // derivative (120 * 4/3), not a 120px one that would be cropped+upscaled.
+  const coverToken = await (await fetch(base + '/archx/token/cat?bw=120&bh=120&fit=cover')).json();
+  const coverBytes = new Uint8Array(await (await fetch(base + coverToken.url)).arrayBuffer());
+  assert.equal(decodeContainer(coverBytes).header.w, 160);
 
   // tampered token -> 403
   const tampered = token.url.replace(/t=([^.]+)\./, (_, b) => 't=' + b.slice(0, -2) + 'XX.');

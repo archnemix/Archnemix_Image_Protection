@@ -156,8 +156,8 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag best">⬢ ARCHX · FORTRESS + LENS</span>
           <h3>For the truly determined attacker</h3>
-          <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One screenshot can never contain the whole sharp image.</p>
-          <div class="try">👉 Move your pointer over this card. Now screenshot it: you captured mush + one small sharp circle. Sweeping the lens to stitch patches is rate-tracked and reported.</div>
+          <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping, a dynamic session/time capture trace — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One OS, extension, DevTools, or cross-device camera capture can never contain the whole sharp image.</p>
+          <div class="try">👉 Move your pointer over this card. Now screenshot or photograph it: you captured mush + one small sharp circle + a moving trace code. Sweeping the lens to stitch patches is rate-tracked and reported.</div>
         </div>
       </article>
     </div>
@@ -218,8 +218,11 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>Prototype bypass (expert)</td><td>Vault mode: WebGL with <code>preserveDrawingBuffer:false</code> — the browser itself returns black. In Shield, the backing store only ever holds the display-size, watermarked copy</td><td>Vault: black. Shield: screen-size watermarked copy at best</td></tr>
           <tr><td>Bulk scrapers / AI crawlers</td><td>No URLs in HTML, JS+token required per image, rate-limited signer</td><td>An empty harvest</td></tr>
           <tr><td>Print → PDF</td><td><code>@media print</code> blackout + beforeprint reaction</td><td>Black boxes</td></tr>
-          <tr><td>Screenshot / snipping tool</td><td><i>Cannot be fully prevented on the open web</i> (see honesty box). Deterred: display-res only, baked session watermark, forensic grain, blur-on-focus-loss, PrintScreen reaction</td><td>A traceable screen-res copy</td></tr>
-          <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs dozens of real-input captures</td></tr>
+          <tr><td>Windows/macOS/Linux screenshot or snipping tool</td><td><i>Cannot be blocked by a web page</i>: the OS compositor is outside browser control. Archx reacts to the signals that do reach the page — PrintScreen / snipping shortcuts, focus loss, page freeze — with blur/blackout and caps everything at the authorized display derivative</td><td>At best a marked screen-res copy; often a blurred/black frame if the signal arrives first</td></tr>
+          <tr><td>Chrome/other screenshot extension, DevTools “Capture screenshot”, CDP capture</td><td>These run with browser privileges above page JS and cannot be enumerated or vetoed by the website. Fortress therefore assumes capture will happen and renders Lens mush + a drifting session/time trace; Vault canvas read-back itself remains black</td><td>A degraded, attributable visible-tab capture — not the file or master</td></tr>
+          <tr><td>View Page Source / inspect HTML</td><td>Source contains code and endpoint names, not masters, signed image URLs, or server secrets. Protected pixels still require JS, authorization, and a fresh entitled token</td><td>No downloadable image URL to copy</td></tr>
+          <tr><td>Photograph the screen with a phone/second device</td><td><i>Physically unstoppable and undetectable from the displayed device.</i> The answer is value reduction: server-authorized resolution, baked visible/forensic marks, Fortress Lens, and a dynamic trace that changes while the camera is framing/stitching</td><td>A camera copy with screen/moiré loss, Lens mush outside one disc, and session attribution</td></tr>
+          <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs many real-input captures and still carries marks</td></tr>
           <tr><td>Memory/cache forensics after viewing</td><td><code>no-store</code> everywhere; strict-memory mode (Fortress) closes decoded bitmaps right after paint/upload and skips the bitmap cache; clean working canvases are wiped immediately</td><td>Far less decoded material left sitting in RAM/cache</td></tr>
         </tbody>
       </table>
@@ -244,7 +247,9 @@ import Archx from '@archnemix/image-protection';
 
 Archx.config({ tokenEndpoint: '/archx/token/' });
 Archx.load.image('#hero', { id: 'aurora-valley' }, {
-  mode: 'vault',                       // 'lite' | 'shield' | 'vault'
+  mode: 'fortress',                    // 'lite' | 'shield' | 'vault' | 'fortress'
+  lens: true,                          // one screenshot != one sharp full image
+  captureShield: true,                 // drifting session/time trace (on in Fortress)
   watermark: '© My Studio · {session}',
   onExtract: 'black',                  // what canvas-grabbers receive
   onAttempt: (kind) => logToAnalytics(kind),
