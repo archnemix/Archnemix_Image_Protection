@@ -5,6 +5,15 @@ var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot
 var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
 var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot add the same private member more than once") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);
 var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
+var __privateWrapper = (obj, member, setter, getter) => ({
+  set _(value) {
+    __privateSet(obj, member, value, setter);
+  },
+  get _() {
+    return __privateGet(obj, member, getter);
+  }
+});
 
 // src/scramble.js
 var ARCHX_MAGIC = "ARCHX1";
@@ -141,6 +150,61 @@ async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
   );
   return new Uint8Array(plain);
 }
+function forensicBlockSigns(seed, count) {
+  const rand = mulberry32(hashSeed(String(seed) + "::archx-forensic"));
+  return Array.from({ length: count }, () => rand() < 0.5 ? -1 : 1);
+}
+function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2 } = {}) {
+  const bs = Math.max(8, blockSize | 0);
+  const bx = Math.ceil(w / bs);
+  const by = Math.ceil(h / bs);
+  const signs = forensicBlockSigns(seed, bx * by);
+  const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  for (let byi = 0; byi < by; byi++) {
+    for (let bxi = 0; bxi < bx; bxi++) {
+      const d = signs[byi * bx + bxi] * delta;
+      if (!d) continue;
+      const x0 = bxi * bs, y0 = byi * bs;
+      const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      for (let y = y0; y < y1; y++) {
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x++, i += 4) {
+          out[i] = Math.max(0, Math.min(255, out[i] + d));
+          out[i + 1] = Math.max(0, Math.min(255, out[i + 1] + d));
+          out[i + 2] = Math.max(0, Math.min(255, out[i + 2] + d));
+        }
+      }
+    }
+  }
+  return out;
+}
+function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}) {
+  const bs = Math.max(8, blockSize | 0);
+  const bx = Math.ceil(w / bs);
+  const by = Math.ceil(h / bs);
+  const signs = forensicBlockSigns(seed, bx * by);
+  let matched = 0, total = 0, signedSum = 0;
+  for (let byi = 0; byi < by; byi++) {
+    for (let bxi = 0; bxi < bx; bxi++) {
+      const x0 = bxi * bs, y0 = byi * bs;
+      const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      let diff = 0, n = 0;
+      for (let y = y0; y < y1; y += 2) {
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x += 2, i += 8) {
+          diff += (candidate[i] + candidate[i + 1] + candidate[i + 2] - (reference[i] + reference[i + 1] + reference[i + 2])) / 3;
+          n++;
+        }
+      }
+      if (!n) continue;
+      const mean = diff / n;
+      total++;
+      signedSum += Math.sign(mean) === signs[byi * bx + bxi] ? 1 : -1;
+      if (Math.sign(mean) === signs[byi * bx + bxi]) matched++;
+    }
+  }
+  return { score: total ? signedSum / total : 0, matched, total };
+}
 function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
   const { grid, count } = plan;
   const tw = pw / grid;
@@ -172,10 +236,99 @@ function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
 }
 
 // src/archx.js
-var VERSION = "1.0.0";
+var VERSION = "1.1.0";
+var NATIVES = (() => {
+  const g = globalThis;
+  const grab = (obj, name) => {
+    try {
+      return obj && typeof obj[name] === "function" ? obj[name] : null;
+    } catch {
+      return null;
+    }
+  };
+  const canvasProto = typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype : null;
+  const ctx2dProto = typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype : null;
+  const docProto = typeof Document !== "undefined" ? Document.prototype : null;
+  const gl2Proto = typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype : null;
+  return Object.freeze({
+    fnToString: Function.prototype.toString,
+    fetch: grab(g, "fetch"),
+    createImageBitmap: grab(g, "createImageBitmap"),
+    ImageCtor: typeof Image !== "undefined" ? Image : null,
+    createObjectURL: typeof URL !== "undefined" ? grab(URL, "createObjectURL") : null,
+    revokeObjectURL: typeof URL !== "undefined" ? grab(URL, "revokeObjectURL") : null,
+    canvasGetContext: grab(canvasProto, "getContext"),
+    canvasToDataURL: grab(canvasProto, "toDataURL"),
+    canvasToBlob: grab(canvasProto, "toBlob"),
+    ctxDrawImage: grab(ctx2dProto, "drawImage"),
+    ctxGetImageData: grab(ctx2dProto, "getImageData"),
+    docCreateElement: grab(docProto, "createElement"),
+    glTexImage2D: grab(gl2Proto, "texImage2D"),
+    glReadPixels: grab(gl2Proto, "readPixels")
+  });
+})();
+function isNativeFn(fn) {
+  if (typeof fn !== "function") return false;
+  try {
+    return /\[native code\]/.test(NATIVES.fnToString.call(fn));
+  } catch {
+    return false;
+  }
+}
+function auditIntegrity() {
+  const g = globalThis;
+  const current = [
+    ["fetch", g.fetch, NATIVES.fetch],
+    ["createImageBitmap", g.createImageBitmap, NATIVES.createImageBitmap],
+    ["URL.createObjectURL", typeof URL !== "undefined" ? URL.createObjectURL : null, NATIVES.createObjectURL],
+    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, NATIVES.canvasGetContext],
+    ["HTMLCanvasElement.prototype.toDataURL", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toDataURL : null, NATIVES.canvasToDataURL],
+    ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
+    ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
+    ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
+    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
+    ["WebGL2RenderingContext.prototype.texImage2D", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.texImage2D : null, NATIVES.glTexImage2D],
+    ["WebGL2RenderingContext.prototype.readPixels", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null, NATIVES.glReadPixels]
+  ];
+  const issues = [];
+  for (const [name, now, captured] of current) {
+    if (!captured && !now) continue;
+    if (now !== captured || captured && !isNativeFn(captured)) issues.push(name);
+  }
+  return issues;
+}
+function detectAutomation() {
+  const signals = [];
+  try {
+    if (typeof navigator !== "undefined") {
+      if (navigator.webdriver) signals.push("webdriver");
+      if (/HeadlessChrome|PhantomJS|Headless/i.test(navigator.userAgent || "")) signals.push("headless-ua");
+      if (navigator.languages && navigator.languages.length === 0) signals.push("no-languages");
+    }
+    if (typeof window !== "undefined" && window.outerWidth === 0 && window.outerHeight === 0) signals.push("zero-outer-size");
+  } catch {
+  }
+  return signals;
+}
+function nativeFetch(url, options) {
+  return NATIVES.fetch ? NATIVES.fetch.call(globalThis, url, options) : fetch(url, options);
+}
+function nativeCreateImageBitmap(source, opts) {
+  return NATIVES.createImageBitmap ? NATIVES.createImageBitmap.call(globalThis, source, opts) : createImageBitmap(source, opts);
+}
+function makeCanvas(ownerDocument) {
+  const doc = ownerDocument || document;
+  return NATIVES.docCreateElement ? NATIVES.docCreateElement.call(doc, "canvas") : doc.createElement("canvas");
+}
+function getNativeContext(canvas, type, attrs) {
+  return NATIVES.canvasGetContext ? NATIVES.canvasGetContext.call(canvas, type, attrs) : canvas.getContext(type, attrs);
+}
+function nativeDrawImage(ctx, ...args) {
+  return NATIVES.ctxDrawImage ? NATIVES.ctxDrawImage.call(ctx, ...args) : ctx.drawImage(...args);
+}
 var DEFAULTS = {
   mode: "shield",
-  // 'lite' | 'shield' | 'vault'
+  // 'lite' | 'shield' | 'vault' | 'fortress'
   fit: "cover",
   // 'cover' | 'contain' | 'fill'
   lazy: true,
@@ -204,12 +357,26 @@ var DEFAULTS = {
   watermark: null,
   // string | { text, opacity, tile, corner }
   forensic: true,
-  // invisible per-session pixel noise (shield/vault)
+  // invisible per-session block pattern (shield/vault/fortress)
   sessionId: null,
   // defaults to a random per-page-view id
   brand: "\xA9 Protected \xB7 Archnemix",
   retries: 2,
   credentials: "same-origin",
+  integrity: "monitor",
+  // 'off' | 'monitor' | 'lock' — hooked-API policy
+  automation: "monitor",
+  // 'off' | 'monitor' | 'lock' — headless/bot policy
+  memory: "standard",
+  // 'standard' | 'strict' — strict wipes decoded bitmaps ASAP
+  localScramble: false,
+  // fortress: GPU texture holds scrambled pixels even for plain sources
+  lens: null,
+  // anti-screenshot pointer lens: true | { radius, idlePixelate }
+  strikes: null,
+  // attempt lockout: { blurAt, lockAt, lockMs } (fortress enables)
+  debug: false,
+  // enables _debug() internals hook — NEVER in production
   guards: {
     contextMenu: true,
     drag: true,
@@ -232,6 +399,7 @@ var DEFAULTS = {
 };
 var globalConfig = structuredCloneSafe(DEFAULTS);
 var instances = /* @__PURE__ */ new Set();
+var hostToInstance = /* @__PURE__ */ new WeakMap();
 var pageSessionId = null;
 function structuredCloneSafe(obj) {
   return JSON.parse(JSON.stringify(obj, (k, v) => typeof v === "function" ? void 0 : v));
@@ -253,7 +421,23 @@ function mergeOptions(opts = {}) {
   if (opts.guards) {
     for (const [k, v] of Object.entries(opts.guards)) if (v !== void 0) merged.guards[k] = v;
   }
+  if (merged.mode === "fortress") {
+    merged.requestedMode = "fortress";
+    merged.mode = "vault";
+    if (clean.onExtract === void 0) merged.onExtract = "black";
+    if (clean.integrity === void 0) merged.integrity = "lock";
+    if (clean.memory === void 0) merged.memory = "strict";
+    if (clean.localScramble === void 0) merged.localScramble = true;
+    if (clean.forensic === void 0) merged.forensic = true;
+    if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
+    if (!opts.guards || opts.guards.devtools === void 0) merged.guards.devtools = true;
+  }
   return merged;
+}
+function sanitizeOptionsView(opts) {
+  if (!opts) return opts;
+  const { key, aesKey, ...rest } = opts;
+  return { ...rest, guards: { ...opts.guards || {} }, key: key ? "[redacted]" : key, aesKey: aesKey ? "[redacted]" : aesKey };
 }
 var limiter = {
   max: 6,
@@ -289,7 +473,7 @@ function getVisibilityObserver() {
   if (!visibilityObserver) {
     visibilityObserver = new IntersectionObserver((entries) => {
       for (const e of entries) {
-        const inst = e.target.__archx;
+        const inst = hostToInstance.get(e.target);
         if (inst) inst._onVisibility(e.isIntersecting);
       }
     }, { rootMargin: "500px" });
@@ -360,7 +544,7 @@ async function fetchWithRetries(url, options, retries) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, options);
+      const res = await nativeFetch(url, options);
       if (!res.ok) throw new Error("Archx fetch failed: HTTP " + res.status);
       return res;
     } catch (err) {
@@ -371,12 +555,12 @@ async function fetchWithRetries(url, options, retries) {
   throw lastErr;
 }
 function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
-  const canvas = document.createElement("canvas");
+  const canvas = makeCanvas();
   canvas.width = Math.max(1, targetW);
   canvas.height = Math.max(1, targetH);
-  const ctx = canvas.getContext("2d");
+  const ctx = getNativeContext(canvas, "2d");
   if (!meta.plan) {
-    ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+    nativeDrawImage(ctx, bitmap, 0, 0, targetW, targetH);
     return canvas;
   }
   const { plan, origW, origH, padW, padH } = meta;
@@ -384,10 +568,10 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   const thSrc = bitmap.height / plan.grid;
   const tileW = Math.max(1, Math.round(targetW * (padW / origW) / plan.grid));
   const tileH = Math.max(1, Math.round(targetH * (padH / origH) / plan.grid));
-  const padded = document.createElement("canvas");
+  const padded = makeCanvas();
   padded.width = tileW * plan.grid;
   padded.height = tileH * plan.grid;
-  const pctx = padded.getContext("2d");
+  const pctx = getNativeContext(padded, "2d");
   const exactScale = Math.abs(tileW - twSrc) < 0.01 && Math.abs(tileH - thSrc) < 0.01;
   pctx.imageSmoothingEnabled = !exactScale;
   const insetX = exactScale ? 0 : Math.min(0.5, twSrc * 0.01);
@@ -401,7 +585,8 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
     pctx.save();
     pctx.translate(dx + (fx ? tileW : 0), dy + (fy ? tileH : 0));
     pctx.scale(fx ? -1 : 1, fy ? -1 : 1);
-    pctx.drawImage(
+    nativeDrawImage(
+      pctx,
       bitmap,
       s.x + insetX,
       s.y + insetY,
@@ -416,7 +601,8 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   }
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(
+  nativeDrawImage(
+    ctx,
     padded,
     0,
     0,
@@ -430,6 +616,38 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   padded.width = 0;
   padded.height = 0;
   return canvas;
+}
+function scrambleCanvasLocally(source, grid, key) {
+  const w = source.width, h = source.height;
+  const { tw, th, pw, ph } = paddedSize(w, h, grid);
+  const plan = buildScramblePlan(grid, key);
+  const cleanPadded = makeCanvas();
+  cleanPadded.width = pw;
+  cleanPadded.height = ph;
+  const cctx = getNativeContext(cleanPadded, "2d");
+  cctx.fillStyle = "#000";
+  cctx.fillRect(0, 0, pw, ph);
+  nativeDrawImage(cctx, source, 0, 0);
+  const scrambled = makeCanvas();
+  scrambled.width = pw;
+  scrambled.height = ph;
+  const ctx = getNativeContext(scrambled, "2d");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, pw, ph);
+  for (let dest = 0; dest < plan.count; dest++) {
+    const orig = plan.order[dest];
+    const s = tileRect(orig, plan.grid, tw, th);
+    const d = tileRect(dest, plan.grid, tw, th);
+    const { fx, fy } = plan.flips[dest];
+    ctx.save();
+    ctx.translate(d.x + (fx ? tw : 0), d.y + (fy ? th : 0));
+    ctx.scale(fx ? -1 : 1, fy ? -1 : 1);
+    nativeDrawImage(ctx, cleanPadded, s.x, s.y, tw, th, 0, 0, tw, th);
+    ctx.restore();
+  }
+  cleanPadded.width = 0;
+  cleanPadded.height = 0;
+  return { canvas: scrambled, meta: { plan, origW: w, origH: h, padW: pw, padH: ph } };
 }
 var SHADOW_CSS = `
   :host { display:block; }
@@ -465,9 +683,20 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeObs, _realCtx;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, securityGate_fn, releaseSourceBitmap_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
+    __privateAdd(this, _ProtectedImage_instances);
+    /* Everything sensitive is a #private field: page scripts and extension
+     * content scripts that obtain an instance (or its host element) get no
+     * handle to the canvas, bitmap, options/secrets, or shadow internals. */
+    __privateAdd(this, _options);
+    __privateAdd(this, _host);
+    __privateAdd(this, _root);
+    __privateAdd(this, _wrap);
+    __privateAdd(this, _canvas);
+    __privateAdd(this, _tilesEl);
+    __privateAdd(this, _shieldEl);
     __privateAdd(this, _source);
     __privateAdd(this, _bitmap, null);
     __privateAdd(this, _meta, null);
@@ -481,39 +710,65 @@ var ProtectedImage = class {
     __privateAdd(this, _blackoutTimer, 0);
     __privateAdd(this, _resizeObs, null);
     __privateAdd(this, _realCtx, null);
-    this.options = mergeOptions(options);
+    __privateAdd(this, _attemptHandler, null);
+    __privateAdd(this, _loading, false);
+    __privateAdd(this, _visible, false);
+    __privateAdd(this, _unloaded, false);
+    __privateAdd(this, _glProg, null);
+    __privateAdd(this, _glLoc, null);
+    __privateAdd(this, _glTex, null);
+    __privateAdd(this, _glMap, null);
+    __privateAdd(this, _glWm, null);
+    __privateAdd(this, _glWmOn, 0);
+    __privateAdd(this, _glSource, null);
+    __privateAdd(this, _glMeta, null);
+    __privateAdd(this, _frameCanvas, null);
+    __privateAdd(this, _lensBase, null);
+    __privateAdd(this, _lensPoint, null);
+    __privateAdd(this, _lensRaf, 0);
+    __privateAdd(this, _lensCells, []);
+    __privateAdd(this, _strikes, 0);
+    __privateAdd(this, _lockedUntil, 0);
+    __privateAdd(this, _lockTimer, 0);
+    __privateAdd(this, _integrityIssues, []);
+    __privateAdd(this, _bitmapReleased, false);
+    __privateSet(this, _options, mergeOptions(options));
     __privateSet(this, _source, source);
     const host = $(target);
     if (!host) throw new Error("Archx: target element not found: " + target);
-    this.host = host;
+    __privateSet(this, _host, host);
     host.classList.add("archx-host");
-    host.__archx = this;
-    if (this.options.alt) {
+    hostToInstance.set(host, this);
+    if (__privateGet(this, _options).alt) {
       host.setAttribute("role", "img");
-      host.setAttribute("aria-label", this.options.alt);
+      host.setAttribute("aria-label", __privateGet(this, _options).alt);
     }
     this._buildDom();
     this._attachGuards();
     instances.add(this);
     installGlobalGuards();
-    if (this.options.guards.devtools) ensureDevtoolsWatcher();
+    if (__privateGet(this, _options).guards.devtools) ensureDevtoolsWatcher();
     this.ready = this._init();
+  }
+  /** Sanitised, secret-free view of the effective options. */
+  get options() {
+    return sanitizeOptionsView(__privateGet(this, _options));
   }
   /* ---------------- DOM ---------------- */
   _buildDom() {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     let root;
     if (o.shadow === "none") {
-      root = this.host;
+      root = __privateGet(this, _host);
     } else {
       try {
-        root = this.host.attachShadow({ mode: o.shadow === "open" ? "open" : "closed" });
+        root = __privateGet(this, _host).attachShadow({ mode: o.shadow === "open" ? "open" : "closed" });
       } catch {
-        root = this.host;
+        root = __privateGet(this, _host);
       }
     }
-    this.root = root;
-    const doc = this.host.ownerDocument;
+    __privateSet(this, _root, root);
+    const doc = __privateGet(this, _host).ownerDocument;
     const style = doc.createElement("style");
     style.textContent = SHADOW_CSS;
     const wrap = doc.createElement("div");
@@ -526,48 +781,49 @@ var ProtectedImage = class {
       <div class="risk"></div>
       <div class="err"><span>\u26A0<br>Protected image unavailable</span></div>`;
     root.append(style, wrap);
-    this.wrap = wrap;
-    this.canvas = wrap.querySelector("canvas.main");
-    this.tilesEl = wrap.querySelector(".tiles");
-    this.shieldEl = wrap.querySelector(".shield");
-    if (o.aspectRatio) this.host.style.aspectRatio = String(o.aspectRatio);
-    if (o.width) this.host.style.width = typeof o.width === "number" ? o.width + "px" : o.width;
-    if (o.height) this.host.style.height = typeof o.height === "number" ? o.height + "px" : o.height;
+    __privateSet(this, _wrap, wrap);
+    __privateSet(this, _canvas, wrap.querySelector("canvas.main"));
+    __privateSet(this, _tilesEl, wrap.querySelector(".tiles"));
+    __privateSet(this, _shieldEl, wrap.querySelector(".shield"));
+    if (o.aspectRatio) __privateGet(this, _host).style.aspectRatio = String(o.aspectRatio);
+    if (o.width) __privateGet(this, _host).style.width = typeof o.width === "number" ? o.width + "px" : o.width;
+    if (o.height) __privateGet(this, _host).style.height = typeof o.height === "number" ? o.height + "px" : o.height;
   }
   _attachGuards() {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     const sig = { signal: __privateGet(this, _abort).signal };
     const attempt = (kind) => {
       try {
         o.onAttempt && o.onAttempt(kind, this);
       } catch {
       }
-      this.host.dispatchEvent(new CustomEvent("archx-attempt", { detail: { kind }, bubbles: true }));
+      __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-attempt", { detail: { kind }, bubbles: true }));
+      __privateMethod(this, _ProtectedImage_instances, registerStrike_fn).call(this, kind);
     };
-    this._attempt = attempt;
+    __privateSet(this, _attemptHandler, attempt);
     if (o.guards.contextMenu) {
-      this.wrap.addEventListener("contextmenu", (e) => {
+      __privateGet(this, _wrap).addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
         attempt("contextmenu");
       }, sig);
     }
     if (o.guards.drag) {
-      this.wrap.addEventListener("dragstart", (e) => {
+      __privateGet(this, _wrap).addEventListener("dragstart", (e) => {
         e.preventDefault();
         attempt("drag");
       }, sig);
     }
     if (o.guards.copy) {
-      this.wrap.addEventListener("copy", (e) => {
+      __privateGet(this, _wrap).addEventListener("copy", (e) => {
         e.preventDefault();
         attempt("copy");
       }, sig);
-      this.wrap.addEventListener("selectstart", (e) => e.preventDefault(), sig);
+      __privateGet(this, _wrap).addEventListener("selectstart", (e) => e.preventDefault(), sig);
     }
     if (o.guards.longPress) {
       let timer = 0;
-      this.wrap.addEventListener("pointerdown", (e) => {
+      __privateGet(this, _wrap).addEventListener("pointerdown", (e) => {
         if (e.pointerType !== "touch") return;
         timer = setTimeout(() => {
           attempt("longpress");
@@ -575,11 +831,11 @@ var ProtectedImage = class {
         }, 450);
       }, sig);
       const clear = () => clearTimeout(timer);
-      this.wrap.addEventListener("pointerup", clear, sig);
-      this.wrap.addEventListener("pointercancel", clear, sig);
-      this.wrap.addEventListener("pointermove", clear, sig);
+      __privateGet(this, _wrap).addEventListener("pointerup", clear, sig);
+      __privateGet(this, _wrap).addEventListener("pointercancel", clear, sig);
+      __privateGet(this, _wrap).addEventListener("pointermove", clear, sig);
     }
-    this.shieldEl.addEventListener("click", (e) => {
+    __privateGet(this, _shieldEl).addEventListener("click", (e) => {
       if (o.onClick) {
         try {
           o.onClick(e, this);
@@ -587,15 +843,34 @@ var ProtectedImage = class {
         }
       }
       if (!o.swallowClick) {
-        this.host.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: e.clientX, clientY: e.clientY }));
+        __privateGet(this, _host).dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: e.clientX, clientY: e.clientY }));
       }
     }, sig);
+    if (o.lens) {
+      const updateLens = (e) => {
+        if (!e.isTrusted) return;
+        const r = __privateGet(this, _wrap).getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return;
+        __privateSet(this, _lensPoint, {
+          x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+          y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
+        });
+        __privateMethod(this, _ProtectedImage_instances, trackLensTravel_fn).call(this, __privateGet(this, _lensPoint));
+        __privateMethod(this, _ProtectedImage_instances, requestLensFrame_fn).call(this);
+      };
+      __privateGet(this, _shieldEl).addEventListener("pointermove", updateLens, sig);
+      __privateGet(this, _shieldEl).addEventListener("pointerdown", updateLens, sig);
+      __privateGet(this, _shieldEl).addEventListener("pointerleave", () => {
+        __privateSet(this, _lensPoint, null);
+        __privateMethod(this, _ProtectedImage_instances, requestLensFrame_fn).call(this);
+      }, sig);
+    }
   }
   _onVisibility(visible) {
-    this._visible = visible;
-    if (visible && !__privateGet(this, _loaded) && !this._loading) this._load();
-    if (visible && __privateGet(this, _loaded) && this._unloaded) this._load();
-    if (!visible && this.options.unloadOnExit && __privateGet(this, _loaded)) this._unloadPixels();
+    __privateSet(this, _visible, visible);
+    if (visible && !__privateGet(this, _loaded) && !__privateGet(this, _loading)) this._load();
+    if (visible && __privateGet(this, _loaded) && __privateGet(this, _unloaded)) this._load();
+    if (!visible && __privateGet(this, _options).unloadOnExit && __privateGet(this, _loaded)) this._unloadPixels();
     if (__privateGet(this, _gl)) visible ? this._startGlLoop() : this._stopGlLoop();
   }
   async _init() {
@@ -603,41 +878,60 @@ var ProtectedImage = class {
     __privateSet(this, _resizeObs, new ResizeObserver(() => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
+        if (__privateGet(this, _gl)) return;
         if (__privateGet(this, _bitmap)) this._render();
+        else if (__privateGet(this, _loaded) && __privateGet(this, _bitmapReleased) && __privateGet(this, _visible)) this._load();
       }, 90);
     }));
-    __privateGet(this, _resizeObs).observe(this.host);
-    if (this.options.lazy && "IntersectionObserver" in window) {
-      getVisibilityObserver().observe(this.host);
-      const r = this.host.getBoundingClientRect();
+    __privateGet(this, _resizeObs).observe(__privateGet(this, _host));
+    if (__privateGet(this, _options).lazy && "IntersectionObserver" in window) {
+      getVisibilityObserver().observe(__privateGet(this, _host));
+      const r = __privateGet(this, _host).getBoundingClientRect();
       if (r.bottom > -500 && r.top < innerHeight + 500) this._load();
     } else {
-      this._visible = true;
+      __privateSet(this, _visible, true);
       await this._load();
     }
     return this;
   }
   /* ---------------- source resolution ---------------- */
   async _resolveBytes() {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     let src = __privateGet(this, _source);
     let extra = {};
+    const strict = o.memory === "strict";
     if (src && typeof src === "object" && !(src instanceof Blob) && !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id) {
       const endpoint = src.tokenEndpoint || o.tokenEndpoint;
       if (!endpoint) throw new Error("Archx: tokenEndpoint required for {id} sources");
-      const w = Math.min(o.maxBackingWidth, Math.ceil((this.host.clientWidth || 800) * Math.min(devicePixelRatio || 1, o.dprCap)));
-      const res = await fetchWithRetries(
-        endpoint + encodeURIComponent(src.id) + "?w=" + w,
-        { credentials: o.credentials, signal: __privateGet(this, _abort).signal },
-        o.retries
-      );
-      const token = await res.json();
-      extra = token;
-      src = token.url;
+      const w = Math.min(o.maxBackingWidth, Math.ceil((__privateGet(this, _host).clientWidth || 800) * Math.min(devicePixelRatio || 1, o.dprCap)));
+      let lastErr;
+      for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
+        try {
+          const res = await fetchWithRetries(
+            endpoint + encodeURIComponent(src.id) + "?w=" + w,
+            { credentials: o.credentials, signal: __privateGet(this, _abort).signal },
+            o.retries
+          );
+          const token = await res.json();
+          const imgRes = await nativeFetch(token.url, {
+            credentials: o.credentials,
+            cache: "no-store",
+            signal: __privateGet(this, _abort).signal
+          });
+          if ((imgRes.status === 401 || imgRes.status === 403) && tokenAttempt === 0) continue;
+          if (!imgRes.ok) throw new Error("Archx fetch failed: HTTP " + imgRes.status);
+          const buf = new Uint8Array(await imgRes.arrayBuffer());
+          return { ...await this._bytesToBitmap(buf, token), extra: token };
+        } catch (err) {
+          lastErr = err;
+          if (tokenAttempt === 1) throw err;
+        }
+      }
+      throw lastErr;
     }
     if (typeof src === "string") {
       const cacheKey = src + "|" + (extra.key || o.key || "");
-      if (bitmapCache.has(cacheKey)) return { ...await bitmapCache.get(cacheKey), extra };
+      if (!strict && bitmapCache.has(cacheKey)) return { ...await bitmapCache.get(cacheKey), extra };
       const promise = (async () => {
         const res = await fetchWithRetries(
           src,
@@ -647,7 +941,7 @@ var ProtectedImage = class {
         const buf = new Uint8Array(await res.arrayBuffer());
         return this._bytesToBitmap(buf, extra);
       })();
-      cachePut(cacheKey, promise);
+      if (!strict) cachePut(cacheKey, promise);
       return { ...await promise, extra };
     }
     if (src instanceof Blob) return { ...await this._bytesToBitmap(new Uint8Array(await src.arrayBuffer()), extra), extra };
@@ -658,7 +952,7 @@ var ProtectedImage = class {
     throw new Error("Archx: unsupported source type");
   }
   async _bytesToBitmap(buf, extra = {}) {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     let header = null;
     let payload = buf;
     if (isArchxContainer(buf)) {
@@ -677,7 +971,7 @@ var ProtectedImage = class {
     const blob = new Blob([payload], { type: header?.mime || "image/webp" });
     let bitmap;
     try {
-      bitmap = await createImageBitmap(blob);
+      bitmap = await nativeCreateImageBitmap(blob);
     } catch {
       bitmap = await this._bitmapViaImage(blob);
     }
@@ -694,66 +988,78 @@ var ProtectedImage = class {
   }
   _bitmapViaImage(blob) {
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
+      const url = NATIVES.createObjectURL ? NATIVES.createObjectURL.call(URL, blob) : URL.createObjectURL(blob);
+      const img = new (NATIVES.ImageCtor || Image)();
       img.onload = () => {
-        URL.revokeObjectURL(url);
+        NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url);
         resolve(img);
       };
       img.onerror = (e) => {
-        URL.revokeObjectURL(url);
+        NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url);
         reject(e);
       };
       img.src = url;
     });
   }
   async _load() {
-    if (this._loading || __privateGet(this, _destroyed)) return;
-    this._loading = true;
+    if (__privateGet(this, _loading) || __privateGet(this, _destroyed)) return;
+    if (!__privateMethod(this, _ProtectedImage_instances, securityGate_fn).call(this)) {
+      __privateGet(this, _wrap).classList.remove("loading");
+      __privateGet(this, _wrap).classList.add("error");
+      __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-error", {
+        detail: { error: new Error("Archx: blocked by integrity/automation/lockout policy") },
+        bubbles: true
+      }));
+      return;
+    }
+    __privateSet(this, _loading, true);
     try {
       const { bitmap, meta } = await limiter.run(() => this._resolveBytes());
       if (__privateGet(this, _destroyed)) return;
       __privateSet(this, _bitmap, bitmap);
       __privateSet(this, _meta, meta);
+      __privateSet(this, _bitmapReleased, false);
+      __privateSet(this, _glSource, null);
+      __privateSet(this, _glMeta, null);
       __privateSet(this, _decoy, null);
-      if (!this.options.aspectRatio && !this.options.height) {
-        this.host.style.aspectRatio = meta.origW + " / " + meta.origH;
+      if (!__privateGet(this, _options).aspectRatio && !__privateGet(this, _options).height) {
+        __privateGet(this, _host).style.aspectRatio = meta.origW + " / " + meta.origH;
       }
       this._render();
       __privateSet(this, _loaded, true);
-      this._unloaded = false;
-      this.wrap.classList.remove("loading", "error");
-      this.host.dispatchEvent(new CustomEvent("archx-load", { bubbles: true }));
+      __privateSet(this, _unloaded, false);
+      __privateGet(this, _wrap).classList.remove("loading", "error");
+      __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-load", { bubbles: true }));
       try {
-        this.options.onLoad && this.options.onLoad(this);
+        __privateGet(this, _options).onLoad && __privateGet(this, _options).onLoad(this);
       } catch {
       }
     } catch (err) {
       if (__privateGet(this, _destroyed)) return;
-      this.wrap.classList.remove("loading");
-      this.wrap.classList.add("error");
-      this.host.dispatchEvent(new CustomEvent("archx-error", { detail: { error: err }, bubbles: true }));
+      __privateGet(this, _wrap).classList.remove("loading");
+      __privateGet(this, _wrap).classList.add("error");
+      __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-error", { detail: { error: err }, bubbles: true }));
       try {
-        this.options.onError && this.options.onError(err, this);
+        __privateGet(this, _options).onError && __privateGet(this, _options).onError(err, this);
       } catch {
       }
     } finally {
-      this._loading = false;
+      __privateSet(this, _loading, false);
     }
   }
   _unloadPixels() {
-    if (this.canvas) {
-      this.canvas.width = 0;
-      this.canvas.height = 0;
+    if (__privateGet(this, _canvas)) {
+      __privateGet(this, _canvas).width = 0;
+      __privateGet(this, _canvas).height = 0;
     }
-    this._unloaded = true;
+    __privateSet(this, _unloaded, true);
   }
   /* ---------------- rendering ---------------- */
   _backingSize() {
-    const o = this.options;
-    const rect = this.host.getBoundingClientRect();
-    const cssW = Math.max(1, Math.round(rect.width || this.host.clientWidth || 320));
-    const cssH = Math.max(1, Math.round(rect.height || this.host.clientHeight || Math.round(cssW * (__privateGet(this, _meta).origH / __privateGet(this, _meta).origW)) || 240));
+    const o = __privateGet(this, _options);
+    const rect = __privateGet(this, _host).getBoundingClientRect();
+    const cssW = Math.max(1, Math.round(rect.width || __privateGet(this, _host).clientWidth || 320));
+    const cssH = Math.max(1, Math.round(rect.height || __privateGet(this, _host).clientHeight || Math.round(cssW * (__privateGet(this, _meta).origH / __privateGet(this, _meta).origW)) || 240));
     let scale = Math.min(window.devicePixelRatio || 1, o.dprCap);
     if (cssW * scale > o.maxBackingWidth) scale = o.maxBackingWidth / cssW;
     const maxScaleBySource = __privateGet(this, _meta).origW * 1 / cssW;
@@ -763,34 +1069,75 @@ var ProtectedImage = class {
   }
   _render() {
     if (!__privateGet(this, _bitmap) || __privateGet(this, _destroyed)) return;
-    const mode = this.options.mode;
+    const mode = __privateGet(this, _options).mode;
     if (mode === "vault") {
       if (this._tryRenderWebGL()) return;
     }
-    if (this.options.splitCanvases && mode !== "lite") this._renderSplit();
+    if (__privateGet(this, _options).splitCanvases && mode !== "lite" && !__privateGet(this, _options).lens) this._renderSplit();
     else this._render2d();
   }
   /** Private, capped, un-scrambled working canvas (wiped after use). */
   _workingCanvas(w, h) {
     const meta = __privateGet(this, _meta);
-    const fit = fitRects(meta.origW, meta.origH, w, h, this.options.fit);
+    const fit = fitRects(meta.origW, meta.origH, w, h, __privateGet(this, _options).fit);
     const fullW = Math.max(1, Math.round(meta.origW / fit.sw * fit.dw));
     const fullH = Math.max(1, Math.round(meta.origH / fit.sh * fit.dh));
     return { full: unscrambleToCanvas(__privateGet(this, _bitmap), meta, fullW, fullH), fit, fullW, fullH };
   }
   _render2d() {
     const { w, h } = this._backingSize();
-    const canvas = this.canvas;
-    this.tilesEl.hidden = true;
+    const canvas = __privateGet(this, _canvas);
+    __privateGet(this, _tilesEl).hidden = true;
     canvas.hidden = false;
     canvas.width = w;
     canvas.height = h;
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = getNativeContext(canvas, "2d", { alpha: false });
     __privateSet(this, _realCtx, ctx);
     const { full, fit } = this._workingCanvas(w, h);
+    if (__privateGet(this, _options).lens) {
+      const frame = makeCanvas(__privateGet(this, _host).ownerDocument);
+      frame.width = w;
+      frame.height = h;
+      const fctx = getNativeContext(frame, "2d");
+      fctx.fillStyle = "#000";
+      fctx.fillRect(0, 0, w, h);
+      nativeDrawImage(
+        fctx,
+        full,
+        fit.sx * (full.width / __privateGet(this, _meta).origW),
+        fit.sy * (full.height / __privateGet(this, _meta).origH),
+        fit.sw * (full.width / __privateGet(this, _meta).origW),
+        fit.sh * (full.height / __privateGet(this, _meta).origH),
+        fit.dx,
+        fit.dy,
+        fit.dw,
+        fit.dh
+      );
+      this._bakeOverlays(fctx, w, h);
+      __privateSet(this, _decoy, this._makeDecoy(full, w, h));
+      full.width = 0;
+      full.height = 0;
+      if (__privateGet(this, _frameCanvas)) {
+        __privateGet(this, _frameCanvas).width = 0;
+        __privateGet(this, _frameCanvas).height = 0;
+      }
+      __privateSet(this, _frameCanvas, frame);
+      const cfg = typeof __privateGet(this, _options).lens === "object" ? __privateGet(this, _options).lens : {};
+      const factor = cfg.idlePixelate ?? 18;
+      const base = makeCanvas(__privateGet(this, _host).ownerDocument);
+      base.width = Math.max(8, Math.round(w / factor));
+      base.height = Math.max(8, Math.round(h / factor));
+      nativeDrawImage(getNativeContext(base, "2d"), frame, 0, 0, base.width, base.height);
+      __privateSet(this, _lensBase, base);
+      __privateMethod(this, _ProtectedImage_instances, paintLens2d_fn).call(this);
+      this._poison(canvas, ctx);
+      __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
+      return;
+    }
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(
+    nativeDrawImage(
+      ctx,
       full,
       fit.sx * (full.width / __privateGet(this, _meta).origW),
       fit.sy * (full.height / __privateGet(this, _meta).origH),
@@ -806,18 +1153,20 @@ var ProtectedImage = class {
     full.width = 0;
     full.height = 0;
     this._poison(canvas, ctx);
+    __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
   }
   _renderSplit() {
     const { w, h } = this._backingSize();
-    const g = Math.max(2, Math.min(6, this.options.splitGrid | 0));
+    const g = Math.max(2, Math.min(6, __privateGet(this, _options).splitGrid | 0));
     const { full, fit } = this._workingCanvas(w, h);
-    const composed = document.createElement("canvas");
+    const composed = makeCanvas();
     composed.width = w;
     composed.height = h;
-    const cctx = composed.getContext("2d");
+    const cctx = getNativeContext(composed, "2d");
     cctx.fillStyle = "#000";
     cctx.fillRect(0, 0, w, h);
-    cctx.drawImage(
+    nativeDrawImage(
+      cctx,
       full,
       fit.sx * (full.width / __privateGet(this, _meta).origW),
       fit.sy * (full.height / __privateGet(this, _meta).origH),
@@ -829,28 +1178,29 @@ var ProtectedImage = class {
       fit.dh
     );
     this._bakeOverlays(cctx, w, h);
-    this.canvas.hidden = true;
-    this.tilesEl.hidden = false;
-    this.tilesEl.style.gridTemplateColumns = `repeat(${g},1fr)`;
-    this.tilesEl.style.gridTemplateRows = `repeat(${g},1fr)`;
-    this.tilesEl.replaceChildren();
+    __privateGet(this, _canvas).hidden = true;
+    __privateGet(this, _tilesEl).hidden = false;
+    __privateGet(this, _tilesEl).style.gridTemplateColumns = `repeat(${g},1fr)`;
+    __privateGet(this, _tilesEl).style.gridTemplateRows = `repeat(${g},1fr)`;
+    __privateGet(this, _tilesEl).replaceChildren();
     const tw = Math.ceil(w / g), th = Math.ceil(h / g);
     for (let i = 0; i < g * g; i++) {
-      const c = document.createElement("canvas");
+      const c = makeCanvas();
       c.width = tw;
       c.height = th;
-      const tctx = c.getContext("2d", { alpha: false });
-      tctx.drawImage(composed, i % g * tw, Math.floor(i / g) * th, tw, th, 0, 0, tw, th);
-      this.tilesEl.appendChild(c);
+      const tctx = getNativeContext(c, "2d", { alpha: false });
+      nativeDrawImage(tctx, composed, i % g * tw, Math.floor(i / g) * th, tw, th, 0, 0, tw, th);
+      __privateGet(this, _tilesEl).appendChild(c);
       __privateSet(this, _decoy, __privateGet(this, _decoy) || this._makeDecoy(full, w, h));
       this._poison(c, tctx);
     }
     composed.width = 0;
     full.width = 0;
     full.height = 0;
+    __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
   }
   _bakeOverlays(ctx, w, h) {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     const wm = o.watermark;
     if (wm) {
       const cfg = typeof wm === "string" ? { text: wm } : wm;
@@ -886,9 +1236,16 @@ var ProtectedImage = class {
       }
     }
     if (o.forensic && o.mode !== "lite") {
-      const rand = mulberry32(hashSeed(sessionId() + "|" + (typeof __privateGet(this, _source) === "string" ? __privateGet(this, _source) : "blob")));
+      const rand = mulberry32(hashSeed(sessionId() + "|" + (typeof __privateGet(this, _source) === "string" ? __privateGet(this, _source) : "blob") + "|fx"));
       ctx.save();
-      for (let i = 0; i < 240; i++) {
+      const bs = Math.max(16, Math.round(Math.min(w, h) / 18));
+      for (let y = 0; y < h; y += bs) {
+        for (let x = 0; x < w; x += bs) {
+          ctx.fillStyle = rand() < 0.5 ? "rgba(0,0,0,0.016)" : "rgba(255,255,255,0.016)";
+          ctx.fillRect(x, y, bs, bs);
+        }
+      }
+      for (let i = 0; i < 160; i++) {
         const v = Math.floor(rand() * 255);
         ctx.fillStyle = `rgba(${v},${v},${v},0.035)`;
         ctx.fillRect(Math.floor(rand() * w), Math.floor(rand() * h), 1, 1);
@@ -897,21 +1254,21 @@ var ProtectedImage = class {
     }
   }
   _makeDecoy(cleanCanvas, w, h) {
-    const o = this.options;
+    const o = __privateGet(this, _options);
     const kind = o.onExtract;
-    const decoy = document.createElement("canvas");
-    const ctx = decoy.getContext("2d");
+    const decoy = makeCanvas();
+    const ctx = getNativeContext(decoy, "2d");
     if (kind === "lowres") {
       const tinyW = 72;
       const tinyH = Math.max(1, Math.round(h / w * tinyW));
-      const tiny = document.createElement("canvas");
+      const tiny = makeCanvas();
       tiny.width = tinyW;
       tiny.height = tinyH;
-      tiny.getContext("2d").drawImage(cleanCanvas, 0, 0, tinyW, tinyH);
+      nativeDrawImage(getNativeContext(tiny, "2d"), cleanCanvas, 0, 0, tinyW, tinyH);
       decoy.width = w;
       decoy.height = h;
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tiny, 0, 0, w, h);
+      nativeDrawImage(ctx, tiny, 0, 0, w, h);
       tiny.width = 0;
       ctx.save();
       ctx.globalAlpha = 0.5;
@@ -933,7 +1290,8 @@ var ProtectedImage = class {
       const dw = w / g, dh = h / g;
       for (let dest = 0; dest < plan.count; dest++) {
         const source = plan.order[dest];
-        ctx.drawImage(
+        nativeDrawImage(
+          ctx,
           cleanCanvas,
           source % g * tw,
           Math.floor(source / g) * th,
@@ -974,8 +1332,8 @@ var ProtectedImage = class {
    */
   _poison(canvas, ctx) {
     const decoy = () => __privateGet(this, _decoy);
-    const realToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    const realToBlob = HTMLCanvasElement.prototype.toBlob;
+    const realToDataURL = NATIVES.canvasToDataURL || HTMLCanvasElement.prototype.toDataURL;
+    const realToBlob = NATIVES.canvasToBlob || HTMLCanvasElement.prototype.toBlob;
     const self = this;
     const define = (name, fn) => {
       try {
@@ -988,19 +1346,22 @@ var ProtectedImage = class {
       }
     };
     define("toDataURL", function(type, quality) {
-      self._attempt && self._attempt("extract-dataurl");
+      var _a;
+      __privateGet(_a = self, _attemptHandler).call(_a, "extract-dataurl");
       const d = decoy();
       return d ? realToDataURL.call(d, type, quality) : "data:,";
     });
     define("toBlob", function(cb, type, quality) {
-      self._attempt && self._attempt("extract-blob");
+      var _a;
+      __privateGet(_a = self, _attemptHandler).call(_a, "extract-blob");
       const d = decoy();
       if (d) realToBlob.call(d, cb, type, quality);
       else if (cb) cb(new Blob([], { type: type || "image/png" }));
     });
     if ("captureStream" in canvas) {
       define("captureStream", function() {
-        self._attempt && self._attempt("extract-stream");
+        var _a;
+        __privateGet(_a = self, _attemptHandler).call(_a, "extract-stream");
         const d = decoy();
         if (d && d.captureStream) return d.captureStream(1);
         throw new DOMException("Protected canvas", "SecurityError");
@@ -1008,7 +1369,8 @@ var ProtectedImage = class {
     }
     if (ctx && ctx.getImageData) {
       const poisonedGet = function(sx, sy, sw, sh) {
-        self._attempt && self._attempt("extract-pixels");
+        var _a;
+        __privateGet(_a = self, _attemptHandler).call(_a, "extract-pixels");
         const w = Math.max(1, Math.abs(sw | 0)), h = Math.max(1, Math.abs(sh | 0));
         const data = new Uint8ClampedArray(w * h * 4);
         for (let i = 3; i < data.length; i += 4) data[i] = 255;
@@ -1024,15 +1386,14 @@ var ProtectedImage = class {
       }
     }
   }
-  /* ---------------- WebGL vault ---------------- */
   _tryRenderWebGL() {
     if (glContextsInUse >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) return false;
-    const canvas = this.canvas;
-    this.tilesEl.hidden = true;
+    const canvas = __privateGet(this, _canvas);
+    __privateGet(this, _tilesEl).hidden = true;
     canvas.hidden = false;
     let gl = __privateGet(this, _gl);
     if (!gl) {
-      gl = canvas.getContext("webgl2", { preserveDrawingBuffer: false, antialias: false, alpha: false, powerPreference: "low-power" });
+      gl = getNativeContext(canvas, "webgl2", { preserveDrawingBuffer: false, antialias: false, alpha: false, powerPreference: "low-power" });
       if (!gl) return false;
       __privateSet(this, _gl, gl);
       glContextsInUse++;
@@ -1040,21 +1401,39 @@ var ProtectedImage = class {
         e.preventDefault();
         __privateSet(this, _gl, null);
         glContextsInUse = Math.max(0, glContextsInUse - 1);
-        this._render2d();
+        __privateSet(this, _glSource, null);
+        __privateSet(this, _glMeta, null);
+        __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
+        if (__privateGet(this, _bitmap)) this._render2d();
+        else {
+          __privateSet(this, _loaded, false);
+          this._load();
+        }
       }, { signal: __privateGet(this, _abort).signal });
       if (!this._initGl(gl)) {
         __privateSet(this, _gl, null);
         glContextsInUse--;
+        __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
         return false;
       }
     }
+    __privateMethod(this, _ProtectedImage_instances, prepareGlSource_fn).call(this);
     this._uploadGlTexture(gl);
-    this._startGlLoop();
-    if (!__privateGet(this, _decoy)) {
+    if (__privateGet(this, _glSource) && __privateGet(this, _glSource) !== __privateGet(this, _bitmap)) {
+      try {
+        __privateGet(this, _glSource).width = 0;
+        __privateGet(this, _glSource).height = 0;
+      } catch {
+      }
+    }
+    __privateSet(this, _glSource, null);
+    if (!__privateGet(this, _decoy) && __privateGet(this, _bitmap)) {
       const { full } = this._workingCanvas(320, Math.max(1, Math.round(320 * __privateGet(this, _meta).origH / __privateGet(this, _meta).origW)));
       __privateSet(this, _decoy, this._makeDecoy(full, full.width, full.height));
       full.width = 0;
     }
+    this._startGlLoop();
+    __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
     return true;
   }
   _initGl(gl) {
@@ -1066,14 +1445,34 @@ var ProtectedImage = class {
       uniform sampler2D uTex; uniform sampler2D uMap; uniform sampler2D uWm;
       uniform float uGrid; uniform vec2 uCrop; uniform vec2 uFitScale; uniform vec2 uFitOffset;
       uniform float uScrambled; uniform float uSeed; uniform float uWmOn;
+      uniform float uLensOn; uniform float uLensActive; uniform vec2 uLensCenter;
+      uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
       void main(){
+        if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
         vec2 uv = vUv*uFitScale + uFitOffset;
         if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){ frag=vec4(0.,0.,0.,1.); return; }
-        vec2 srcUv = uv;
+        // Pointer lens: outside the trusted-pointer disc we sample a heavily
+        // quantised (pixelated) version, so a single screenshot/frame grab
+        // only ever contains one small sharp region.
+        vec2 effUv = uv;
+        float lensOutside = 0.0;
+        float lensDistPx = 0.0;
+        if(uLensOn>0.5){
+          vec2 centerPx = vec2(uLensCenter.x, 1.0-uLensCenter.y) * uResolution;
+          lensDistPx = distance(gl_FragCoord.xy, centerPx);
+          if(uLensActive<0.5 || lensDistPx > uLensRadius){
+            float block = max(uResolution.x, uResolution.y) / 34.0;
+            vec2 qxy = (floor(gl_FragCoord.xy / block) + 0.5) * block;
+            vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
+            effUv = qUv * uFitScale + uFitOffset;
+            lensOutside = 1.0;
+          }
+        }
+        vec2 srcUv = effUv;
         if(uScrambled>0.5){
-          vec2 paddedUv = uv * uCrop; // orig->padded space
+          vec2 paddedUv = effUv * uCrop; // orig->padded space
           vec2 tile = floor(paddedUv*uGrid);
           vec2 local = fract(paddedUv*uGrid);
           vec4 m = texelFetch(uMap, ivec2(tile), 0);
@@ -1088,9 +1487,13 @@ var ProtectedImage = class {
         }
         vec4 c = texture(uTex, srcUv);
         c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
+        if(lensOutside>0.5) c.rgb *= 0.82;
         if(uWmOn>0.5){
           vec4 wm = texture(uWm, vUv);
           c.rgb = mix(c.rgb, wm.rgb, wm.a);
+        }
+        if(uLensOn>0.5 && uLensActive>0.5 && abs(lensDistPx-uLensRadius)<1.5){
+          c.rgb = mix(c.rgb, vec3(1.0), 0.35);
         }
         frag = vec4(c.rgb, 1.0);
       }`;
@@ -1110,33 +1513,52 @@ var ProtectedImage = class {
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
     gl.useProgram(prog);
-    this._glProg = prog;
-    this._glLoc = {};
-    ["uTex", "uMap", "uWm", "uGrid", "uCrop", "uFitScale", "uFitOffset", "uScrambled", "uSeed", "uWmOn"].forEach((n) => {
-      this._glLoc[n] = gl.getUniformLocation(prog, n);
+    __privateSet(this, _glProg, prog);
+    __privateSet(this, _glLoc, {});
+    [
+      "uTex",
+      "uMap",
+      "uWm",
+      "uGrid",
+      "uCrop",
+      "uFitScale",
+      "uFitOffset",
+      "uScrambled",
+      "uSeed",
+      "uWmOn",
+      "uLensOn",
+      "uLensActive",
+      "uLensCenter",
+      "uLensRadius",
+      "uResolution",
+      "uLocked"
+    ].forEach((n) => {
+      __privateGet(this, _glLoc)[n] = gl.getUniformLocation(prog, n);
     });
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    this._glTex = gl.createTexture();
-    this._glMap = gl.createTexture();
-    this._glWm = gl.createTexture();
+    __privateSet(this, _glTex, gl.createTexture());
+    __privateSet(this, _glMap, gl.createTexture());
+    __privateSet(this, _glWm, gl.createTexture());
     return true;
   }
   _uploadGlTexture(gl) {
-    const meta = __privateGet(this, _meta);
+    const meta = __privateGet(this, _glMeta) || __privateGet(this, _meta);
+    const source = __privateGet(this, _glSource) || __privateGet(this, _bitmap);
+    const texImage = (...args) => NATIVES.glTexImage2D ? NATIVES.glTexImage2D.call(gl, ...args) : gl.texImage2D(...args);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this._glTex);
+    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glTex));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, __privateGet(this, _bitmap));
+    texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this._glMap);
+    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glMap));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1151,35 +1573,53 @@ var ProtectedImage = class {
         data[orig * 4 + 2] = meta.plan.flips[scrambledPos].fx ? 255 : 0;
         data[orig * 4 + 3] = meta.plan.flips[scrambledPos].fy ? 255 : 0;
       }
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, g, g, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      texImage(gl.TEXTURE_2D, 0, gl.RGBA, g, g, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
     }
     gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, this._glWm);
+    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glWm));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    const wm = this.options.watermark;
-    this._glWmOn = 0;
+    const wm = __privateGet(this, _options).watermark;
+    __privateSet(this, _glWmOn, 0);
     if (wm) {
-      const text = String((typeof wm === "string" ? wm : wm.text) || "").replace("{session}", sessionId().slice(0, 6));
+      const cfg = typeof wm === "string" ? { text: wm } : wm;
+      const text = String(cfg.text || "").replace("{session}", sessionId().slice(0, 6));
       if (text) {
-        const c = document.createElement("canvas");
+        const c = makeCanvas();
         c.width = 1024;
         c.height = Math.max(64, Math.round(1024 * meta.origH / meta.origW));
-        const ctx = c.getContext("2d");
+        const ctx = getNativeContext(c, "2d");
         ctx.clearRect(0, 0, c.width, c.height);
-        ctx.fillStyle = "#ffffff";
-        ctx.globalAlpha = (typeof wm === "object" ? wm.opacity : void 0) ?? 0.16;
-        const fs = Math.max(18, Math.round(Math.min(c.width, c.height) / 12));
-        ctx.font = `700 ${fs}px system-ui,sans-serif`;
-        ctx.textAlign = "center";
-        ctx.translate(c.width / 2, c.height / 2);
-        ctx.rotate(-Math.PI / 7);
-        const diag = Math.hypot(c.width, c.height);
-        for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) ctx.fillText(text, 0, y);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
-        this._glWmOn = 1;
+        ctx.fillStyle = cfg.color || "#ffffff";
+        if (cfg.tile !== false) {
+          ctx.save();
+          ctx.globalAlpha = cfg.opacity ?? 0.16;
+          const fs = Math.max(18, Math.round(Math.min(c.width, c.height) / 12));
+          ctx.font = `700 ${fs}px system-ui,sans-serif`;
+          ctx.textAlign = "center";
+          ctx.translate(c.width / 2, c.height / 2);
+          ctx.rotate(-Math.PI / 7);
+          const diag = Math.hypot(c.width, c.height);
+          for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) ctx.fillText(text, 0, y);
+          ctx.restore();
+        }
+        if (cfg.corner !== false) {
+          ctx.save();
+          ctx.globalAlpha = cfg.cornerOpacity ?? 0.9;
+          const fs = Math.max(14, Math.round(Math.min(c.width, c.height) / 30));
+          ctx.font = `600 ${fs}px system-ui,sans-serif`;
+          ctx.textAlign = "right";
+          ctx.shadowColor = "rgba(0,0,0,.85)";
+          ctx.shadowBlur = 5;
+          ctx.fillText(text, c.width - 14, c.height - 14);
+          ctx.restore();
+        }
+        texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+        c.width = 0;
+        c.height = 0;
+        __privateSet(this, _glWmOn, 1);
       }
     }
   }
@@ -1190,14 +1630,14 @@ var ProtectedImage = class {
       __privateSet(this, _raf, requestAnimationFrame(draw));
       if (__privateGet(this, _destroyed) || !__privateGet(this, _gl)) return;
       const { w, h } = this._backingSize();
-      if (this.canvas.width !== w || this.canvas.height !== h) {
-        this.canvas.width = w;
-        this.canvas.height = h;
+      if (__privateGet(this, _canvas).width !== w || __privateGet(this, _canvas).height !== h) {
+        __privateGet(this, _canvas).width = w;
+        __privateGet(this, _canvas).height = h;
       }
       gl.viewport(0, 0, w, h);
-      gl.useProgram(this._glProg);
-      const L = this._glLoc;
-      const meta = __privateGet(this, _meta);
+      gl.useProgram(__privateGet(this, _glProg));
+      const L = __privateGet(this, _glLoc);
+      const meta = __privateGet(this, _glMeta) || __privateGet(this, _meta);
       gl.uniform1i(L.uTex, 0);
       gl.uniform1i(L.uMap, 1);
       gl.uniform1i(L.uWm, 2);
@@ -1206,7 +1646,7 @@ var ProtectedImage = class {
       const srcRatio = meta.origW / meta.origH;
       const dstRatio = w / h;
       let sx = 1, sy = 1, ox = 0, oy = 0;
-      if (this.options.fit === "cover") {
+      if (__privateGet(this, _options).fit === "cover") {
         if (srcRatio > dstRatio) {
           sx = dstRatio / srcRatio;
           ox = (1 - sx) / 2;
@@ -1214,7 +1654,7 @@ var ProtectedImage = class {
           sy = srcRatio / dstRatio;
           oy = (1 - sy) / 2;
         }
-      } else if (this.options.fit === "contain") {
+      } else if (__privateGet(this, _options).fit === "contain") {
         if (srcRatio > dstRatio) {
           sy = srcRatio / dstRatio;
           oy = -(sy - 1) / 2;
@@ -1237,7 +1677,14 @@ var ProtectedImage = class {
       gl.uniform2f(L.uFitOffset, ox, oy);
       gl.uniform1f(L.uScrambled, meta.plan ? 1 : 0);
       gl.uniform1f(L.uSeed, hashSeed(sessionId()) % 1e3 / 37);
-      gl.uniform1f(L.uWmOn, this._glWmOn || 0);
+      gl.uniform1f(L.uWmOn, __privateGet(this, _glWmOn) || 0);
+      const lensCfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
+      gl.uniform1f(L.uLensOn, __privateGet(this, _options).lens ? 1 : 0);
+      gl.uniform1f(L.uLensActive, __privateGet(this, _lensPoint) ? 1 : 0);
+      gl.uniform2f(L.uLensCenter, __privateGet(this, _lensPoint)?.x ?? -10, __privateGet(this, _lensPoint)?.y ?? -10);
+      gl.uniform1f(L.uLensRadius, Math.max(24, Math.min(w, h) * (lensCfg.radius ?? 0.3)));
+      gl.uniform2f(L.uResolution, w, h);
+      gl.uniform1f(L.uLocked, Date.now() < __privateGet(this, _lockedUntil) ? 1 : 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     };
     __privateSet(this, _raf, requestAnimationFrame(draw));
@@ -1248,35 +1695,52 @@ var ProtectedImage = class {
   }
   /* ---------------- risk reactions ---------------- */
   _setRisk(kind, on) {
-    const g = this.options.guards;
+    const g = __privateGet(this, _options).guards;
     const relevant = kind === "blur" && g.blurOnBlur || kind === "hidden" && g.blurOnBlur || kind === "print" && g.print || kind === "devtools" && g.devtools;
     if (!relevant) return;
     if (on) __privateGet(this, _risk).add(kind);
     else __privateGet(this, _risk).delete(kind);
-    this.wrap.classList.toggle("risk-on", __privateGet(this, _risk).size > 0);
+    __privateGet(this, _wrap).classList.toggle("risk-on", __privateGet(this, _risk).size > 0);
   }
   _momentaryBlackout(ms, kind) {
-    if (kind === "screenshot-key" && !this.options.guards.screenshotKeys) return;
-    this.wrap.classList.add("blackout");
-    if (this._attempt) this._attempt(kind);
+    if (kind === "screenshot-key" && !__privateGet(this, _options).guards.screenshotKeys) return;
+    __privateGet(this, _wrap).classList.add("blackout");
+    if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, kind);
     clearTimeout(__privateGet(this, _blackoutTimer));
-    __privateSet(this, _blackoutTimer, setTimeout(() => this.wrap.classList.remove("blackout"), ms));
+    __privateSet(this, _blackoutTimer, setTimeout(() => __privateGet(this, _wrap).classList.remove("blackout"), ms));
   }
   /* ---------------- public per-instance API ---------------- */
   get loaded() {
     return __privateGet(this, _loaded);
   }
   get element() {
-    return this.host;
+    return __privateGet(this, _host);
   }
-  /** Test/debug hook — returns internals. Never enable in production pages. */
+  /**
+   * Test/debug hook — returns internals ONLY when this instance was created
+   * with `debug: true`. There is deliberately no way to switch this on for
+   * an existing instance from outside (options are private + sanitised).
+   * Never enable in production pages.
+   */
   _debug() {
-    return { canvas: this.canvas, tiles: [...this.tilesEl.querySelectorAll("canvas")], wrap: this.wrap, meta: __privateGet(this, _meta) };
+    if (__privateGet(this, _options).debug !== true) return null;
+    return {
+      canvas: __privateGet(this, _canvas),
+      tiles: [...__privateGet(this, _tilesEl).querySelectorAll("canvas")],
+      wrap: __privateGet(this, _wrap),
+      meta: __privateGet(this, _meta),
+      integrityIssues: [...__privateGet(this, _integrityIssues)],
+      strikes: __privateGet(this, _strikes),
+      locked: Date.now() < __privateGet(this, _lockedUntil),
+      lens: __privateGet(this, _lensPoint) ? { ...__privateGet(this, _lensPoint) } : null,
+      bitmapReleased: __privateGet(this, _bitmapReleased),
+      glScrambledTexture: !!(__privateGet(this, _glMeta) && __privateGet(this, _glMeta).plan)
+    };
   }
   async reload(newSource) {
     if (newSource !== void 0) __privateSet(this, _source, newSource);
     __privateSet(this, _loaded, false);
-    this.wrap.classList.add("loading");
+    __privateGet(this, _wrap).classList.add("loading");
     await this._load();
     return this;
   }
@@ -1294,19 +1758,45 @@ var ProtectedImage = class {
       __privateSet(this, _gl, null);
     }
     if (__privateGet(this, _resizeObs)) __privateGet(this, _resizeObs).disconnect();
-    if (visibilityObserver) visibilityObserver.unobserve(this.host);
-    if (this.canvas) {
-      this.canvas.width = 0;
-      this.canvas.height = 0;
+    if (visibilityObserver) visibilityObserver.unobserve(__privateGet(this, _host));
+    if (__privateGet(this, _canvas)) {
+      __privateGet(this, _canvas).width = 0;
+      __privateGet(this, _canvas).height = 0;
     }
     if (__privateGet(this, _decoy)) {
       __privateGet(this, _decoy).width = 0;
       __privateSet(this, _decoy, null);
     }
-    this.root.replaceChildren?.();
-    delete this.host.__archx;
+    if (__privateGet(this, _frameCanvas)) {
+      __privateGet(this, _frameCanvas).width = 0;
+      __privateGet(this, _frameCanvas).height = 0;
+      __privateSet(this, _frameCanvas, null);
+    }
+    if (__privateGet(this, _lensBase)) {
+      __privateGet(this, _lensBase).width = 0;
+      __privateGet(this, _lensBase).height = 0;
+      __privateSet(this, _lensBase, null);
+    }
+    if (__privateGet(this, _lensRaf)) cancelAnimationFrame(__privateGet(this, _lensRaf));
+    clearTimeout(__privateGet(this, _lockTimer));
+    if (__privateGet(this, _options).memory === "strict") {
+      try {
+        __privateGet(this, _bitmap)?.close && __privateGet(this, _bitmap).close();
+      } catch {
+      }
+    }
+    __privateSet(this, _bitmap, null);
+    __privateGet(this, _root).replaceChildren?.();
+    hostToInstance.delete(__privateGet(this, _host));
   }
 };
+_options = new WeakMap();
+_host = new WeakMap();
+_root = new WeakMap();
+_wrap = new WeakMap();
+_canvas = new WeakMap();
+_tilesEl = new WeakMap();
+_shieldEl = new WeakMap();
 _source = new WeakMap();
 _bitmap = new WeakMap();
 _meta = new WeakMap();
@@ -1320,6 +1810,178 @@ _risk = new WeakMap();
 _blackoutTimer = new WeakMap();
 _resizeObs = new WeakMap();
 _realCtx = new WeakMap();
+_attemptHandler = new WeakMap();
+_loading = new WeakMap();
+_visible = new WeakMap();
+_unloaded = new WeakMap();
+_glProg = new WeakMap();
+_glLoc = new WeakMap();
+_glTex = new WeakMap();
+_glMap = new WeakMap();
+_glWm = new WeakMap();
+_glWmOn = new WeakMap();
+_glSource = new WeakMap();
+_glMeta = new WeakMap();
+_frameCanvas = new WeakMap();
+_lensBase = new WeakMap();
+_lensPoint = new WeakMap();
+_lensRaf = new WeakMap();
+_lensCells = new WeakMap();
+_strikes = new WeakMap();
+_lockedUntil = new WeakMap();
+_lockTimer = new WeakMap();
+_integrityIssues = new WeakMap();
+_bitmapReleased = new WeakMap();
+_ProtectedImage_instances = new WeakSet();
+/** Strike accounting: repeated extraction attempts escalate to lockout. */
+registerStrike_fn = function(kind) {
+  const serious = /^(extract-|contextmenu|drag|copy|longpress|integrity|automation|lens-scan)/.test(kind);
+  if (!serious) return;
+  __privateWrapper(this, _strikes)._++;
+  const policy = __privateGet(this, _options).strikes;
+  if (!policy) return;
+  const blurAt = policy.blurAt ?? 3;
+  const lockAt = policy.lockAt ?? 6;
+  const lockMs = policy.lockMs ?? 3e4;
+  if (__privateGet(this, _strikes) >= lockAt) {
+    __privateSet(this, _lockedUntil, Date.now() + lockMs);
+    __privateGet(this, _wrap).classList.add("blackout");
+    this._stopGlLoop();
+    clearTimeout(__privateGet(this, _lockTimer));
+    __privateSet(this, _lockTimer, setTimeout(() => {
+      __privateSet(this, _lockedUntil, 0);
+      __privateSet(this, _strikes, 0);
+      __privateGet(this, _wrap).classList.remove("blackout");
+      if (__privateGet(this, _gl) && __privateGet(this, _visible)) this._startGlLoop();
+      else if (__privateGet(this, _frameCanvas)) __privateMethod(this, _ProtectedImage_instances, paintLens2d_fn).call(this);
+    }, lockMs));
+  } else if (__privateGet(this, _strikes) >= blurAt) {
+    __privateGet(this, _wrap).classList.add("risk-on");
+    setTimeout(() => {
+      if (!__privateGet(this, _risk).size && Date.now() >= __privateGet(this, _lockedUntil)) __privateGet(this, _wrap).classList.remove("risk-on");
+    }, 4e3);
+  }
+};
+/** Heuristic: a lens swept rapidly across many cells == stitching attempt. */
+trackLensTravel_fn = function(point) {
+  const now = performance.now();
+  const cell = Math.floor(point.y * 6) * 6 + Math.floor(point.x * 6);
+  __privateGet(this, _lensCells).push({ cell, now });
+  __privateSet(this, _lensCells, __privateGet(this, _lensCells).filter((c) => now - c.now < 8e3));
+  const distinct = new Set(__privateGet(this, _lensCells).map((c) => c.cell)).size;
+  const cfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
+  const threshold = cfg.scanCells ?? 26;
+  if (distinct >= threshold) {
+    __privateSet(this, _lensCells, []);
+    if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "lens-scan");
+  }
+};
+requestLensFrame_fn = function() {
+  if (__privateGet(this, _gl)) return;
+  if (__privateGet(this, _lensRaf) || !__privateGet(this, _frameCanvas)) return;
+  __privateSet(this, _lensRaf, requestAnimationFrame(() => {
+    __privateSet(this, _lensRaf, 0);
+    __privateMethod(this, _ProtectedImage_instances, paintLens2d_fn).call(this);
+  }));
+};
+/** Hook/automation gate. Returns true if loading may proceed. */
+securityGate_fn = function() {
+  const o = __privateGet(this, _options);
+  if (Date.now() < __privateGet(this, _lockedUntil)) return false;
+  if (o.integrity !== "off") {
+    __privateSet(this, _integrityIssues, auditIntegrity());
+    if (__privateGet(this, _integrityIssues).length) {
+      if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "integrity:" + __privateGet(this, _integrityIssues).join(","));
+      if (o.integrity === "lock") return false;
+    }
+  }
+  if (o.automation !== "off") {
+    const signals = detectAutomation();
+    if (signals.length) {
+      if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "automation:" + signals.join(","));
+      if (o.automation === "lock") return false;
+    }
+  }
+  return true;
+};
+/** Strict-memory mode: drop the decoded source as soon as pixels are painted. */
+releaseSourceBitmap_fn = function() {
+  if (__privateGet(this, _options).memory !== "strict" || !__privateGet(this, _bitmap)) return;
+  try {
+    __privateGet(this, _bitmap).close && __privateGet(this, _bitmap).close();
+  } catch {
+  }
+  __privateSet(this, _bitmap, null);
+  __privateSet(this, _bitmapReleased, true);
+};
+paintLens2d_fn = function() {
+  const ctx = __privateGet(this, _realCtx);
+  const frame = __privateGet(this, _frameCanvas);
+  if (!ctx || !frame || __privateGet(this, _destroyed)) return;
+  const w = frame.width, h = frame.height;
+  if (Date.now() < __privateGet(this, _lockedUntil)) {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+    return;
+  }
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+  if (__privateGet(this, _lensBase)) {
+    ctx.imageSmoothingEnabled = true;
+    nativeDrawImage(ctx, __privateGet(this, _lensBase), 0, 0, w, h);
+    ctx.fillStyle = "rgba(4,6,12,0.18)";
+    ctx.fillRect(0, 0, w, h);
+  }
+  const point = __privateGet(this, _lensPoint);
+  if (point) {
+    const cfg = typeof __privateGet(this, _options).lens === "object" ? __privateGet(this, _options).lens : {};
+    const radius = Math.max(24, Math.min(w, h) * (cfg.radius ?? 0.3));
+    const cx = point.x * w, cy = point.y * h;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.clip();
+    nativeDrawImage(ctx, frame, 0, 0);
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+};
+/* ---------------- WebGL vault ---------------- */
+/** A canvas that already owns a WebGL context can never become a 2D
+ * canvas — fallback therefore swaps in a fresh element inside the shadow. */
+fresh2dCanvas_fn = function() {
+  const fresh = makeCanvas(__privateGet(this, _host).ownerDocument);
+  fresh.className = "main";
+  fresh.setAttribute("aria-hidden", "true");
+  __privateGet(this, _canvas).replaceWith(fresh);
+  __privateSet(this, _canvas, fresh);
+  __privateSet(this, _realCtx, null);
+  return fresh;
+};
+/** Decide what the GPU texture will hold (scrambled whenever possible). */
+prepareGlSource_fn = function() {
+  if (__privateGet(this, _glMeta)) return;
+  const o = __privateGet(this, _options);
+  if (!__privateGet(this, _meta).plan && o.localScramble) {
+    const { w, h } = this._backingSize();
+    const { full } = this._workingCanvas(w, h);
+    const local = scrambleCanvasLocally(full, o.grid, "local:" + sessionId());
+    if (!__privateGet(this, _decoy)) __privateSet(this, _decoy, this._makeDecoy(full, full.width, full.height));
+    full.width = 0;
+    full.height = 0;
+    __privateSet(this, _glSource, local.canvas);
+    __privateSet(this, _glMeta, local.meta);
+    return;
+  }
+  __privateSet(this, _glSource, __privateGet(this, _bitmap));
+  __privateSet(this, _glMeta, __privateGet(this, _meta));
+};
 function loadImage(target, source, options) {
   const inst = new ProtectedImage(target, source, options);
   return inst;
@@ -1354,12 +2016,13 @@ function protectAll(selectorOrNodes = "img[data-protect], [data-archx-src]", opt
 }
 function defineElement() {
   if (typeof customElements === "undefined" || customElements.get("archx-image")) return;
+  const elementInstances = /* @__PURE__ */ new WeakMap();
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
       return ["src", "image-id", "mode", "watermark", "alt", "fit", "grid", "key", "on-extract"];
     }
     connectedCallback() {
-      if (this._inst) return;
+      if (elementInstances.has(this)) return;
       this.style.display = this.style.display || "block";
       const inner = document.createElement("div");
       inner.style.width = "100%";
@@ -1367,7 +2030,7 @@ function defineElement() {
       this.appendChild(inner);
       const id = this.getAttribute("image-id");
       const src = id ? { id } : this.getAttribute("src");
-      this._inst = new ProtectedImage(inner, src, {
+      const inst = new ProtectedImage(inner, src, {
         mode: this.getAttribute("mode") || void 0,
         watermark: this.getAttribute("watermark") || void 0,
         alt: this.getAttribute("alt") || "",
@@ -1375,20 +2038,24 @@ function defineElement() {
         grid: this.getAttribute("grid") ? Number(this.getAttribute("grid")) : void 0,
         key: this.getAttribute("key") || void 0,
         scrambled: this.hasAttribute("scrambled"),
+        lens: this.hasAttribute("lens") ? true : void 0,
         onExtract: this.getAttribute("on-extract") || void 0,
         tokenEndpoint: this.getAttribute("token-endpoint") || void 0
       });
-      this.ready = this._inst.ready;
+      elementInstances.set(this, inst);
+      this.ready = inst.ready;
     }
     disconnectedCallback() {
-      if (this._inst) {
-        this._inst.destroy();
-        this._inst = null;
+      const inst = elementInstances.get(this);
+      if (inst) {
+        inst.destroy();
+        elementInstances.delete(this);
       }
     }
     attributeChangedCallback(name, oldV, newV) {
-      if (!this._inst || oldV === newV) return;
-      if (name === "src" && newV) this._inst.reload(newV);
+      const inst = elementInstances.get(this);
+      if (!inst || oldV === newV) return;
+      if (name === "src" && newV) inst.reload(newV);
     }
   }
   customElements.define("archx-image", ArchxImage);
@@ -1400,7 +2067,7 @@ var Archx = {
     const clean = {};
     for (const [k, v] of Object.entries(partial)) if (v !== void 0) clean[k] = v;
     globalConfig = { ...globalConfig, ...clean, guards: { ...globalConfig.guards, ...partial.guards || {} } };
-    return { ...globalConfig };
+    return sanitizeOptionsView(globalConfig);
   },
   load: {
     image: loadImage,
@@ -1411,8 +2078,14 @@ var Archx = {
   gallery: loadGallery,
   protectAll,
   defineElement,
-  _instances: instances,
-  _sessionId: sessionId
+  /** Number of live protected images (the registry itself stays private). */
+  get instanceCount() {
+    return instances.size;
+  },
+  /** Names of browser APIs that currently look monkey-patched. */
+  auditIntegrity,
+  /** Cheap headless/automation signals present in this browser. */
+  detectAutomation
 };
 if (typeof document !== "undefined") {
   if (document.readyState === "loading") {
@@ -1428,14 +2101,19 @@ export {
   DEFAULT_GRID,
   ProtectedImage,
   VERSION,
+  applyForensicBlocks,
+  auditIntegrity,
   base64ToBytes,
   buildScramblePlan,
   bytesToBase64,
   decodeContainer,
   decryptPayload,
   index_default as default,
+  detectAutomation,
   encodeContainer,
   encryptPayload,
+  forensicBlockSigns,
+  forensicScore,
   generateKeyBase64,
   hashSeed,
   isArchxContainer,

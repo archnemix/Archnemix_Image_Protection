@@ -9,6 +9,7 @@ import {
   buildScramblePlan, scramblePixels, paddedSize,
   encodeContainer, decodeContainer, isArchxContainer,
   encryptPayload, decryptPayload, generateKeyBase64,
+  applyForensicBlocks, forensicScore, forensicBlockSigns,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
 import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
@@ -41,6 +42,21 @@ test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
   let same = 0;
   for (let i = 0; i < raw.length; i++) if (raw[i] === scrambled[i]) same++;
   assert.ok(same / raw.length < 0.08, `scrambled too similar: ${same}/${raw.length} bytes identical`);
+});
+
+test('forensic block mark: seeded signs are embedded and recoverable by correlation', () => {
+  const w = 256, h = 192;
+  const reference = new Uint8Array(w * h * 4);
+  for (let i = 0; i < reference.length; i += 4) {
+    reference[i] = 110; reference[i + 1] = 120; reference[i + 2] = 130; reference[i + 3] = 255;
+  }
+  const marked = applyForensicBlocks(new Uint8Array(reference), w, h, 'viewer-session-42', { blockSize: 32, delta: 3 });
+  assert.notDeepEqual(marked, reference);
+  const hit = forensicScore(marked, reference, w, h, 'viewer-session-42', { blockSize: 32 });
+  const miss = forensicScore(marked, reference, w, h, 'someone-else', { blockSize: 32 });
+  assert.ok(hit.score > 0.9, `expected strong correlation, got ${hit.score}`);
+  assert.ok(Math.abs(miss.score) < 0.55, `wrong seed should not correlate, got ${miss.score}`);
+  assert.equal(forensicBlockSigns('x', 8).length, 8);
 });
 
 test('paddedSize rounds up to grid multiples', () => {
@@ -127,6 +143,45 @@ test('encrypted .archx: payload is ciphertext, decrypt+unscramble restores the i
   await assert.rejects(decryptPayload(payload, generateKeyBase64(), header.iv));
 });
 
+test('server-baked watermark survives into the un-scrambled reconstruction', async () => {
+  const dark = await sharp({ create: { width: 320, height: 240, channels: 3, background: { r: 8, g: 10, b: 18 } } }).png().toBuffer();
+  const plain = await scrambleImage(dark, { key: 'wm-key', grid: 8, format: 'png', maxWidth: 320 });
+  const forensicOnly = await scrambleImage(dark, { key: 'wm-key', grid: 8, format: 'png', maxWidth: 320, forensicSeed: 'sess-1', forensic: { blockSize: 32, delta: 4 } });
+  const marked = await scrambleImage(dark, { key: 'wm-key', grid: 8, format: 'png', maxWidth: 320, watermark: 'SECRET VIEWER 42', forensicSeed: 'sess-1', forensic: { blockSize: 32, delta: 4 } });
+  assert.equal(marked.header.wm, 1);
+  assert.equal(marked.header.fx, 1);
+  const restore = async (bytes) => {
+    const { payload, header } = decodeContainer(bytes);
+    return unscrambleImage(Buffer.from(payload), { grid: 8, key: 'wm-key', w: header.w, h: header.h });
+  };
+  const plainImg = await restore(plain.bytes);
+  const markedImg = await restore(marked.bytes);
+  const diff = await meanAbsDiff(plainImg, markedImg, 320, 240);
+  assert.ok(diff > 2.5, `reconstructed stolen copy should visibly carry the watermark (MAD=${diff.toFixed(2)})`);
+  // And the marked reconstruction is full of bright watermark pixels on a dark field.
+  const raw = await sharp(markedImg).removeAlpha().raw().toBuffer();
+  let bright = 0;
+  for (let i = 0; i < raw.length; i += 3) if ((raw[i] + raw[i + 1] + raw[i + 2]) / 3 > 60) bright++;
+  assert.ok(bright > 250, `expected watermark text pixels, got ${bright}`);
+
+  // The pre-scramble block mark must actually be present after a stolen
+  // payload is perfectly un-shuffled — not merely advertised by a header flag.
+  const forensicImg = await restore(forensicOnly.bytes);
+  const [controlRaw, forensicRaw] = await Promise.all([
+    sharp(plainImg).ensureAlpha().raw().toBuffer(),
+    sharp(forensicImg).ensureAlpha().raw().toBuffer(),
+  ]);
+  const score = forensicScore(
+    new Uint8Array(forensicRaw),
+    new Uint8Array(controlRaw),
+    320,
+    240,
+    'sess-1',
+    { blockSize: 32 },
+  );
+  assert.ok(score.score > 0.7, `server forensic mark should survive reconstruction (score=${score.score.toFixed(2)})`);
+});
+
 test('scrambleImage down-scales masters and strips them out of the payload', async () => {
   const master = await syntheticMaster(1600, 1200);
   const { header } = await scrambleImage(master, { key: 'k', maxWidth: 500 });
@@ -194,4 +249,47 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   // token minted for a different id -> 403
   const other = signToken({ id: 'dog', w: 300, exp: Date.now() + 60000, n: 'n' }, 'http-secret');
   assert.equal((await fetch(`${base}/archx/i/cat?t=${other}`)).status, 403);
+});
+
+test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, origin allowlist, server watermark/forensic', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-hard-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const handler = createArchxMiddleware({
+    secret: 'hard-secret',
+    imagesDir: dir,
+    oneTimeTokens: true,
+    bindTokenTo: { userAgent: true },
+    allowedOrigins: ['https://example.test'],
+    serverWatermark: ({ viewerId }) => `VIEWER ${viewerId}`,
+    forensic: true,
+    forensicPerToken: true,
+    authorize: async () => ({ viewerId: 'user-42', maxWidth: 180 }),
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const asBrowser = (ua, withOrigin = true) => ({
+    headers: { 'user-agent': ua, ...(withOrigin ? { referer: 'https://example.test/page' } : {}) },
+  });
+
+  // No allowed origin/referer -> 403 even for the token endpoint
+  assert.equal((await fetch(base + '/archx/token/cat?w=900', asBrowser('BrowserA', false))).status, 403);
+
+  const tokenRes = await fetch(base + '/archx/token/cat?w=900', asBrowser('BrowserA'));
+  assert.equal(tokenRes.status, 200);
+  const token = await tokenRes.json();
+
+  // Wrong User-Agent cannot spend the token…
+  assert.equal((await fetch(base + token.url, asBrowser('BrowserB'))).status, 403);
+  // …the right browser can, exactly once.
+  const ok = await fetch(base + token.url, asBrowser('BrowserA'));
+  assert.equal(ok.status, 200);
+  const bytes = new Uint8Array(await ok.arrayBuffer());
+  const { header } = decodeContainer(bytes);
+  assert.equal(header.w, 180, 'entitlement maxWidth overrides the client-requested 900px');
+  assert.equal(header.wm, 1, 'server watermark baked pre-scramble');
+  assert.equal(header.fx, 1, 'forensic mark baked pre-scramble');
+  // Replay of the same (still unexpired) URL -> 403: one-time use.
+  assert.equal((await fetch(base + token.url, asBrowser('BrowserA'))).status, 403);
 });

@@ -33,7 +33,9 @@ if (!input || !output || args.help) {
   --grid <n>           tiles per side (default 8)
   --max-width <px>     down-scale master to this width first (default 1600)
   --quality <1-100>    WebP quality (default 82)
-  --encrypt            AES-GCM-encrypt the payload (prints the key — store it safely)`);
+  --encrypt            AES-GCM-encrypt the payload (prints the key — store it safely)
+  --watermark <text>   bake a visible watermark in before scrambling
+  --forensic-seed <s>  bake a seeded forensic block mark in before scrambling`);
   process.exit(input ? 0 : 1);
 }
 
@@ -46,6 +48,8 @@ const opts = {
   maxWidth: args['max-width'] ? Number(args['max-width']) : 1600,
   quality: args.quality ? Number(args.quality) : 82,
   aesKey,
+  watermark: args.watermark || null,
+  forensicSeed: args['forensic-seed'] || null,
 };
 
 async function protectOne(inPath, outPath) {

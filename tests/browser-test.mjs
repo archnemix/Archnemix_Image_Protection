@@ -99,7 +99,39 @@ try {
   check('closed shadow root hides internals from JS (shadowRoot === null)', dom.closedShadowRoot === null);
   check('protected host outerHTML contains no URL/src', !/src=|http|\.jpg|\.archx/.test(dom.shieldOuter), dom.shieldOuter.slice(0, 120));
   check('no signed image URL anywhere in body HTML', !dom.anyAuroraInDom);
-  check('all 6 protected instances loaded', Object.values(dom.loadedFlags).every(Boolean), JSON.stringify(dom.loadedFlags));
+  check('all 7 protected instances loaded', Object.values(dom.loadedFlags).every(Boolean) && Object.keys(dom.loadedFlags).length === 7, JSON.stringify(dom.loadedFlags));
+
+  console.log('\n[1b] Encapsulation — scripts/extensions get no handle to internals');
+  const encap = await page.evaluate(async () => {
+    const closedHost = document.querySelector('#t-closed');
+    const closed = window.__instances.closed;
+    const host = document.createElement('div');
+    host.style.cssText = 'width:200px;height:120px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, '/demo/public-unprotected/neon-portrait.jpg',
+      { mode: 'shield', key: 'super-secret-key', aesKey: 'super-secret-aes', lazy: false });
+    await inst.ready;
+    const out = {
+      hostExpando: closedHost.__archx,
+      publicRegistry: window.Archx._instances,
+      instanceCountType: typeof window.Archx.instanceCount,
+      closedDebug: closed._debug(),
+      closedCanvasProp: closed.canvas,
+      secretKey: inst.options.key,
+      secretAes: inst.options.aesKey,
+      tempDebug: inst._debug(),
+      configEchoKey: window.Archx.config().key,
+    };
+    inst.destroy();
+    host.remove();
+    return out;
+  });
+  check('no __archx expando is stamped on host elements', encap.hostExpando === undefined);
+  check('no public instance registry is exposed (Archx._instances)', encap.publicRegistry === undefined && encap.instanceCountType === 'number');
+  check('_debug() returns null unless the instance was created with debug:true', encap.closedDebug === null && encap.tempDebug === null);
+  check('canvas is not reachable as a public instance property', encap.closedCanvasProp === undefined);
+  check('option secrets are redacted from the public options view', encap.secretKey === '[redacted]' && encap.secretAes === '[redacted]');
+  check('Archx.config() echo never leaks secrets', !encap.configEchoKey || encap.configEchoKey === '[redacted]');
 
   console.log('\n[2] Visual correctness — protected images actually display the picture');
   async function boxStats(selector) {
@@ -110,7 +142,7 @@ try {
     let variance = 0; for (let i = 0; i < data.length; i++) variance += (data[i] - mean) ** 2; variance /= data.length;
     return { mean, std: Math.sqrt(variance), w: info.width, h: info.height };
   }
-  for (const [sel, label] of [['#t-lite', 'lite'], ['#t-shield', 'shield'], ['#t-vault', 'vault(WebGL)'], ['#t-split', 'split'], ['#t-clientonly', 'client-only']]) {
+  for (const [sel, label] of [['#t-lite', 'lite'], ['#t-shield', 'shield'], ['#t-vault', 'vault(WebGL)'], ['#t-fortress', 'fortress(lens idle, pixelated)'], ['#t-split', 'split'], ['#t-clientonly', 'client-only']]) {
     const s = await boxStats(sel);
     check(`${label} renders a real, non-blank picture`, s.std > 18 && s.mean > 12, `mean=${s.mean.toFixed(1)} std=${s.std.toFixed(1)}`);
   }
@@ -229,6 +261,91 @@ try {
   await page.emulateMediaType('screen');
   await new Promise((r) => setTimeout(r, 300));
 
+  console.log('\n[7b] Fortress — lens, strict memory, local scramble, strikes, integrity lock');
+  const fortressBox = await (await page.$('#t-fortress')).boundingBox();
+  await page.mouse.move(fortressBox.x + fortressBox.width / 2, fortressBox.y + fortressBox.height / 2);
+  await new Promise((r) => setTimeout(r, 250));
+  const lensState = await page.evaluate(() => {
+    const dbg = window.__instances.fortress._debug();
+    const shield = dbg.wrap.querySelector('.shield');
+    const before = dbg.lens ? { ...dbg.lens } : null;
+    // Synthetic (script-fired) pointer events are untrusted and must be ignored.
+    shield.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: 1, clientY: 1 }));
+    const afterSynthetic = window.__instances.fortress._debug().lens;
+    return { before, afterSynthetic, bitmapReleased: dbg.bitmapReleased, glScrambled: dbg.glScrambledTexture };
+  });
+  check('trusted pointer input activates the fortress lens near the pointer',
+    lensState.before && Math.abs(lensState.before.x - 0.5) < 0.25 && Math.abs(lensState.before.y - 0.5) < 0.25,
+    JSON.stringify(lensState.before));
+  check('synthetic (untrusted) pointer events cannot sweep the lens',
+    JSON.stringify(lensState.afterSynthetic) === JSON.stringify(lensState.before));
+  check('fortress strict-memory released the decoded bitmap after upload', lensState.bitmapReleased === true);
+  check('fortress GPU texture is scrambled', lensState.glScrambled === true);
+
+  const localScramble = await page.evaluate(async () => {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:190px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, '/demo/public-unprotected/neon-portrait.jpg',
+      { mode: 'fortress', debug: true, lazy: false, automation: 'monitor', lens: false });
+    await inst.ready;
+    await new Promise((r) => setTimeout(r, 250));
+    const dbg = inst._debug();
+    const out = { loaded: inst.loaded, glScrambled: dbg?.glScrambledTexture, released: dbg?.bitmapReleased };
+    inst.destroy(); host.remove();
+    return out;
+  });
+  check('plain client-only source is locally scrambled before GPU upload in fortress',
+    localScramble.loaded && localScramble.glScrambled === true && localScramble.released === true, JSON.stringify(localScramble));
+
+  const strike = await page.evaluate(async () => {
+    window.__attempts.length = 0;
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:190px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'gallery-004' },
+      { mode: 'shield', debug: true, lazy: false, strikes: { blurAt: 99, lockAt: 2, lockMs: 1500 } });
+    await inst.ready;
+    const canvas = inst._debug().canvas;
+    canvas.toDataURL('image/png');
+    canvas.toDataURL('image/png');
+    const dbg = inst._debug();
+    const out = { locked: dbg.locked, strikes: dbg.strikes, blackout: dbg.wrap.classList.contains('blackout') };
+    inst.destroy(); host.remove();
+    return out;
+  });
+  check('repeated extraction attempts escalate to a strike lockout (blackout)',
+    strike.locked === true && strike.blackout === true && strike.strikes >= 2, JSON.stringify(strike));
+
+  const integrity = await page.evaluate(async () => {
+    window.__attempts.length = 0;
+    const originalFetch = window.fetch;
+    window.fetch = (...args) => originalFetch(...args); // naive userscript-style hook
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:190px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'gallery-005' },
+      { mode: 'fortress', debug: true, lazy: false, automation: 'monitor' });
+    await inst.ready;
+    await new Promise((r) => setTimeout(r, 150));
+    const dbg = inst._debug();
+    const out = {
+      loaded: inst.loaded,
+      issues: dbg?.integrityIssues || [],
+      attempts: window.__attempts.slice(),
+      auditNow: window.Archx.auditIntegrity(),
+    };
+    window.fetch = originalFetch;
+    inst.destroy(); host.remove();
+    return out;
+  });
+  check('hooked fetch is detected by the integrity audit', integrity.auditNow.includes('fetch'), JSON.stringify(integrity.auditNow));
+  check('fortress integrity policy fails closed (image does not load) under API hooking',
+    integrity.loaded === false && integrity.issues.includes('fetch') && integrity.attempts.some((a) => a.startsWith('integrity')),
+    JSON.stringify(integrity));
+  const integrityRestored = await page.evaluate(() => window.Archx.auditIntegrity());
+  check('integrity audit is clean again after restoring the native fetch', integrityRestored.length === 0, JSON.stringify(integrityRestored));
+
   console.log('\n[8] Network payload — captured bytes are scrambled, master unreachable');
   const directMaster = await fetch(BASE + '/demo-masters/aurora-valley.jpg');
   check('GET master path directly -> 404', directMaster.status === 404);
@@ -246,6 +363,12 @@ try {
   let netMad = 0; for (let i = 0; i < masterRaw.length; i++) netMad += Math.abs(masterRaw[i] - innerRaw[i]); netMad /= masterRaw.length;
   check('captured payload pixels are a scrambled mosaic vs master', netMad > 24, `mean abs diff=${netMad.toFixed(1)}`);
   check('server down-scaled master (never sends full res)', header.w === 800, `header.w=${header.w}`);
+  check('demo payload carries server-baked watermark + forensic flags', header.wm === 1 && header.fx === 1, JSON.stringify({ wm: header.wm, fx: header.fx }));
+  const replay = await fetch(BASE + token.url);
+  check('replaying the same signed URL is rejected (one-time token)', replay.status === 403, `HTTP ${replay.status}`);
+  const token2 = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { headers: { 'user-agent': 'Browser-A' } })).json();
+  const wrongBrowser = await fetch(BASE + token2.url, { headers: { 'user-agent': 'Browser-B' } });
+  check('signed URL presented by a different browser/User-Agent is rejected', wrongBrowser.status === 403, `HTTP ${wrongBrowser.status}`);
 
   console.log('\n[9] Performance — 100-image protected gallery');
   const gallery = await page.evaluate(() => window.__loadGallery(100));

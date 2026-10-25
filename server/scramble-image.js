@@ -7,10 +7,44 @@
 import sharp from 'sharp';
 import {
   buildScramblePlan, paddedSize, scramblePixels,
-  encodeContainer, encryptPayload, generateKeyBase64,
+  encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
 } from '../src/scramble.js';
 
 export { generateKeyBase64 };
+
+function escapeXml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+}
+
+/**
+ * Build an SVG watermark layer (diagonal tiled text + corner credit) at the
+ * *output* size. It is composited BEFORE scrambling/encryption, so even an
+ * attacker who captures the payload, steals the session key and perfectly
+ * un-shuffles it offline still ends up with a watermarked copy — the client
+ * side watermark alone could not guarantee that.
+ */
+function watermarkSvg(w, h, wm) {
+  const cfg = typeof wm === 'string' ? { text: wm } : wm;
+  const text = escapeXml(cfg.text || '');
+  if (!text) return null;
+  const color = escapeXml(cfg.color || '#ffffff');
+  const fs = Math.max(13, Math.round(Math.min(w, h) / 13));
+  const angle = cfg.angle ?? -24;
+  let body = '';
+  if (cfg.tile !== false) {
+    const rows = [];
+    const diag = Math.hypot(w, h);
+    for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) {
+      rows.push(`<text x="0" y="${y.toFixed(0)}" text-anchor="middle">${text}</text>`);
+    }
+    body += `<g transform="translate(${w / 2} ${h / 2}) rotate(${angle})" opacity="${cfg.opacity ?? 0.15}" font-size="${fs}" font-weight="700">${rows.join('')}</g>`;
+  }
+  if (cfg.corner !== false) {
+    const cfs = Math.max(10, Math.round(Math.min(w, h) / 34));
+    body += `<g opacity="${cfg.cornerOpacity ?? 0.9}" font-size="${cfs}" font-weight="600"><text x="${w - 11}" y="${h - 10}" text-anchor="end" stroke="rgba(0,0,0,0.65)" stroke-width="3" paint-order="stroke">${text}</text></g>`;
+  }
+  return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><g font-family="Arial, Helvetica, sans-serif" fill="${color}">${body}</g></svg>`);
+}
 
 /** Pad a raw RGBA buffer (w×h) into pw×ph with black. */
 function padRaw(raw, w, h, pw, ph) {
@@ -36,11 +70,44 @@ export async function scrambleImage(input, opts = {}) {
 
   let pipeline = sharp(input).rotate(); // bake EXIF orientation, drop metadata
   if (maxWidth) pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
+
+  // Server-baked visible watermark: composited pre-scramble so that NO
+  // extraction route — screenshot, canvas grab, or full payload
+  // reconstruction with a stolen session key — can produce an unmarked copy.
+  let watermarked = false;
+  if (opts.watermark) {
+    const srcMeta = await sharp(input).metadata();
+    const rotated = srcMeta.orientation >= 5 && srcMeta.orientation <= 8;
+    const srcW = rotated ? srcMeta.height : srcMeta.width;
+    const srcH = rotated ? srcMeta.width : srcMeta.height;
+    const scale = maxWidth ? Math.min(1, maxWidth / srcW) : 1;
+    const tw = Math.max(1, Math.round(srcW * scale));
+    const th = Math.max(1, Math.round(srcH * scale));
+    const svg = watermarkSvg(tw, th, opts.watermark);
+    if (svg) {
+      pipeline = pipeline.composite([{ input: svg, top: 0, left: 0 }]);
+      watermarked = true;
+    }
+  }
+
   const { data, info } = await pipeline.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const w = info.width;
   const h = info.height;
+
+  // Block-level forensic mark (also pre-scramble): survives into any
+  // reconstructed copy and can be correlated against the viewing session.
+  let rawPixels = new Uint8Array(data);
+  let forensicMarked = false;
+  if (opts.forensicSeed) {
+    const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
+    rawPixels = applyForensicBlocks(rawPixels, w, h, opts.forensicSeed, {
+      blockSize: fx.blockSize ?? 32,
+      delta: fx.delta ?? 2,
+    });
+    forensicMarked = true;
+  }
   const { pw, ph } = paddedSize(w, h, grid);
-  const padded = padRaw(new Uint8Array(data), w, h, pw, ph);
+  const padded = padRaw(rawPixels, w, h, pw, ph);
   const plan = buildScramblePlan(grid, key);
   const scrambled = scramblePixels(padded, pw, ph, plan, 'scramble');
 
@@ -52,6 +119,8 @@ export async function scrambleImage(input, opts = {}) {
 
   const header = {
     v: 1, w, h, pw, ph, grid, mime, scrambled: true, encrypted: false,
+    ...(watermarked ? { wm: 1 } : {}),
+    ...(forensicMarked ? { fx: 1 } : {}),
   };
   if (opts.aesKey) {
     const { cipher, iv } = await encryptPayload(payload, opts.aesKey);

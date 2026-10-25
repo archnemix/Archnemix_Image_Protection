@@ -17,6 +17,7 @@
 <div class="box"><div id="t-lite"></div></div>
 <div class="box"><div id="t-shield"></div></div>
 <div class="box"><div id="t-vault"></div></div>
+<div class="box"><div id="t-fortress"></div></div>
 <div class="box"><div id="t-split"></div></div>
 <div class="box"><div id="t-closed"></div></div>
 <div class="box"><div id="t-clientonly"></div></div>
@@ -30,13 +31,18 @@ document.addEventListener('archx-attempt', (e) => window.__attempts.push(e.detai
 
 Archx.config({ tokenEndpoint: '/archx/token/' });
 
-const common = { lazy: false, watermark: '© TEST · {session}', onExtract: 'black' };
+// debug:true is a TEST-ONLY hook so the suite can play "attacker who found
+// the canvas in DevTools". The `closed` instance deliberately leaves it off
+// to verify production encapsulation. NEVER ship debug:true.
+const common = { lazy: false, watermark: '© TEST · {session}', onExtract: 'black', debug: true };
 window.__instances = {
   lite: Archx.load.image('#t-lite', { id: 'gallery-001' }, { ...common, mode: 'lite', shadow: 'open' }),
   shield: Archx.load.image('#t-shield', { id: 'aurora-valley' }, { ...common, mode: 'shield', shadow: 'open' }),
   vault: Archx.load.image('#t-vault', { id: 'luxury-watch' }, { ...common, mode: 'vault', shadow: 'open' }),
+  fortress: Archx.load.image('#t-fortress', { id: 'neon-portrait' },
+    { ...common, mode: 'fortress', shadow: 'open', lens: true, automation: 'monitor' }),
   split: Archx.load.image('#t-split', { id: 'neon-portrait' }, { ...common, mode: 'shield', shadow: 'open', splitCanvases: true, splitGrid: 3 }),
-  closed: Archx.load.image('#t-closed', { id: 'gallery-002' }, { ...common, mode: 'shield', shadow: 'closed' }),
+  closed: Archx.load.image('#t-closed', { id: 'gallery-002' }, { ...common, debug: false, mode: 'shield', shadow: 'closed' }),
   clientOnly: Archx.load.image('#t-clientonly', '/demo/public-unprotected/neon-portrait.jpg', { ...common, mode: 'shield', shadow: 'open' }),
 };
 window.__ready = Promise.allSettled(Object.values(window.__instances).map((i) => i.ready))

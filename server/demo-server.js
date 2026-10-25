@@ -38,6 +38,16 @@ const archx = createArchxMiddleware({
   ],
   ttlSec: 120,
   grid: 8,
+  // Determined-attacker hardening (all on for the demo):
+  oneTimeTokens: true,                    // a captured signed URL cannot be replayed
+  bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it
+  // Baked in BEFORE scrambling: even a perfectly un-shuffled stolen payload
+  // remains watermarked. Gallery thumbs are spared the visible mark.
+  serverWatermark: ({ id }) => (id.startsWith('gallery-')
+    ? null
+    : { text: `© Archnemix Demo · ${id}`, corner: false }), // client adds the corner label
+  forensic: { blockSize: 32, delta: 2 },  // invisible block mark, also pre-scramble
+  forensicPerToken: false,                // per-image here so cached gallery stays fast
   // encrypt: true, // <- flip this on to see AES-GCM payloads in the demo
 });
 

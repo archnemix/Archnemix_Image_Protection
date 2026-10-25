@@ -103,7 +103,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
   <!-- ============================================================ -->
   <section id="arena">
-    <h2>🎯 The arena — same photo, three fates</h2>
+    <h2>🎯 The arena — try to steal them</h2>
     <p class="sub">Try everything you know on each card: right-click → <i>Save image</i>, drag it to a new tab,
     long-press on mobile, open DevTools (<span class="kbd">F12</span>) and hunt through Elements &amp; Network.
     Watch the <b>attempt log</b> under the attack simulator react.</p>
@@ -136,7 +136,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag good">✓ ARCHX · SHIELD</span>
           <h3>Shield mode + signed scrambled delivery</h3>
-          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root), 8×8 tile-scrambled payload behind a 120-second signed URL, watermark baked into the pixels, poisoned canvas read-back.</p>
+          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed URL. The watermark + forensic mark are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked.</p>
           <div class="try">👉 Right-click, drag, inspect. Then run Attack ② below to see the decoy an extractor receives.</div>
         </div>
       </article>
@@ -148,6 +148,16 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <h3>Vault mode for premium images</h3>
           <p>Rendered by a WebGL shader that un-scrambles tiles on the GPU. The drawing buffer is cleared after every frame, so <i>even a prototype-bypass</i> <code>toDataURL</code> returns pure black.</p>
           <div class="try">👉 Run Attack ③ below: Shield yields only the watermarked screen-size copy — Vault yields <b>black</b>.</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="media"><div id="fortress-img"></div></div>
+        <div class="body">
+          <span class="tag best">⬢ ARCHX · FORTRESS + LENS</span>
+          <h3>For the truly determined attacker</h3>
+          <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One screenshot can never contain the whole sharp image.</p>
+          <div class="try">👉 Move your pointer over this card. Now screenshot it: you captured mush + one small sharp circle. Sweeping the lens to stitch patches is rate-tracked and reported.</div>
         </div>
       </article>
     </div>
@@ -199,14 +209,18 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>Drag to desktop / new tab</td><td><code>dragstart</code> blocked, <code>-webkit-user-drag:none</code></td><td>Nothing</td></tr>
           <tr><td>DevTools → Elements</td><td>Closed shadow DOM; source URL held in JS closures/private fields, never in attributes</td><td>An empty-looking custom element</td></tr>
           <tr><td>DevTools → Network (Img)</td><td>Bytes arrive via <code>fetch()</code> as <code>application/octet-stream</code> .archx containers — not classified as images</td><td>An opaque <code>data.bin</code></td></tr>
-          <tr><td>Open/reuse the image URL</td><td>HMAC-signed URLs expire in ~120s and are bound to one image id</td><td><code>403 invalid or expired token</code></td></tr>
+          <tr><td>Open/reuse the image URL</td><td>HMAC-signed URLs expire in ~120s, are bound to one image id, can be <b>one-time-use</b> and <b>bound to the requesting IP/User-Agent</b>; your backend entitlement caps the resolution regardless of what the client asks for</td><td><code>403 invalid or expired token</code></td></tr>
           <tr><td>Guess the master path</td><td>Masters live outside every static route; only the signer endpoint can read them, and it never returns them</td><td><code>404</code></td></tr>
-          <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top)</td><td>A meaningless mosaic / ciphertext</td></tr>
+          <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top). Watermark + block forensic mark are applied <b>before</b> scrambling</td><td>A meaningless mosaic / ciphertext. Even with the stolen session key + a rewritten un-shuffler: a downscaled, server-watermarked copy</td></tr>
+          <tr><td>Hook browser APIs (userscript/extension patches <code>fetch</code>/<code>drawImage</code>/<code>createImageBitmap</code>)</td><td>Native references captured at library load and used internally; integrity audit detects replaced/non-native APIs — Fortress fails closed. All internals are <code>#private</code>: no <code>element.__archx</code>, no public instance registry, no debug hook in production</td><td>Hooks installed after load are bypassed; pre-installed naive hooks are detected &amp; reported/locked</td></tr>
+          <tr><td>Repeated extraction probing</td><td>Strike policy: escalating attempts blur, then black-lock the image for a cooldown (configurable, on in Fortress)</td><td>A black box + an attempt trail in your logs</td></tr>
           <tr><td><code>canvas.toDataURL()</code> / <code>toBlob()</code> / <code>getImageData()</code></td><td>Read-back APIs on Archx canvases are poisoned per-instance</td><td>Black card, 72-pixel potato, or scrambled mosaic (your choice)</td></tr>
           <tr><td>Prototype bypass (expert)</td><td>Vault mode: WebGL with <code>preserveDrawingBuffer:false</code> — the browser itself returns black. In Shield, the backing store only ever holds the display-size, watermarked copy</td><td>Vault: black. Shield: screen-size watermarked copy at best</td></tr>
           <tr><td>Bulk scrapers / AI crawlers</td><td>No URLs in HTML, JS+token required per image, rate-limited signer</td><td>An empty harvest</td></tr>
           <tr><td>Print → PDF</td><td><code>@media print</code> blackout + beforeprint reaction</td><td>Black boxes</td></tr>
           <tr><td>Screenshot / snipping tool</td><td><i>Cannot be fully prevented on the open web</i> (see honesty box). Deterred: display-res only, baked session watermark, forensic grain, blur-on-focus-loss, PrintScreen reaction</td><td>A traceable screen-res copy</td></tr>
+          <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs dozens of real-input captures</td></tr>
+          <tr><td>Memory/cache forensics after viewing</td><td><code>no-store</code> everywhere; strict-memory mode (Fortress) closes decoded bitmaps right after paint/upload and skips the bitmap cache; clean working canvases are wiped immediately</td><td>Far less decoded material left sitting in RAM/cache</td></tr>
         </tbody>
       </table>
     </div>
@@ -263,6 +277,7 @@ app.use(createArchxMiddleware({
 
 <script type="module">
 import Archx from '/src/index.js';
+import { buildScramblePlan, tileRect } from '/src/scramble.js';
 
 Archx.config({ tokenEndpoint: '/archx/token/', brand: '© Archnemix Demo' });
 
@@ -285,23 +300,28 @@ function loot(src, caption) {
   while (lootEl.children.length > 8) lootEl.lastChild.remove();
 }
 
-let shield, vault;
+let shield, vault, fortress;
 function buildCards() {
-  shield?.destroy(); vault?.destroy();
-  document.getElementById('shield-img').replaceChildren();
-  document.getElementById('vault-img').replaceChildren();
+  shield?.destroy(); vault?.destroy(); fortress?.destroy();
   // NOTE: destroy()+rebuild needs fresh hosts (shadow roots can't be re-attached)
-  for (const id of ['shield-img', 'vault-img']) {
+  for (const id of ['shield-img', 'vault-img', 'fortress-img']) {
     const old = document.getElementById(id);
+    old.replaceChildren();
     const fresh = document.createElement('div'); fresh.id = id;
     old.replaceWith(fresh);
   }
   const wm = document.getElementById('wm-text').value;
   const onExtract = document.getElementById('extract-kind').value;
+  // debug:true exists ONLY so this demo's attack buttons can play
+  // "attacker found the canvas in DevTools". Never enable it in production.
+  // The tiled watermark you see is baked on the SERVER; the client adds the
+  // corner session label on top.
   shield = Archx.load.image('#shield-img', { id: 'aurora-valley' },
-    { mode: 'shield', watermark: wm, onExtract, alt: 'Aurora valley (protected, shield mode)' });
+    { mode: 'shield', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Aurora valley (protected, shield mode)' });
   vault = Archx.load.image('#vault-img', { id: 'luxury-watch' },
-    { mode: 'vault', watermark: wm, onExtract, alt: 'Luxury watch (protected, vault mode)' });
+    { mode: 'vault', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Luxury watch (protected, vault mode)' });
+  fortress = Archx.load.image('#fortress-img', { id: 'neon-portrait' },
+    { mode: 'fortress', lens: true, automation: 'monitor', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Neon portrait (protected, fortress mode with pointer lens)' });
 }
 buildCards();
 document.getElementById('rebuild').addEventListener('click', () => { buildCards(); log('↻ Protected cards rebuilt with your settings.'); });
@@ -370,17 +390,50 @@ async function attackNetwork() {
   const inner = buf.slice(10 + headerLen);
   const innerUrl = URL.createObjectURL(new Blob([inner], { type: header.mime }));
   loot(innerUrl, '✓ Even after stripping the .archx container, the payload is an 8×8 shuffled/mirrored mosaic. Useless without the secret un-shuffle key.');
-  log('   Verdict: network capture yields garbage — bulk ripping is dead.', 'good');
+  // Try 3: the DETERMINED attacker — also steal the session key from the
+  // token response (their own browser legitimately receives it), re-implement
+  // the un-shuffle from our open-source code, and rebuild the image offline.
+  try {
+    const bitmap = await createImageBitmap(new Blob([inner], { type: header.mime }));
+    const plan = buildScramblePlan(header.grid, token.key);
+    const padded = document.createElement('canvas');
+    padded.width = bitmap.width; padded.height = bitmap.height;
+    const pctx = padded.getContext('2d');
+    const tw = bitmap.width / plan.grid, th = bitmap.height / plan.grid;
+    for (let orig = 0; orig < plan.count; orig++) {
+      const sp = plan.inverse[orig];
+      const s = tileRect(sp, plan.grid, tw, th);
+      const d = tileRect(orig, plan.grid, tw, th);
+      const f = plan.flips[sp];
+      pctx.save();
+      pctx.translate(d.x + (f.fx ? tw : 0), d.y + (f.fy ? th : 0));
+      pctx.scale(f.fx ? -1 : 1, f.fy ? -1 : 1);
+      pctx.drawImage(bitmap, s.x, s.y, tw, th, 0, 0, tw, th);
+      pctx.restore();
+    }
+    const rebuilt = document.createElement('canvas');
+    rebuilt.width = header.w; rebuilt.height = header.h;
+    rebuilt.getContext('2d').drawImage(padded, 0, 0, header.w, header.h, 0, 0, header.w, header.h);
+    loot(rebuilt.toDataURL('image/png'), '⚠ DETERMINED-ATTACKER ceiling: after stealing the session key AND re-implementing the un-shuffle, this downscaled copy is the best obtainable — and the SERVER-baked watermark (applied before scrambling) is still on it. The master never existed here.');
+    log('   Verdict: bulk ripping is dead; even full reverse-engineering tops out at a marked web-size copy.', 'good');
+  } catch (e) {
+    log('   Offline rebuild attempt failed: ' + e.message, 'good');
+  }
 }
 
 async function attackDirect() {
-  log('⑤ Trying to fetch the master directly + replaying a tampered signed URL…');
+  log('⑤ Trying to fetch the master directly + replaying signed URLs…');
   const direct = await fetch('/demo-masters/aurora-valley.jpg');
   log(`   GET /demo-masters/aurora-valley.jpg  →  HTTP ${direct.status} (masters are outside every static route)`, direct.status === 404 ? 'good' : 'bad');
   const token = await (await fetch('/archx/token/aurora-valley?w=900')).json();
   const tampered = token.url.replace(/t=([^.]+)\./, (m, body) => 't=' + body.slice(0, -2) + 'XX.');
   const replay = await fetch(tampered);
-  log(`   GET signed URL with tampered signature  →  HTTP ${replay.status} (real ones also die after 120s)`, replay.status === 403 ? 'good' : 'bad');
+  log(`   GET signed URL with tampered signature  →  HTTP ${replay.status}`, replay.status === 403 ? 'good' : 'bad');
+  const firstUse = await fetch(token.url);
+  await firstUse.arrayBuffer();
+  const secondUse = await fetch(token.url);
+  log(`   Same signed URL used twice  →  1st: HTTP ${firstUse.status}, replay: HTTP ${secondUse.status} (one-time tokens; also User-Agent-bound and dead after 120s)`,
+    firstUse.status === 200 && secondUse.status === 403 ? 'good' : 'bad');
 }
 
 function attackPrint() {

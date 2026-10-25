@@ -207,6 +207,87 @@ export async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Block-level forensic watermark                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A seeded ±delta luminance pattern applied per macro-block. Unlike 1px
+ * noise, block-level shifts have a chance of surviving WebP/JPEG
+ * re-encoding and screen-resolution screenshots well enough to be
+ * *correlated* later: given a suspect image and a candidate viewing
+ * session, resize/align the suspect to the payload geometry and compare
+ * its block means against the unwatermarked reference (or a flat-field
+ * estimate) — the seeded sign pattern either matches or it doesn't.
+ * This is a tracing aid, not magic: cropping, heavy filtering or a camera
+ * photo will weaken or destroy it. The visible watermark remains the
+ * primary deterrent; this is the quiet second witness.
+ */
+export function forensicBlockSigns(seed, count) {
+  const rand = mulberry32(hashSeed(String(seed) + '::archx-forensic'));
+  return Array.from({ length: count }, () => (rand() < 0.5 ? -1 : 1));
+}
+
+export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2 } = {}) {
+  const bs = Math.max(8, blockSize | 0);
+  const bx = Math.ceil(w / bs);
+  const by = Math.ceil(h / bs);
+  const signs = forensicBlockSigns(seed, bx * by);
+  const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  for (let byi = 0; byi < by; byi++) {
+    for (let bxi = 0; bxi < bx; bxi++) {
+      const d = signs[byi * bx + bxi] * delta;
+      if (!d) continue;
+      const x0 = bxi * bs, y0 = byi * bs;
+      const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      for (let y = y0; y < y1; y++) {
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x++, i += 4) {
+          out[i] = Math.max(0, Math.min(255, out[i] + d));
+          out[i + 1] = Math.max(0, Math.min(255, out[i + 1] + d));
+          out[i + 2] = Math.max(0, Math.min(255, out[i + 2] + d));
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Score how well `candidate` matches the forensic pattern for `seed`,
+ * using `reference` (same geometry, unmarked) as the baseline.
+ * Returns { score: -1..1, matched, total } — a genuine marked copy
+ * typically scores > 0.7 even after lossy re-encoding at the same size.
+ */
+export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}) {
+  const bs = Math.max(8, blockSize | 0);
+  const bx = Math.ceil(w / bs);
+  const by = Math.ceil(h / bs);
+  const signs = forensicBlockSigns(seed, bx * by);
+  let matched = 0, total = 0, signedSum = 0;
+  for (let byi = 0; byi < by; byi++) {
+    for (let bxi = 0; bxi < bx; bxi++) {
+      const x0 = bxi * bs, y0 = byi * bs;
+      const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
+      let diff = 0, n = 0;
+      for (let y = y0; y < y1; y += 2) {
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x += 2, i += 8) {
+          diff += ((candidate[i] + candidate[i + 1] + candidate[i + 2]) -
+                   (reference[i] + reference[i + 1] + reference[i + 2])) / 3;
+          n++;
+        }
+      }
+      if (!n) continue;
+      const mean = diff / n;
+      total++;
+      signedSum += Math.sign(mean) === signs[byi * bx + bxi] ? 1 : -1;
+      if (Math.sign(mean) === signs[byi * bx + bxi]) matched++;
+    }
+  }
+  return { score: total ? signedSum / total : 0, matched, total };
+}
+
+/* ------------------------------------------------------------------ */
 /* Pixel-level scramble on raw RGBA buffers (used by server + tests)    */
 /* ------------------------------------------------------------------ */
 

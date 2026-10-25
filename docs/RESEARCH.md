@@ -23,7 +23,13 @@ map onto this library's design.
 - That layered strategy is exactly what large rights-holders do (Google Arts
   & Culture's tiled + signed + encrypted delivery; stock agencies' tiled
   zoom + domain-locked derivatives; streaming's DRM for video). Archx packages
-  the still-image version of it into one small library + one middleware.
+  the still-image version of it into one small library + one middleware, and
+  its **Fortress** policy adds controls aimed at the next tier up: payload/key
+  reconstruction, API hooking, public debug/instance handles, token replay,
+  client-chosen oversized derivatives, repeated extraction probing, decoded
+  bitmaps lingering in memory, and single-screenshot capture. Those controls
+  reduce value and increase attribution/friction; they do not turn an
+  attacker-owned browser into a trusted device.
 
 ---
 
@@ -45,9 +51,19 @@ map onto this library's design.
 | A12 | OS screenshot / snipping tool / screen recording / photographing the monitor | none–low | pixels on a screen (**unstoppable**) |
 | A13 | Intercepting the network payload with a proxy (mitmproxy on your own machine) | medium | a usable file on the wire |
 | A14 | Reverse-engineering the viewer JS and re-implementing its decoder | high (per-site, manual) | determination |
+| A15 | Capturing both the scrambled payload and the key delivered to the attacker's own browser, then reconstructing offline | high | a legitimate viewing session |
+| A16 | Userscript/extension hooking of `fetch`, `createImageBitmap`, canvas or WebGL APIs before/after the viewer loads | medium–high | script execution in the page |
+| A17 | Reaching viewer internals through public instance fields, a global registry, DOM expandos, config echoes, or an always-on debug hook | low–medium | accidental API/DOM handles |
+| A18 | Replaying or sharing a signed image URL, possibly from another browser/machine | low | a reusable bearer URL |
+| A19 | Tampering with the requested width/derivative parameters to obtain a larger copy than the account/page should receive | low | client-controlled delivery policy |
+| A20 | Repeated extraction probing until a race, fallback, or read-back route succeeds | medium | unlimited silent attempts |
+| A21 | Recovering a decoded bitmap or clean working canvas retained in browser memory after display | high | long-lived decoded pixels + memory/process access |
+| A22 | Taking many screenshots while moving an inspection lens and stitching the sharp regions | low–medium (manual) / high (automated) | a user-controlled sharp viewport |
 
-The design goal follows directly: **A1–A11 and A13 must yield nothing usable;
-A12/A14 must yield at most a screen-resolution, watermarked, traceable copy.**
+The design goal follows directly: **A1–A11, A13 and A16–A20 should yield
+nothing clean or reusable; A12/A14/A15/A21/A22 must be pushed toward at most a
+server-authorized, screen-resolution, visibly/forensically marked copy whose
+production is slow, noisy, and attributable.**
 
 ## 2. What production platforms actually do
 
@@ -151,6 +167,74 @@ leaves the original URL fetchable in the Network tab and the canvas one
 interaction guards) and adds the missing layers (no-URL delivery,
 scrambling, signed expiry, poisoned read-back, resolution caps).
 
+### 2.7 Determined-attacker hardening: make successful extraction low-value
+
+The first design iteration correctly concentrated on the file/URL boundary.
+The harder question is what happens when the adversary is also an authorized
+viewer and can observe every input their own browser receives. In that model,
+payload secrecy from the viewer is impossible: the browser must receive enough
+information to display the picture. The useful controls therefore move **before**
+delivery (authorization and marking), **around** delivery (replay/binding),
+**inside the API surface** (no accidental handles), and **after** display
+(memory lifetime and attempt escalation):
+
+- **Bake attribution in before scrambling.** Client-drawn watermarks do not
+  help against A15 because the attacker can ignore the client renderer and
+  un-shuffle the captured derivative themselves. Archx's server can composite
+  a visible SVG watermark and apply a seeded macro-block forensic mark to the
+  resized derivative *before* tile permutation/encryption. Perfect offline
+  reconstruction then reconstructs the marks too. The CLI can bake the same
+  marks into static `.archx` assets.
+- **Authorize the derivative, not just the URL.** A signature over an image id
+  is insufficient if the browser can append `w=8000`. Middleware entitlements
+  let `authorize()` return a viewer identity and maximum width; the capped
+  width is included before signing. Viewer identifiers are HMAC-hashed for
+  token/cache/forensic derivation instead of being treated as raw secrets.
+- **Make bearer URLs expire in more than time.** Optional one-time nonces
+  reject replay, and signed IP/User-Agent bindings make a copied URL fail in a
+  different browser context. Origin/Referer allowlists and separate signer vs
+  image rate limits reduce non-browser harvesting. These are delivery
+  controls, not viewer-proof cryptography: the intended browser can still use
+  its first (and only) response however its owner instruments it.
+- **Remove accidental control handles.** JavaScript `#private` fields,
+  module-private `WeakMap` host/element registries, redacted option/config
+  views, no public instance list, and a debug hook that exists only when a
+  specific instance opts in remove the easy script/extension route from “find
+  element” to “call internal canvas/bitmap methods.” DevTools, which operates
+  outside normal page privilege, can still inspect more than page JS can.
+- **Capture then audit native APIs.** Archx records sensitive function
+  references at module evaluation and calls those references internally. The
+  audit compares current functions with the captured references and checks
+  whether captured functions still report native bodies. Fortress can fail
+  closed. This defeats ordinary later monkey-patching and detects naive
+  earlier hooks; an attacker who patches below JS, controls the browser
+  binary, or successfully forges native fingerprints before module load can
+  evade it. It is a tripwire and bypass-reduction layer, not attestation.
+- **Turn probing into an incident, not a free oracle.** Extraction attempts
+  can feed a strike policy: report, blur, then lock/blackout for a cooldown.
+  Automation signals feed the same reporting/lock framework. This cannot stop
+  a separate capture process, but it removes unlimited silent retries inside
+  the page and gives the site telemetry for account-level action.
+- **Shorten clean-pixel lifetime.** Strict memory mode avoids shared decoded
+  bitmap retention, closes bitmaps promptly, wipes CPU-side clean canvases
+  after GPU upload, and can locally scramble plain sources before uploading a
+  WebGL texture. This narrows A21. Composited pixels necessarily exist in the
+  browser/GPU/OS path while visible, so process/GPU compromise remains out of
+  scope.
+- **Attack the “one perfect screenshot” assumption.** Fortress Lens renders
+  a pixelated base and only a sharp disc around trusted (`isTrusted`) pointer
+  input; synthetic script events do not move the disc, and rapid/broad sweeps
+  can be reported as lens scanning. This makes a single screenshot mostly
+  degraded and automated stitching harder. A patient human can still move a
+  real pointer and stitch, so Lens is a UX/friction tradeoff, not DRM.
+
+The combined objective is **value destruction**: any eventually successful
+copy should be no larger than the server chose to authorize, visibly owned,
+forensically attributable where geometry/quality permit, and obtained one slow
+image at a time after generating suspicious events. That is materially
+different from promising that pixels can be both shown to and withheld from
+the same untrusted machine.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -158,12 +242,16 @@ scrambling, signed expiry, poisoned read-back, resolution caps).
 | Casual visitor | save a picture they like | Finds no save path at all (A1/A2 dead-end) |
 | Bookmarklet/extension user | strip a page/gallery in one click | DOM has no images; canvas grabs return decoys |
 | Scraper bot operator (incl. AI training crawlers) | harvest a whole catalogue | No URLs in HTML; needs JS + fresh signed token per image, rate-limited; payloads are mosaics/ciphertext |
-| Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; ceiling = display-size, watermarked, grain-traced copy (vault forces them down to screenshots) |
-| Insider / paying customer | leak content they can legitimately view | Screenshot possible, but carries visible + forensic session watermark → attributable |
+| Script/extension injector | hook web APIs or grab viewer internals wholesale | Captured natives bypass later hooks; audits can fail closed in Fortress; no host expando/public registry/debug handle exposes canvases, bitmaps, or keys |
+| Token thief | replay/share a captured delivery URL or inflate its derivative size | Short expiry + optional one-time nonce, IP/User-Agent binding, origin checks, and signed server-side entitlement width |
+| Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
+| Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic marks; Lens prevents one screenshot from containing the whole sharp image |
 
 Non-goals: hiding that protection exists, DRM-level guarantees, stopping a
-camera pointed at a monitor, compensating for masters also hosted at public
-URLs (that's a deployment error — see the README checklist).
+camera pointed at a monitor, proving browser integrity on a machine the
+attacker owns, defending composited frames against a compromised browser/GPU
+process, or compensating for masters also hosted at public URLs (that's a
+deployment error — see the README checklist).
 
 ## 4. Design decisions (and rejected alternatives)
 
@@ -201,31 +289,69 @@ URLs (that's a deployment error — see the README checklist).
    *scrambled* bitmaps), off-screen unloading, integer-tile reassembly with a
    single smoothing pass (no seams, no per-pixel loops), server output
    caching, and a hard WebGL-context budget with automatic fallback.
+7. **Server marks outrank client marks for reconstruction resistance.** A
+   client-added `{session}` watermark is useful against screenshots/canvas
+   grabs, but the offline reconstruction path bypasses the client renderer.
+   Therefore the middleware/CLI can mark the resized derivative before
+   scrambling. Header `wm`/`fx` flags let operators verify that the delivered
+   container was marked without placing the forensic seed in the payload.
+8. **Entitlements are signed policy, not presentation hints.** Width is part
+   of the security boundary. The middleware accepts a browser's desired width
+   only as a request, clamps it by global and per-viewer `maxWidth`, and signs
+   the resulting derivative size. One-time/browser-bound tokens are optional
+   because they increase token churn and can interact with retries, mobile IP
+   changes, and shared networks.
+9. **Encapsulation should be structural, not naming-based.** Calling a field
+   `_canvas` is only a convention. `#private` fields and private WeakMap
+   registries make internals unavailable to ordinary page script even if it
+   obtains the public `ProtectedImage` object or host element. A default-off,
+   per-instance debug opt-in preserves testability without shipping an
+   always-available extraction handle.
+10. **Per-viewer attribution deliberately costs cacheability.** Per-token
+    watermarks, forensic seeds, scramble keys, strict bitmap release, and
+    one-time URLs all reduce reuse and may force fresh token requests. The
+    API therefore exposes the granularity (`forensicPerToken`, static CLI
+    marks, normal vs strict memory, `lite` vs `fortress`) rather than forcing
+    maximum paranoia onto 500 catalogue thumbnails.
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 10 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 13 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them
   (MAD < 6 lossless, ≈ 5–8 through the full browser pipeline incl. watermark
   and WebP q82); encrypted payloads don't parse as images and fail closed
   under wrong keys; tokens reject tampering, expiry and id-swaps; the HTTP
-  flow serves only down-scaled `.archx` containers.
-- **Real browser (headless Chromium, 33 checks):** a page with 6 protected
+  flow serves only down-scaled `.archx` containers. The hardened middleware
+  tests also prove that an entitlement's 180 px cap overrides a browser's
+  900 px request, a disallowed/missing origin fails, the wrong User-Agent
+  cannot spend a bound token, the right browser can spend it only once, and
+  the payload advertises server `wm`/`fx` embedding. A separate reconstruction
+  test verifies the actual visible watermark and a >0.7 forensic correlation
+  remain after offline un-shuffling—not just that header flags were set.
+- **Real browser (headless Chromium, 52 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
-  protected element's HTML, closed root invisible to JS; `toDataURL`/
-  `toBlob`/`getImageData` all return decoys and fire attempt events; the
-  WebGL prototype bypass returns **pure black** (mean RGB ≈ 0) while the
-  same canvas screenshots as a perfectly normal photo; split mode = 9
-  separately poisoned canvases; right-click and drag are intercepted;
-  window-blur protection and print blackout engage; master path → 404,
-  token-less image route → 403, captured payload is a mosaic.
-- **Performance:** 100/100 gallery images loaded+painted in **~1.5 s** in
-  headless Chromium with 0 `<img>` tags; browser bundle **11.7 kB gzipped**;
-  server scramble+encode ≈ 100 ms one-time per image/width (cached
-  thereafter), pixel scramble ≈ 135 MP/s, AES-GCM overhead ≈ 4 ms.
+  protected element's HTML, closed root invisible to JS; protected hosts have
+  no `__archx` expando, `Archx._instances` is absent, public option/config
+  views redact secrets, instances expose no public canvas property, and
+  `_debug()` is null without explicit per-instance opt-in. `toDataURL`/
+  `toBlob`/`getImageData` all return decoys and fire attempt events; repeated
+  probes trigger the configured strike blackout. Replacing `fetch` is both
+  reported by `auditIntegrity()` and causes Fortress to fail closed; restoring
+  it returns a clean audit. Trusted pointer movement positions the Lens while
+  a synthetic untrusted event does not; strict mode reports the bitmap
+  released and the GPU source scrambled, including for a plain client-only
+  image. The WebGL prototype bypass returns **pure black** (mean RGB ≈ 0),
+  split mode uses 9 separately poisoned canvases, right-click/drag guards,
+  window-blur protection and print blackout engage, and the browser network
+  checks confirm a marked mosaic payload, one-time replay rejection, and
+  wrong-User-Agent rejection.
+- **Performance:** 100/100 gallery images loaded+painted in **~1.4–1.5 s** in
+  headless Chromium with 0 `<img>` tags; browser bundle **44.1 kB minified /
+  15.5 kB gzipped**. Static/per-image server outputs remain cacheable;
+  per-token marks/keys intentionally trade cache hits for attribution.
 
 ## 6. Sources
 
@@ -254,3 +380,12 @@ URLs (that's a deployment error — see the README checklist).
   tiling trade-offs) — https://www.cambridgeincolour.com/tutorials/protect-online-photos.htm
 - ProtectImage.js (representative canvas-only library) —
   https://github.com/puffinsoft/ProtectImage.js
+- MDN, *Private elements* (language-enforced class privacy) and *WeakMap*
+  (non-enumerable object-key associations) —
+  https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes/Private_elements
+  · https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
+- MDN, *Event.isTrusted* (distinguishes user-generated events from script-
+  dispatched events) and *ImageBitmap.close()* (explicit decoded-bitmap
+  disposal) —
+  https://developer.mozilla.org/en-US/docs/Web/API/Event/isTrusted
+  · https://developer.mozilla.org/en-US/docs/Web/API/ImageBitmap/close
