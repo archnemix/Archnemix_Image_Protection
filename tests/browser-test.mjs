@@ -304,6 +304,8 @@ try {
       glScrambled: dbg.glScrambledTexture,
       captureTraceOn: dbg.captureTraceOn,
       traceText: dbg.traceText,
+      temporalOn: dbg.temporalOn,
+      glContinuous: dbg.glContinuous,
     };
   });
   check('trusted pointer input activates the fortress lens near the pointer',
@@ -316,6 +318,29 @@ try {
   check('fortress dynamic capture trace is active for OS/extension/camera captures',
     lensState.captureTraceOn === true && /TEST/.test(lensState.traceText || ''),
     (lensState.traceText || '').slice(0, 80));
+  check('fortress temporal shield is active (single-frame captures get one noisy complementary frame)',
+    lensState.temporalOn === true && lensState.glContinuous === true, JSON.stringify(lensState));
+
+  const renderEconomy = await page.evaluate(async () => {
+    const vault = window.__instances.vault._debug();
+    const fortress = window.__instances.fortress._debug();
+    const before = { vault: vault.glFrames, fortress: fortress.glFrames };
+    await new Promise((r) => setTimeout(r, 450));
+    const after = {
+      vault: window.__instances.vault._debug().glFrames,
+      fortress: window.__instances.fortress._debug().glFrames,
+    };
+    return {
+      vaultDelta: after.vault - before.vault,
+      fortressDelta: after.fortress - before.fortress,
+      vaultContinuous: window.__instances.vault._debug().glContinuous,
+    };
+  });
+  check('static Vault WebGL draws on demand instead of burning GPU at 60fps',
+    renderEconomy.vaultContinuous === false && renderEconomy.vaultDelta <= 2,
+    JSON.stringify(renderEconomy));
+  check('temporal-shield Fortress is the deliberate exception that keeps animating',
+    renderEconomy.fortressDelta > 5, JSON.stringify(renderEconomy));
 
   const captureKey = await page.evaluate(() => {
     window.__attempts.length = 0;
@@ -343,6 +368,100 @@ try {
   });
   check('plain client-only source is locally scrambled before GPU upload in fortress',
     localScramble.loaded && localScramble.glScrambled === true && localScramble.released === true, JSON.stringify(localScramble));
+
+  const noReload = await page.evaluate(async () => {
+    const count = (needle) => performance.getEntriesByType('resource')
+      .filter((e) => e.name.includes(needle)).length;
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:190px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'gallery-006' }, {
+      mode: 'fortress', debug: true, lazy: false, automation: 'monitor',
+      unloadOnExit: true, temporalShield: false,
+    });
+    await inst.ready;
+    await new Promise((r) => setTimeout(r, 200));
+    const before = {
+      tokens: count('/archx/token/gallery-006'),
+      payloads: count('/archx/i/gallery-006'),
+      cachedPayload: inst._debug().cachedPayload,
+      released: inst._debug().bitmapReleased,
+    };
+    // Scroll out/in and an ordinary resize: repaint locally, never remint.
+    inst._onVisibility(false);
+    inst._onVisibility(true);
+    host.style.width = '336px';
+    await new Promise((r) => setTimeout(r, 350));
+    const after = {
+      tokens: count('/archx/token/gallery-006'),
+      payloads: count('/archx/i/gallery-006'),
+      loaded: inst.loaded,
+      loadedOnce: inst._debug().loadedOnce,
+    };
+    inst.destroy(); host.remove();
+    return { before, after };
+  });
+  check('a loaded strict-memory image does not reload/remint on visibility or ordinary resize',
+    noReload.before.tokens === 1 && noReload.after.tokens === 1 &&
+    noReload.before.payloads === 1 && noReload.after.payloads === 1 &&
+    noReload.before.cachedPayload === true && noReload.after.loadedOnce === true,
+    JSON.stringify(noReload));
+
+  const presetInfo = await page.evaluate(() => {
+    const p = window.Archx.preset('screenshotResistant', { temporalShield: false, renderLoop: 'static' });
+    return {
+      names: Object.keys(window.Archx.presets),
+      mode: p.mode,
+      temporalOff: p.temporalShield === false,
+      loop: p.renderLoop,
+      quality: p.qualityProfile,
+    };
+  });
+  check('direct parameter presets are inspectable and individually overridable',
+    presetInfo.names.includes('gallery') && presetInfo.names.includes('commerce') &&
+    presetInfo.mode === 'fortress' && presetInfo.temporalOff && presetInfo.loop === 'static',
+    JSON.stringify(presetInfo));
+
+  const customFlags = await page.evaluate(async () => {
+    async function make(id, options) {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id }, { debug: true, lazy: false, ...options });
+      await inst.ready;
+      await new Promise((r) => setTimeout(r, 120)); // let a static WebGL presentation frame run
+      const out = {
+        loaded: inst.loaded,
+        requestedMode: inst.options.requestedMode,
+        resolvedMode: inst.options.mode,
+        renderer: inst.options.renderer,
+        forensic: inst.options.forensic,
+        memory: inst.options.memory,
+        tiles: inst._debug().tiles.length,
+        glFrames: inst._debug().glFrames,
+        bitmapReleased: inst._debug().bitmapReleased,
+      };
+      inst.destroy(); host.remove();
+      return out;
+    }
+
+    const explicitCustom = await make('gallery-006', {
+      mode: 'custom', renderer: 'canvas', splitCanvases: true, splitGrid: 3,
+      forensic: true, memory: 'standard', temporalShield: false,
+    });
+    const noModeCustom = await make('gallery-007', {
+      renderer: 'webgl', forensic: true, memory: 'strict', localScramble: true,
+      temporalShield: false, renderLoop: 'static',
+    });
+    return { explicitCustom, noModeCustom };
+  });
+  check('custom flags work without a preset mode (explicit custom + omitted mode)',
+    customFlags.explicitCustom.loaded && customFlags.explicitCustom.requestedMode === 'custom' &&
+    customFlags.explicitCustom.renderer === 'canvas' && customFlags.explicitCustom.tiles === 9 &&
+    customFlags.noModeCustom.loaded && customFlags.noModeCustom.requestedMode === 'custom' &&
+    customFlags.noModeCustom.renderer === 'webgl' && customFlags.noModeCustom.resolvedMode === 'vault' &&
+    customFlags.noModeCustom.glFrames > 0 && customFlags.noModeCustom.memory === 'strict',
+    JSON.stringify(customFlags));
 
   const strike = await page.evaluate(async () => {
     window.__attempts.length = 0;
@@ -409,7 +528,9 @@ try {
   let netMad = 0; for (let i = 0; i < masterRaw.length; i++) netMad += Math.abs(masterRaw[i] - innerRaw[i]); netMad /= masterRaw.length;
   check('captured payload pixels are a scrambled mosaic vs master', netMad > 24, `mean abs diff=${netMad.toFixed(1)}`);
   check('server down-scaled master (never sends full res)', header.w === 800, `header.w=${header.w}`);
-  check('demo payload carries server-baked watermark + forensic flags', header.wm === 1 && header.fx === 1, JSON.stringify({ wm: header.wm, fx: header.fx }));
+  check('demo payload carries server-baked watermark + forensic + StegoMark flags',
+    header.wm === 1 && header.fx === 1 && header.sg === 1,
+    JSON.stringify({ wm: header.wm, fx: header.fx, sg: header.sg }));
   const replay = await fetch(BASE + token.url);
   check('replaying the same signed URL is rejected (one-time token)', replay.status === 403, `HTTP ${replay.status}`);
   const token2 = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { headers: { 'user-agent': 'Browser-A' } })).json();

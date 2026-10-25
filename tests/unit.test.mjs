@@ -10,10 +10,13 @@ import {
   encodeContainer, decodeContainer, isArchxContainer,
   encryptPayload, decryptPayload, generateKeyBase64,
   applyForensicBlocks, forensicScore, forensicBlockSigns,
+  embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
 import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
-import { createArchxMiddleware, signToken, verifyToken } from '../server/middleware.js';
+import {
+  createArchxMiddleware, signToken, verifyToken, deriveStegoKey,
+} from '../server/middleware.js';
 
 /* ---------- scramble plan ---------- */
 
@@ -57,6 +60,33 @@ test('forensic block mark: seeded signs are embedded and recoverable by correlat
   assert.ok(hit.score > 0.9, `expected strong correlation, got ${hit.score}`);
   assert.ok(Math.abs(miss.score) < 0.55, `wrong seed should not correlate, got ${miss.score}`);
   assert.equal(forensicBlockSigns('x', 8).length, 8);
+});
+
+test('StegoMark: blind fingerprint decodes without a reference and survives re-encode/resize', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const raw = new Uint8Array(data);
+  const marked = embedStegoFingerprint(raw, info.width, info.height, 'ORDER-1042', { key: 'owner-key' });
+
+  const direct = detectStegoFingerprint(marked, info.width, info.height, { key: 'owner-key' });
+  assert.equal(direct.found, true, JSON.stringify(direct));
+  assert.equal(direct.fingerprint, stegoFingerprint('ORDER-1042'));
+
+  // A realistic stolen-copy path: downscale + lossy JPEG re-encode.
+  const copied = await sharp(Buffer.from(marked), {
+    raw: { width: info.width, height: info.height, channels: 4 },
+  }).resize({ width: 448 }).jpeg({ quality: 85 }).toBuffer();
+  const copiedRaw = await sharp(copied).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const afterCopy = detectStegoFingerprint(
+    new Uint8Array(copiedRaw.data), copiedRaw.info.width, copiedRaw.info.height,
+    { key: 'owner-key', searchOffsets: true },
+  );
+  assert.equal(afterCopy.found, true, JSON.stringify(afterCopy));
+  assert.equal(afterCopy.fingerprint, direct.fingerprint);
+
+  // Negative controls must not produce a confident ownership claim.
+  assert.equal(detectStegoFingerprint(raw, info.width, info.height, { key: 'owner-key' }).found, false);
+  assert.equal(detectStegoFingerprint(marked, info.width, info.height, { key: 'wrong-key' }).found, false);
 });
 
 test('paddedSize rounds up to grid multiples', () => {
@@ -217,6 +247,24 @@ test('server-baked watermark survives into the un-scrambled reconstruction', asy
   assert.ok(score.score > 0.7, `server forensic mark should survive reconstruction (score=${score.score.toFixed(2)})`);
 });
 
+test('scrambleImage bakes StegoMark before scrambling; reconstructed copies remain attributable', async () => {
+  const master = await syntheticMaster(640, 420);
+  const result = await scrambleImage(master, {
+    key: 'stego-scramble-key', grid: 8, maxWidth: 640, lossless: true,
+    stegoPayload: 'BUYER-77', stegoKey: 'stego-secret',
+  });
+  assert.equal(result.header.sg, 1);
+  assert.equal(result.stegoFingerprint, stegoFingerprint('BUYER-77'));
+  const { payload, header } = decodeContainer(result.bytes);
+  const restored = await unscrambleImage(Buffer.from(payload), {
+    grid: header.grid, key: 'stego-scramble-key', w: header.w, h: header.h,
+  });
+  const { data, info } = await sharp(restored).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const found = detectStegoFingerprint(new Uint8Array(data), info.width, info.height, { key: 'stego-secret' });
+  assert.equal(found.found, true, JSON.stringify(found));
+  assert.equal(found.fingerprint, result.stegoFingerprint);
+});
+
 test('scrambleImage down-scales masters and strips them out of the payload', async () => {
   const master = await syntheticMaster(1600, 1200);
   const { header } = await scrambleImage(master, { key: 'k', maxWidth: 500 });
@@ -333,4 +381,43 @@ test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, or
   assert.equal(header.fx, 1, 'forensic mark baked pre-scramble');
   // Replay of the same (still unexpired) URL -> 403: one-time use.
   assert.equal((await fetch(base + token.url, asBrowser('BrowserA'))).status, 403);
+});
+
+test('middleware direct controls: entitlement quality/format wins and StegoMark issuance is registered', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-stego-http-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(640, 420));
+  const issued = [];
+  const handler = createArchxMiddleware({
+    secret: 'stego-http-secret',
+    imagesDir: dir,
+    steganography: { perToken: true, strength: 6 },
+    onStegoIssue: async (record) => { issued.push(record); },
+    // The backend grants this buyer lossless PNG pixels; the browser asking
+    // for q=10 must not downgrade (or upgrade beyond) that entitlement.
+    authorize: async () => ({ viewerId: 'buyer-7', quality: 'lossless', format: 'png' }),
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const token = await (await fetch(base + '/archx/token/cat?w=640&q=10')).json();
+  assert.equal(issued.length, 1);
+  assert.equal(issued[0].viewerId, 'buyer-7');
+  assert.match(issued[0].fingerprint, /^[0-9a-f]{12}$/);
+
+  const bytes = new Uint8Array(await (await fetch(base + token.url)).arrayBuffer());
+  const { header, payload } = decodeContainer(bytes);
+  assert.equal(header.sg, 1);
+  assert.equal(header.mime, 'image/png');
+
+  const restored = await unscrambleImage(Buffer.from(payload), {
+    grid: header.grid, key: token.key, w: header.w, h: header.h,
+  });
+  const { data, info } = await sharp(restored).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const found = detectStegoFingerprint(new Uint8Array(data), info.width, info.height, {
+    key: deriveStegoKey('cat', 'stego-http-secret'),
+  });
+  assert.equal(found.found, true, JSON.stringify(found));
+  assert.equal(found.fingerprint, issued[0].fingerprint);
 });

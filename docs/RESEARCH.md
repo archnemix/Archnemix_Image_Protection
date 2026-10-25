@@ -27,9 +27,13 @@ map onto this library's design.
   its **Fortress** policy adds controls aimed at the next tier up: payload/key
   reconstruction, API hooking, public debug/instance handles, token replay,
   client-chosen oversized derivatives, repeated extraction probing, decoded
-  bitmaps lingering in memory, and single-screenshot capture. Those controls
-  reduce value and increase attribution/friction; they do not turn an
-  attacker-owned browser into a trusted device.
+  bitmaps lingering in memory, and single-screenshot capture. v1.3 adds the
+  operational complements current sellers rely on: direct per-image policy
+  parameters instead of opaque modes, a no-reload/draw-on-demand lifecycle,
+  temporal single-frame degradation, and a blind StegoMark fingerprint +
+  detector/registry workflow. Those controls reduce value and increase
+  attribution/friction; they do not turn an attacker-owned browser into a
+  trusted device, and they do not make visible pixels AI-regeneration-proof.
 
 ---
 
@@ -62,11 +66,15 @@ map onto this library's design.
 | A23 | Browser-privileged capture: screenshot extension (`captureVisibleTab`-style APIs), DevTools “Capture screenshot”, remote debugging/CDP, browser automation screenshot | low–medium | control of the browser itself, above page JavaScript |
 | A24 | View Page Source / save-page / inspect static assets looking for the image or a reusable signed URL | low | secrets or usable URLs accidentally present in HTML |
 | A25 | Cross-device analog capture: phone/camera photographing or filming another device's screen | none–low | photons leaving a display (**physically unstoppable/undetectable by the page**) |
+| A26 | Defeat temporal/psychovisual defences by screen-recording, averaging many screenshots, or using a long camera exposure | low–medium | multiple presented frames over time |
+| A27 | AI-assisted cleanup: denoise, upscale, inpaint watermarks, or diffusion-regenerate a degraded capture until pixel marks are weakened/removed | low (consumer tools)–medium | any visible copy, however degraded |
+| A28 | Repost a copy while denying its origin / stripping metadata and visible credit | none | ambiguity about which issued view leaked |
 
 The design goal follows directly: **A1–A11, A13, A16–A20 and A24 should yield
-nothing clean or reusable; A12/A14/A15/A21–A23/A25 must be pushed toward at
+nothing clean or reusable; A12/A14/A15/A21–A23/A25–A27 must be pushed toward at
 most a server-authorized, screen-resolution, visibly/forensically marked copy
-whose production is slow, noisy, and attributable.**
+whose production is slow, noisy, and attributable; A28 should leave the owner
+a testable fingerprint trail rather than screenshots and assertions.**
 
 ## 2. What production platforms actually do
 
@@ -305,6 +313,76 @@ faithfully as an ordinary image at that CSS/DPR size. It cannot mean sending
 the full master merely so the browser can downscale it—that would defeat the
 resolution boundary. Sites choose the derivative ceiling per viewer.
 
+### 2.10 2026 production patterns: licensed previews, shifting reveals, forensic IDs, temporal frames, and AI
+
+The follow-up research for v1.3 looked specifically at how current image
+sellers and protection vendors behave when they accept that screenshots are
+possible. Four patterns recur:
+
+- **The control plane is licensing + derivatives, not a clever page trick.**
+  Stock/preview businesses keep the valuable file behind authentication and
+  commerce, publish a bounded preview derivative, bake marks into that
+  derivative, and monitor/enforce afterwards. The browser layer's job is to
+  make the preview awkward to harvest; the server's entitlement decision is
+  what actually determines what a viewer may receive. Archx mirrors that split:
+  signed entitled derivatives, optional per-viewer quality/format caps, and no
+  master URL.
+- **Gallery vendors now degrade the *visible frame*, not just the file.**
+  ShootProof's Screenshot Protection is representative: on desktop it reacts
+  to a capture attempt with blur/notice, while on mobile part of every image
+  stays blurred and the revealed region shifts under intentional touch, so a
+  single screenshot cannot contain the whole clean photograph. The vendor's
+  own copy still frames this as discouragement/defence rather than absolute
+  prevention. Archx's trusted-pointer Lens is the same product insight with a
+  shader/canvas implementation: change what any one capture can contain.
+- **Serious leak attribution is per-recipient and detector-backed.**
+  Forensic-watermark vendors (IMATAG, NAGRA NexGuard and similar systems)
+  embed a unique invisible identifier for each recipient/session, retain an
+  issuance record, and later run a detector over a suspect copy to identify
+  the source view. Steg.AI's **Light Field Messaging** goes further: it is
+  patented deep-learning photographic steganography designed so the hidden ID
+  remains recoverable even through screen-to-camera capture. Two lessons
+  matter for an open web library. First, a mark without a registry and a
+  detector is only half a system. Second, it would be dishonest to claim a
+  small classical embedder is “the same as” a trained neural LFM stack.
+  Archx therefore implements the tractable part faithfully — a keyed,
+  redundant, blindly decodable 48-bit StegoMark payload + CRC, soft repair,
+  `onStegoIssue` registry hook and `archx-detect` — and labels it attribution
+  evidence with measured robustness, not neural/DRM equivalence.
+- **Human-vs-camera temporal separation is real, bounded, and old.**
+  Temporal-dithering proofs of concept alternate complementary noisy frames:
+  one frame adds a random offset, the next subtracts it, and human temporal
+  integration averages the pair back toward the source while one screenshot
+  keeps a noisy half. Temporal psychovisual modulation research uses the same
+  visual-system gap against camcorders. The limits are equally clear: screen
+  recording, averaging several captures, long-exposure photography and good
+  denoisers can reconstruct much of the signal; refresh/rolling-shutter
+  behaviour varies; and visible flicker can fatigue or exclude users. Archx's
+  `temporalShield` therefore degrades a *single* OS/extension/DevTools frame,
+  honours `prefers-reduced-motion` by default, and is layered under Lens,
+  dynamic trace and baked marks instead of posing as a PrintScreen veto.
+
+The AI update cuts across all of the above. Peer-reviewed work on generative
+regeneration shows that adding noise and re-synthesizing an image with a
+diffusion model can remove or weaken many pixel-level invisible watermarks
+while preserving what the picture *is of*. Consumer watermark-removal and
+upscaling tools make the practical version of that attack cheap. The correct
+response is not to promise “AI-proof” pixels. It is to (a) never ship the
+master/high-value derivative in the first place, (b) reduce what one capture
+contains, (c) keep visible attribution where the business model allows it,
+(d) retain server issuance logs/fingerprints for evidence, and (e) monitor and
+enforce outside the page.
+
+Finally, the same product research argues against modal, all-or-nothing
+configuration. A catalogue thumbnail, an editorial hero, a paid product view
+and a pre-release proof need different points on the quality/friction/
+attribution curve. v1.3 therefore treats modes as presets over direct public
+parameters — quality profile/requested quality, cache and reload policy,
+render loop, Lens, capture trace, temporal shield, strikes, guards, memory,
+integrity and server quality/format/StegoMark issuance — and ships
+`Archx.preset(name, overrides)` so sites can state a policy and still flip one
+switch without forking the library.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -315,15 +393,18 @@ resolution boundary. Sites choose the derivative ceiling per viewer.
 | Script/extension injector | hook web APIs or grab viewer internals wholesale | Captured natives bypass later hooks; audits can fail closed in Fortress; no host expando/public registry/debug handle exposes canvases, bitmaps, or keys |
 | Token thief | replay/share a captured delivery URL or inflate its derivative size | Short expiry + optional one-time nonce, IP/User-Agent binding, origin checks, and signed server-side entitlement width |
 | Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
-| Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic marks; Lens prevents one screenshot from containing the whole sharp image |
-| Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens-degraded + dynamically traced |
-| Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, and Lens reducing resale value |
+| Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic + blind StegoMark IDs; Lens prevents one screenshot from containing the whole sharp image, and the registry can identify the issued view |
+| Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens/temporal-degraded + dynamically traced |
+| Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, temporal capture effects, and Lens reducing resale value |
+| AI cleanup / regeneration operator | turn a degraded capture into a polished copy or remove invisible marks | Cannot be ruled out for visible pixels. Archx limits source information and keeps server-side entitlement/issuance evidence; regenerated detail is invented, but the business still needs monitoring/enforcement |
+| Reposter denying origin | circulate a copy stripped of metadata/credit | `archx-detect` can test for the blind StegoMark and map the recovered fingerprint to the owner's issuance record when the mark survives the copy path |
 
 Non-goals: hiding that protection exists, DRM-level guarantees, stopping a
 camera pointed at a monitor, proving browser integrity on a machine the
 attacker owns, defending composited frames against a compromised browser/GPU
-process, or compensating for masters also hosted at public URLs (that's a
-deployment error — see the README checklist).
+process, claiming invisible marks survive arbitrary AI regeneration, or
+compensating for masters also hosted at public URLs (that's a deployment
+error — see the README checklist).
 
 ## 4. Design decisions (and rejected alternatives)
 
@@ -357,34 +438,44 @@ deployment error — see the README checklist).
    how vendors end up with security theatre.
 6. **Performance is a protection feature.** If protecting 300 product photos
    tanks scrolling, sites will switch it off. Hence: shared
-   `IntersectionObserver`, max-6 decode concurrency, bitmap LRU (of
-   *scrambled* bitmaps), off-screen unloading, integer-tile reassembly with a
-   single smoothing pass (no seams, no per-pixel loops), server output
-   caching, and a hard WebGL-context budget with automatic fallback.
+   `IntersectionObserver`, max-6 decode concurrency, bitmap LRU and private
+   scrambled-payload retention so a once-loaded image repaints locally,
+   integer-tile reassembly with a single smoothing pass (no seams, no
+   per-pixel loops), server output caching, draw-on-demand WebGL for static
+   stills, and a hard WebGL-context budget with automatic fallback.
+   Off-screen backing-store unloading remains an opt-in memory knob, not a
+   reason to remint tokens while scrolling.
 7. **Server marks outrank client marks for reconstruction resistance.** A
    client-added `{session}` watermark is useful against screenshots/canvas
    grabs, but the offline reconstruction path bypasses the client renderer.
    Therefore the middleware/CLI can mark the resized derivative before
-   scrambling. Header `wm`/`fx` flags let operators verify that the delivered
-   container was marked without placing the forensic seed in the payload.
-8. **Entitlements are signed policy, not presentation hints.** Width is part
-   of the security boundary. The middleware accepts a browser's desired width
-   only as a request, clamps it by global and per-viewer `maxWidth`, and signs
-   the resulting derivative size. One-time/browser-bound tokens are optional
-   because they increase token churn and can interact with retries, mobile IP
-   changes, and shared networks.
+   scrambling. Header `wm`/`fx`/`sg` flags let operators verify that the
+   delivered container was marked without placing the forensic seed or
+   StegoMark fingerprint derivation in the payload.
+8. **Entitlements are signed policy, not presentation hints.** Width — and
+   now delivery quality/format — is part of the security boundary. The
+   middleware accepts a browser's desired width/quality only as a request,
+   clamps width by global and per-viewer `maxWidth`, lets `authorize()` set
+   `quality`/`lossless`/`format`, and signs the resulting derivative policy.
+   One-time/browser-bound tokens are optional because they increase token
+   churn and can interact with retries, mobile IP changes, and shared
+   networks.
 9. **Encapsulation should be structural, not naming-based.** Calling a field
    `_canvas` is only a convention. `#private` fields and private WeakMap
    registries make internals unavailable to ordinary page script even if it
    obtains the public `ProtectedImage` object or host element. A default-off,
    per-instance debug opt-in preserves testability without shipping an
    always-available extraction handle.
-10. **Per-viewer attribution deliberately costs cacheability.** Per-token
-    watermarks, forensic seeds, scramble keys, strict bitmap release, and
-    one-time URLs all reduce reuse and may force fresh token requests. The
-    API therefore exposes the granularity (`forensicPerToken`, static CLI
-    marks, normal vs strict memory, `lite` vs `fortress`) rather than forcing
-    maximum paranoia onto 500 catalogue thumbnails.
+10. **Per-viewer attribution deliberately costs server cacheability, not
+    viewer reloads.** Per-token watermarks, forensic seeds, StegoMarks,
+    scramble keys and one-time URLs reduce cross-viewer output reuse. On the
+    client, however, a delivered view should be spent once: strict bitmap
+    release is paired with private payload retention / texture repaint so
+    scrolling and ordinary resizes do not ask for another token. The API
+    exposes the granularity (`forensicPerToken`, StegoMark `perToken`, static
+    CLI marks, `cachePayload`, `reloadOnResize`, normal vs strict memory,
+    `lite` vs `fortress`) rather than forcing maximum paranoia onto 500
+    catalogue thumbnails.
 11. **Quality is also a protection feature.** If protected images look slurry,
     sites will publish an unprotected copy beside them. Delivery therefore
     defaults to q95, offers lossless derivatives, sizes by display box +
@@ -399,10 +490,25 @@ deployment error — see the README checklist).
     authorized (server entitlement). This avoids brittle “disable F12” theatre
     while making every privileged/physical capture class inherit the same
     value limits.
+13. **Loaded means loaded; static means static.** A still photograph is not a
+    video game. After first paint, visibility changes repaint from the
+    retained bitmap/WebGL texture or decode the already-delivered scrambled
+    payload locally; ordinary resizes do not remint one-time tokens; and
+    WebGL presents a few frames then idles unless Lens interaction, a resize,
+    a lock/risk change — or the explicitly continuous temporal shield — asks
+    for more. `reload()` remains the deliberate forced-refresh API.
+14. **Temporal and steganographic layers must be labelled by what they prove.**
+    The temporal shield proves only that one frame is an incomplete sample;
+    time integration/recording can recover more. StegoMark proves, when it
+    decodes, that a suspect copy is consistent with a registered fingerprint;
+    it does not prove a negative when filtering/regeneration has destroyed
+    the signal. Shipping the detector, CRC/confidence output and negative
+    controls matters more than calling either layer “screenshot-proof” or
+    “AI-proof.”
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 14 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 17 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -419,33 +525,45 @@ deployment error — see the README checklist).
   once, and the payload advertises server `wm`/`fx` embedding. A separate
   reconstruction test verifies the actual visible watermark and a >0.7
   forensic correlation remain after offline un-shuffling—not just flags.
-- **Real browser (headless Chromium, 55 checks):** a page with 7 protected
+  StegoMark tests decode the blind fingerprint with no reference image, keep
+  decoding it after downscale + JPEG re-encoding, reject unmarked and
+  wrong-key controls, and prove that an HTTP entitlement's lossless/PNG
+  policy wins over a browser's `q=10` request while `onStegoIssue` receives
+  exactly the fingerprint later recovered from the reconstructed copy.
+- **Real browser (headless Chromium, 60 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
   no `__archx` expando, `Archx._instances` is absent, public option/config
   views redact secrets, instances expose no public canvas property, and
   `_debug()` is null without explicit per-instance opt-in. At native element
-  resolution the Shield render now measures **7.03 MAD and 0.85 gradient-detail
-  ratio** versus the ordinary `<img>` (the cover/quality work moved this from
-  11.28 / 0.53 in the failing intermediate measurement). `toDataURL`/`toBlob`/
+  resolution the Shield render measures **9.48 MAD and 0.88 gradient-detail
+  ratio** versus the ordinary `<img>` in the current marked/StegoMark demo
+  configuration (the cover/quality work had moved an earlier failing
+  11.28 / 0.53 measurement to 7.03 / 0.85 before the additional stego layer). `toDataURL`/`toBlob`/
   `getImageData` all return decoys and fire attempt events; repeated probes
   trigger the configured strike blackout. Replacing `fetch` is both reported
   by `auditIntegrity()` and causes Fortress to fail closed. Trusted pointer
   movement positions the Lens while a synthetic untrusted event does not; the
   dynamic capture trace is active with session/time text, and a PrintScreen
   signal immediately blackouts. Strict mode reports the bitmap released and
-  the GPU source scrambled. The WebGL prototype bypass returns **pure black**
+  the GPU source scrambled. The lifecycle regression test loads a strict
+  Fortress token image, cycles visibility with backing-store unloading and
+  applies an ordinary resize, and observes **exactly one token request and
+  one payload request total**; in the render-economy check a static Vault
+  presented **0 extra frames over 450 ms**, while a temporal-shield Fortress
+  presented 27. The WebGL prototype bypass returns **pure black**
   (mean RGB ≈ 0), split mode uses 9 separately poisoned canvases, guards and
   print blackout engage, and network checks confirm a marked mosaic payload,
   one-time replay rejection, and wrong-User-Agent rejection.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  about **2.1 s** in the deliberately non-lazy headless test with high-quality
-  derivatives and 0 `<img>` tags; browser bundle **49.5 kB minified / 17.2 kB
-  gzipped**. The 900 px q95 server pipeline measured ~147 ms one-time per
-  cached variant. Static/per-image server outputs remain cacheable; per-token
-  marks/keys and lossless payloads intentionally trade bytes/cache hits for
-  attribution and exactness.
+  about **2.6 s** in the deliberately non-lazy headless test with high-quality
+  derivatives and 0 `<img>` tags; browser bundle **58.9 KiB minified / 19.8 KiB
+  gzipped**. The 900 px q95 server pipeline previously measured ~147 ms
+  one-time per cached variant. Static/per-image server outputs remain
+  cacheable; per-token marks/keys and lossless payloads intentionally trade
+  bytes/cache hits for attribution and exactness, while the client spends a
+  delivered payload once and then repaints locally.
 
 ## 6. Sources
 
@@ -492,3 +610,24 @@ deployment error — see the README checklist).
   https://developer.mozilla.org/en-US/docs/Web/API/Document/freeze_event
   · https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio
   · https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/imageSmoothingQuality
+- ShootProof, *Introducing Screenshot Protection* (desktop blur/notice;
+  mobile partially blurred, touch-shifting reveal; positioned as deterrence)
+  — https://www.shootproof.com/blog/screenshot-protection/
+- Steg.AI, *Watermarking Software for Secure Collaboration* (patented deep
+  Light Field Messaging; vendor claims survival through common edits,
+  screenshots and screen-to-camera capture; watermark → share → trace
+  workflow) — https://steg.ai/watermarking-software/
+- persistent.info / Mihai Parparita, *Screenshot-proof images via temporal
+  dithering* (positive/negative frame proof of concept and its own
+  recording/analog-hole caveats) —
+  https://blog.persistent.info/2012/12/screenshot-proof-images-via-temporal.html
+- Chrome, `chrome.tabs.captureVisibleTab` (extension-privileged visible-tab
+  capture available to the browser, not a page-vetoable web API) —
+  https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab
+- Ilya Grishchenko et al., *Invisible Image Watermarks Are
+  Provably Removable Using Generative AI* (NeurIPS 2024; regeneration attacks
+  against pixel-level invisible watermarks) —
+  https://arxiv.org/abs/2306.01953
+- IMATAG forensic-watermarking API material (unique per-recipient invisible
+  identifiers plus later detection/monitoring as the production workflow) —
+  https://www.imatag.com/api/forensic-watermarking-api

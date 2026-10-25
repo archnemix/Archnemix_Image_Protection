@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { stegoFingerprint as resolveStegoFingerprint } from '../src/scramble.js';
 
 const ID_RE = /^[A-Za-z0-9._-]+$/;
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.tif', '.tiff']);
@@ -37,6 +38,23 @@ function verifyToken(token, secret) {
     if (!payload.exp || Date.now() > payload.exp) return null;
     return payload;
   } catch { return null; }
+}
+
+/** Deterministic 48-bit StegoMark ID for one issued view. Store the mapping
+ *  from this fingerprint to your image/user/order in your own database. */
+export function deriveStegoFingerprint({ id, nonce = '', viewerHash = '', secret, perToken = true } = {}) {
+  if (!secret) throw new Error('Archx stego: secret required');
+  return crypto.createHmac('sha256', secret)
+    .update(`stego:${id}:${viewerHash}:${perToken ? nonce : 'static'}`)
+    .digest('hex').slice(0, 12);
+}
+
+/** Key controlling StegoMark cell permutation for an image. The detector
+ *  needs the same key; derive it from your server secret when investigating. */
+export function deriveStegoKey(id, secret) {
+  if (!secret) throw new Error('Archx stego: secret required');
+  return crypto.createHmac('sha256', secret)
+    .update('stego-key:' + id).digest('base64url').slice(0, 24);
 }
 
 export function createArchxMiddleware(options = {}) {
@@ -66,6 +84,11 @@ export function createArchxMiddleware(options = {}) {
   const serverWatermark = options.serverWatermark ?? null;
   const forensic = options.forensic ?? false; // true | { blockSize, delta }
   const forensicPerToken = options.forensicPerToken ?? true;
+  const allowClientQuality = !!options.allowClientQuality; // client may ask for q=95 / q=lossless
+  // steganography: true | { strength, gridX, gridY, perToken }
+  const steganography = options.steganography ?? false;
+  const stegoGlobalCfg = typeof steganography === 'object' && steganography ? steganography : {};
+  const onStegoIssue = options.onStegoIssue || null; // async ({req,id,viewerId,nonce,exp,fingerprint}) => void
 
   // Index masters: id (basename w/o extension) -> absolute path
   const index = new Map();
@@ -233,8 +256,51 @@ export function createArchxMiddleware(options = {}) {
           { req, id, nonce, viewerId, exp },
         );
         const tokenPayload = { id, w, exp, n: nonce };
-        if (viewerId) tokenPayload.vh = hmacShort('viewer', viewerId, 20);
+        const viewerHash = viewerId ? hmacShort('viewer', viewerId, 20) : '';
+        if (viewerId) tokenPayload.vh = viewerHash;
         if (watermark) tokenPayload.wm = watermark;
+
+        // Direct delivery-quality control. Your authorize() entitlement wins;
+        // the browser's q=… request is honoured only when you opt in.
+        const clientQuality = allowClientQuality ? url.searchParams.get('q') : null;
+        const rawQuality = entitlement.quality ?? clientQuality ?? quality;
+        let deliveryLossless = entitlement.lossless ?? (lossless || rawQuality === 'lossless');
+        let deliveryQuality = deliveryLossless
+          ? 'lossless'
+          : Math.max(1, Math.min(100, Math.round(Number(rawQuality) || 95)));
+        const rawFormat = entitlement.format || format;
+        const deliveryFormat = ['webp', 'png', 'jpeg'].includes(rawFormat) ? rawFormat : 'webp';
+        tokenPayload.q = deliveryQuality;
+        if (deliveryLossless) tokenPayload.ls = 1;
+        if (deliveryFormat !== format) tokenPayload.fmt = deliveryFormat;
+
+        // StegoMark issuance: derive (but do not expose) the fingerprint that
+        // will be baked into this view's pixels, and let the host persist the
+        // fingerprint -> image/viewer/order mapping via onStegoIssue.
+        const effectiveStego = entitlement.steganography ?? steganography;
+        if (effectiveStego) {
+          const entStegoCfg = typeof effectiveStego === 'object' ? effectiveStego : {};
+          const stegoPerToken = entStegoCfg.perToken ?? stegoGlobalCfg.perToken ?? true;
+          let issuedFingerprint;
+          if (entitlement.stegoFingerprint) {
+            tokenPayload.sg = String(entitlement.stegoFingerprint);
+            issuedFingerprint = resolveStegoFingerprint(entitlement.stegoFingerprint);
+          } else {
+            if (!stegoPerToken) tokenPayload.sgp = 0;
+            issuedFingerprint = deriveStegoFingerprint({
+              id, nonce, viewerHash, secret, perToken: stegoPerToken,
+            });
+          }
+          const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
+          if (strength != null) tokenPayload.sgs = strength;
+          if (onStegoIssue) {
+            try {
+              await onStegoIssue({ req, id, viewerId, nonce, exp, fingerprint: issuedFingerprint });
+            } catch { /* registry failure must not break image delivery */ }
+          }
+        } else if (steganography) {
+          tokenPayload.nsg = 1; // entitlement explicitly opted this view out
+        }
         const bindings = {};
         if (bindTokenTo.ip) bindings.ip = hmacShort('bind-ip', requestIp(req));
         if (bindTokenTo.userAgent) bindings.ua = hmacShort('bind-ua', req.headers?.['user-agent'] || '');
@@ -276,13 +342,28 @@ export function createArchxMiddleware(options = {}) {
               ? `${id}:${payload.n}:${payload.vh || ''}`
               : `${id}:static:${payload.vh || ''}`, 32)
           : null;
+        const deliveryQuality = payload.q ?? quality;
+        const deliveryLossless = payload.ls === 1 || deliveryQuality === 'lossless' || lossless;
+        const deliveryFormat = ['webp', 'png', 'jpeg'].includes(payload.fmt) ? payload.fmt : format;
+        const stegoEnabled = !!steganography && payload.nsg !== 1;
+        const stegoPayload = stegoEnabled
+          ? (payload.sg || deriveStegoFingerprint({
+              id,
+              nonce: payload.n,
+              viewerHash: payload.vh || '',
+              secret,
+              perToken: payload.sgp !== 0,
+            }))
+          : null;
         const wmCachePart = payload.wm ? hmacShort('wm', JSON.stringify(payload.wm), 12) : 'nowm';
+        const stegoCachePart = stegoPayload ? hmacShort('sg', stegoPayload, 12) : 'nosg';
         const cacheKey = [
           id, payload.w,
           scrambleKeyMode === 'per-token' ? payload.n : 's',
           encrypt ? 'e' : 'p', wmCachePart,
           forensicSeed ? (forensicPerToken ? payload.n : 'fx') : 'nofx',
           payload.vh || '',
+          `q${deliveryQuality}`, deliveryLossless ? 'ls' : 'lq', deliveryFormat, stegoCachePart,
         ].join('|');
         let bytes = outputCache.get(cacheKey);
         if (!bytes) {
@@ -299,13 +380,17 @@ export function createArchxMiddleware(options = {}) {
             grid,
             key: scrambleKey,
             maxWidth: Math.min(maxWidthCap, payload.w || 1200),
-            quality,
-            lossless,
-            format,
+            quality: deliveryQuality,
+            lossless: deliveryLossless,
+            format: deliveryFormat,
             aesKey: encrypt ? deriveAesKey(id, payload.n) : null,
             watermark: payload.wm || null,
             forensicSeed,
             forensic: typeof forensic === 'object' ? forensic : {},
+            stegoPayload,
+            stegoKey: stegoPayload ? deriveStegoKey(id, secret) : null,
+            stegoStrength: payload.sgs ?? stegoGlobalCfg.strength ?? 6,
+            steganography: stegoPayload ? stegoGlobalCfg : null,
           });
           bytes = result.bytes;
           outputCache.set(cacheKey, bytes);

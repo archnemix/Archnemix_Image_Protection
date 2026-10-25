@@ -37,7 +37,10 @@ if (!input || !output || args.help) {
   --format <fmt>       webp (default), png, or jpeg
   --encrypt            AES-GCM-encrypt the payload (prints the key — store it safely)
   --watermark <text>   bake a visible watermark in before scrambling
-  --forensic-seed <s>  bake a seeded forensic block mark in before scrambling`);
+  --forensic-seed <s>  bake a seeded forensic block mark in before scrambling
+  --stego <payload>    bake a blind StegoMark ownership fingerprint (detect later with archx-detect)
+  --stego-key <s>      StegoMark permutation key (default: the scramble --key)
+  --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)`);
   process.exit(input ? 0 : 1);
 }
 
@@ -54,14 +57,17 @@ const opts = {
   aesKey,
   watermark: args.watermark || null,
   forensicSeed: args['forensic-seed'] || null,
+  stegoPayload: args.stego || null,
+  stegoKey: args['stego-key'] || key,
+  stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
 };
 
 async function protectOne(inPath, outPath) {
   const inputBytes = fs.readFileSync(inPath);
-  const { bytes, header } = await scrambleImage(inputBytes, opts);
+  const { bytes, header, stegoFingerprint } = await scrambleImage(inputBytes, opts);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, bytes);
-  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB)`);
+  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB${stegoFingerprint ? `, StegoMark ${stegoFingerprint}` : ''})`);
 }
 
 const stat = fs.statSync(input);

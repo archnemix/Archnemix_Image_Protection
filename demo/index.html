@@ -117,6 +117,22 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <option value="scrambled">🧩 a scrambled mosaic</option>
         </select>
       </label>
+      <label>Legitimate-view quality (direct parameter)
+        <select id="quality-profile">
+          <option value="original">original — lossless at display size</option>
+          <option value="high">high — WebP/JPEG q95</option>
+          <option value="balanced">balanced — q90, lighter</option>
+          <option value="fast">fast — q82, smallest</option>
+        </select>
+      </label>
+      <label>Fortress capture style (direct parameter)
+        <select id="capture-style">
+          <option value="lens-temporal">Lens + temporal shield + trace</option>
+          <option value="lens">Lens + trace (no flicker)</option>
+          <option value="temporal">Temporal shield + trace (full frame)</option>
+          <option value="trace">Dynamic trace only</option>
+        </select>
+      </label>
       <button class="btn" id="rebuild">↻ Rebuild protected cards</button>
     </div>
 
@@ -136,7 +152,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag good">✓ ARCHX · SHIELD</span>
           <h3>Shield mode + signed scrambled delivery</h3>
-          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed URL. The watermark + forensic mark are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked.</p>
+          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed URL. The watermark, forensic mark and blind <b>StegoMark ownership fingerprint</b> are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked and testable later with <code>archx-detect</code>. Once loaded, this card never reloads on scroll/resize.</p>
           <div class="try">👉 Right-click, drag, inspect. Then run Attack ② below to see the decoy an extractor receives.</div>
         </div>
       </article>
@@ -146,7 +162,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag best">⬢ ARCHX · VAULT (WEBGL)</span>
           <h3>Vault mode for premium images</h3>
-          <p>Rendered by a WebGL shader that un-scrambles tiles on the GPU. The drawing buffer is cleared after every frame, so <i>even a prototype-bypass</i> <code>toDataURL</code> returns pure black.</p>
+          <p>Rendered by a WebGL shader that un-scrambles tiles on the GPU. The drawing buffer is not preserved, so <i>even a prototype-bypass</i> <code>toDataURL</code> returns pure black. Static Vault images now draw <b>on demand</b> (load/resize/lens/risk changes) instead of looping at 60 fps forever.</p>
           <div class="try">👉 Run Attack ③ below: Shield yields only the watermarked screen-size copy — Vault yields <b>black</b>.</div>
         </div>
       </article>
@@ -156,8 +172,8 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag best">⬢ ARCHX · FORTRESS + LENS</span>
           <h3>For the truly determined attacker</h3>
-          <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping, a dynamic session/time capture trace — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One OS, extension, DevTools, or cross-device camera capture can never contain the whole sharp image.</p>
-          <div class="try">👉 Move your pointer over this card. Now screenshot or photograph it: you captured mush + one small sharp circle + a moving trace code. Sweeping the lens to stitch patches is rate-tracked and reported.</div>
+          <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping, a dynamic session/time capture trace, a <b>temporal shield</b> (complementary noisy frames your eyes integrate but a single screenshot cannot) — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One OS, extension, DevTools, or cross-device camera capture can never contain the whole clean sharp image. It still cannot magically veto your PrintScreen key — it makes that captured frame degraded and attributable.</p>
+          <div class="try">👉 Move your pointer over this card. Now screenshot or photograph it: you captured mush + one temporally-noised sharp circle + a moving trace code. Sweeping the lens to stitch patches is rate-tracked and reported. Try the capture-style selector above.</div>
         </div>
       </article>
     </div>
@@ -186,7 +202,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
   <section id="gallery-section">
     <h2>🖼 100 protected images, still fast</h2>
     <p class="sub">Gallery mode is built for scale: shared <code>IntersectionObserver</code> lazy-loading, max 6 concurrent decodes,
-    an LRU bitmap cache, display-size-only backing stores, and off-screen unloading. Scroll — images paint as they approach, with zero <code>&lt;img&gt;</code> tags.</p>
+    an LRU bitmap cache, display-size-only backing stores, and <b>no reload after first paint</b> (scrolling/resizing repaints locally). Scroll — images paint as they approach, with zero <code>&lt;img&gt;</code> tags.</p>
     <div class="stats">
       <span><b id="stat-loaded">0</b> / 100 loaded</span>
       <span><b id="stat-imgtags">–</b> &lt;img&gt; tags from Archx</span>
@@ -223,6 +239,9 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>View Page Source / inspect HTML</td><td>Source contains code and endpoint names, not masters, signed image URLs, or server secrets. Protected pixels still require JS, authorization, and a fresh entitled token</td><td>No downloadable image URL to copy</td></tr>
           <tr><td>Photograph the screen with a phone/second device</td><td><i>Physically unstoppable and undetectable from the displayed device.</i> The answer is value reduction: server-authorized resolution, baked visible/forensic marks, Fortress Lens, and a dynamic trace that changes while the camera is framing/stitching</td><td>A camera copy with screen/moiré loss, Lens mush outside one disc, and session attribution</td></tr>
           <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs many real-input captures and still carries marks</td></tr>
+          <tr><td>One PrintScreen / extension frame of a temporal-shield image</td><td>Two complementary noisy frames alternate at refresh rate; human temporal integration averages them, a single captured frame keeps the noise. Screen <i>recording</i> or averaging many captures can undo this, so it is layered with Lens/trace/marks</td><td>One noisy half-frame, not the clean still</td></tr>
+          <tr><td>Denoise / AI-upscale / “recreate” a degraded capture</td><td>No pixel-layer defence is AI-proof. Archx reduces the information available (entitled derivative, Lens, temporal noise), keeps visible attribution, and adds evidence layers; server authorization and monitoring remain the real control plane</td><td>A plausible hallucination at best — not your exact pixels, and marked/attributable inputs</td></tr>
+          <tr><td>Repost a screenshot/export and claim it is not yours</td><td>StegoMark blind fingerprint (48-bit ID + CRC, repeated keyed macro-cells) is baked server-side; test the suspect file with <code>archx-detect</code> and look the fingerprint up in your issuance registry</td><td>Attribution evidence identifying the issued image/view, even after common re-encoding/resizing</td></tr>
           <tr><td>Memory/cache forensics after viewing</td><td><code>no-store</code> everywhere; strict-memory mode (Fortress) closes decoded bitmaps right after paint/upload and skips the bitmap cache; clean working canvases are wiped immediately</td><td>Far less decoded material left sitting in RAM/cache</td></tr>
         </tbody>
       </table>
@@ -248,12 +267,18 @@ import Archx from '@archnemix/image-protection';
 Archx.config({ tokenEndpoint: '/archx/token/' });
 Archx.load.image('#hero', { id: 'aurora-valley' }, {
   mode: 'fortress',                    // 'lite' | 'shield' | 'vault' | 'fortress'
+  qualityProfile: 'original',          // lossless legitimate view at display size
   lens: true,                          // one screenshot != one sharp full image
+  temporalShield: { strength: 0.16 },  // one captured frame != the clean still
   captureShield: true,                 // drifting session/time trace (on in Fortress)
+  cachePayload: true,                  // loaded once: scrolling/resizing never remints
+  renderLoop: 'auto',                  // static images draw on demand, not 60fps forever
   watermark: '© My Studio · {session}',
   onExtract: 'black',                  // what canvas-grabbers receive
   onAttempt: (kind) => logToAnalytics(kind),
 });
+// Or start from an inspectable preset and override any single parameter:
+// Archx.load.image(el, src, { ...Archx.preset('commerce'), temporalShield: false });
 
 // ——— 2 · Client-only (any existing image URL or File/Blob) ———
 Archx.load.image('#photo', 'https://cdn.example.com/photo.jpg', { mode: 'shield' });
@@ -262,7 +287,7 @@ Archx.load.image('#preview', fileFromInput, { mode: 'lite' });
 // ——— 3 · Declarative ———
 // &lt;archx-image image-id="aurora-valley" mode="shield" watermark="© Studio"&gt;&lt;/archx-image&gt;
 
-// ——— Galleries (lazy, capped concurrency, auto-unload) ———
+// ——— Galleries (lazy, capped concurrency, cached/no-reload) ———
 Archx.load.gallery('#grid', ids.map(id =&gt; ({ id })), { mode: 'lite' });
 
 // ——— Server (Node, Express-compatible) ———
@@ -271,6 +296,9 @@ app.use(createArchxMiddleware({
   secret: process.env.ARCHX_SECRET,
   imagesDir: './masters',            // keep OUTSIDE your static/public folder
   ttlSec: 120, grid: 8,
+  steganography: { perToken: true, strength: 6 },
+  onStegoIssue: ({ id, viewerId, fingerprint }) =&gt; db.saveFingerprint({ id, viewerId, fingerprint }),
+  authorize: async (req, id) =&gt; ({ viewerId: req.user.id, maxWidth: 1600, quality: 'lossless' }),
 }));</code></pre>
   </section>
 
@@ -317,16 +345,25 @@ function buildCards() {
   }
   const wm = document.getElementById('wm-text').value;
   const onExtract = document.getElementById('extract-kind').value;
+  const qualityProfile = document.getElementById('quality-profile').value;
+  const captureStyle = document.getElementById('capture-style').value;
+  const fortressCapture = {
+    lens: captureStyle === 'lens-temporal' || captureStyle === 'lens',
+    temporalShield: captureStyle === 'lens-temporal' || captureStyle === 'temporal'
+      ? { strength: 0.16, block: 2 }
+      : false,
+    captureShield: { dynamicTrace: true, temporalPattern: true },
+  };
   // debug:true exists ONLY so this demo's attack buttons can play
   // "attacker found the canvas in DevTools". Never enable it in production.
   // The tiled watermark you see is baked on the SERVER; the client adds the
   // corner session label on top.
   shield = Archx.load.image('#shield-img', { id: 'aurora-valley' },
-    { mode: 'shield', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Aurora valley (protected, shield mode)' });
+    { mode: 'shield', qualityProfile, watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Aurora valley (protected, shield mode)' });
   vault = Archx.load.image('#vault-img', { id: 'luxury-watch' },
-    { mode: 'vault', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Luxury watch (protected, vault mode)' });
+    { mode: 'vault', qualityProfile, renderLoop: 'static', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Luxury watch (protected, vault mode)' });
   fortress = Archx.load.image('#fortress-img', { id: 'neon-portrait' },
-    { mode: 'fortress', lens: true, automation: 'monitor', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Neon portrait (protected, fortress mode with pointer lens)' });
+    { mode: 'fortress', qualityProfile, ...fortressCapture, automation: 'monitor', watermark: { text: wm, tile: false, corner: true }, onExtract, debug: true, alt: 'Neon portrait (protected, fortress mode with pointer lens)' });
 }
 buildCards();
 document.getElementById('rebuild').addEventListener('click', () => { buildCards(); log('↻ Protected cards rebuilt with your settings.'); });

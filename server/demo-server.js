@@ -30,6 +30,8 @@ if (galleryCount < 100 || !fs.existsSync(path.join(root, 'demo', 'public-unprote
   catch { console.warn('⚠ demo image generation failed — run: npm run demo:images'); }
 }
 
+const stegoRegistry = []; // demo stand-in for your fingerprint -> view database
+
 const archx = createArchxMiddleware({
   secret: process.env.ARCHX_SECRET || 'demo-secret-change-me-in-production',
   imagesDirs: [
@@ -39,6 +41,16 @@ const archx = createArchxMiddleware({
   ttlSec: 120,
   grid: 8,
   quality: 95, // high-fidelity delivered pixels (set lossless:true for exact-size pixels)
+  allowClientQuality: true, // demo cards ask for qualityProfile:'original' (lossless)
+  // Blind ownership fingerprint in every delivered view. Per-image here so the
+  // demo output cache stays effective; production can use perToken + a DB.
+  steganography: { perToken: false, strength: 6 },
+  onStegoIssue: async ({ id, fingerprint }) => {
+    if (!stegoRegistry.some((r) => r.id === id && r.fingerprint === fingerprint)) {
+      stegoRegistry.unshift({ id, fingerprint, issuedAt: new Date().toISOString() });
+      stegoRegistry.length = Math.min(stegoRegistry.length, 30);
+    }
+  },
   // Determined-attacker hardening (all on for the demo):
   oneTimeTokens: true,                    // a captured signed URL cannot be replayed
   bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it
@@ -92,6 +104,10 @@ function serveStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/demo-api/stego-registry')) {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(stegoRegistry, null, 2));
+  }
   if (req.url.startsWith('/archx/')) return archx(req, res);
   return serveStatic(req, res);
 });

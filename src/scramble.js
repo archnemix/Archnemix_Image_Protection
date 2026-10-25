@@ -288,6 +288,323 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
 }
 
 /* ------------------------------------------------------------------ */
+/* Blind steganographic ownership fingerprint                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Archx StegoMark: a keyed, redundant, *blindly decodable* payload hidden in
+ * delivered pixels. It complements (not replaces) the reference-based
+ * forensic blocks above: the owner can feed a suspect screenshot/export to
+ * `detectStegoFingerprint()` / `archx-detect` and recover a 48-bit
+ * fingerprint identifying the image / viewer / token — no original needed.
+ *
+ * Scheme: the image is divided into a macro-cell grid (default 24×16).
+ * A 64-bit codeword (48-bit fingerprint + CRC-16) is assigned to cells via a
+ * keyed permutation, so every code bit is repeated across several cells and
+ * survives local cropping/damage. Each cell encodes its bit as a 4-band
+ * alternating luminance pattern (+−+− vs −+−+), sign-flipped by a keyed
+ * per-cell polarity and broken into four short row segments with keyed signs
+ * so the mark does not form long, visible vertical stripes. Detection uses a
+ * third-difference of each segment's band means, which cancels smooth image
+ * content (gradients) while responding to the embedded alternation, then
+ * soft-votes across repetitions and checks CRC.
+ *
+ * Honest limits: this is classical spread-spectrum-style marking, not a
+ * neural Light Field Messaging system. It is designed to survive ordinary
+ * re-encoding, mild resizing and screenshots well enough to *attribute*
+ * copies; determined denoising / diffusion regeneration can weaken or
+ * remove it. Treat a positive decode as evidence, not as DRM.
+ */
+export function stegoFingerprint(value) {
+  const s = String(value ?? '');
+  if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
+  const a = hashSeed('archx-stego:' + s, 0x51ab);
+  const b = hashSeed('archx-stego:' + s, 0x9e37);
+  const lo = Math.floor(a % 0x1000000).toString(16).padStart(6, '0');
+  const hi = Math.floor(b % 0x1000000).toString(16).padStart(6, '0');
+  return lo + hi;
+}
+
+function stegoCrc16(bytes) {
+  let crc = 0xffff;
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let i = 0; i < 8; i++) {
+      crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+    }
+  }
+  return crc;
+}
+
+function stegoCodeBits(fingerprint) {
+  const bytes = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) bytes[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
+  const crc = stegoCrc16(bytes);
+  const all = [...bytes, (crc >> 8) & 255, crc & 255];
+  const bits = new Uint8Array(64);
+  all.forEach((byte, i) => {
+    for (let b = 0; b < 8; b++) bits[i * 8 + b] = (byte >> (7 - b)) & 1;
+  });
+  return bits;
+}
+
+function stegoBitsToBytes(bits) {
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  return bytes;
+}
+
+function stegoCrcValid(bits) {
+  const bytes = stegoBitsToBytes(bits);
+  return stegoCrc16(bytes.subarray(0, 6)) === ((bytes[6] << 8) | bytes[7]);
+}
+
+/**
+ * Soft-decision repair: if the voted codeword fails CRC, try flipping the
+ * least-reliable bits (singles, pairs, triples). Real marks usually need
+ * 0–2 repairs after re-encoding; random images are still rejected by the
+ * caller's signal/agreement thresholds, not by CRC alone.
+ */
+function correctStegoBits(bits, reliability) {
+  if (stegoCrcValid(bits)) return { bits, corrections: 0 };
+  const weakest = [...bits.keys()]
+    .sort((a, b) => reliability[a] - reliability[b])
+    .slice(0, 20);
+  let best = null;
+  const visit = (start, chosen) => {
+    if (chosen.length) {
+      const candidate = new Uint8Array(bits);
+      let cost = 0;
+      for (const i of chosen) { candidate[i] ^= 1; cost += reliability[i]; }
+      if (stegoCrcValid(candidate) && (!best || cost < best.cost)) {
+        best = { bits: candidate, corrections: chosen.length, cost };
+      }
+    }
+    if (chosen.length >= 3) return;
+    for (let i = start; i < weakest.length; i++) visit(i + 1, [...chosen, weakest[i]]);
+  };
+  visit(0, []);
+  return best || { bits, corrections: -1 };
+}
+
+const STEGO_ROW_SEGMENTS = 4;
+
+function stegoLayout(cellCount, key) {
+  const rand = mulberry32(hashSeed(String(key) + '::archx-stego-layout'));
+  const order = Array.from({ length: cellCount }, (_, i) => i);
+  for (let i = cellCount - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const polarity = new Int8Array(cellCount);
+  for (let i = 0; i < cellCount; i++) polarity[i] = rand() < 0.5 ? -1 : 1;
+  const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
+  for (let i = 0; i < segmentPolarity.length; i++) segmentPolarity[i] = rand() < 0.5 ? -1 : 1;
+  return { order, polarity, segmentPolarity };
+}
+
+function stegoGrid(w, h, gridX, gridY) {
+  let gx = Math.max(4, Math.min(64, Math.round(gridX || 24)));
+  let gy = Math.max(4, Math.min(64, Math.round(gridY || 16)));
+  gx = Math.min(gx, Math.max(4, Math.floor(w / 8)));
+  gy = Math.min(gy, Math.max(4, Math.floor(h / 8)));
+  while (gx * gy < 64 && (gx < Math.floor(w / 4) || gy < Math.floor(h / 4))) {
+    if (gx <= gy && gx < Math.floor(w / 4)) gx++; else gy++;
+  }
+  return { gx, gy };
+}
+
+export function embedStegoFingerprint(rgba, w, h, payload, {
+  key = '', strength = 6, gridX = 24, gridY = 16,
+} = {}) {
+  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
+  if (w < 64 || h < 64) throw new Error('Archx stego: image too small (minimum 64×64)');
+  const fingerprint = stegoFingerprint(payload);
+  const bits = stegoCodeBits(fingerprint);
+  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const cellCount = gx * gy;
+  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const out = new Uint8Array(src);
+  const amp = Math.max(1, Math.min(16, Number(strength) || 6));
+
+  for (let cy = 0; cy < gy; cy++) {
+    const y0 = Math.floor((cy * h) / gy);
+    const y1 = Math.floor(((cy + 1) * h) / gy);
+    for (let cx = 0; cx < gx; cx++) {
+      const x0 = Math.floor((cx * w) / gx);
+      const x1 = Math.floor(((cx + 1) * w) / gx);
+      if (x1 - x0 < 4 || y1 - y0 < 2) continue;
+      const cell = cy * gx + cx;
+      const bit = bits[order[cell] % bits.length];
+      const pol = polarity[cell];
+
+      // Perceptual masking: textured cells can hide a stronger mark than
+      // flat sky/skin. Sample local luminance spread to scale amplitude.
+      let sum = 0, sum2 = 0, n = 0;
+      for (let y = y0; y < y1; y += 2) {
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x += 2, i += 8) {
+          const lum = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+          sum += lum; sum2 += lum * lum; n++;
+        }
+      }
+      const mean = n ? sum / n : 0;
+      const std = n ? Math.sqrt(Math.max(0, sum2 / n - mean * mean)) : 0;
+      const cellAmp = amp * Math.max(0.35, Math.min(1, 0.35 + std / 55));
+      const cellW = x1 - x0;
+      const cellH = y1 - y0;
+
+      for (let y = y0; y < y1; y++) {
+        const segment = Math.min(
+          STEGO_ROW_SEGMENTS - 1,
+          Math.floor(((y - y0) * STEGO_ROW_SEGMENTS) / cellH),
+        );
+        const segmentSign = segmentPolarity[cell * STEGO_ROW_SEGMENTS + segment];
+        let i = (y * w + x0) * 4;
+        for (let x = x0; x < x1; x++, i += 4) {
+          const band = Math.min(3, Math.floor(((x - x0) * 4) / cellW));
+          const pattern = (band % 2 === 0 ? 1 : -1) * (bit ? 1 : -1) * pol * segmentSign;
+          const delta = cellAmp * pattern;
+          // Clamp per channel: a saturated red channel must not suppress the
+          // mark in green/blue, or flat synthetic/saturated areas decode with
+          // a systematic one-direction bias.
+          out[i] = Math.max(0, Math.min(255, src[i] + delta));
+          out[i + 1] = Math.max(0, Math.min(255, src[i + 1] + delta));
+          out[i + 2] = Math.max(0, Math.min(255, src[i + 2] + delta));
+        }
+      }
+    }
+  }
+  return out;
+}
+
+export function detectStegoFingerprint(rgba, w, h, {
+  key = '', gridX = 24, gridY = 16, searchOffsets = false,
+} = {}) {
+  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
+  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const cellCount = gx * gy;
+  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const cw = w / gx, ch = h / gy;
+  const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
+
+  const evaluate = (fx, fy) => {
+    const dx = fx * cw, dy = fy * ch;
+    const bitScores = new Float64Array(64);
+    const bitCounts = new Uint16Array(64);
+    const cellScores = [];
+    for (let cy = 0; cy < gy; cy++) {
+      const y0 = Math.max(0, Math.round(cy * ch + dy));
+      const y1 = Math.min(h, Math.round((cy + 1) * ch + dy));
+      for (let cx = 0; cx < gx; cx++) {
+        const x0 = Math.max(0, Math.round(cx * cw + dx));
+        const x1 = Math.min(w, Math.round((cx + 1) * cw + dx));
+        if (x1 - x0 < 4 || y1 - y0 < 2) continue;
+        const sums = new Float64Array(STEGO_ROW_SEGMENTS * 4);
+        const counts = new Uint32Array(STEGO_ROW_SEGMENTS * 4);
+        const cellW = x1 - x0;
+        const cellH = y1 - y0;
+        const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
+        for (let y = y0; y < y1; y += step) {
+          const segment = Math.min(
+            STEGO_ROW_SEGMENTS - 1,
+            Math.floor(((y - y0) * STEGO_ROW_SEGMENTS) / cellH),
+          );
+          let i = (y * w + x0) * 4;
+          for (let x = x0; x < x1; x += step, i += step * 4) {
+            const band = Math.min(3, Math.floor(((x - x0) * 4) / cellW));
+            const idx = segment * 4 + band;
+            sums[idx] += (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+            counts[idx]++;
+          }
+        }
+        // Third-difference responds to +−+− alternation and cancels linear /
+        // quadratic image content. Evaluate each short row segment under its
+        // keyed sign, then average. Positive result means code bit = 1.
+        let segmentScoreSum = 0;
+        let segmentWeightSum = 0;
+        const cellIndex = cy * gx + cx;
+        for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
+          const base = segment * 4;
+          if (counts[base] === 0 || counts[base + 1] === 0 || counts[base + 2] === 0 || counts[base + 3] === 0) continue;
+          const m0 = sums[base] / counts[base];
+          const m1 = sums[base + 1] / counts[base + 1];
+          const m2 = sums[base + 2] / counts[base + 2];
+          const m3 = sums[base + 3] / counts[base + 3];
+          const weight = Math.min(counts[base], counts[base + 1], counts[base + 2], counts[base + 3]);
+          segmentScoreSum += (-(-m0 + 3 * m1 - 3 * m2 + m3) / 8) *
+            polarity[cellIndex] * segmentPolarity[cellIndex * STEGO_ROW_SEGMENTS + segment] * weight;
+          segmentWeightSum += weight;
+        }
+        if (!segmentWeightSum) continue;
+        const rawScore = segmentScoreSum / segmentWeightSum;
+        // Clip outliers: one hard image edge crossing a cell can otherwise
+        // outvote five correctly-marked repetitions of the same code bit.
+        const score = Math.max(-12, Math.min(12, rawScore));
+        const bitIndex = order[cy * gx + cx] % 64;
+        bitScores[bitIndex] += score;
+        bitCounts[bitIndex]++;
+        cellScores.push({ bitIndex, score });
+      }
+    }
+    const votedBits = new Uint8Array(64);
+    const reliability = new Float64Array(64);
+    for (let i = 0; i < 64; i++) {
+      votedBits[i] = bitScores[i] >= 0 ? 1 : 0;
+      reliability[i] = Math.abs(bitScores[i]) / Math.max(1, bitCounts[i]);
+    }
+    const corrected = correctStegoBits(votedBits, reliability);
+    const bits = corrected.bits;
+    const bytes = stegoBitsToBytes(bits);
+    const fingerprint = [...bytes.subarray(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const crcValid = stegoCrcValid(bits);
+    const agreeing = cellScores.filter(({ bitIndex, score }) => (score >= 0) === !!bits[bitIndex]).length;
+    const agreement = cellScores.length ? agreeing / cellScores.length : 0;
+    const meanAbs = bitScores.reduce((s, v, i) => s + Math.abs(v) / Math.max(1, bitCounts[i]), 0) / 64;
+    // Unmarked photos naturally show ~0.60–0.68 self-agreement (majority
+    // vote bias) and weak mean signal; genuine marks sit far above both.
+    const evidence = Math.max(0, agreement - 0.64) * 2.4 +
+      Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) -
+      Math.max(0, corrected.corrections) * 0.04;
+    const confidence = crcValid
+      ? Math.max(0, Math.min(0.99, 0.42 + evidence))
+      : Math.max(0, Math.min(0.49, evidence));
+    return {
+      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2,
+      fingerprint,
+      crcValid,
+      corrections: Math.max(0, corrected.corrections),
+      confidence: Math.round(confidence * 1000) / 1000,
+      agreement: Math.round(agreement * 1000) / 1000,
+      meanSignal: Math.round(meanAbs * 100) / 100,
+      cells: cellScores.length,
+      offset: { x: fx, y: fy },
+      grid: { x: gx, y: gy },
+      _evidence: evidence,
+    };
+  };
+
+  let best = null;
+  for (const fx of fractions) for (const fy of fractions) {
+    const candidate = evaluate(fx, fy);
+    const better = !best ||
+      (candidate.found && !best.found) ||
+      (candidate.found === best.found && candidate._evidence > best._evidence) ||
+      (candidate.found === best.found && candidate._evidence === best._evidence && candidate.confidence > best.confidence);
+    if (better) best = candidate;
+    if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
+  }
+  if (best) delete best._evidence;
+  return best;
+}
+
+/* ------------------------------------------------------------------ */
 /* Pixel-level scramble on raw RGBA buffers (used by server + tests)    */
 /* ------------------------------------------------------------------ */
 

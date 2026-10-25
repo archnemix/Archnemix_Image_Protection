@@ -8,6 +8,7 @@ import sharp from 'sharp';
 import {
   buildScramblePlan, paddedSize, scramblePixels,
   encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
+  embedStegoFingerprint, stegoFingerprint,
 } from '../src/scramble.js';
 
 export { generateKeyBase64 };
@@ -118,6 +119,26 @@ export async function scrambleImage(input, opts = {}) {
     });
     forensicMarked = true;
   }
+
+  // Blind steganographic ownership fingerprint (pre-scramble): a suspect
+  // screenshot/export can later be tested with detectStegoFingerprint() or
+  // `archx-detect` and attributed to this image / viewer / issued token.
+  let stegoMarked = false;
+  let resolvedStegoFingerprint = null;
+  const stegoCfg = typeof opts.steganography === 'object' && opts.steganography ? opts.steganography : {};
+  const stegoPayload = opts.stegoPayload ?? stegoCfg.payload ??
+    (opts.steganography === true ? key || 'archx' : null);
+  if (stegoPayload != null && stegoPayload !== '') {
+    rawPixels = embedStegoFingerprint(rawPixels, w, h, stegoPayload, {
+      key: opts.stegoKey ?? stegoCfg.key ?? key,
+      strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
+      gridX: stegoCfg.gridX ?? 24,
+      gridY: stegoCfg.gridY ?? 16,
+    });
+    stegoMarked = true;
+    resolvedStegoFingerprint = stegoFingerprint(stegoPayload);
+  }
+
   const { pw, ph } = paddedSize(w, h, grid);
   const padded = padRaw(rawPixels, w, h, pw, ph);
   const plan = buildScramblePlan(grid, key);
@@ -142,6 +163,7 @@ export async function scrambleImage(input, opts = {}) {
     v: 1, w, h, pw, ph, grid, mime, scrambled: true, encrypted: false,
     ...(watermarked ? { wm: 1 } : {}),
     ...(forensicMarked ? { fx: 1 } : {}),
+    ...(stegoMarked ? { sg: 1 } : {}),
   };
   if (opts.aesKey) {
     const { cipher, iv } = await encryptPayload(payload, opts.aesKey);
@@ -151,9 +173,13 @@ export async function scrambleImage(input, opts = {}) {
   }
   if (opts.container === false) {
     if (header.encrypted) throw new Error('encrypted output requires an .archx container');
-    return { bytes: payload, header };
+    return { bytes: payload, header, stegoFingerprint: resolvedStegoFingerprint };
   }
-  return { bytes: Buffer.from(encodeContainer(header, payload)), header };
+  return {
+    bytes: Buffer.from(encodeContainer(header, payload)),
+    header,
+    stegoFingerprint: resolvedStegoFingerprint,
+  };
 }
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */
