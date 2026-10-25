@@ -1,0 +1,270 @@
+#!/usr/bin/env node
+/**
+ * Real-browser protection tests (headless Chromium via puppeteer-core +
+ * @sparticuz/chromium, so no browser download is needed).
+ * Boots the demo server on a test port and verifies, in an actual browser:
+ * DOM hygiene, poisoned read-back, WebGL black read-back, split tiles,
+ * interaction guards, risk reactions, print blackout, visual correctness,
+ * network payload scrambling, and 100-image gallery performance.
+ */
+import { spawn, execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import sharp from 'sharp';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PORT = 4179;
+const BASE = `http://127.0.0.1:${PORT}`;
+
+let failures = 0;
+let checks = 0;
+function check(name, cond, detail = '') {
+  checks++;
+  if (cond) console.log(`  ✔ ${name}${detail ? ' — ' + detail : ''}`);
+  else { failures++; console.log(`  ✘ FAIL: ${name}${detail ? ' — ' + detail : ''}`); }
+}
+
+/* ensure demo images exist */
+if (!fs.existsSync(path.join(root, 'demo-masters/gallery/gallery-001.jpg'))) {
+  execSync('node tools/generate-test-images.mjs', { cwd: root, stdio: 'inherit' });
+}
+
+/* boot server */
+const server = spawn('node', ['server/demo-server.js'], {
+  cwd: root, env: { ...process.env, PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'pipe'],
+});
+let serverLog = '';
+server.stdout.on('data', (d) => { serverLog += d; });
+server.stderr.on('data', (d) => { serverLog += d; });
+async function waitServer() {
+  for (let i = 0; i < 60; i++) {
+    try { const r = await fetch(BASE + '/test-harness.html'); if (r.ok) return; } catch {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('demo server did not start:\n' + serverLog);
+}
+
+/* launch browser */
+const chromium = (await import('@sparticuz/chromium')).default;
+const puppeteer = (await import('puppeteer-core')).default;
+await waitServer();
+
+/* @sparticuz/chromium ships its AL2023 shared libs (libnspr4/libnss3/…) as a
+ * brotli tar. Outside Lambda they aren't auto-extracted, so do it ourselves
+ * and point the dynamic loader at them. */
+async function chromiumEnv() {
+  const libDir = '/tmp/al2023/lib';
+  try {
+    if (!fs.existsSync(path.join(libDir, 'libnspr4.so'))) {
+      const zlib = await import('node:zlib');
+      const { pipeline } = await import('node:stream/promises');
+      const br = path.join(root, 'node_modules/@sparticuz/chromium/bin/al2023.tar.br');
+      await pipeline(fs.createReadStream(br), zlib.createBrotliDecompress(), fs.createWriteStream('/tmp/al2023.tar'));
+      fs.mkdirSync('/tmp/al2023', { recursive: true });
+      execSync('tar -xf /tmp/al2023.tar -C /tmp/al2023');
+    }
+    return { ...process.env, LD_LIBRARY_PATH: libDir + ':' + (process.env.LD_LIBRARY_PATH || '') };
+  } catch { return process.env; }
+}
+
+const browser = await puppeteer.launch({
+  executablePath: await chromium.executablePath(),
+  args: [...chromium.args, '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader'],
+  headless: true,
+  env: await chromiumEnv(),
+});
+const page = await browser.newPage();
+await page.setViewport({ width: 1200, height: 900 });
+const pageErrors = [];
+page.on('pageerror', (e) => pageErrors.push('pageerror: ' + e.message));
+page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('console: ' + m.text()); });
+
+try {
+  await page.goto(BASE + '/test-harness.html', { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.waitForFunction(() => window.__allLoaded === true, { timeout: 60000 });
+
+  console.log('\n[1] DOM hygiene — nothing for scrapers/extensions to grab');
+  const dom = await page.evaluate(() => ({
+    imgCount: document.querySelectorAll('img').length,
+    imgSrcs: [...document.querySelectorAll('img')].map((i) => i.getAttribute('src')),
+    canvasInDocument: document.querySelectorAll('canvas').length,
+    closedShadowRoot: document.querySelector('#t-closed').shadowRoot,
+    shieldOuter: document.querySelector('#t-shield').outerHTML,
+    anyAuroraInDom: document.body.innerHTML.includes('/archx/i/') || document.body.innerHTML.includes('t=eyJ'),
+    loadedFlags: Object.fromEntries(Object.entries(window.__instances).map(([k, v]) => [k, v.loaded])),
+  }));
+  check('only the deliberately unprotected <img> exists', dom.imgCount === 1 && dom.imgSrcs[0].includes('public-unprotected'), JSON.stringify(dom.imgSrcs));
+  check('no canvas reachable via document.querySelectorAll (shadow DOM)', dom.canvasInDocument === 0);
+  check('closed shadow root hides internals from JS (shadowRoot === null)', dom.closedShadowRoot === null);
+  check('protected host outerHTML contains no URL/src', !/src=|http|\.jpg|\.archx/.test(dom.shieldOuter), dom.shieldOuter.slice(0, 120));
+  check('no signed image URL anywhere in body HTML', !dom.anyAuroraInDom);
+  check('all 6 protected instances loaded', Object.values(dom.loadedFlags).every(Boolean), JSON.stringify(dom.loadedFlags));
+
+  console.log('\n[2] Visual correctness — protected images actually display the picture');
+  async function boxStats(selector) {
+    const el = await page.$(selector);
+    const shot = await el.screenshot();
+    const { data, info } = await sharp(shot).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    let mean = 0; for (let i = 0; i < data.length; i++) mean += data[i]; mean /= data.length;
+    let variance = 0; for (let i = 0; i < data.length; i++) variance += (data[i] - mean) ** 2; variance /= data.length;
+    return { mean, std: Math.sqrt(variance), w: info.width, h: info.height };
+  }
+  for (const [sel, label] of [['#t-lite', 'lite'], ['#t-shield', 'shield'], ['#t-vault', 'vault(WebGL)'], ['#t-split', 'split'], ['#t-clientonly', 'client-only']]) {
+    const s = await boxStats(sel);
+    check(`${label} renders a real, non-blank picture`, s.std > 18 && s.mean > 12, `mean=${s.mean.toFixed(1)} std=${s.std.toFixed(1)}`);
+  }
+  // Shield (scrambled delivery, unscrambled client-side) should resemble the normal <img> of same photo
+  async function boxRaw(selector, w = 96, h = 64) {
+    const el = await page.$(selector);
+    return sharp(await el.screenshot()).resize(w, h).removeAlpha().raw().toBuffer();
+  }
+  const diffShieldVsNormal = (() => null)(); // placeholder to keep ordering clear
+  const [rawNormal, rawShield] = [await boxRaw('#normal'), await boxRaw('#t-shield')];
+  let mad = 0; for (let i = 0; i < rawNormal.length; i++) mad += Math.abs(rawNormal[i] - rawShield[i]);
+  mad /= rawNormal.length;
+  check('shield image matches the original photo visually (scramble round-trip in browser)', mad < 38, `mean abs diff=${mad.toFixed(1)} (watermark+re-encode tolerant)`);
+
+  console.log('\n[3] Poisoned read-back — canvas grabbers get decoys');
+  const poison = await page.evaluate(async () => {
+    const canvas = window.__instances.shield._debug().canvas;
+    const dataUrl = canvas.toDataURL('image/png');
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = dataUrl; });
+    const probe = document.createElement('canvas');
+    probe.width = img.width; probe.height = img.height;
+    const pctx = probe.getContext('2d');
+    pctx.drawImage(img, 0, 0);
+    const px = pctx.getImageData(0, 0, probe.width, probe.height).data;
+    let sum = 0; for (let i = 0; i < px.length; i += 4) sum += px[i] + px[i + 1] + px[i + 2];
+    const decoyMean = sum / (px.length / 4) / 3;
+    const blobText = await new Promise((res) => canvas.toBlob(async (b) => {
+      const ab = new Uint8Array(await b.arrayBuffer()); res(ab.length);
+    }, 'image/png'));
+    const ctx = canvas.getContext('2d');
+    const idata = ctx.getImageData(0, 0, 24, 24).data;
+    let pixelSum = 0; for (let i = 0; i < idata.length; i += 4) pixelSum += idata[i] + idata[i + 1] + idata[i + 2];
+    const attempts = window.__attempts.slice();
+    return { decoyMean, blobBytes: blobText, getImageDataSum: pixelSum, attempts };
+  });
+  check('shield canvas.toDataURL() returns the black decoy (dark image)', poison.decoyMean < 22, `decoy mean brightness=${poison.decoyMean.toFixed(1)}/255`);
+  check('shield canvas.toBlob() returns decoy bytes (not zero, not the photo pipeline)', poison.blobBytes > 800, `${poison.blobBytes} bytes`);
+  check('shield ctx.getImageData() returns opaque black pixels', poison.getImageDataSum === 0);
+  check('extraction attempts were reported via archx-attempt events',
+    poison.attempts.includes('extract-dataurl') && poison.attempts.includes('extract-blob') && poison.attempts.includes('extract-pixels'),
+    JSON.stringify([...new Set(poison.attempts)]));
+
+  console.log('\n[4] Vault (WebGL) — even the prototype bypass gets black');
+  const vaultBypass = await page.evaluate(async () => {
+    const canvas = window.__instances.vault._debug().canvas;
+    const real = HTMLCanvasElement.prototype.toDataURL;
+    // Sample like an extension/script would: from a timer task, after frames presented.
+    let best = null;
+    for (let tries = 0; tries < 5; tries++) {
+      await new Promise((r) => setTimeout(r, 90));
+      const url = real.call(canvas, 'image/png');
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+      const probe = document.createElement('canvas');
+      probe.width = Math.max(1, img.width); probe.height = Math.max(1, img.height);
+      const pctx = probe.getContext('2d');
+      pctx.drawImage(img, 0, 0);
+      const px = pctx.getImageData(0, 0, probe.width, probe.height).data;
+      // RGB only — opaque black (0,0,0,255) must score 0, not 63.75.
+      let sum = 0; for (let i = 0; i < px.length; i += 4) sum += px[i] + px[i + 1] + px[i + 2];
+      const mean = sum / (px.length / 4) / 3;
+      best = best === null ? mean : Math.min(best, mean);
+      if (mean < 4) break;
+    }
+    // Shield prototype bypass for honest comparison (display-size watermarked copy)
+    const shieldCanvas = window.__instances.shield._debug().canvas;
+    const sUrl = real.call(shieldCanvas, 'image/png');
+    const sImg = new Image();
+    await new Promise((res, rej) => { sImg.onload = res; sImg.onerror = rej; sImg.src = sUrl; });
+    return { vaultMean: best, vaultIsGL: !!window.__instances.vault._debug().canvas.getContext('webgl2', {}), shieldBypassW: sImg.width, shieldCanvasW: shieldCanvas.width };
+  });
+  check('vault prototype-bypass toDataURL is black/transparent', vaultBypass.vaultMean < 4, `mean=${vaultBypass.vaultMean.toFixed(2)}/255`);
+  check('shield prototype bypass only yields the display-size backing store (resolution cap)', vaultBypass.shieldBypassW === vaultBypass.shieldCanvasW && vaultBypass.shieldCanvasW <= 700,
+    `backing=${vaultBypass.shieldCanvasW}px wide for a 340px box (no master resolution)`);
+
+  console.log('\n[5] Split-canvas mode — no single canvas holds the whole image');
+  const split = await page.evaluate(() => ({
+    tiles: window.__instances.split._debug().tiles.length,
+    tilePoisoned: (() => {
+      const t = window.__instances.split._debug().tiles[0];
+      return t.toDataURL('image/png').length > 100; // decoy still returned
+    })(),
+  }));
+  check('split mode renders 3×3 = 9 separate tile canvases', split.tiles === 9);
+  check('each tile canvas is individually poisoned', split.tilePoisoned);
+
+  console.log('\n[6] Interaction guards — right-click & drag');
+  await page.evaluate(() => { window.__attempts.length = 0; });
+  const shieldBox = await (await page.$('#t-shield')).boundingBox();
+  await page.mouse.click(shieldBox.x + shieldBox.width / 2, shieldBox.y + shieldBox.height / 2, { button: 'right' });
+  await new Promise((r) => setTimeout(r, 250));
+  let attemptsNow = await page.evaluate(() => window.__attempts.slice());
+  check('real right-click on protected image is intercepted (contextmenu)', attemptsNow.includes('contextmenu'), JSON.stringify(attemptsNow));
+  const dragPrevented = await page.evaluate(() => {
+    const wrap = window.__instances.shield._debug().wrap;
+    const ev = new DragEvent('dragstart', { bubbles: true, cancelable: true });
+    wrap.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  });
+  check('dragstart is prevented', dragPrevented === true);
+
+  console.log('\n[7] Risk reactions — blur on window blur, print blackout');
+  const blurState = await page.evaluate(() => {
+    window.dispatchEvent(new Event('blur'));
+    const on = window.__instances.shield._debug().wrap.classList.contains('risk-on');
+    window.dispatchEvent(new Event('focus'));
+    const off = window.__instances.shield._debug().wrap.classList.contains('risk-on');
+    return { on, off };
+  });
+  check('window blur triggers protective blur; focus restores', blurState.on === true && blurState.off === false);
+  await page.emulateMediaType('print');
+  await new Promise((r) => setTimeout(r, 300));
+  const printStats = await boxStats('#t-shield');
+  check('print media renders protected image blacked out', printStats.mean < 16, `print mean=${printStats.mean.toFixed(1)}`);
+  await page.emulateMediaType('screen');
+  await new Promise((r) => setTimeout(r, 300));
+
+  console.log('\n[8] Network payload — captured bytes are scrambled, master unreachable');
+  const directMaster = await fetch(BASE + '/demo-masters/aurora-valley.jpg');
+  check('GET master path directly -> 404', directMaster.status === 404);
+  const noToken = await fetch(BASE + '/archx/i/aurora-valley');
+  check('GET image route without token -> 403', noToken.status === 403);
+  const token = await (await fetch(BASE + '/archx/token/aurora-valley?w=800')).json();
+  const payloadRes = await fetch(BASE + token.url);
+  const payload = new Uint8Array(await payloadRes.arrayBuffer());
+  check('payload content-type is not an image', (payloadRes.headers.get('content-type') || '').includes('octet-stream'));
+  const headerLen = new DataView(payload.buffer).getUint32(6, false);
+  const header = JSON.parse(new TextDecoder().decode(payload.slice(10, 10 + headerLen)));
+  const inner = Buffer.from(payload.slice(10 + headerLen));
+  const masterRaw = await sharp(fs.readFileSync(path.join(root, 'demo-masters/aurora-valley.jpg'))).resize(160, 90).removeAlpha().raw().toBuffer();
+  const innerRaw = await sharp(inner).resize(160, 90).removeAlpha().raw().toBuffer();
+  let netMad = 0; for (let i = 0; i < masterRaw.length; i++) netMad += Math.abs(masterRaw[i] - innerRaw[i]); netMad /= masterRaw.length;
+  check('captured payload pixels are a scrambled mosaic vs master', netMad > 24, `mean abs diff=${netMad.toFixed(1)}`);
+  check('server down-scaled master (never sends full res)', header.w === 800, `header.w=${header.w}`);
+
+  console.log('\n[9] Performance — 100-image protected gallery');
+  const gallery = await page.evaluate(() => window.__loadGallery(100));
+  const galleryDom = await page.evaluate(() => ({
+    imgs: document.querySelectorAll('#gallery img').length,
+    loaded: window.__galleryInstances.filter((i) => i.loaded).length,
+  }));
+  check('100 gallery images all loaded', galleryDom.loaded === 100, `${galleryDom.loaded}/100 in ${(gallery.ms / 1000).toFixed(1)}s`);
+  check('100 gallery images created 0 <img> tags', galleryDom.imgs === 0);
+  check('gallery load completes within a sane budget (<90s in headless CI, ~seconds in a real browser)', gallery.ms < 90000, `${(gallery.ms / 1000).toFixed(1)}s`);
+
+  check('no page errors during the whole run', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
+} catch (err) {
+  failures++;
+  console.error('\n✘ Browser test crashed:', err);
+} finally {
+  await browser.close().catch(() => {});
+  server.kill('SIGTERM');
+}
+
+console.log(`\n${failures === 0 ? '🟢 ALL BROWSER CHECKS PASSED' : '🔴 FAILURES: ' + failures}  (${checks} checks)`);
+process.exit(failures ? 1 : 0);

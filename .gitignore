@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+# Regenerable demo assets (npm run demo:images) — keep the repo light:
+demo-masters/gallery/
+demo/public-unprotected/
+# Local scratch
+*.archx
+tmp/

@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archnemix Image Protection — live demo &amp; attack simulator</title>
+<meta name="description" content="Display images on your website without handing visitors a downloadable file. Try to steal these images — then see what you actually get.">
+<style>
+  :root {
+    --bg:#070a12; --panel:#0d1220; --panel2:#11182b; --line:#212b45;
+    --text:#e9edf7; --muted:#93a0bb; --accent:#6d7cff; --accent2:#27e0a7;
+    --bad:#ff5d73; --warn:#ffb454; --good:#2be08c; --radius:18px;
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:radial-gradient(1200px 600px at 80% -10%, #1a2450 0%, var(--bg) 55%) fixed, var(--bg);
+    color:var(--text); font:16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color:#aab6ff; }
+  .wrap { max-width:1180px; margin:0 auto; padding:28px 20px 90px; }
+  header.site { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:8px 0 26px; flex-wrap:wrap; }
+  .logo { font-weight:800; font-size:20px; letter-spacing:.02em; }
+  .logo span { color:var(--accent2); }
+  .logo small { display:block; font-weight:500; font-size:12px; color:var(--muted); letter-spacing:.14em; text-transform:uppercase; }
+  nav a { color:var(--muted); text-decoration:none; margin-left:18px; font-size:14px; }
+  nav a:hover { color:var(--text); }
+  h1 { font-size:clamp(32px,5.4vw,56px); line-height:1.04; margin:10px 0 14px; letter-spacing:-.02em; }
+  h1 em { font-style:normal; background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .lede { color:var(--muted); font-size:18px; max-width:760px; margin:0 0 22px; }
+  .cta-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .btn { appearance:none; border:1px solid var(--line); background:var(--panel2); color:var(--text);
+    padding:11px 18px; border-radius:12px; font-weight:650; cursor:pointer; font-size:15px; text-decoration:none; display:inline-block; }
+  .btn:hover { border-color:#3a4a78; transform:translateY(-1px); }
+  .btn.primary { background:linear-gradient(90deg,#5465f5,#1fb98c); border:none; color:white; }
+  .btn.attack { background:#241022; border-color:#5b2440; }
+  .btn.attack:hover { border-color:#8c355c; }
+  .btn:disabled { opacity:.55; cursor:wait; transform:none; }
+  code, pre { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background:#080c16; border:1px solid var(--line); border-radius:14px; padding:16px 18px; overflow:auto; font-size:13.5px; line-height:1.55; }
+  .hero-code { max-width:760px; }
+  section { margin-top:64px; }
+  h2 { font-size:clamp(24px,3.4vw,34px); letter-spacing:-.01em; margin:0 0 8px; }
+  .sub { color:var(--muted); max-width:820px; margin:0 0 24px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
+  .card .media { aspect-ratio:4/2.7; background:#0a0e18; }
+  .card .media img { width:100%; height:100%; object-fit:cover; display:block; }
+  .card .media > div, .card .media > archx-image { width:100%; height:100%; }
+  .card .body { padding:16px 18px 18px; }
+  .card h3 { margin:0 0 6px; font-size:18px; }
+  .card p { margin:0; color:var(--muted); font-size:14px; }
+  .tag { display:inline-block; font-size:11px; font-weight:750; letter-spacing:.1em; padding:4px 9px; border-radius:99px; margin-bottom:8px; }
+  .tag.bad { background:#3a1220; color:#ff90a3; } .tag.good { background:#0c2f26; color:#5df0b8; } .tag.best { background:#182a5e; color:#a9bcff; }
+  .try { font-size:13px; color:#c6d0ea; background:#0a0f1e; border:1px dashed #2c3a63; border-radius:10px; padding:9px 11px; margin-top:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:20px; }
+  .attack-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:12px; margin-bottom:18px; }
+  .attack-grid .btn { text-align:left; font-size:14px; padding:13px 15px; }
+  .attack-grid .btn small { display:block; font-weight:400; color:var(--muted); margin-top:3px; }
+  #attack-log { background:#060910; border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-height:120px;
+    font-family:ui-monospace,monospace; font-size:13px; white-space:pre-wrap; color:#c9d4f2; max-height:340px; overflow:auto; }
+  #attack-loot { display:flex; gap:14px; flex-wrap:wrap; margin-top:16px; }
+  .loot { width:210px; } .loot img { width:210px; height:150px; object-fit:contain; background:#05070c; border:1px solid var(--line); border-radius:10px; display:block; }
+  .loot figcaption { font-size:12px; color:var(--muted); margin-top:6px; }
+  .verdict { font-weight:750; } .verdict.good { color:var(--good); } .verdict.bad { color:var(--bad); } .verdict.warn { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:#c8d2ee; font-size:12px; letter-spacing:.08em; text-transform:uppercase; }
+  td { color:#c3cde6; } td:first-child { color:var(--text); font-weight:600; white-space:nowrap; }
+  .scrollx { overflow-x:auto; }
+  #gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
+  #gallery .archx-gallery-item { aspect-ratio:640/420; border-radius:12px; overflow:hidden; background:#0a0e18; }
+  .stats { display:flex; gap:22px; flex-wrap:wrap; color:var(--muted); font-size:14px; margin:12px 0 18px; }
+  .stats b { color:var(--text); font-size:18px; }
+  .honest { border-color:#5e4a1f; background:#171106; }
+  .controls { display:flex; gap:14px; flex-wrap:wrap; align-items:end; margin-bottom:18px; }
+  .controls label { font-size:13px; color:var(--muted); display:grid; gap:5px; }
+  .controls input, .controls select { background:#0a0f1e; color:var(--text); border:1px solid var(--line); border-radius:9px; padding:9px 11px; font-size:14px; }
+  footer { margin-top:80px; color:var(--muted); font-size:13px; border-top:1px solid var(--line); padding-top:22px; }
+  .kbd { background:#1a2240; border:1px solid #33406b; border-bottom-width:2px; border-radius:6px; padding:1px 6px; font-size:12px; font-family:ui-monospace,monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="site">
+    <div class="logo">🛡 ARCHNEMIX <span>Archx</span><small>Image Protection for websites</small></div>
+    <nav>
+      <a href="#arena">Try to steal it</a><a href="#attacks">Attack simulator</a>
+      <a href="#gallery-section">100-image gallery</a><a href="#how">How it works</a><a href="#code">Code</a>
+    </nav>
+  </header>
+
+  <h1>Show your images.<br><em>Don't give them away.</em></h1>
+  <p class="lede">One line replaces <code>&lt;img&gt;</code> with a protected viewer: no image URL in the page,
+  no right-click save, scrambled &amp; expiring delivery, poisoned canvas extraction, baked-in watermarking.
+  Thieves who dig deeper get a black card, a mosaic, or a pixelated thumbnail — never your file.</p>
+  <div class="cta-row">
+    <a class="btn primary" href="#arena">🎯 Try to steal the images below</a>
+    <a class="btn" href="#code">See the 3-line integration</a>
+  </div>
+  <pre class="hero-code"><code>import Archx from '@archnemix/image-protection';
+
+Archx.config({ tokenEndpoint: '/archx/token/' });
+Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: '© My Studio' });</code></pre>
+
+  <!-- ============================================================ -->
+  <section id="arena">
+    <h2>🎯 The arena — same photo, three fates</h2>
+    <p class="sub">Try everything you know on each card: right-click → <i>Save image</i>, drag it to a new tab,
+    long-press on mobile, open DevTools (<span class="kbd">F12</span>) and hunt through Elements &amp; Network.
+    Watch the <b>attempt log</b> under the attack simulator react.</p>
+
+    <div class="controls">
+      <label>Watermark text<input id="wm-text" value="© Archnemix Demo · {session}"></label>
+      <label>If someone extracts the canvas, give them…
+        <select id="extract-kind">
+          <option value="black">⬛ a black “PROTECTED” card</option>
+          <option value="lowres">🥔 a very low-res pixelated copy</option>
+          <option value="scrambled">🧩 a scrambled mosaic</option>
+        </select>
+      </label>
+      <button class="btn" id="rebuild">↻ Rebuild protected cards</button>
+    </div>
+
+    <div class="cards">
+      <article class="card">
+        <div class="media"><img id="normal-img" src="/demo/public-unprotected/aurora-valley.jpg" alt="Unprotected demo photo"></div>
+        <div class="body">
+          <span class="tag bad">✕ NORMAL &lt;IMG&gt;</span>
+          <h3>Unprotected (how most sites ship)</h3>
+          <p>Right-click → Save. Drag → saved. DevTools shows the file URL. Any bulk downloader empties your site in seconds.</p>
+          <div class="try">👉 Go ahead: right-click this one and save it. It's <i>supposed</i> to work — that's the problem.</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="media"><div id="shield-img"></div></div>
+        <div class="body">
+          <span class="tag good">✓ ARCHX · SHIELD</span>
+          <h3>Shield mode + signed scrambled delivery</h3>
+          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root), 8×8 tile-scrambled payload behind a 120-second signed URL, watermark baked into the pixels, poisoned canvas read-back.</p>
+          <div class="try">👉 Right-click, drag, inspect. Then run Attack ② below to see the decoy an extractor receives.</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="media"><div id="vault-img"></div></div>
+        <div class="body">
+          <span class="tag best">⬢ ARCHX · VAULT (WEBGL)</span>
+          <h3>Vault mode for premium images</h3>
+          <p>Rendered by a WebGL shader that un-scrambles tiles on the GPU. The drawing buffer is cleared after every frame, so <i>even a prototype-bypass</i> <code>toDataURL</code> returns pure black.</p>
+          <div class="try">👉 Run Attack ③ below: Shield yields only the watermarked screen-size copy — Vault yields <b>black</b>.</div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="attacks">
+    <h2>⚔️ Attack simulator</h2>
+    <p class="sub">These buttons execute <b>real theft techniques</b> in your browser against the cards above and show you the loot. Nothing is mocked.</p>
+    <div class="panel">
+      <div class="attack-grid">
+        <button class="btn attack" data-attack="dom">① Scan the DOM<small>What scrapers &amp; downloader extensions do: find &lt;img&gt; tags and image URLs</small></button>
+        <button class="btn attack" data-attack="dataurl">② canvas.toDataURL() extraction<small>The standard “grab the canvas as a PNG” move</small></button>
+        <button class="btn attack" data-attack="prototype">③ Prototype-bypass extraction<small>HTMLCanvasElement.prototype.toDataURL.call(canvas) — the expert move</small></button>
+        <button class="btn attack" data-attack="network">④ Capture the network payload<small>Grab what actually crossed the wire and try to view it as an image</small></button>
+        <button class="btn attack" data-attack="direct">⑤ Guess / reuse URLs<small>Fetch the master path directly; replay an expired/tampered signed URL</small></button>
+        <button class="btn attack" data-attack="print">⑥ Print the page<small>Media-query blackout — use your browser's print preview to verify</small></button>
+      </div>
+      <div id="attack-log">Attack log — press a button, or right-click / drag / long-press a protected card…
+</div>
+      <div id="attack-loot"></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="gallery-section">
+    <h2>🖼 100 protected images, still fast</h2>
+    <p class="sub">Gallery mode is built for scale: shared <code>IntersectionObserver</code> lazy-loading, max 6 concurrent decodes,
+    an LRU bitmap cache, display-size-only backing stores, and off-screen unloading. Scroll — images paint as they approach, with zero <code>&lt;img&gt;</code> tags.</p>
+    <div class="stats">
+      <span><b id="stat-loaded">0</b> / 100 loaded</span>
+      <span><b id="stat-imgtags">–</b> &lt;img&gt; tags from Archx</span>
+      <span>first-20 paint: <b id="stat-first20">–</b></span>
+    </div>
+    <button class="btn primary" id="load-gallery">▶ Load the 100-image protected gallery</button>
+    <div style="height:16px"></div>
+    <div id="gallery"></div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="how">
+    <h2>🧱 How each theft route is closed</h2>
+    <p class="sub">Defence in depth — every layer is cheap, and an attacker must defeat <i>all</i> of them to get even a screen-resolution, watermarked copy.</p>
+    <div class="panel scrollx">
+      <table>
+        <thead><tr><th>Attack</th><th>Archx defence</th><th>What the thief gets</th></tr></thead>
+        <tbody>
+          <tr><td>Right-click → Save image</td><td>No <code>&lt;img&gt;</code> exists; canvas sits under a shield layer in a closed shadow root; context menu intercepted on the component</td><td>No menu, no file</td></tr>
+          <tr><td>Drag to desktop / new tab</td><td><code>dragstart</code> blocked, <code>-webkit-user-drag:none</code></td><td>Nothing</td></tr>
+          <tr><td>DevTools → Elements</td><td>Closed shadow DOM; source URL held in JS closures/private fields, never in attributes</td><td>An empty-looking custom element</td></tr>
+          <tr><td>DevTools → Network (Img)</td><td>Bytes arrive via <code>fetch()</code> as <code>application/octet-stream</code> .archx containers — not classified as images</td><td>An opaque <code>data.bin</code></td></tr>
+          <tr><td>Open/reuse the image URL</td><td>HMAC-signed URLs expire in ~120s and are bound to one image id</td><td><code>403 invalid or expired token</code></td></tr>
+          <tr><td>Guess the master path</td><td>Masters live outside every static route; only the signer endpoint can read them, and it never returns them</td><td><code>404</code></td></tr>
+          <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top)</td><td>A meaningless mosaic / ciphertext</td></tr>
+          <tr><td><code>canvas.toDataURL()</code> / <code>toBlob()</code> / <code>getImageData()</code></td><td>Read-back APIs on Archx canvases are poisoned per-instance</td><td>Black card, 72-pixel potato, or scrambled mosaic (your choice)</td></tr>
+          <tr><td>Prototype bypass (expert)</td><td>Vault mode: WebGL with <code>preserveDrawingBuffer:false</code> — the browser itself returns black. In Shield, the backing store only ever holds the display-size, watermarked copy</td><td>Vault: black. Shield: screen-size watermarked copy at best</td></tr>
+          <tr><td>Bulk scrapers / AI crawlers</td><td>No URLs in HTML, JS+token required per image, rate-limited signer</td><td>An empty harvest</td></tr>
+          <tr><td>Print → PDF</td><td><code>@media print</code> blackout + beforeprint reaction</td><td>Black boxes</td></tr>
+          <tr><td>Screenshot / snipping tool</td><td><i>Cannot be fully prevented on the open web</i> (see honesty box). Deterred: display-res only, baked session watermark, forensic grain, blur-on-focus-loss, PrintScreen reaction</td><td>A traceable screen-res copy</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="height:16px"></div>
+    <div class="panel honest">
+      <h3 style="margin-top:0">⚠ The honest limit (every vendor should tell you this)</h3>
+      <p style="color:#e5d9bd;margin:0">If pixels reach a screen, a determined person can photograph the screen — no JavaScript can stop that;
+      only DRM video pipelines (Widevine + HDCP) black out screenshots, and they don't exist for still images on the web.
+      What Archx <i>does</i> guarantee: your <b>original file is never sent</b>, one-click &amp; bulk theft stop working,
+      automated scrapers get nothing, and anything that <i>does</i> leak is capped at display resolution and carries your watermark + a per-session forensic trace.
+      That is the difference between “right-click, done” and “hours of reverse-engineering for a watermarked thumbnail”.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <section id="code">
+    <h2>⌨️ Integration</h2>
+    <p class="sub">Three ways in — pick per page. Server mode (recommended for anything valuable) takes ~6 lines in Node; client-only mode works on any static host today.</p>
+    <pre><code>// ——— 1 · JS API (strongest: signed, scrambled, expiring delivery) ———
+import Archx from '@archnemix/image-protection';
+
+Archx.config({ tokenEndpoint: '/archx/token/' });
+Archx.load.image('#hero', { id: 'aurora-valley' }, {
+  mode: 'vault',                       // 'lite' | 'shield' | 'vault'
+  watermark: '© My Studio · {session}',
+  onExtract: 'black',                  // what canvas-grabbers receive
+  onAttempt: (kind) => logToAnalytics(kind),
+});
+
+// ——— 2 · Client-only (any existing image URL or File/Blob) ———
+Archx.load.image('#photo', 'https://cdn.example.com/photo.jpg', { mode: 'shield' });
+Archx.load.image('#preview', fileFromInput, { mode: 'lite' });
+
+// ——— 3 · Declarative ———
+// &lt;archx-image image-id="aurora-valley" mode="shield" watermark="© Studio"&gt;&lt;/archx-image&gt;
+
+// ——— Galleries (lazy, capped concurrency, auto-unload) ———
+Archx.load.gallery('#grid', ids.map(id =&gt; ({ id })), { mode: 'lite' });
+
+// ——— Server (Node, Express-compatible) ———
+import { createArchxMiddleware } from '@archnemix/image-protection/server';
+app.use(createArchxMiddleware({
+  secret: process.env.ARCHX_SECRET,
+  imagesDir: './masters',            // keep OUTSIDE your static/public folder
+  ttlSec: 120, grid: 8,
+}));</code></pre>
+  </section>
+
+  <footer>
+    Archnemix Image Protection · MIT · Masters used in this demo live in <code>demo-masters/</code> and are never web-accessible —
+    try <code>/demo-masters/aurora-valley.jpg</code>. The “unprotected” card intentionally uses a sacrificial public copy.
+  </footer>
+</div>
+
+<script type="module">
+import Archx from '/src/index.js';
+
+Archx.config({ tokenEndpoint: '/archx/token/', brand: '© Archnemix Demo' });
+
+const logEl = document.getElementById('attack-log');
+const lootEl = document.getElementById('attack-loot');
+function log(msg, cls = '') {
+  const line = document.createElement('div');
+  if (cls) line.className = 'verdict ' + cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function loot(src, caption) {
+  const fig = document.createElement('figure');
+  fig.className = 'loot';
+  fig.innerHTML = `<img alt=""><figcaption></figcaption>`;
+  fig.querySelector('img').src = src;
+  fig.querySelector('figcaption').textContent = caption;
+  lootEl.prepend(fig);
+  while (lootEl.children.length > 8) lootEl.lastChild.remove();
+}
+
+let shield, vault;
+function buildCards() {
+  shield?.destroy(); vault?.destroy();
+  document.getElementById('shield-img').replaceChildren();
+  document.getElementById('vault-img').replaceChildren();
+  // NOTE: destroy()+rebuild needs fresh hosts (shadow roots can't be re-attached)
+  for (const id of ['shield-img', 'vault-img']) {
+    const old = document.getElementById(id);
+    const fresh = document.createElement('div'); fresh.id = id;
+    old.replaceWith(fresh);
+  }
+  const wm = document.getElementById('wm-text').value;
+  const onExtract = document.getElementById('extract-kind').value;
+  shield = Archx.load.image('#shield-img', { id: 'aurora-valley' },
+    { mode: 'shield', watermark: wm, onExtract, alt: 'Aurora valley (protected, shield mode)' });
+  vault = Archx.load.image('#vault-img', { id: 'luxury-watch' },
+    { mode: 'vault', watermark: wm, onExtract, alt: 'Luxury watch (protected, vault mode)' });
+}
+buildCards();
+document.getElementById('rebuild').addEventListener('click', () => { buildCards(); log('↻ Protected cards rebuilt with your settings.'); });
+
+document.addEventListener('archx-attempt', (e) => {
+  log(`⚠ Theft attempt intercepted: "${e.detail.kind}" on a protected image — blocked & logged.`, 'warn');
+});
+
+/* ---------------- attacks ---------------- */
+const waitFrames = (n = 3) => new Promise(r => { const step = () => --n <= 0 ? r() : requestAnimationFrame(step); requestAnimationFrame(step); });
+
+async function attackDom() {
+  const imgs = [...document.querySelectorAll('img')];
+  const canvases = document.querySelectorAll('canvas');
+  log(`① DOM scan found ${imgs.length} <img> element(s):`);
+  imgs.forEach(i => log(`   • <img src="${i.getAttribute('src')}">  ← downloadable!`));
+  log(`   Canvas elements reachable from document: ${canvases.length} (Archx canvases hide in closed shadow roots).`);
+  log('   Verdict: the ONLY stealable image on this page is the deliberately unprotected card.', 'good');
+}
+
+async function stealNormalViaCanvas() {
+  const img = document.getElementById('normal-img');
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+async function attackDataUrl() {
+  log('② Running canvas.toDataURL() against all three cards…');
+  loot(await stealNormalViaCanvas(), '✕ Loot from NORMAL card: the actual photo, full quality. Game over.');
+  // _debug() stands in for "attacker located the canvas in DevTools" — demo-only hook.
+  const sc = shield._debug().canvas;
+  loot(sc.toDataURL('image/png'), `✓ Loot from SHIELD card via toDataURL(): the "${document.getElementById('extract-kind').value}" decoy.`);
+  const vc = vault._debug().canvas;
+  loot(vc.toDataURL('image/png'), '✓ Loot from VAULT card via toDataURL(): decoy/black — no pixels.');
+  log('   Verdict: read-back poisoning works — grabbers receive decoys, not photos.', 'good');
+}
+
+async function attackPrototype() {
+  log('③ Expert move: bypassing instance patches via HTMLCanvasElement.prototype…');
+  const real = HTMLCanvasElement.prototype.toDataURL;
+  const sc = shield._debug().canvas;
+  loot(real.call(sc, 'image/png'), '⚠ SHIELD prototype-bypass loot: only the DISPLAY-SIZE, watermark-baked copy exists to steal (§ honest limit). The original file never reached this browser.');
+  await waitFrames(4); // ensure at least one present() cleared the GL buffer
+  const vc = vault._debug().canvas;
+  // Sample the GL canvas from a macrotask (like any extension/script would)
+  await new Promise(r => setTimeout(r, 60));
+  loot(real.call(vc, 'image/png'), '⬢ VAULT prototype-bypass loot: BLACK. WebGL cleared the drawing buffer after compositing — the browser itself enforces this.');
+  log('   Verdict: use VAULT for hero/premium images; SHIELD everywhere else.', 'good');
+}
+
+async function attackNetwork() {
+  log('④ Capturing the protected payload off the wire (as DevTools → “Save response” would)…');
+  const token = await (await fetch('/archx/token/aurora-valley?w=900')).json();
+  const buf = new Uint8Array(await (await fetch(token.url)).arrayBuffer());
+  log(`   Captured ${buf.length} bytes, content-type application/octet-stream, first bytes: ${new TextDecoder('utf-8', { fatal: false }).decode(buf.slice(0, 6))}…`);
+  // Try 1: view raw capture as an image
+  const rawUrl = URL.createObjectURL(new Blob([buf], { type: 'image/webp' }));
+  const probe = new Image();
+  const rawOk = await new Promise(r => { probe.onload = () => r(true); probe.onerror = () => r(false); probe.src = rawUrl; });
+  log(rawOk ? '   Raw capture decoded as image?!' : '   ✕ Raw capture does NOT decode as an image at all (.archx container).', rawOk ? 'bad' : 'good');
+  // Try 2: smart attacker parses our open container format and extracts the inner image
+  const headerLen = new DataView(buf.buffer).getUint32(6, false);
+  const header = JSON.parse(new TextDecoder().decode(buf.slice(10, 10 + headerLen)));
+  const inner = buf.slice(10 + headerLen);
+  const innerUrl = URL.createObjectURL(new Blob([inner], { type: header.mime }));
+  loot(innerUrl, '✓ Even after stripping the .archx container, the payload is an 8×8 shuffled/mirrored mosaic. Useless without the secret un-shuffle key.');
+  log('   Verdict: network capture yields garbage — bulk ripping is dead.', 'good');
+}
+
+async function attackDirect() {
+  log('⑤ Trying to fetch the master directly + replaying a tampered signed URL…');
+  const direct = await fetch('/demo-masters/aurora-valley.jpg');
+  log(`   GET /demo-masters/aurora-valley.jpg  →  HTTP ${direct.status} (masters are outside every static route)`, direct.status === 404 ? 'good' : 'bad');
+  const token = await (await fetch('/archx/token/aurora-valley?w=900')).json();
+  const tampered = token.url.replace(/t=([^.]+)\./, (m, body) => 't=' + body.slice(0, -2) + 'XX.');
+  const replay = await fetch(tampered);
+  log(`   GET signed URL with tampered signature  →  HTTP ${replay.status} (real ones also die after 120s)`, replay.status === 403 ? 'good' : 'bad');
+}
+
+function attackPrint() {
+  log('⑥ Print blackout armed via @media print. Opening print preview — protected cards render as black boxes. (Cancel the dialog to return.)', 'warn');
+  setTimeout(() => window.print(), 450);
+}
+
+const attacks = { dom: attackDom, dataurl: attackDataUrl, prototype: attackPrototype, network: attackNetwork, direct: attackDirect, print: attackPrint };
+document.querySelectorAll('[data-attack]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try { await attacks[btn.dataset.attack](); }
+    catch (err) { log('Attack errored: ' + err.message, 'bad'); }
+    btn.disabled = false;
+  });
+});
+
+/* ---------------- gallery ---------------- */
+let galleryStarted = null, loadedCount = 0;
+document.addEventListener('archx-load', (e) => {
+  if (!e.target.closest?.('#gallery') && !e.target.classList?.contains('archx-gallery-item')) return;
+  loadedCount++;
+  document.getElementById('stat-loaded').textContent = loadedCount;
+  if (loadedCount === 20 && galleryStarted) {
+    document.getElementById('stat-first20').textContent = ((performance.now() - galleryStarted) / 1000).toFixed(1) + ' s';
+  }
+});
+document.getElementById('load-gallery').addEventListener('click', (e) => {
+  e.currentTarget.disabled = true;
+  galleryStarted = performance.now();
+  const items = Array.from({ length: 100 }, (_, i) => ({ id: 'gallery-' + String(i + 1).padStart(3, '0'), alt: 'Protected gallery image ' + (i + 1) }));
+  Archx.load.gallery('#gallery', items.map(it => ({ ...it })), { mode: 'lite', onExtract: 'black' });
+  // gallery() takes {id} token sources directly:
+  document.getElementById('stat-imgtags').textContent = document.querySelectorAll('#gallery img').length;
+  log('🖼 Gallery: 100 protected images queued (lazy — scroll to stream them in). <img> tags created by Archx: 0.');
+}, { once: true });
+</script>
+</body>
+</html>

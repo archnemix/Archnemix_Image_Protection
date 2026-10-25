@@ -1,0 +1,64 @@
+{
+  "name": "@archnemix/image-protection",
+  "version": "1.0.0",
+  "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/archx.cjs",
+  "module": "./dist/archx.esm.js",
+  "unpkg": "./dist/archx.min.js",
+  "exports": {
+    ".": {
+      "import": "./dist/archx.esm.js",
+      "require": "./dist/archx.cjs",
+      "default": "./dist/archx.esm.js"
+    },
+    "./server": "./server/middleware.js",
+    "./scramble": "./src/scramble.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "server",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "archx-protect": "./server/scramble-cli.js"
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "demo": "node server/demo-server.js",
+    "demo:images": "node tools/generate-test-images.mjs",
+    "test": "node --test tests/unit.test.mjs",
+    "test:browser": "node tests/browser-test.mjs",
+    "test:all": "npm run build && npm test && npm run test:browser",
+    "bench": "node tools/benchmark.mjs"
+  },
+  "keywords": [
+    "image-protection",
+    "anti-scraping",
+    "canvas",
+    "watermark",
+    "drm",
+    "copyright",
+    "webgl"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "puppeteer-core": "^24.0.0",
+    "@sparticuz/chromium": "^138.0.0",
+    "sharp": "^0.34.0"
+  },
+  "peerDependencies": {
+    "sharp": "^0.34.0"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
+  }
+}
