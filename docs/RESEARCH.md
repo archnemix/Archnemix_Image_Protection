@@ -34,6 +34,11 @@ map onto this library's design.
   detector/registry workflow. Those controls reduce value and increase
   attribution/friction; they do not turn an attacker-owned browser into a
   trusted device, and they do not make visible pixels AI-regeneration-proof.
+  v1.4 hardens the production boundary around those layers: server startup
+  and every token redemption are deny-by-default, token claims and paths are
+  strict, security stores and Sharp work are bounded, and the separate-device
+  work is split honestly between browser-feasible temporal degradation and
+  hardware systems a web page cannot reproduce.
 
 ---
 
@@ -383,21 +388,153 @@ integrity and server quality/format/StegoMark issuance — and ships
 `Archx.preset(name, overrides)` so sites can state a policy and still flip one
 switch without forking the library.
 
+
+### 2.11 v1.4 deep dive: production access control, bounded image work, and photographing a screen
+
+The v1.4 review started from an uncomfortable conclusion: a polished viewer
+does not compensate for a permissive delivery endpoint. Most catastrophic
+losses would not require defeating the scramble at all—an attacker would ask
+the server for a bigger derivative, replay a URL, enumerate public masters,
+wait for an unbounded limiter/cache to pressure the host, or feed the image
+pipeline a pathological file. The server therefore now follows the same
+deny-by-default model OWASP recommends for application authorization:
+
+- `createArchxMiddleware()` is a **configuration boundary**, not a bag of
+  optional hints. Missing/short/known-demo secrets, malformed origins or
+  processing values, no indexed supported masters, master/public overlap, or
+  “neither `authorize()` nor explicit `allowAnonymous:true`” fail startup. A
+  non-throwing `auditArchxServerConfig()` makes that policy testable in CI
+  without returning secret material.
+- Authentication remains the host site's job; authorization is object-level
+  and checked twice. `authorize(req,id,{phase:'token'})` decides whether this
+  viewer may receive this image and at what width/quality/format. The same
+  callback runs at `phase:'image'` before any payload bytes are sent, with the
+  verified token available. A valid signature is therefore *not* a two-minute
+  irrevocable capability: logout, cancellation, plan downgrade, or transfer to
+  a different viewer can still win, and current entitlements may tighten but
+  never widen the signed derivative.
+- The token itself became a strict v2 claim set rather than “any JSON with a
+  MAC.” Audience, scope, image ID, integer width, issued-at/expiry window,
+  bounded quality/format, and nonce shape are all validated. Token minting is
+  POST-only by default with an `X-Archx-Request` header and same-site/fetch-
+  metadata gating; exact configured origins remain CORS/CSRF signals. None of
+  Origin, Referer, IP, or User-Agent is treated as a credential.
+- One-time use is claimed synchronously after signature/claim/IP/UA checks
+  and before the first redemption `await`. In Node's event-loop model this
+  removes the check/use gap that let twenty parallel copies of one URL race;
+  the regression test now expects exactly one 200 and nineteen 403s. The
+  operational price is explicit: if redemption authorization, quota, or
+  processing later fails, that URL is burned and the client must mint again.
+- Rate limiting needed a memory bound as much as a request bound. Token,
+  payload, quota, nonce, distinct-image, master-cache, dimension-cache, and
+  output-cache state now has TTL cleanup plus client/entry/byte ceilings.
+  Quotas can be keyed by IP, viewer, IP+image, and viewer+image; a distinct-
+  image tracker can emit a sanitized suspicious-scraping event or deny after
+  an operator-selected catalogue-sweep threshold. `429` responses include
+  `Retry-After`, while error bodies stay generic.
+- Path safety is based on indexed identity, not string concatenation. Image
+  IDs accept only `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; directory files and
+  explicit map entries are format/extension checked, resolved with
+  `realpath`, and containment-tested with `path.relative`. A symlink inside a
+  masters folder that points outside is not indexed, and the file is resolved
+  again at redemption so a later swap cannot silently escape the approved
+  root. The demo's static server uses the same realpath/relative rule rather
+  than the classic vulnerable `startsWith(dir)` sibling-prefix test.
+- Sharp/libvips is given an untrusted-input budget: maximum source bytes,
+  input pixels/width/height, output pixels, detected-format allowlist,
+  rejection of animated/multi-page and >4-channel masters,
+  `failOn:'warning'`, `limitInputPixels`, sequential reads, native timeouts,
+  one metadata pass, metadata-free derivatives, and a bounded semaphore and
+  queue in front of processing. This matches Sharp's own “all input is
+  untrusted” posture and stops a valid token for a pathological master from
+  becoming an unbounded CPU/memory job.
+
+#### What can a browser do about a second-device camera?
+
+The camera research separates into three very different classes:
+
+1. **Selective temporal viewing (strong, but hardware).** Temporal
+   Psychovisual Modulation (TPVM) broadcasts high-refresh “atom frames” and
+   lets a person wearing a **display-synchronized viewing device** fuse a
+   selected combination in the human visual system. It is an elegant display
+   paradigm, not a JavaScript feature. Without synchronized shutters or a
+   trusted display pipeline, a web page cannot make pixels visible to the
+   unaided intended viewer but fundamentally invisible to every camera.
+2. **Coded room illumination (stronger artifacts, also hardware).**
+   Anti-camera LED / LiShield-style systems modulate multi-colour room lights
+   at frequencies chosen for rolling-shutter sensors. Rows exposed during
+   different parts of the waveform receive different intensities/colours,
+   producing stripes while people perceive approximately steady light. A
+   website cannot control the room, the panel backlight waveform, exposure,
+   or shutter phase, so Archx does not claim equivalence. The transferable
+   insight is narrower: horizontal temporal bands and opponent-colour changes
+   are promising page-level degradation patterns because rolling shutters
+   sample rows at different times and Bayer arrays sample colour unevenly.
+3. **Page-level temporal degradation + attribution.** This is what v1.4
+   ships. `temporalShield`/`cameraShield` now share one complementary-frame
+   engine with `blocks`, parity `checker`, and horizontal `bands`, plus an
+   opponent-colour (`chroma`) transform in both the WebGL shader and Canvas2D
+   frame generator. Human temporal integration averages the +/− pair; a
+   screenshot, short camera exposure, or asymmetric rolling-shutter sample can
+   retain noise, checker phase, or banding. Lens still prevents one frame
+   from containing the whole sharp image; dynamic traces and server marks add
+   attribution. The defeats remain obvious and are documented rather than
+   hidden: record and average frames, use a longer exposure, shift exposure
+   phase, stitch pointer-Lens discs, denoise/regenerate, or simply accept the
+   screen-resolution picture.
+
+#### Why StegoMark is not (yet) a phone-photo detector
+
+Screen-shooting-resilient watermark research is a distinct field because the
+screen→camera channel combines perspective/RST warp, lens distortion,
+defocus, moiré from two sampling grids, colour/gamma changes, glare, sensor
+noise, and platform enhancement. Systems such as classical I-SIFT/DCT
+screen-shooting watermarking, neural distortion-layer methods, and ScreenMark
+therefore spend much of their design on **localization/synchronization**:
+find the displayed content, estimate and undo its geometry, then decode a
+redundant payload. Archx's classical 24×16 StegoMark originally assumed that
+grid still spanned the suspect image.
+
+v1.4 adds a bounded forensic geometry search instead of pretending that one
+detector call solves the analog channel. `searchGeometry:true` (the CLI
+default) evaluates independent X/Y grid scales for roughly 80–125% retained
+areas at edge/centre origins, refines the best candidates by sub-cell phase,
+accepts partial cells only with enough overlap/segments, and retains the
+CRC + agreement + mean-signal + minimum-cell gates. That makes ordinary
+axis-aligned screenshot crops measurable: in the three-photo 800 px matrix,
+90% centre, 85%-remaining left-edge, and 90%-remaining bottom-edge crops
+decoded 3/3, while 80% centre crops decoded 2/3. A 2° rotation decoded 0/3.
+The correct operator workflow for a phone photograph is therefore: crop to
+the displayed rectangle, correct perspective and rotation externally, then
+run `archx-detect`; a positive result is evidence, a negative result is not
+proof that no mark was ever present.
+
+#### Performance work that supports the security posture
+
+Security that forces a 60 fps renderer or an uncached Sharp job for every
+thumbnail will be disabled. v1.4 keeps static WebGL draw-on-demand, requests
+low-power/no-depth/no-stencil/no-MSAA contexts, generates Canvas2D temporal
+frames in block spans with clamped-array writes, scopes browser bitmap/token
+caching by viewer (`cacheScope` + `Archx.clearCaches()`), stops retrying
+permanent 4xx/aborted fetches, and bounds every server store/queue. Continuous
+CPU/GPU work is deliberately opt-in through temporal/camera patterns;
+`lite`/static galleries should normally leave it off.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
 |---|---|---|
 | Casual visitor | save a picture they like | Finds no save path at all (A1/A2 dead-end) |
 | Bookmarklet/extension user | strip a page/gallery in one click | DOM has no images; canvas grabs return decoys |
-| Scraper bot operator (incl. AI training crawlers) | harvest a whole catalogue | No URLs in HTML; needs JS + fresh signed token per image, rate-limited; payloads are mosaics/ciphertext |
+| Scraper bot operator (incl. AI training crawlers) | harvest a whole catalogue | No URLs in HTML; needs JS, POST, authorization and a fresh signed token per image; bounded rate/quota/distinct-image controls make sweeps slow and visible; payloads are mosaics/ciphertext |
 | Script/extension injector | hook web APIs or grab viewer internals wholesale | Captured natives bypass later hooks; audits can fail closed in Fortress; no host expando/public registry/debug handle exposes canvases, bitmaps, or keys |
-| Token thief | replay/share a captured delivery URL or inflate its derivative size | Short expiry + optional one-time nonce, IP/User-Agent binding, origin checks, and signed server-side entitlement width |
+| Token thief | replay/share a captured delivery URL or inflate its derivative size | Strict v2 claims + short expiry + synchronous one-time claim; redemption reauthorization and viewer/session checks; optional IP/User-Agent friction; current entitlement can only tighten signed width/quality/format |
 | Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
-| Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic + blind StegoMark IDs; Lens prevents one screenshot from containing the whole sharp image, and the registry can identify the issued view |
-| Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens/temporal-degraded + dynamically traced |
-| Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, temporal capture effects, and Lens reducing resale value |
+| Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic + blind StegoMark IDs; Lens prevents one screenshot from containing the whole sharp image, and the registry can identify the issued view when the mark survives and is geometrically recovered |
+| Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens/patterned-temporal-degraded + dynamically traced |
+| Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, checker/band opponent-colour effects, and Lens reducing resale value; StegoMark phone-photo recovery is unproven without external rectification |
 | AI cleanup / regeneration operator | turn a degraded capture into a polished copy or remove invisible marks | Cannot be ruled out for visible pixels. Archx limits source information and keeps server-side entitlement/issuance evidence; regenerated detail is invented, but the business still needs monitoring/enforcement |
-| Reposter denying origin | circulate a copy stripped of metadata/credit | `archx-detect` can test for the blind StegoMark and map the recovered fingerprint to the owner's issuance record when the mark survives the copy path |
+| Reposter denying origin | circulate a copy stripped of metadata/credit | `archx-detect` can test for the blind StegoMark, search bounded axis-aligned crop geometry, and map a recovered fingerprint to the owner's issuance record; rotation/perspective/AI failures remain possible |
 
 Non-goals: hiding that protection exists, DRM-level guarantees, stopping a
 camera pointed at a monitor, proving browser integrity on a machine the
@@ -506,9 +643,29 @@ error — see the README checklist).
     controls matters more than calling either layer “screenshot-proof” or
     “AI-proof.”
 
+15. **Configuration is part of the attack surface.** A missing authorization
+    callback, demo secret, wildcard origin, public/master path overlap, or
+    absurd processing limit is not a warning to discover after an incident.
+    Startup either receives a coherent deny-by-default policy or throws;
+    `allowAnonymous:true` is deliberately explicit and auditable.
+16. **A signed URL is a request to re-check policy, not the policy itself.**
+    Claims say what was approved at issuance; redemption asks what is true
+    now. This is the only way revocation and entitlement downgrade can have
+    an effect shorter than token expiry.
+17. **Every security store gets a forgetting rule.** Rate windows expire,
+    nonce entries expire, client maps evict, caches have byte ceilings, and
+    processing queues reject predictably. “Security state” that grows forever
+    becomes a denial-of-service feature for the attacker.
+18. **Do not port hardware claims into browser marketing.** TPVM needs a
+    synchronized viewer; anti-camera LEDs need controllable illumination;
+    neural screen-shooting watermarks need learned localization/synchronization.
+    Archx borrows the page-feasible signal-processing ideas (complementary
+    checker/bands/chroma, incomplete reveal, redundant marks) and labels the
+    missing hardware/learning pieces as missing.
+
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 17 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 24 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -530,7 +687,20 @@ error — see the README checklist).
   wrong-key controls, and prove that an HTTP entitlement's lossless/PNG
   policy wins over a browser's `q=10` request while `onStegoIssue` receives
   exactly the fingerprint later recovered from the reconstructed copy.
-- **Real browser (headless Chromium, 60 checks):** a page with 7 protected
+  The v1.4 regressions additionally prove that missing `authorize()` and
+  weak/short secrets fail startup, wildcard origins and unsafe processing
+  numbers are rejected, master/public overlap is refused, an outside-pointing
+  symlink is not indexed, every strict v2 claim mutation fails, bounded
+  limiter/nonce stores expire or fail closed, an overloaded semaphore returns
+  a typed busy error, malformed percent-encoding/traversal/extra segments/
+  wrong methods/oversized token bodies/bad sizing/cross-site fetch metadata
+  produce controlled 4xx responses, revoked or transferred sessions cannot
+  redeem, a downgraded entitlement narrows the delivered width, token/image
+  quotas and distinct-image denial fire with sanitized security events, and
+  corrupt/oversized/format-mismatched masters produce typed Sharp-limit
+  errors. Twenty parallel spends of one signed URL produce **one** 200 and
+  nineteen 403s.
+- **Real browser (headless Chromium, 62 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
@@ -555,16 +725,34 @@ error — see the README checklist).
   presented 27. The WebGL prototype bypass returns **pure black**
   (mean RGB ≈ 0), split mode uses 9 separately poisoned canvases, guards and
   print blackout engage, and network checks confirm a marked mosaic payload,
-  one-time replay rejection, and wrong-User-Agent rejection.
+  one-time replay rejection, and wrong-User-Agent rejection. The production
+  POST-token path is exercised by the actual page loads; v1.4 also renders a
+  `bands` + chroma camera shield continuously in WebGL and a `checker` +
+  chroma shield as complementary Canvas2D frames, exposes their normalized
+  pattern/chroma only through the debug-gated test hook, scopes their token
+  cache, and verifies `Archx.clearCaches()` does not blank already-painted
+  instances.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  about **2.6 s** in the deliberately non-lazy headless test with high-quality
-  derivatives and 0 `<img>` tags; browser bundle **58.9 KiB minified / 19.8 KiB
+  about **2.9 s** in the deliberately non-lazy headless test with high-quality
+  derivatives and 0 `<img>` tags; browser bundle **61.5 KiB minified / 20.7 KiB
   gzipped**. The 900 px q95 server pipeline previously measured ~147 ms
   one-time per cached variant. Static/per-image server outputs remain
   cacheable; per-token marks/keys and lossless payloads intentionally trade
   bytes/cache hits for attribution and exactness, while the client spends a
   delivered payload once and then repaints locally.
 
+- **StegoMark transform matrix (three 800 px photo masters, strength 6,
+  geometry search on):** direct PNG, resize to 560 px + JPEG q70, blur 0.8 +
+  JPEG q85, and brightness/saturation/contrast adjustment + JPEG q85 decoded
+  in the earlier matrix. The v1.4 crop matrix decoded 90% centre-crop +
+  resize (3/3), left-edge crop leaving 85% width (3/3), and top-aligned crop
+  leaving 90% height (3/3), but only 2/3 at an 80% centre crop; 2° rotation +
+  90% centre crop decoded 0/3. Geometry search on these files took roughly
+  1.8–2.3 s per suspect on the test machine, so it is an offline forensic
+  mode, not a per-page-view cost. Unmarked controls remained negative. These
+  results support resize/re-encode/mild-blur/photometric and bounded
+  axis-aligned-crop claims only—not rotation, perspective, screen-photo, or
+  AI-regeneration attribution.
 ## 6. Sources
 
 - MDN, *Use cross-origin images in a canvas* (tainted-canvas rules) —
@@ -631,3 +819,33 @@ error — see the README checklist).
 - IMATAG forensic-watermarking API material (unique per-recipient invisible
   identifiers plus later detection/monitoring as the production workflow) —
   https://www.imatag.com/api/forensic-watermarking-api
+- OWASP, *Authorization Cheat Sheet* and *Broken Access Control* (least
+  privilege, deny by default, resource-level checks, logging/rate limits,
+  short-lived stateless tokens) —
+  https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html
+  · https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+- Sharp, *Security* and *Output* documentation (treat all input as untrusted;
+  warning/pixel/channel limits; metadata is removed from output by default;
+  run image work under resource limits) —
+  https://sharp.pixelplumbing.com/security/
+  · https://sharp.pixelplumbing.com/api-output/
+- Xiaolin Wu & Guangtao Zhai, *Temporal Psychovisual Modulation: a new paradigm of
+  information display* (high-refresh atom frames fused through
+  display-synchronized viewing devices and the human visual system) —
+  https://arxiv.org/abs/1201.1601
+- *Anti-camera LED Lighting* (multispectral coded illumination intended to
+  create rolling-shutter colour artifacts while appearing steady to people)
+  — https://dl.acm.org/doi/10.1145/3123266.3123416
+- Shilin Zhu, Chi Zhang & Xinyu Zhang, *Automating Visual Privacy Protection Using a
+  Smart LED* / LiShield (smart-LED waveforms exploit row-sequential camera
+  exposure; custom illumination hardware is part of the system) —
+  https://cacm.acm.org/magazines/2020/2/242333-automating-visual-privacy-protection-using-a-smart-led/abstract
+- *Screen-Shooting Resilient Watermarking* (I-SIFT localization, repeated
+  templates, and the lens/light/moiré distortion model) —
+  http://home.ustc.edu.cn/~zh2991/18TIFS_Screen/Screen-Shooting%20Resilient%20Watermarking.pdf
+- *ScreenMark: Watermarking Arbitrary Visual Content on Screen* and
+  *Automatic Localization and Detection Applicable to Robust Image
+  Watermarking Resisting Camera Shooting* (why localization/synchronization,
+  not merely payload redundancy, dominates screen→camera recovery) —
+  https://arxiv.org/html/2409.03487v1
+  · https://arxiv.org/pdf/2304.13953

@@ -418,7 +418,7 @@ async function attackPrototype() {
 
 async function attackNetwork() {
   log('④ Capturing the protected payload off the wire (as DevTools → “Save response” would)…');
-  const token = await (await fetch('/archx/token/aurora-valley?w=900')).json();
+  const token = await (await fetch('/archx/token/aurora-valley?w=900', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
   const buf = new Uint8Array(await (await fetch(token.url)).arrayBuffer());
   log(`   Captured ${buf.length} bytes, content-type application/octet-stream, first bytes: ${new TextDecoder('utf-8', { fatal: false }).decode(buf.slice(0, 6))}…`);
   // Try 1: view raw capture as an image
@@ -467,7 +467,7 @@ async function attackDirect() {
   log('⑤ Trying to fetch the master directly + replaying signed URLs…');
   const direct = await fetch('/demo-masters/aurora-valley.jpg');
   log(`   GET /demo-masters/aurora-valley.jpg  →  HTTP ${direct.status} (masters are outside every static route)`, direct.status === 404 ? 'good' : 'bad');
-  const token = await (await fetch('/archx/token/aurora-valley?w=900')).json();
+  const token = await (await fetch('/archx/token/aurora-valley?w=900', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
   const tampered = token.url.replace(/t=([^.]+)\./, (m, body) => 't=' + body.slice(0, -2) + 'XX.');
   const replay = await fetch(tampered);
   log(`   GET signed URL with tampered signature  →  HTTP ${replay.status}`, replay.status === 403 ? 'good' : 'bad');

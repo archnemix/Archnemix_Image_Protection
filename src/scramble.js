@@ -484,7 +484,7 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
 }
 
 export function detectStegoFingerprint(rgba, w, h, {
-  key = '', gridX = 24, gridY = 16, searchOffsets = false,
+  key = '', gridX = 24, gridY = 16, searchOffsets = false, searchGeometry = false,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
@@ -494,31 +494,39 @@ export function detectStegoFingerprint(rgba, w, h, {
   const cw = w / gx, ch = h / gy;
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
 
-  const evaluate = (fx, fy) => {
-    const dx = fx * cw, dy = fy * ch;
+  const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
+    const cellW0 = cw * scaleX;
+    const cellH0 = ch * scaleY;
+    const ox = originX ?? fx * cw;
+    const oy = originY ?? fy * ch;
     const bitScores = new Float64Array(64);
     const bitCounts = new Uint16Array(64);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
-      const y0 = Math.max(0, Math.round(cy * ch + dy));
-      const y1 = Math.min(h, Math.round((cy + 1) * ch + dy));
+      const rawY0 = oy + cy * cellH0;
+      const rawY1 = rawY0 + cellH0;
+      const y0 = Math.max(0, Math.round(rawY0));
+      const y1 = Math.min(h, Math.round(rawY1));
+      if (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) continue;
       for (let cx = 0; cx < gx; cx++) {
-        const x0 = Math.max(0, Math.round(cx * cw + dx));
-        const x1 = Math.min(w, Math.round((cx + 1) * cw + dx));
-        if (x1 - x0 < 4 || y1 - y0 < 2) continue;
+        const rawX0 = ox + cx * cellW0;
+        const rawX1 = rawX0 + cellW0;
+        const x0 = Math.max(0, Math.round(rawX0));
+        const x1 = Math.min(w, Math.round(rawX1));
+        if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
         const sums = new Float64Array(STEGO_ROW_SEGMENTS * 4);
         const counts = new Uint32Array(STEGO_ROW_SEGMENTS * 4);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
         const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
         for (let y = y0; y < y1; y += step) {
-          const segment = Math.min(
+          const segment = Math.max(0, Math.min(
             STEGO_ROW_SEGMENTS - 1,
-            Math.floor(((y - y0) * STEGO_ROW_SEGMENTS) / cellH),
-          );
+            Math.floor(((y - rawY0) * STEGO_ROW_SEGMENTS) / cellH0),
+          ));
           let i = (y * w + x0) * 4;
           for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.min(3, Math.floor(((x - x0) * 4) / cellW));
+            const band = Math.max(0, Math.min(3, Math.floor(((x - rawX0) * 4) / cellW0)));
             const idx = segment * 4 + band;
             sums[idx] += (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
             counts[idx]++;
@@ -529,10 +537,12 @@ export function detectStegoFingerprint(rgba, w, h, {
         // keyed sign, then average. Positive result means code bit = 1.
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
+        let validSegments = 0;
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
           const base = segment * 4;
           if (counts[base] === 0 || counts[base + 1] === 0 || counts[base + 2] === 0 || counts[base + 3] === 0) continue;
+          validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
           const m2 = sums[base + 2] / counts[base + 2];
@@ -542,7 +552,7 @@ export function detectStegoFingerprint(rgba, w, h, {
             polarity[cellIndex] * segmentPolarity[cellIndex * STEGO_ROW_SEGMENTS + segment] * weight;
           segmentWeightSum += weight;
         }
-        if (!segmentWeightSum) continue;
+        if (!segmentWeightSum || validSegments < 2) continue;
         const rawScore = segmentScoreSum / segmentWeightSum;
         // Clip outliers: one hard image edge crossing a cell can otherwise
         // outvote five correctly-marked repetitions of the same code bit.
@@ -575,8 +585,10 @@ export function detectStegoFingerprint(rgba, w, h, {
     const confidence = crcValid
       ? Math.max(0, Math.min(0.99, 0.42 + evidence))
       : Math.max(0, Math.min(0.49, evidence));
+    const minBitCount = Math.min(...bitCounts);
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2,
+      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
+        cellScores.length >= 96 && minBitCount >= 1,
       fingerprint,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
@@ -584,23 +596,126 @@ export function detectStegoFingerprint(rgba, w, h, {
       agreement: Math.round(agreement * 1000) / 1000,
       meanSignal: Math.round(meanAbs * 100) / 100,
       cells: cellScores.length,
-      offset: { x: fx, y: fy },
+      offset: {
+        x: Math.round((ox / cellW0) * 1000) / 1000,
+        y: Math.round((oy / cellH0) * 1000) / 1000,
+      },
+      geometry: {
+        scaleX: Math.round(scaleX * 1000) / 1000,
+        scaleY: Math.round(scaleY * 1000) / 1000,
+        originX: Math.round(ox * 10) / 10,
+        originY: Math.round(oy * 10) / 10,
+      },
       grid: { x: gx, y: gy },
       _evidence: evidence,
+      _originX: ox,
+      _originY: oy,
+      _scaleX: scaleX,
+      _scaleY: scaleY,
     };
   };
 
   let best = null;
-  for (const fx of fractions) for (const fy of fractions) {
-    const candidate = evaluate(fx, fy);
+  const consider = (candidate) => {
     const better = !best ||
       (candidate.found && !best.found) ||
       (candidate.found === best.found && candidate._evidence > best._evidence) ||
       (candidate.found === best.found && candidate._evidence === best._evidence && candidate.confidence > best.confidence);
     if (better) best = candidate;
+    return candidate;
+  };
+
+  for (const fx of fractions) for (const fy of fractions) {
+    consider(evaluate({ fx, fy }));
     if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
   }
-  if (best) delete best._evidence;
+
+  // Uniform crop+resize changes the suspect-pixel size and origin of the
+  // original macro-cell grid. Search a bounded set of retained-area scales
+  // (80–125%) at left/center/right and top/center/bottom origins, then refine
+  // the strongest geometries by sub-cell offsets. This intentionally does
+  // NOT claim perspective/rotation recovery: a phone photo usually needs
+  // manual deskew/crop to the displayed rectangle before detection.
+  if (searchGeometry && !best?.found) {
+    const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.25];
+    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 10) / 10))];
+    const originRange = (span, extent) => {
+      const min = Math.min(0, extent - span);
+      const max = Math.max(0, extent - span);
+      return { min, max, center: (min + max) / 2 };
+    };
+
+    // First rank independent X/Y retained-area scales at edge/center origins.
+    // This catches one-axis crops (e.g. only the left edge was removed) as
+    // well as symmetric crops. Geometry search is an offline forensic mode,
+    // so a few hundred bounded candidates are acceptable.
+    const scaleCandidates = [];
+    for (const scaleX of scaleValues) {
+      const rangeX = originRange(gx * cw * scaleX, w);
+      for (const scaleY of scaleValues) {
+        const rangeY = originRange(gy * ch * scaleY, h);
+        for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+          for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+            scaleCandidates.push(consider(evaluate({
+              scaleX, scaleY, originX, originY,
+            })));
+          }
+        }
+      }
+    }
+
+    // Then try edge/center origins for the strongest scale pairs.
+    const originCandidates = [];
+    const seenPairs = new Set();
+    for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      const key = `${Math.round(candidate._scaleX * 1000)}:${Math.round(candidate._scaleY * 1000)}`;
+      if (seenPairs.has(key)) continue;
+      seenPairs.add(key);
+      const rangeX = originRange(gx * cw * candidate._scaleX, w);
+      const rangeY = originRange(gy * ch * candidate._scaleY, h);
+      for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+        for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+          originCandidates.push(consider(evaluate({
+            scaleX: candidate._scaleX,
+            scaleY: candidate._scaleY,
+            originX,
+            originY,
+          })));
+        }
+      }
+      if (seenPairs.size >= 4) break;
+    }
+
+    // Finally refine the best three geometries by sub-cell offsets.
+    const refinements = [];
+    const seenGeometries = new Set();
+    for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      const key = `${Math.round(candidate._scaleX * 1000)}:${Math.round(candidate._scaleY * 1000)}:` +
+        `${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
+      if (seenGeometries.has(key)) continue;
+      seenGeometries.add(key);
+      refinements.push(candidate);
+      if (refinements.length >= 3) break;
+    }
+    for (const coarseCandidate of refinements) {
+      for (const fx of fractions) for (const fy of fractions) {
+        consider(evaluate({
+          scaleX: coarseCandidate._scaleX,
+          scaleY: coarseCandidate._scaleY,
+          originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
+          originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY,
+        }));
+      }
+    }
+  }
+
+  if (best) {
+    delete best._evidence;
+    delete best._originX;
+    delete best._originY;
+    delete best._scaleX;
+    delete best._scaleY;
+  }
   return best;
 }
 

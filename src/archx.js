@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID,
 } from './scramble.js';
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -168,6 +168,7 @@ const DEFAULTS = {
   key: null,                    // scramble seed and/or AES key (see docs)
   aesKey: null,                 // base64 AES key for encrypted .archx payloads
   tokenEndpoint: null,          // e.g. '/archx/token/'  (+ image id)
+  tokenMethod: 'POST',          // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
   onExtract: 'black',           // 'black' | 'lowres' | 'scrambled'
   splitCanvases: false,         // shield+: one canvas per tile (hero images)
   splitGrid: 3,
@@ -179,10 +180,12 @@ const DEFAULTS = {
   requestQuality: null,         // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
   cacheBitmap: true,            // reuse a decoded bitmap for the same source in this page session
   cachePayload: true,           // retain the scrambled bytes privately so repaint/strict-memory recovery needs NO network reload
+  cacheScope: null,             // set per authenticated viewer/tenant so SPA account switches cannot reuse another viewer's bitmap
   reloadOnResize: 'upscale',    // 'never' | 'upscale' | 'always' — ordinary resizes repaint locally, never remint tokens
   resizeUpscaleFactor: 1.75,    // only a much larger box may justify a fresh derivative under 'upscale'
   renderLoop: 'auto',           // 'auto' (static images draw on demand; temporal shield animates) | 'static' | 'continuous'
-  temporalShield: null,         // true | { strength, block, respectReducedMotion } — complementary frames a single screenshot cannot average
+  temporalShield: null,         // true | { strength, block, pattern, chroma, respectReducedMotion } — complementary frames a single screenshot cannot average
+  cameraShield: null,           // experimental alias/profile for temporalShield aimed at rolling-shutter/Bayer cameras
   watermark: null,              // string | { text, opacity, tile, corner }
   forensic: true,               // invisible per-session block pattern (shield/vault/fortress)
   sessionId: null,              // defaults to a random per-page-view id
@@ -284,7 +287,9 @@ function mergeOptions(opts = {}) {
     if (clean.localScramble === undefined) merged.localScramble = true;
     if (clean.forensic === undefined) merged.forensic = true;
     if (clean.captureShield === undefined) merged.captureShield = true;
-    if (clean.temporalShield === undefined) merged.temporalShield = { strength: 0.16, block: 2 };
+    if (clean.temporalShield === undefined && clean.cameraShield === undefined) {
+      merged.temporalShield = { strength: 0.16, block: 2, pattern: 'checker', chroma: true };
+    }
     if (clean.strikes === undefined) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 30000 };
     if (!opts.guards || opts.guards.devtools === undefined) merged.guards.devtools = true;
   }
@@ -316,7 +321,7 @@ export const PRESETS = Object.freeze({
   }),
   screenshotResistant: Object.freeze({
     mode: 'fortress', qualityProfile: 'original', lens: true,
-    temporalShield: Object.freeze({ strength: 0.16, block: 2 }),
+    temporalShield: Object.freeze({ strength: 0.16, block: 2, pattern: 'checker', chroma: true }),
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
     cacheBitmap: true, cachePayload: true, renderLoop: 'auto',
     strikes: Object.freeze({ blurAt: 3, lockAt: 6, lockMs: 30000 }),
@@ -470,10 +475,20 @@ async function fetchWithRetries(url, options, retries) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await nativeFetch(url, options);
-      if (!res.ok) throw new Error('Archx fetch failed: HTTP ' + res.status);
+      if (!res.ok) {
+        const err = new Error('Archx fetch failed: HTTP ' + res.status);
+        err.status = res.status;
+        throw err;
+      }
       return res;
     } catch (err) {
       lastErr = err;
+      // Retrying a permanent 4xx (denied, quota, malformed request) only burns
+      // network/server quota and delays the visible error. Keep retries for
+      // network failures and the small set of transient HTTP statuses.
+      const retryableHttp = err.status == null || err.status >= 500 ||
+        [408, 425, 429].includes(err.status);
+      if (!retryableHttp || err?.name === 'AbortError') throw err;
       if (attempt < retries) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
     }
   }
@@ -1016,7 +1031,10 @@ export class ProtectedImage {
   /** Effective temporal-shield config, or null when disabled / reduced-motion. */
   #temporalConfig() {
     const o = this.#options;
-    let raw = o.temporalShield;
+    // A truthy cameraShield is the more specific direct flag, so it wins
+    // over a preset's generic temporalShield. `cameraShield:false` merely
+    // means "no camera-specific override" and leaves temporalShield alone.
+    let raw = o.cameraShield || o.temporalShield;
     if (raw == null && o.captureShield && typeof o.captureShield === 'object') {
       raw = o.captureShield.temporalDither;
     }
@@ -1027,9 +1045,13 @@ export class ProtectedImage {
         typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) {
       return null;
     }
+    const pattern = ['blocks', 'checker', 'bands'].includes(cfg.pattern) ? cfg.pattern : 'blocks';
     return {
       strength: Math.max(0, Math.min(0.45, Number(cfg.strength ?? 0.16))),
       block: Math.max(1, Math.min(16, Math.round(Number(cfg.block ?? 2)))),
+      pattern,
+      patternCode: pattern === 'checker' ? 1 : pattern === 'bands' ? 2 : 0,
+      chroma: cfg.chroma === true,
     };
   }
 
@@ -1085,7 +1107,7 @@ export class ProtectedImage {
       // gets cropped and then upscaled (a major source of slurry detail).
       let tokenQuery = `?w=${boxW}&bw=${boxW}&bh=${boxH}&fit=${encodeURIComponent(o.fit || 'cover')}`;
       if (o.requestQuality != null && o.requestQuality !== '') tokenQuery += `&q=${encodeURIComponent(o.requestQuality)}`;
-      const tokenCacheKey = `token|${endpoint}|${src.id}|${boxW}x${boxH}|${o.fit}|${o.requestQuality ?? ''}|${o.key || ''}|${o.aesKey ? 'aes' : ''}`;
+      const tokenCacheKey = `token|${o.cacheScope || ''}|${endpoint}|${src.id}|${boxW}x${boxH}|${o.fit}|${o.requestQuality ?? ''}|${o.key || ''}|${o.aesKey ? 'aes' : ''}`;
       if (!force && cacheBitmap && bitmapCache.has(tokenCacheKey)) {
         const hit = await bitmapCache.get(tokenCacheKey);
         return { ...hit, extra: hit.extra || {} };
@@ -1094,8 +1116,14 @@ export class ProtectedImage {
         let lastErr;
         for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
           try {
-            const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + tokenQuery,
-              { credentials: o.credentials, signal: this.#abort.signal }, o.retries);
+            const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
+            const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + tokenQuery, {
+              method: tokenMethod,
+              credentials: o.credentials,
+              cache: 'no-store',
+              headers: { 'X-Archx-Request': 'token' },
+              signal: this.#abort.signal,
+            }, o.retries);
             const token = await res.json();
             const imgRes = await nativeFetch(token.url, {
               credentials: o.credentials, cache: 'no-store', signal: this.#abort.signal,
@@ -1116,7 +1144,7 @@ export class ProtectedImage {
       return tokenPromise;
     }
     if (typeof src === 'string') {
-      const cacheKey = src + '|' + (extra.key || o.key || '');
+      const cacheKey = `${o.cacheScope || ''}|${src}|${extra.key || o.key || ''}`;
       if (!force && cacheBitmap && bitmapCache.has(cacheKey)) return { ...(await bitmapCache.get(cacheKey)), extra };
       const promise = (async () => {
         const res = await fetchWithRetries(src,
@@ -1408,22 +1436,57 @@ export class ProtectedImage {
     const bw = Math.ceil(w / block), bh = Math.ceil(h / block);
     const offsets = new Float32Array(bw * bh * 3);
     const amp = cfg.strength * 255;
-    for (let i = 0; i < offsets.length; i++) offsets[i] = (Math.random() * 2 - 1) * amp;
+    for (let by = 0; by < bh; by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        const oi = (by * bw + bx) * 3;
+        if (cfg.pattern === 'bands' && bx > 0) {
+          offsets[oi] = offsets[oi - 3];
+          offsets[oi + 1] = offsets[oi - 2];
+          offsets[oi + 2] = offsets[oi - 1];
+          continue;
+        }
+        const parity = cfg.pattern === 'checker' ? (((bx + by) & 1) ? 1 : -1) : 1;
+        if (cfg.chroma) {
+          // Opponent-colour modulation: human chroma sensitivity is lower
+          // than luma sensitivity, while Bayer sensors sample RGB unevenly.
+          const scalar = cfg.pattern === 'checker'
+            ? (0.35 + Math.random() * 0.65) * amp * parity
+            : (Math.random() * 2 - 1) * amp;
+          offsets[oi] = scalar;
+          offsets[oi + 1] = -0.62 * scalar;
+          offsets[oi + 2] = 0.78 * scalar;
+        } else if (cfg.pattern === 'checker') {
+          offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
+        } else {
+          offsets[oi] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
+        }
+      }
+    }
     const mk = (sign) => {
       const c = makeCanvas(this.#host.ownerDocument);
       c.width = w; c.height = h;
       const cctx = getNativeContext(c, '2d');
       const out = cctx.createImageData(w, h);
-      const s = src.data, d = out.data;
-      for (let y = 0; y < h; y++) {
-        const by = Math.floor(y / block) * bw;
-        let p = y * w * 4;
-        for (let x = 0; x < w; x++, p += 4) {
-          const oi = (by + Math.floor(x / block)) * 3;
-          d[p] = Math.max(0, Math.min(255, s[p] + sign * offsets[oi]));
-          d[p + 1] = Math.max(0, Math.min(255, s[p + 1] + sign * offsets[oi + 1]));
-          d[p + 2] = Math.max(0, Math.min(255, s[p + 2] + sign * offsets[oi + 2]));
-          d[p + 3] = 255;
+      const s = src.data, d = out.data; // Uint8ClampedArray clamps assignments
+      for (let by = 0; by < bh; by++) {
+        const y0 = by * block;
+        const y1 = Math.min(h, y0 + block);
+        for (let y = y0; y < y1; y++) {
+          let p = y * w * 4;
+          for (let bx = 0; bx < bw; bx++) {
+            const oi = (by * bw + bx) * 3;
+            const x1 = Math.min(w, (bx + 1) * block);
+            for (let x = bx * block; x < x1; x++, p += 4) {
+              d[p] = s[p] + sign * offsets[oi];
+              d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
+              d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
+              d[p + 3] = 255;
+            }
+          }
         }
       }
       cctx.putImageData(out, 0, 0);
@@ -1737,7 +1800,14 @@ export class ProtectedImage {
     canvas.hidden = false;
     let gl = this.#gl;
     if (!gl) {
-      gl = getNativeContext(canvas, 'webgl2', { preserveDrawingBuffer: false, antialias: false, alpha: false, powerPreference: 'low-power' });
+      gl = getNativeContext(canvas, 'webgl2', {
+        preserveDrawingBuffer: false,
+        antialias: false,
+        alpha: false,
+        depth: false,
+        stencil: false,
+        powerPreference: 'low-power',
+      });
       if (!gl) return false;
       this.#gl = gl;
       glContextsInUse++;
@@ -1787,6 +1857,7 @@ export class ProtectedImage {
       uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
       uniform float uTemporalOn; uniform float uTemporalSign;
       uniform float uTemporalStrength; uniform float uTemporalBlock;
+      uniform float uTemporalPattern; uniform float uTemporalChroma;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
       vec3 hash3(vec2 q){
@@ -1872,7 +1943,26 @@ export class ProtectedImage {
         // one screenshot/extension capture keeps a single noisy frame.
         if(uTemporalOn>0.5){
           vec2 blockCell = floor(gl_FragCoord.xy / max(uTemporalBlock, 1.0));
-          c.rgb += (hash3(blockCell) - 0.5) * uTemporalStrength * uTemporalSign;
+          vec3 delta;
+          if(uTemporalPattern>1.5){
+            // Horizontal bands interact strongly with rolling-shutter rows.
+            float v = hash(vec2(0.0, blockCell.y)) - 0.5;
+            delta = uTemporalChroma>0.5 ? vec3(v, -0.62*v, 0.78*v) : hash3(vec2(0.0, blockCell.y)) - 0.5;
+          } else if(uTemporalPattern>0.5){
+            float parity = mod(blockCell.x + blockCell.y, 2.0) > 0.5 ? 1.0 : -1.0;
+            if(uTemporalChroma>0.5){
+              float v = (0.35 + 0.65*hash(blockCell)) * parity;
+              delta = vec3(v, -0.62*v, 0.78*v) * 0.5;
+            } else {
+              delta = (0.35 + 0.65*hash3(blockCell)) * parity * 0.5;
+            }
+          } else if(uTemporalChroma>0.5){
+            float v = hash(blockCell) - 0.5;
+            delta = vec3(v, -0.62*v, 0.78*v);
+          } else {
+            delta = hash3(blockCell) - 0.5;
+          }
+          c.rgb += delta * uTemporalStrength * uTemporalSign;
         }
         frag = vec4(c.rgb, 1.0);
       }`;
@@ -1893,7 +1983,7 @@ export class ProtectedImage {
     this.#glLoc = {};
     ['uTex','uMap','uWm','uGrid','uCrop','uFitScale','uFitOffset','uScrambled','uSeed','uWmOn',
      'uLensOn','uLensActive','uLensCenter','uLensRadius','uResolution','uLocked',
-     'uTemporalOn','uTemporalSign','uTemporalStrength','uTemporalBlock']
+     'uTemporalOn','uTemporalSign','uTemporalStrength','uTemporalBlock','uTemporalPattern','uTemporalChroma']
       .forEach((n) => { this.#glLoc[n] = gl.getUniformLocation(prog, n); });
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -2058,6 +2148,8 @@ export class ProtectedImage {
       gl.uniform1f(L.uTemporalSign, this.#temporalSign);
       gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength : 0);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
+      gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
+      gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
       if (temporal) this.#temporalSign = -this.#temporalSign;
@@ -2103,6 +2195,7 @@ export class ProtectedImage {
    */
   _debug() {
     if (this.#options.debug !== true) return null;
+    const temporal = this.#temporalConfig();
     return {
       canvas: this.#canvas,
       tiles: [...this.#tilesEl.querySelectorAll('canvas')],
@@ -2121,8 +2214,12 @@ export class ProtectedImage {
       renderedSize: { w: this.#renderedW, h: this.#renderedH },
       glFrames: this.#glFrames,
       glContinuous: this.#gl ? this.#glContinuous() : false,
-      temporalOn: !!this.#temporalConfig(),
+      temporalOn: !!temporal,
+      temporalPattern: temporal?.pattern || null,
+      temporalChroma: !!temporal?.chroma,
       temporalFrames2d: !!this.#temporalFrames,
+      tokenMethod: this.#options.tokenMethod,
+      cacheScope: this.#options.cacheScope || null,
     };
   }
   async reload(newSource) {
@@ -2223,7 +2320,7 @@ function defineElement() {
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint']; }
+    static get observedAttributes() { return ['src', 'image-id', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'cache-scope']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -2249,10 +2346,15 @@ function defineElement() {
         lens: this.hasAttribute('lens') ? true : presetOptions.lens,
         captureShield: this.hasAttribute('capture-shield') ? true : presetOptions.captureShield,
         temporalShield: this.hasAttribute('temporal-shield') ? true : presetOptions.temporalShield,
+        cameraShield: this.hasAttribute('camera-shield')
+          ? { pattern: 'checker', chroma: true }
+          : presetOptions.cameraShield,
         renderLoop: this.getAttribute('render-loop') || presetOptions.renderLoop,
         reloadOnResize: this.getAttribute('reload-on-resize') || presetOptions.reloadOnResize,
         onExtract: this.getAttribute('on-extract') || presetOptions.onExtract,
         tokenEndpoint: this.getAttribute('token-endpoint') || undefined,
+        tokenMethod: this.getAttribute('token-method') || undefined,
+        cacheScope: this.getAttribute('cache-scope') || undefined,
       });
       elementInstances.set(this, inst);
       this.ready = inst.ready;
@@ -2293,6 +2395,8 @@ const Archx = {
   defineElement,
   /** Number of live protected images (the registry itself stays private). */
   get instanceCount() { return instances.size; },
+  /** Prevent future reuse of shared decoded bitmaps (call on logout/account switch). */
+  clearCaches() { bitmapCache.clear(); pageSessionId = null; },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,
   /** Cheap headless/automation signals present in this browser. */

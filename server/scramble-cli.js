@@ -40,7 +40,10 @@ if (!input || !output || args.help) {
   --forensic-seed <s>  bake a seeded forensic block mark in before scrambling
   --stego <payload>    bake a blind StegoMark ownership fingerprint (detect later with archx-detect)
   --stego-key <s>      StegoMark permutation key (default: the scramble --key)
-  --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)`);
+  --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
+  --max-input-bytes <n> reject masters above this size (default 52428800)
+  --max-input-pixels <n> reject masters above this pixel budget (default 40000000)
+  --timeout-sec <n> Sharp processing timeout per image (default 10)`);
   process.exit(input ? 0 : 1);
 }
 
@@ -60,6 +63,9 @@ const opts = {
   stegoPayload: args.stego || null,
   stegoKey: args['stego-key'] || key,
   stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
+  maxInputBytes: args['max-input-bytes'] ? Number(args['max-input-bytes']) : undefined,
+  maxInputPixels: args['max-input-pixels'] ? Number(args['max-input-pixels']) : undefined,
+  processingTimeoutSec: args['timeout-sec'] ? Number(args['timeout-sec']) : undefined,
 };
 
 async function protectOne(inPath, outPath) {

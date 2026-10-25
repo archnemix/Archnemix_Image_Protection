@@ -360,7 +360,8 @@ function detectStegoFingerprint(rgba, w, h, {
   key = "",
   gridX = 24,
   gridY = 16,
-  searchOffsets = false
+  searchOffsets = false,
+  searchGeometry = false
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
@@ -369,31 +370,39 @@ function detectStegoFingerprint(rgba, w, h, {
   const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
   const cw = w / gx, ch = h / gy;
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
-  const evaluate = (fx, fy) => {
-    const dx = fx * cw, dy = fy * ch;
+  const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
+    const cellW0 = cw * scaleX;
+    const cellH0 = ch * scaleY;
+    const ox = originX ?? fx * cw;
+    const oy = originY ?? fy * ch;
     const bitScores = new Float64Array(64);
     const bitCounts = new Uint16Array(64);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
-      const y0 = Math.max(0, Math.round(cy * ch + dy));
-      const y1 = Math.min(h, Math.round((cy + 1) * ch + dy));
+      const rawY0 = oy + cy * cellH0;
+      const rawY1 = rawY0 + cellH0;
+      const y0 = Math.max(0, Math.round(rawY0));
+      const y1 = Math.min(h, Math.round(rawY1));
+      if (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) continue;
       for (let cx = 0; cx < gx; cx++) {
-        const x0 = Math.max(0, Math.round(cx * cw + dx));
-        const x1 = Math.min(w, Math.round((cx + 1) * cw + dx));
-        if (x1 - x0 < 4 || y1 - y0 < 2) continue;
+        const rawX0 = ox + cx * cellW0;
+        const rawX1 = rawX0 + cellW0;
+        const x0 = Math.max(0, Math.round(rawX0));
+        const x1 = Math.min(w, Math.round(rawX1));
+        if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
         const sums = new Float64Array(STEGO_ROW_SEGMENTS * 4);
         const counts = new Uint32Array(STEGO_ROW_SEGMENTS * 4);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
         const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
         for (let y = y0; y < y1; y += step) {
-          const segment = Math.min(
+          const segment = Math.max(0, Math.min(
             STEGO_ROW_SEGMENTS - 1,
-            Math.floor((y - y0) * STEGO_ROW_SEGMENTS / cellH)
-          );
+            Math.floor((y - rawY0) * STEGO_ROW_SEGMENTS / cellH0)
+          ));
           let i = (y * w + x0) * 4;
           for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.min(3, Math.floor((x - x0) * 4 / cellW));
+            const band = Math.max(0, Math.min(3, Math.floor((x - rawX0) * 4 / cellW0)));
             const idx = segment * 4 + band;
             sums[idx] += src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
             counts[idx]++;
@@ -401,10 +410,12 @@ function detectStegoFingerprint(rgba, w, h, {
         }
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
+        let validSegments = 0;
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
           const base = segment * 4;
           if (counts[base] === 0 || counts[base + 1] === 0 || counts[base + 2] === 0 || counts[base + 3] === 0) continue;
+          validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
           const m2 = sums[base + 2] / counts[base + 2];
@@ -413,7 +424,7 @@ function detectStegoFingerprint(rgba, w, h, {
           segmentScoreSum += -(-m0 + 3 * m1 - 3 * m2 + m3) / 8 * polarity[cellIndex] * segmentPolarity[cellIndex * STEGO_ROW_SEGMENTS + segment] * weight;
           segmentWeightSum += weight;
         }
-        if (!segmentWeightSum) continue;
+        if (!segmentWeightSum || validSegments < 2) continue;
         const rawScore = segmentScoreSum / segmentWeightSum;
         const score = Math.max(-12, Math.min(12, rawScore));
         const bitIndex = order[cy * gx + cx] % 64;
@@ -438,8 +449,9 @@ function detectStegoFingerprint(rgba, w, h, {
     const meanAbs = bitScores.reduce((s, v, i) => s + Math.abs(v) / Math.max(1, bitCounts[i]), 0) / 64;
     const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - Math.max(0, corrected.corrections) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
+    const minBitCount = Math.min(...bitCounts);
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2,
+      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && minBitCount >= 1,
       fingerprint,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
@@ -447,19 +459,106 @@ function detectStegoFingerprint(rgba, w, h, {
       agreement: Math.round(agreement * 1e3) / 1e3,
       meanSignal: Math.round(meanAbs * 100) / 100,
       cells: cellScores.length,
-      offset: { x: fx, y: fy },
+      offset: {
+        x: Math.round(ox / cellW0 * 1e3) / 1e3,
+        y: Math.round(oy / cellH0 * 1e3) / 1e3
+      },
+      geometry: {
+        scaleX: Math.round(scaleX * 1e3) / 1e3,
+        scaleY: Math.round(scaleY * 1e3) / 1e3,
+        originX: Math.round(ox * 10) / 10,
+        originY: Math.round(oy * 10) / 10
+      },
       grid: { x: gx, y: gy },
-      _evidence: evidence
+      _evidence: evidence,
+      _originX: ox,
+      _originY: oy,
+      _scaleX: scaleX,
+      _scaleY: scaleY
     };
   };
   let best = null;
-  for (const fx of fractions) for (const fy of fractions) {
-    const candidate = evaluate(fx, fy);
+  const consider = (candidate) => {
     const better = !best || candidate.found && !best.found || candidate.found === best.found && candidate._evidence > best._evidence || candidate.found === best.found && candidate._evidence === best._evidence && candidate.confidence > best.confidence;
     if (better) best = candidate;
+    return candidate;
+  };
+  for (const fx of fractions) for (const fy of fractions) {
+    consider(evaluate({ fx, fy }));
     if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
   }
-  if (best) delete best._evidence;
+  if (searchGeometry && !best?.found) {
+    const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.25];
+    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 10) / 10))];
+    const originRange = (span, extent) => {
+      const min = Math.min(0, extent - span);
+      const max = Math.max(0, extent - span);
+      return { min, max, center: (min + max) / 2 };
+    };
+    const scaleCandidates = [];
+    for (const scaleX of scaleValues) {
+      const rangeX = originRange(gx * cw * scaleX, w);
+      for (const scaleY of scaleValues) {
+        const rangeY = originRange(gy * ch * scaleY, h);
+        for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+          for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+            scaleCandidates.push(consider(evaluate({
+              scaleX,
+              scaleY,
+              originX,
+              originY
+            })));
+          }
+        }
+      }
+    }
+    const originCandidates = [];
+    const seenPairs = /* @__PURE__ */ new Set();
+    for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}`;
+      if (seenPairs.has(key2)) continue;
+      seenPairs.add(key2);
+      const rangeX = originRange(gx * cw * candidate._scaleX, w);
+      const rangeY = originRange(gy * ch * candidate._scaleY, h);
+      for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+        for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+          originCandidates.push(consider(evaluate({
+            scaleX: candidate._scaleX,
+            scaleY: candidate._scaleY,
+            originX,
+            originY
+          })));
+        }
+      }
+      if (seenPairs.size >= 4) break;
+    }
+    const refinements = [];
+    const seenGeometries = /* @__PURE__ */ new Set();
+    for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}:${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
+      if (seenGeometries.has(key2)) continue;
+      seenGeometries.add(key2);
+      refinements.push(candidate);
+      if (refinements.length >= 3) break;
+    }
+    for (const coarseCandidate of refinements) {
+      for (const fx of fractions) for (const fy of fractions) {
+        consider(evaluate({
+          scaleX: coarseCandidate._scaleX,
+          scaleY: coarseCandidate._scaleY,
+          originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
+          originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY
+        }));
+      }
+    }
+  }
+  if (best) {
+    delete best._evidence;
+    delete best._originX;
+    delete best._originY;
+    delete best._scaleX;
+    delete best._scaleY;
+  }
   return best;
 }
 function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
@@ -493,7 +592,7 @@ function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
 }
 
 // src/archx.js
-var VERSION = "1.3.0";
+var VERSION = "1.4.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -605,6 +704,8 @@ var DEFAULTS = {
   // base64 AES key for encrypted .archx payloads
   tokenEndpoint: null,
   // e.g. '/archx/token/'  (+ image id)
+  tokenMethod: "POST",
+  // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
   onExtract: "black",
   // 'black' | 'lowres' | 'scrambled'
   splitCanvases: false,
@@ -626,6 +727,8 @@ var DEFAULTS = {
   // reuse a decoded bitmap for the same source in this page session
   cachePayload: true,
   // retain the scrambled bytes privately so repaint/strict-memory recovery needs NO network reload
+  cacheScope: null,
+  // set per authenticated viewer/tenant so SPA account switches cannot reuse another viewer's bitmap
   reloadOnResize: "upscale",
   // 'never' | 'upscale' | 'always' — ordinary resizes repaint locally, never remint tokens
   resizeUpscaleFactor: 1.75,
@@ -633,7 +736,9 @@ var DEFAULTS = {
   renderLoop: "auto",
   // 'auto' (static images draw on demand; temporal shield animates) | 'static' | 'continuous'
   temporalShield: null,
-  // true | { strength, block, respectReducedMotion } — complementary frames a single screenshot cannot average
+  // true | { strength, block, pattern, chroma, respectReducedMotion } — complementary frames a single screenshot cannot average
+  cameraShield: null,
+  // experimental alias/profile for temporalShield aimed at rolling-shutter/Bayer cameras
   watermark: null,
   // string | { text, opacity, tile, corner }
   forensic: true,
@@ -732,7 +837,9 @@ function mergeOptions(opts = {}) {
     if (clean.localScramble === void 0) merged.localScramble = true;
     if (clean.forensic === void 0) merged.forensic = true;
     if (clean.captureShield === void 0) merged.captureShield = true;
-    if (clean.temporalShield === void 0) merged.temporalShield = { strength: 0.16, block: 2 };
+    if (clean.temporalShield === void 0 && clean.cameraShield === void 0) {
+      merged.temporalShield = { strength: 0.16, block: 2, pattern: "checker", chroma: true };
+    }
     if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
     if (!opts.guards || opts.guards.devtools === void 0) merged.guards.devtools = true;
   }
@@ -780,7 +887,7 @@ var PRESETS = Object.freeze({
     mode: "fortress",
     qualityProfile: "original",
     lens: true,
-    temporalShield: Object.freeze({ strength: 0.16, block: 2 }),
+    temporalShield: Object.freeze({ strength: 0.16, block: 2, pattern: "checker", chroma: true }),
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
     cacheBitmap: true,
     cachePayload: true,
@@ -913,10 +1020,16 @@ async function fetchWithRetries(url, options, retries) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await nativeFetch(url, options);
-      if (!res.ok) throw new Error("Archx fetch failed: HTTP " + res.status);
+      if (!res.ok) {
+        const err = new Error("Archx fetch failed: HTTP " + res.status);
+        err.status = res.status;
+        throw err;
+      }
       return res;
     } catch (err) {
       lastErr = err;
+      const retryableHttp = err.status == null || err.status >= 500 || [408, 425, 429].includes(err.status);
+      if (!retryableHttp || err?.name === "AbortError") throw err;
       if (attempt < retries) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
     }
   }
@@ -1437,7 +1550,7 @@ var ProtectedImage = class {
       const boxH = Math.min(maxSourceWidth, Math.ceil(cssHeight * pixelScale));
       let tokenQuery = `?w=${boxW}&bw=${boxW}&bh=${boxH}&fit=${encodeURIComponent(o.fit || "cover")}`;
       if (o.requestQuality != null && o.requestQuality !== "") tokenQuery += `&q=${encodeURIComponent(o.requestQuality)}`;
-      const tokenCacheKey = `token|${endpoint}|${src.id}|${boxW}x${boxH}|${o.fit}|${o.requestQuality ?? ""}|${o.key || ""}|${o.aesKey ? "aes" : ""}`;
+      const tokenCacheKey = `token|${o.cacheScope || ""}|${endpoint}|${src.id}|${boxW}x${boxH}|${o.fit}|${o.requestQuality ?? ""}|${o.key || ""}|${o.aesKey ? "aes" : ""}`;
       if (!force && cacheBitmap && bitmapCache.has(tokenCacheKey)) {
         const hit = await bitmapCache.get(tokenCacheKey);
         return { ...hit, extra: hit.extra || {} };
@@ -1446,11 +1559,14 @@ var ProtectedImage = class {
         let lastErr;
         for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
           try {
-            const res = await fetchWithRetries(
-              endpoint + encodeURIComponent(src.id) + tokenQuery,
-              { credentials: o.credentials, signal: __privateGet(this, _abort).signal },
-              o.retries
-            );
+            const tokenMethod = String(o.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
+            const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + tokenQuery, {
+              method: tokenMethod,
+              credentials: o.credentials,
+              cache: "no-store",
+              headers: { "X-Archx-Request": "token" },
+              signal: __privateGet(this, _abort).signal
+            }, o.retries);
             const token = await res.json();
             const imgRes = await nativeFetch(token.url, {
               credentials: o.credentials,
@@ -1476,7 +1592,7 @@ var ProtectedImage = class {
       return tokenPromise;
     }
     if (typeof src === "string") {
-      const cacheKey = src + "|" + (extra.key || o.key || "");
+      const cacheKey = `${o.cacheScope || ""}|${src}|${extra.key || o.key || ""}`;
       if (!force && cacheBitmap && bitmapCache.has(cacheKey)) return { ...await bitmapCache.get(cacheKey), extra };
       const promise = (async () => {
         const res = await fetchWithRetries(
@@ -2006,7 +2122,14 @@ var ProtectedImage = class {
     canvas.hidden = false;
     let gl = __privateGet(this, _gl);
     if (!gl) {
-      gl = getNativeContext(canvas, "webgl2", { preserveDrawingBuffer: false, antialias: false, alpha: false, powerPreference: "low-power" });
+      gl = getNativeContext(canvas, "webgl2", {
+        preserveDrawingBuffer: false,
+        antialias: false,
+        alpha: false,
+        depth: false,
+        stencil: false,
+        powerPreference: "low-power"
+      });
       if (!gl) return false;
       __privateSet(this, _gl, gl);
       glContextsInUse++;
@@ -2062,6 +2185,7 @@ var ProtectedImage = class {
       uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
       uniform float uTemporalOn; uniform float uTemporalSign;
       uniform float uTemporalStrength; uniform float uTemporalBlock;
+      uniform float uTemporalPattern; uniform float uTemporalChroma;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
       vec3 hash3(vec2 q){
@@ -2147,7 +2271,26 @@ var ProtectedImage = class {
         // one screenshot/extension capture keeps a single noisy frame.
         if(uTemporalOn>0.5){
           vec2 blockCell = floor(gl_FragCoord.xy / max(uTemporalBlock, 1.0));
-          c.rgb += (hash3(blockCell) - 0.5) * uTemporalStrength * uTemporalSign;
+          vec3 delta;
+          if(uTemporalPattern>1.5){
+            // Horizontal bands interact strongly with rolling-shutter rows.
+            float v = hash(vec2(0.0, blockCell.y)) - 0.5;
+            delta = uTemporalChroma>0.5 ? vec3(v, -0.62*v, 0.78*v) : hash3(vec2(0.0, blockCell.y)) - 0.5;
+          } else if(uTemporalPattern>0.5){
+            float parity = mod(blockCell.x + blockCell.y, 2.0) > 0.5 ? 1.0 : -1.0;
+            if(uTemporalChroma>0.5){
+              float v = (0.35 + 0.65*hash(blockCell)) * parity;
+              delta = vec3(v, -0.62*v, 0.78*v) * 0.5;
+            } else {
+              delta = (0.35 + 0.65*hash3(blockCell)) * parity * 0.5;
+            }
+          } else if(uTemporalChroma>0.5){
+            float v = hash(blockCell) - 0.5;
+            delta = vec3(v, -0.62*v, 0.78*v);
+          } else {
+            delta = hash3(blockCell) - 0.5;
+          }
+          c.rgb += delta * uTemporalStrength * uTemporalSign;
         }
         frag = vec4(c.rgb, 1.0);
       }`;
@@ -2189,7 +2332,9 @@ var ProtectedImage = class {
       "uTemporalOn",
       "uTemporalSign",
       "uTemporalStrength",
-      "uTemporalBlock"
+      "uTemporalBlock",
+      "uTemporalPattern",
+      "uTemporalChroma"
     ].forEach((n) => {
       __privateGet(this, _glLoc)[n] = gl.getUniformLocation(prog, n);
     });
@@ -2366,6 +2511,8 @@ var ProtectedImage = class {
       gl.uniform1f(L.uTemporalSign, __privateGet(this, _temporalSign));
       gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength : 0);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
+      gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
+      gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
       if (temporal) __privateSet(this, _temporalSign, -__privateGet(this, _temporalSign));
@@ -2413,6 +2560,7 @@ var ProtectedImage = class {
    */
   _debug() {
     if (__privateGet(this, _options).debug !== true) return null;
+    const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
     return {
       canvas: __privateGet(this, _canvas),
       tiles: [...__privateGet(this, _tilesEl).querySelectorAll("canvas")],
@@ -2431,8 +2579,12 @@ var ProtectedImage = class {
       renderedSize: { w: __privateGet(this, _renderedW), h: __privateGet(this, _renderedH) },
       glFrames: __privateGet(this, _glFrames),
       glContinuous: __privateGet(this, _gl) ? __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) : false,
-      temporalOn: !!__privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this),
-      temporalFrames2d: !!__privateGet(this, _temporalFrames)
+      temporalOn: !!temporal,
+      temporalPattern: temporal?.pattern || null,
+      temporalChroma: !!temporal?.chroma,
+      temporalFrames2d: !!__privateGet(this, _temporalFrames),
+      tokenMethod: __privateGet(this, _options).tokenMethod,
+      cacheScope: __privateGet(this, _options).cacheScope || null
     };
   }
   async reload(newSource) {
@@ -2637,7 +2789,7 @@ shouldUpgradeDerivative_fn = function(previousW, previousH) {
 /** Effective temporal-shield config, or null when disabled / reduced-motion. */
 temporalConfig_fn = function() {
   const o = __privateGet(this, _options);
-  let raw = o.temporalShield;
+  let raw = o.cameraShield || o.temporalShield;
   if (raw == null && o.captureShield && typeof o.captureShield === "object") {
     raw = o.captureShield.temporalDither;
   }
@@ -2647,9 +2799,13 @@ temporalConfig_fn = function() {
   if (cfg.respectReducedMotion !== false && typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) {
     return null;
   }
+  const pattern = ["blocks", "checker", "bands"].includes(cfg.pattern) ? cfg.pattern : "blocks";
   return {
     strength: Math.max(0, Math.min(0.45, Number(cfg.strength ?? 0.16))),
-    block: Math.max(1, Math.min(16, Math.round(Number(cfg.block ?? 2))))
+    block: Math.max(1, Math.min(16, Math.round(Number(cfg.block ?? 2)))),
+    pattern,
+    patternCode: pattern === "checker" ? 1 : pattern === "bands" ? 2 : 0,
+    chroma: cfg.chroma === true
   };
 };
 waitForStableSize_fn = async function() {
@@ -2711,7 +2867,32 @@ setupTemporalFrames_fn = function(frame, cfg) {
   const bw = Math.ceil(w / block), bh = Math.ceil(h / block);
   const offsets = new Float32Array(bw * bh * 3);
   const amp = cfg.strength * 255;
-  for (let i = 0; i < offsets.length; i++) offsets[i] = (Math.random() * 2 - 1) * amp;
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      const oi = (by * bw + bx) * 3;
+      if (cfg.pattern === "bands" && bx > 0) {
+        offsets[oi] = offsets[oi - 3];
+        offsets[oi + 1] = offsets[oi - 2];
+        offsets[oi + 2] = offsets[oi - 1];
+        continue;
+      }
+      const parity = cfg.pattern === "checker" ? bx + by & 1 ? 1 : -1 : 1;
+      if (cfg.chroma) {
+        const scalar = cfg.pattern === "checker" ? (0.35 + Math.random() * 0.65) * amp * parity : (Math.random() * 2 - 1) * amp;
+        offsets[oi] = scalar;
+        offsets[oi + 1] = -0.62 * scalar;
+        offsets[oi + 2] = 0.78 * scalar;
+      } else if (cfg.pattern === "checker") {
+        offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
+        offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
+        offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
+      } else {
+        offsets[oi] = (Math.random() * 2 - 1) * amp;
+        offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
+        offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
+      }
+    }
+  }
   const mk = (sign) => {
     const c = makeCanvas(__privateGet(this, _host).ownerDocument);
     c.width = w;
@@ -2719,15 +2900,21 @@ setupTemporalFrames_fn = function(frame, cfg) {
     const cctx = getNativeContext(c, "2d");
     const out = cctx.createImageData(w, h);
     const s = src.data, d = out.data;
-    for (let y = 0; y < h; y++) {
-      const by = Math.floor(y / block) * bw;
-      let p = y * w * 4;
-      for (let x = 0; x < w; x++, p += 4) {
-        const oi = (by + Math.floor(x / block)) * 3;
-        d[p] = Math.max(0, Math.min(255, s[p] + sign * offsets[oi]));
-        d[p + 1] = Math.max(0, Math.min(255, s[p + 1] + sign * offsets[oi + 1]));
-        d[p + 2] = Math.max(0, Math.min(255, s[p + 2] + sign * offsets[oi + 2]));
-        d[p + 3] = 255;
+    for (let by = 0; by < bh; by++) {
+      const y0 = by * block;
+      const y1 = Math.min(h, y0 + block);
+      for (let y = y0; y < y1; y++) {
+        let p = y * w * 4;
+        for (let bx = 0; bx < bw; bx++) {
+          const oi = (by * bw + bx) * 3;
+          const x1 = Math.min(w, (bx + 1) * block);
+          for (let x = bx * block; x < x1; x++, p += 4) {
+            d[p] = s[p] + sign * offsets[oi];
+            d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
+            d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
+            d[p + 3] = 255;
+          }
+        }
       }
     }
     cctx.putImageData(out, 0, 0);
@@ -2882,7 +3069,7 @@ function defineElement() {
   const elementInstances = /* @__PURE__ */ new WeakMap();
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
-      return ["src", "image-id", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "render-loop", "reload-on-resize", "on-extract", "token-endpoint"];
+      return ["src", "image-id", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "cache-scope"];
     }
     connectedCallback() {
       if (elementInstances.has(this)) return;
@@ -2915,10 +3102,13 @@ function defineElement() {
         lens: this.hasAttribute("lens") ? true : presetOptions.lens,
         captureShield: this.hasAttribute("capture-shield") ? true : presetOptions.captureShield,
         temporalShield: this.hasAttribute("temporal-shield") ? true : presetOptions.temporalShield,
+        cameraShield: this.hasAttribute("camera-shield") ? { pattern: "checker", chroma: true } : presetOptions.cameraShield,
         renderLoop: this.getAttribute("render-loop") || presetOptions.renderLoop,
         reloadOnResize: this.getAttribute("reload-on-resize") || presetOptions.reloadOnResize,
         onExtract: this.getAttribute("on-extract") || presetOptions.onExtract,
-        tokenEndpoint: this.getAttribute("token-endpoint") || void 0
+        tokenEndpoint: this.getAttribute("token-endpoint") || void 0,
+        tokenMethod: this.getAttribute("token-method") || void 0,
+        cacheScope: this.getAttribute("cache-scope") || void 0
       });
       elementInstances.set(this, inst);
       this.ready = inst.ready;
@@ -2961,6 +3151,11 @@ var Archx = {
   /** Number of live protected images (the registry itself stays private). */
   get instanceCount() {
     return instances.size;
+  },
+  /** Prevent future reuse of shared decoded bitmaps (call on logout/account switch). */
+  clearCaches() {
+    bitmapCache.clear();
+    pageSessionId = null;
   },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,

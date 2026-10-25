@@ -16,6 +16,8 @@ import {
 import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
 import {
   createArchxMiddleware, signToken, verifyToken, deriveStegoKey,
+  auditArchxServerConfig, validateTokenClaims, validateImageId,
+  SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
 } from '../server/middleware.js';
 
 /* ---------- scramble plan ---------- */
@@ -130,6 +132,14 @@ async function syntheticMaster(w = 320, h = 240) {
     <text x="24" y="${h - 24}" font-family="sans-serif" font-size="40" font-weight="bold" fill="white">SECRET 42</text>
   </svg>`;
   return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+function postToken(url, { headers = {}, ...init } = {}) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'x-archx-request': 'token', ...headers },
+    ...init,
+  });
 }
 
 async function meanAbsDiff(bufA, bufB, w, h) {
@@ -287,20 +297,20 @@ test('token verify accepts valid, rejects tampered/expired', () => {
 test('HTTP middleware: token flow serves scrambled container, blocks everything else', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-test-'));
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
-  const handler = createArchxMiddleware({ secret: 'http-secret', imagesDir: dir, ttlSec: 60 });
+  const handler = createArchxMiddleware({ secret: 'http-secret-for-unit-tests-32chars-minimum', imagesDir: dir, ttlSec: 60, allowAnonymous: true });
   const server = http.createServer((req, res) => handler(req, res));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
 
   // unknown id -> 404 (no existence leaks)
-  assert.equal((await fetch(base + '/archx/token/nope')).status, 404);
+  assert.equal((await postToken(base + '/archx/token/nope')).status, 404);
   // path traversal style id -> 404
-  assert.equal((await fetch(base + '/archx/token/..%2Fsecret')).status, 404);
+  assert.equal((await postToken(base + '/archx/token/..%2Fsecret')).status, 404);
   // image route without token -> 403
   assert.equal((await fetch(base + '/archx/i/cat')).status, 403);
 
-  const tokenRes = await fetch(base + '/archx/token/cat?w=300');
+  const tokenRes = await postToken(base + '/archx/token/cat?w=300');
   assert.equal(tokenRes.status, 200);
   const token = await tokenRes.json();
   assert.ok(token.url.startsWith('/archx/i/cat?t='));
@@ -325,7 +335,7 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
 
   // Cover-aware sizing: a 320x240 source in a 120x120 box needs a 160px-wide
   // derivative (120 * 4/3), not a 120px one that would be cropped+upscaled.
-  const coverToken = await (await fetch(base + '/archx/token/cat?bw=120&bh=120&fit=cover')).json();
+  const coverToken = await (await postToken(base + '/archx/token/cat?bw=120&bh=120&fit=cover')).json();
   const coverBytes = new Uint8Array(await (await fetch(base + coverToken.url)).arrayBuffer());
   assert.equal(decodeContainer(coverBytes).header.w, 160);
 
@@ -333,10 +343,10 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   const tampered = token.url.replace(/t=([^.]+)\./, (_, b) => 't=' + b.slice(0, -2) + 'XX.');
   assert.equal((await fetch(base + tampered)).status, 403);
   // expired token -> 403 (sign one in the past with the same secret)
-  const expired = signToken({ id: 'cat', w: 300, exp: Date.now() - 5000, n: 'n' }, 'http-secret');
+  const expired = signToken({ id: 'cat', w: 300, exp: Date.now() - 5000, n: 'n' }, 'http-secret-for-unit-tests-32chars-minimum');
   assert.equal((await fetch(`${base}/archx/i/cat?t=${expired}`)).status, 403);
   // token minted for a different id -> 403
-  const other = signToken({ id: 'dog', w: 300, exp: Date.now() + 60000, n: 'n' }, 'http-secret');
+  const other = signToken({ id: 'dog', w: 300, exp: Date.now() + 60000, n: 'n' }, 'http-secret-for-unit-tests-32chars-minimum');
   assert.equal((await fetch(`${base}/archx/i/cat?t=${other}`)).status, 403);
 });
 
@@ -344,7 +354,7 @@ test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, or
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-hard-'));
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
   const handler = createArchxMiddleware({
-    secret: 'hard-secret',
+    secret: 'hardened-secret-for-unit-tests-32chars',
     imagesDir: dir,
     oneTimeTokens: true,
     bindTokenTo: { userAgent: true },
@@ -363,9 +373,9 @@ test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, or
   });
 
   // No allowed origin/referer -> 403 even for the token endpoint
-  assert.equal((await fetch(base + '/archx/token/cat?w=900', asBrowser('BrowserA', false))).status, 403);
+  assert.equal((await postToken(base + '/archx/token/cat?w=900', asBrowser('BrowserA', false))).status, 403);
 
-  const tokenRes = await fetch(base + '/archx/token/cat?w=900', asBrowser('BrowserA'));
+  const tokenRes = await postToken(base + '/archx/token/cat?w=900', asBrowser('BrowserA'));
   assert.equal(tokenRes.status, 200);
   const token = await tokenRes.json();
 
@@ -388,7 +398,7 @@ test('middleware direct controls: entitlement quality/format wins and StegoMark 
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(640, 420));
   const issued = [];
   const handler = createArchxMiddleware({
-    secret: 'stego-http-secret',
+    secret: 'stego-http-secret-for-unit-tests-32chars',
     imagesDir: dir,
     steganography: { perToken: true, strength: 6 },
     onStegoIssue: async (record) => { issued.push(record); },
@@ -401,7 +411,7 @@ test('middleware direct controls: entitlement quality/format wins and StegoMark 
   t.after(() => server.close());
   const base = `http://127.0.0.1:${server.address().port}`;
 
-  const token = await (await fetch(base + '/archx/token/cat?w=640&q=10')).json();
+  const token = await (await postToken(base + '/archx/token/cat?w=640&q=10')).json();
   assert.equal(issued.length, 1);
   assert.equal(issued[0].viewerId, 'buyer-7');
   assert.match(issued[0].fingerprint, /^[0-9a-f]{12}$/);
@@ -416,8 +426,305 @@ test('middleware direct controls: entitlement quality/format wins and StegoMark 
   });
   const { data, info } = await sharp(restored).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const found = detectStegoFingerprint(new Uint8Array(data), info.width, info.height, {
-    key: deriveStegoKey('cat', 'stego-http-secret'),
+    key: deriveStegoKey('cat', 'stego-http-secret-for-unit-tests-32chars'),
   });
   assert.equal(found.found, true, JSON.stringify(found));
   assert.equal(found.fingerprint, issued[0].fingerprint);
+});
+
+/* ---------- v1.4 production-hardening regressions ---------- */
+
+const TEST_SECRET = 'unit-test-secret-with-more-than-32-bytes';
+
+async function startArchxFixture(t, options, images = { cat: [320, 240] }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v14-'));
+  for (const [id, [w, h]] of Object.entries(images)) {
+    fs.writeFileSync(path.join(dir, `${id}.jpg`), await syntheticMaster(w, h));
+  }
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    ...options,
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    handler.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  return { dir, handler, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+test('strict server configuration fails closed and rejects unsafe deployments', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-config-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+
+  const weak = auditArchxServerConfig({
+    secret: 'short', imagesDir: dir, allowAnonymous: true,
+  });
+  assert.equal(weak.ok, false);
+  assert.ok(weak.issues.some((issue) => /secret/i.test(issue)));
+  assert.equal(JSON.stringify(weak).includes(TEST_SECRET), false, 'config audit never returns secret material');
+
+  assert.throws(
+    () => createArchxMiddleware({ secret: TEST_SECRET, imagesDir: dir }),
+    /authorize.*required/i,
+    'missing authorize() must never silently mean public access',
+  );
+  assert.throws(
+    () => createArchxMiddleware({
+      secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+      allowedOrigins: ['*'],
+    }),
+    /allowedOrigins/i,
+  );
+  assert.throws(
+    () => createArchxMiddleware({
+      secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+      processing: { maxInputPixels: 12 },
+    }),
+    /maxInputPixels/i,
+  );
+  assert.throws(
+    () => createArchxMiddleware({
+      secret: TEST_SECRET, imagesDir: dir, publicDir: dir, allowAnonymous: true,
+    }),
+    /public directory/i,
+    'masters must not overlap a declared public root',
+  );
+
+  // A symlink inside a masters directory that points outside it is not indexed.
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-outside-'));
+  const outsideFile = path.join(outside, 'outside.jpg');
+  fs.writeFileSync(outsideFile, await syntheticMaster());
+  const symlinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-links-'));
+  fs.symlinkSync(outsideFile, path.join(symlinkDir, 'escape.jpg'));
+  assert.throws(
+    () => createArchxMiddleware({ secret: TEST_SECRET, imagesDir: symlinkDir, allowAnonymous: true }),
+    /no supported master images/i,
+  );
+
+  assert.equal(validateImageId('cat-01_final'), true);
+  for (const bad of ['', '.', '..', '../cat', 'cat/dog', 'cat\\dog', 'cat.jpg', '-cat', 'a'.repeat(129), null, 42]) {
+    assert.equal(validateImageId(bad), false, `rejected id: ${String(bad)}`);
+  }
+});
+
+test('v2 token claims validate every security-relevant field', () => {
+  const now = 1_800_000_000_000;
+  const valid = {
+    v: 2, aud: 'archx:image', scope: 'image:view', id: 'cat',
+    w: 800, iat: now, exp: now + 60_000, n: 'nonce-1234567890', q: 95, fmt: 'webp',
+  };
+  const opts = { id: 'cat', maxWidthCap: 1920, maxTtlMs: 120_000, now: now + 1_000 };
+  assert.equal(validateTokenClaims(valid, opts), true);
+  for (const mutation of [
+    { v: 1 }, { aud: 'other' }, { scope: 'image:download' }, { id: '../cat' },
+    { id: 'dog' }, { w: 63 }, { w: 1921.5 }, { w: 1921 },
+    { iat: now + 10 * 60_000 }, { exp: now + 20 * 60_000 },
+    { n: 'short' }, { n: '../../nonce' }, { q: 101 }, { fmt: 'gif' },
+  ]) {
+    assert.equal(validateTokenClaims({ ...valid, ...mutation }, opts), false, JSON.stringify(mutation));
+  }
+});
+
+test('bounded security stores expire/evict and processing semaphore fails predictably', async () => {
+  const limiter = new SlidingWindowLimiter({ windowMs: 100, maxClients: 2, cleanupIntervalMs: 0 });
+  assert.equal(limiter.hit('a', 1, 1000).limited, false);
+  assert.equal(limiter.hit('a', 1, 1001).limited, true);
+  limiter.hit('b', 1, 1002);
+  limiter.hit('c', 1, 1003);
+  assert.ok(limiter.size <= 2, 'client map is hard-bounded');
+  limiter.cleanup(1200);
+  assert.equal(limiter.size, 0, 'stale clients are forgotten');
+  limiter.close();
+
+  const nonces = new BoundedTtlSet({ maxEntries: 1, cleanupIntervalMs: 0 });
+  assert.equal(nonces.claim('one', 2000, 1000), true);
+  assert.equal(nonces.claim('one', 2000, 1000), false, 'synchronous duplicate claim loses');
+  assert.equal(nonces.claim('two', 2000, 1000), false, 'saturated nonce store fails closed');
+  assert.equal(nonces.claim('expired', 999, 1000), false);
+  nonces.cleanup(2001);
+  assert.equal(nonces.claim('two', 3000, 2001), true);
+  nonces.close();
+
+  const semaphore = new AsyncSemaphore({ maxConcurrent: 1, maxQueue: 0, queueTimeoutMs: 0 });
+  let release;
+  const first = semaphore.run(() => new Promise((resolve) => { release = resolve; }));
+  await assert.rejects(
+    semaphore.run(async () => 'never'),
+    (err) => err.code === 'ARCHX_PROCESSING_BUSY',
+  );
+  release('done');
+  assert.equal(await first, 'done');
+});
+
+test('hardened HTTP edge cases: malformed requests, race-safe replay, redemption reauthorization', async (t) => {
+  let allowed = true;
+  let viewerId = 'alice';
+  let entitlementWidth = 220;
+  const events = [];
+  const { base, handler } = await startArchxFixture(t, {
+    bindTokenTo: { session: true },
+    onSecurityEvent: (event) => events.push(event),
+    authorize: async () => (allowed
+      ? { viewerId, maxWidth: entitlementWidth, permissions: ['image:view'] }
+      : false),
+  });
+
+  assert.equal(handler.configAudit.ok, true);
+  assert.equal(handler.stats().images, 1);
+
+  const getToken = await fetch(base + '/archx/token/cat?w=200');
+  assert.equal(getToken.status, 405, 'POST-only token minting is the secure default');
+  assert.equal(getToken.headers.get('allow'), 'POST');
+  assert.match(getToken.headers.get('cache-control') || '', /no-store/);
+  assert.equal(getToken.headers.get('x-content-type-options'), 'nosniff');
+
+  assert.equal((await postToken(base + '/archx/token/%E0%A4%A')).status, 400);
+  assert.equal((await postToken(base + '/archx/token/..%2Fsecret')).status, 404);
+  assert.equal((await postToken(base + '/archx/token/%252e%252e%252fsecret')).status, 404);
+  assert.equal((await postToken(base + '/archx/token/cat/extra')).status, 404);
+  assert.equal((await postToken(base + '/archx/token/cat', { body: 'x'.repeat(1025) })).status, 413);
+  assert.equal((await postToken(base + '/archx/token/cat?w=12abc')).status, 400);
+  assert.equal((await postToken(base + '/archx/token/cat?bw=100&bh=0&fit=cover')).status, 400);
+  assert.equal((await postToken(base + '/archx/token/cat?w=100&fit=evil')).status, 400);
+  assert.equal((await postToken(base + '/archx/token/cat?w=100', {
+    headers: { 'sec-fetch-site': 'cross-site' },
+  })).status, 403);
+
+  const mint = async () => {
+    const res = await postToken(base + '/archx/token/cat?w=220');
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+
+  // Twenty truly parallel spends of one URL: exactly one may win.
+  const raced = await mint();
+  const statuses = await Promise.all(Array.from({ length: 20 }, async () => {
+    const res = await fetch(base + raced.url);
+    await res.arrayBuffer();
+    return res.status;
+  }));
+  assert.equal(statuses.filter((status) => status === 200).length, 1, JSON.stringify(statuses));
+  assert.equal(statuses.filter((status) => status === 403).length, 19);
+
+  // A token issued to Alice cannot be redeemed after the session becomes Mallory.
+  const transferred = await mint();
+  viewerId = 'mallory';
+  assert.equal((await fetch(base + transferred.url)).status, 403);
+  viewerId = 'alice';
+
+  // Revocation during the token TTL wins over a valid signature/expiry.
+  const revoked = await mint();
+  allowed = false;
+  assert.equal((await fetch(base + revoked.url)).status, 403);
+  allowed = true;
+
+  // Redemption authorization can tighten the signed resolution, never widen it.
+  const narrowed = await mint();
+  entitlementWidth = 120;
+  const narrowedRes = await fetch(base + narrowed.url);
+  assert.equal(narrowedRes.status, 200);
+  assert.equal(narrowedRes.headers.get('content-security-policy'), "default-src 'none'; sandbox");
+  assert.equal(narrowedRes.headers.get('cross-origin-resource-policy'), 'same-origin');
+  const narrowedBytes = new Uint8Array(await narrowedRes.arrayBuffer());
+  assert.equal(decodeContainer(narrowedBytes).header.w, 120);
+  entitlementWidth = 220;
+
+  const duplicateToken = `${narrowed.url}&t=second-token`;
+  assert.equal((await fetch(base + duplicateToken)).status, 403);
+  assert.equal((await fetch(base + '/archx/i/cat?t=' + 'A'.repeat(9000))).status, 403);
+
+  assert.ok(events.length > 5, 'security hook receives denial telemetry');
+  assert.equal(JSON.stringify(events).includes(TEST_SECRET), false);
+  assert.ok(events.every((event) => !('token' in event) && !('key' in event) && !('headers' in event)));
+});
+
+test('rate limits, quotas, and distinct-image abuse policy are independently enforceable', async (t) => {
+  const rate = await startArchxFixture(t, {
+    allowAnonymous: true,
+    tokenRateLimitPerMinute: 2,
+  });
+  assert.equal((await postToken(rate.base + '/archx/token/unknown?w=100')).status, 404,
+    'unknown-ID enumeration attempts still consume the bounded request budget');
+  assert.equal((await postToken(rate.base + '/archx/token/cat?w=100')).status, 200);
+  const limited = await postToken(rate.base + '/archx/token/cat?w=100');
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+
+  const quota = await startArchxFixture(t, {
+    quotas: { perViewerImage: 1, windowMs: 60_000 },
+    authorize: async () => ({ viewerId: 'quota-user' }),
+  });
+  assert.equal((await postToken(quota.base + '/archx/token/cat?w=100')).status, 200);
+  const quotaDenied = await postToken(quota.base + '/archx/token/cat?w=100');
+  assert.equal(quotaDenied.status, 429);
+  assert.ok(Number(quotaDenied.headers.get('retry-after')) >= 1);
+
+  const abuseEvents = [];
+  const abuse = await startArchxFixture(t, {
+    abuseDetection: { distinctImages: 1, windowMs: 60_000, action: 'deny' },
+    onSecurityEvent: (event) => abuseEvents.push(event),
+    authorize: async () => ({ viewerId: 'collector' }),
+  }, { cat: [320, 240], dog: [320, 240] });
+  assert.equal((await postToken(abuse.base + '/archx/token/cat?w=100')).status, 200);
+  assert.equal((await postToken(abuse.base + '/archx/token/dog?w=100')).status, 429);
+  assert.ok(abuseEvents.some((event) => event.type === 'archx.suspicious_scraping'));
+});
+
+test('image processing limits reject corrupt/oversized/format-mismatched masters with typed errors', async () => {
+  const master = await syntheticMaster(320, 240);
+  const rejectsWith = async (promise, code) => assert.rejects(promise, (err) => err.code === code);
+
+  await rejectsWith(
+    scrambleImage(Buffer.from('this is definitely not an image'), { key: 'limits' }),
+    'ARCHX_UNSUPPORTED_IMAGE',
+  );
+  await rejectsWith(
+    scrambleImage(master, { key: 'limits', maxInputBytes: 1024 }),
+    'ARCHX_INPUT_TOO_LARGE',
+  );
+  await rejectsWith(
+    scrambleImage(master, { key: 'limits', maxInputPixels: 10000 }),
+    'ARCHX_INPUT_TOO_LARGE',
+  );
+  await rejectsWith(
+    scrambleImage(master, { key: 'limits', allowedInputFormats: ['jpeg'] }),
+    'ARCHX_UNSUPPORTED_IMAGE',
+  );
+  await assert.rejects(
+    scrambleImage(master, { key: 'limits', grid: 99 }),
+    /grid must be/,
+  );
+
+  const bounded = await scrambleImage(master, {
+    key: 'limits', maxWidth: 320, maxOutputPixels: 10000,
+  });
+  assert.ok(bounded.header.w * bounded.header.h <= 10000, JSON.stringify(bounded.header));
+});
+
+test('StegoMark geometry search recovers a uniform center crop without accepting the unmarked control', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const raw = new Uint8Array(data);
+  const marked = embedStegoFingerprint(raw, info.width, info.height, 'CROP-90', { key: 'geometry-key' });
+  const markedPng = await sharp(Buffer.from(marked), {
+    raw: { width: info.width, height: info.height, channels: 4 },
+  }).png().toBuffer();
+  const cropped = await sharp(markedPng)
+    .extract({ left: 32, top: 21, width: 576, height: 378 })
+    .jpeg({ quality: 85 }).toBuffer();
+  const croppedRaw = await sharp(cropped).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const found = detectStegoFingerprint(new Uint8Array(croppedRaw.data), croppedRaw.info.width, croppedRaw.info.height, {
+    key: 'geometry-key', searchOffsets: true, searchGeometry: true,
+  });
+  assert.equal(found.found, true, JSON.stringify(found));
+  assert.equal(found.fingerprint, stegoFingerprint('CROP-90'));
+  assert.ok(Math.abs(found.geometry.scaleX - 1.111) < 0.02, JSON.stringify(found.geometry));
+
+  const unmarked = detectStegoFingerprint(raw, info.width, info.height, {
+    key: 'geometry-key', searchOffsets: true, searchGeometry: true,
+  });
+  assert.equal(unmarked.found, false, JSON.stringify(unmarked));
 });

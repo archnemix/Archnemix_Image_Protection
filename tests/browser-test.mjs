@@ -463,6 +463,51 @@ try {
     customFlags.noModeCustom.glFrames > 0 && customFlags.noModeCustom.memory === 'strict',
     JSON.stringify(customFlags));
 
+  const cameraShield = await page.evaluate(async () => {
+    async function make(id, options) {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id }, {
+        mode: 'custom', debug: true, lazy: false, cacheScope: 'camera-test', ...options,
+      });
+      await inst.ready;
+      const before = inst._debug().glFrames;
+      await new Promise((r) => setTimeout(r, 250));
+      const dbg = inst._debug();
+      const out = {
+        loaded: inst.loaded,
+        pattern: dbg.temporalPattern,
+        chroma: dbg.temporalChroma,
+        temporalOn: dbg.temporalOn,
+        frames2d: dbg.temporalFrames2d,
+        glContinuous: dbg.glContinuous,
+        glDelta: dbg.glFrames - before,
+        tokenMethod: dbg.tokenMethod,
+        cacheScope: dbg.cacheScope,
+      };
+      inst.destroy(); host.remove();
+      return out;
+    }
+    const webgl = await make('gallery-008', {
+      renderer: 'webgl',
+      cameraShield: { pattern: 'bands', chroma: true, strength: 0.14, block: 3 },
+    });
+    const canvas = await make('gallery-009', {
+      renderer: 'canvas',
+      cameraShield: { pattern: 'checker', chroma: true, strength: 0.12, block: 3 },
+    });
+    window.Archx.clearCaches();
+    return { webgl, canvas, vaultStillLoaded: window.__instances.vault.loaded };
+  });
+  check('camera shield drives patterned opponent-colour temporal frames in WebGL and Canvas2D',
+    cameraShield.webgl.loaded && cameraShield.webgl.pattern === 'bands' && cameraShield.webgl.chroma &&
+    cameraShield.webgl.glContinuous && cameraShield.webgl.glDelta > 2 &&
+    cameraShield.canvas.loaded && cameraShield.canvas.pattern === 'checker' && cameraShield.canvas.chroma &&
+    cameraShield.canvas.frames2d && cameraShield.webgl.tokenMethod === 'POST' &&
+    cameraShield.canvas.cacheScope === 'camera-test' && cameraShield.vaultStillLoaded,
+    JSON.stringify(cameraShield));
+
   const strike = await page.evaluate(async () => {
     window.__attempts.length = 0;
     const host = document.createElement('div');
@@ -516,7 +561,7 @@ try {
   check('GET master path directly -> 404', directMaster.status === 404);
   const noToken = await fetch(BASE + '/archx/i/aurora-valley');
   check('GET image route without token -> 403', noToken.status === 403);
-  const token = await (await fetch(BASE + '/archx/token/aurora-valley?w=800')).json();
+  const token = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
   const payloadRes = await fetch(BASE + token.url);
   const payload = new Uint8Array(await payloadRes.arrayBuffer());
   check('payload content-type is not an image', (payloadRes.headers.get('content-type') || '').includes('octet-stream'));
@@ -533,7 +578,7 @@ try {
     JSON.stringify({ wm: header.wm, fx: header.fx, sg: header.sg }));
   const replay = await fetch(BASE + token.url);
   check('replaying the same signed URL is rejected (one-time token)', replay.status === 403, `HTTP ${replay.status}`);
-  const token2 = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { headers: { 'user-agent': 'Browser-A' } })).json();
+  const token2 = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { method: 'POST', headers: { 'user-agent': 'Browser-A', 'x-archx-request': 'token' } })).json();
   const wrongBrowser = await fetch(BASE + token2.url, { headers: { 'user-agent': 'Browser-B' } });
   check('signed URL presented by a different browser/User-Agent is rejected', wrongBrowser.status === 403, `HTTP ${wrongBrowser.status}`);
 

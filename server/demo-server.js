@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { createArchxMiddleware } from './middleware.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -32,8 +33,21 @@ if (galleryCount < 100 || !fs.existsSync(path.join(root, 'demo', 'public-unprote
 
 const stegoRegistry = []; // demo stand-in for your fingerprint -> view database
 
+const demoSecret = process.env.ARCHX_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.ARCHX_SECRET) {
+  console.log('Demo only: generated a fresh random ARCHX_SECRET for this process. Set ARCHX_SECRET (>=32 bytes) for any shared deployment.');
+}
+
 const archx = createArchxMiddleware({
-  secret: process.env.ARCHX_SECRET || 'demo-secret-change-me-in-production',
+  secret: demoSecret,
+  // Demo-only explicit opt-in. Production must provide authorize(req,id,{phase})
+  // tied to the host site's session/entitlement system instead.
+  allowAnonymous: true,
+  publicDirs: [
+    path.join(root, 'demo'),
+    path.join(root, 'src'),
+    path.join(root, 'dist'),
+  ],
   imagesDirs: [
     path.join(root, 'demo-masters'),
     path.join(root, 'demo-masters', 'gallery'),
@@ -73,39 +87,77 @@ const MIME = {
 };
 
 const STATIC_ROOTS = [
-  { prefix: '/demo/', dir: path.join(root, 'demo') },
-  { prefix: '/src/', dir: path.join(root, 'src') },
-  { prefix: '/dist/', dir: path.join(root, 'dist') },
+  { prefix: '/demo/', dir: fs.realpathSync(path.join(root, 'demo')) },
+  { prefix: '/src/', dir: fs.realpathSync(path.join(root, 'src')) },
+  { prefix: '/dist/', dir: fs.realpathSync(path.join(root, 'dist')) },
 ];
 
+function isInsideDir(dir, filePath) {
+  const rel = path.relative(dir, filePath);
+  return rel === '' || (!rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+}
+
+const SAFE_ERROR_HEADERS = Object.freeze({
+  'Content-Type': 'text/plain; charset=utf-8',
+  'Cache-Control': 'no-store',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+});
+
+function sendTextError(res, status, message, extra = {}) {
+  res.writeHead(status, { ...SAFE_ERROR_HEADERS, ...extra });
+  return res.end(message);
+}
+
 function serveStatic(req, res) {
-  const url = new URL(req.url, 'http://x');
-  let pathname = decodeURIComponent(url.pathname);
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    return sendTextError(res, 405, 'method not allowed', { Allow: 'GET, HEAD' });
+  }
+  let pathname;
+  try {
+    const url = new URL(req.url, 'http://x');
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    return sendTextError(res, 400, 'bad request');
+  }
   if (pathname === '/' || pathname === '/index.html') pathname = '/demo/index.html';
   if (pathname === '/test-harness.html') pathname = '/demo/test-harness.html';
   if (pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
-  // Masters are NEVER static:
-  if (pathname.startsWith('/demo-masters')) { res.writeHead(404); return res.end('not found'); }
+  // Masters are NEVER static. The realpath+relative checks below are the
+  // actual boundary; this early return just gives the obvious URL a fast 404.
+  if (pathname.startsWith('/demo-masters')) return sendTextError(res, 404, 'not found');
 
   for (const { prefix, dir } of STATIC_ROOTS) {
     if (!pathname.startsWith(prefix)) continue;
     const rel = pathname.slice(prefix.length);
-    const filePath = path.resolve(dir, rel);
-    if (!filePath.startsWith(dir)) { res.writeHead(403); return res.end('forbidden'); }
-    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) break;
+    const candidate = path.resolve(dir, '.' + path.sep + rel);
+    if (!isInsideDir(dir, candidate)) return sendTextError(res, 404, 'not found');
+    let filePath;
+    try { filePath = fs.realpathSync(candidate); } catch { break; }
+    if (!isInsideDir(dir, filePath) || !fs.statSync(filePath).isFile()) break;
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
     });
+    if (req.method === 'HEAD') return res.end();
     return fs.createReadStream(filePath).pipe(res);
   }
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('not found');
+  return sendTextError(res, 404, 'not found');
 }
 
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/demo-api/stego-registry')) {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress || '');
+    if (process.env.ARCHX_DEMO_EXPOSE_STEGO_REGISTRY !== '1' || !loopback) {
+      return sendTextError(res, 404, 'not found');
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
     return res.end(JSON.stringify(stegoRegistry, null, 2));
   }
   if (req.url.startsWith('/archx/')) return archx(req, res);

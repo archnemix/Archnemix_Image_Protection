@@ -159,7 +159,7 @@
   mode: 'fortress',
   qualityProfile: 'original',
   lens: { radius: 0.32, idlePixelate: 18 },
-  temporalShield: { strength: 0.16, block: 2 },
+  cameraShield: { pattern: 'checker', chroma: true, strength: 0.18, block: 2 },
   captureShield: true,
   watermark: '© Archnemix · Fortress · {session}',
   onExtract: 'black'
@@ -191,7 +191,7 @@ This showcase uses the JPG directly only to make the visual comparison easy.</pr
   <section class="panel" id="customPanel">
     <div class="eyebrow">No preset required</div>
     <h2>5 — Custom Flags Builder</h2>
-    <p>Change the direct flags below and press <strong>Apply custom flags</strong>. The generated call uses <code>mode: 'custom'</code> plus a direct <code>renderer</code> flag; on Archx 1.3+ you may also omit <code>mode</code> entirely and pass only <code>renderer</code> and the individual flags.</p>
+    <p>Change the direct flags below and press <strong>Apply custom flags</strong>. The generated call uses <code>mode: 'custom'</code> plus a direct <code>renderer</code> flag; on Archx 1.3+ you may also omit <code>mode</code> entirely and pass only <code>renderer</code> and the individual flags. Patterned <code>cameraShield</code> options require Archx 1.4+.</p>
 
     <div class="custom-layout">
       <form class="controls" id="customForm">
@@ -222,12 +222,24 @@ This showcase uses the JPG directly only to make the visual comparison easy.</pr
           </select>
         </div>
 
+        <div>
+          <label for="customCamera">Separate-device / screen-camera degradation</label>
+          <select id="customCamera">
+            <option value="off" selected>Off — lowest GPU/CPU use</option>
+            <option value="checker">Checker + opponent colour — Bayer-sensor friction</option>
+            <option value="bands">Horizontal bands + opponent colour — rolling-shutter friction</option>
+            <option value="blocks">Random complementary blocks</option>
+          </select>
+          <small style="display:block;margin-top:6px;color:var(--muted)">These alternate complementary frames. A single capture keeps noise, but video averaging or a long exposure can defeat them; this is degradation, not camera-proofing.</small>
+        </div>
+
         <fieldset>
           <legend>Direct protection flags</legend>
           <label class="check"><input type="checkbox" id="customWatermark" checked><span>Visible watermark<small>Baked into the displayed canvas pixels.</small></span></label>
           <label class="check"><input type="checkbox" id="customForensic" checked><span>Client forensic pattern<small>Subtle per-session block pattern.</small></span></label>
           <label class="check"><input type="checkbox" id="customLens"><span>Pointer Lens<small>Most of the frame stays pixelated; only the pointer area is sharp.</small></span></label>
           <label class="check"><input type="checkbox" id="customTemporal"><span>Temporal shield<small>Alternating complementary frames degrade a single screenshot; may flicker.</small></span></label>
+          <label class="check"><input type="checkbox" id="customChroma" checked><span>Opponent-colour camera modulation<small>Used by checker/bands camera patterns; spends more modulation in chroma than brightness.</small></span></label>
           <label class="check"><input type="checkbox" id="customTrace" checked><span>Dynamic capture trace<small>Moving low-opacity session/time trace overlay.</small></span></label>
           <label class="check"><input type="checkbox" id="customStrict"><span>Strict memory<small>Release decoded bitmaps sooner; repaint prefers cached protected payload.</small></span></label>
           <label class="check"><input type="checkbox" id="customSplit"><span>Split canvases (Canvas renderer)<small>No single 2D canvas contains the whole image.</small></span></label>
@@ -326,6 +338,7 @@ function versionAtLeast(version, major, minor) {
 let activeImage = null;
 let customInstance = null;
 let customRendererSupported = false;
+let cameraShieldSupported = false;
 
 function common(label) {
   return {
@@ -340,12 +353,23 @@ function common(label) {
 function buildCustomOptions() {
   const renderer = document.getElementById('customRenderer').value;
   const strict = document.getElementById('customStrict').checked;
+  const temporal = document.getElementById('customTemporal').checked;
+  const cameraPattern = document.getElementById('customCamera').value;
+  const camera = cameraPattern !== 'off' ? {
+    pattern: cameraPattern,
+    chroma: document.getElementById('customChroma').checked,
+    strength: cameraPattern === 'bands' ? 0.16 : 0.18,
+    block: cameraPattern === 'bands' ? 3 : 2,
+    respectReducedMotion: true
+  } : false;
 
   const options = {
     mode: 'custom',
     renderer,
     fit: 'cover',
     lazy: false,
+    tokenMethod: 'POST',
+    cacheScope: 'showcase-custom',
     qualityProfile: document.getElementById('customQuality').value,
     sourceOversample: 2,
     dprCap: 3,
@@ -361,9 +385,10 @@ function buildCustomOptions() {
     lens: document.getElementById('customLens').checked
       ? { radius: 0.30, idlePixelate: 18 }
       : null,
-    temporalShield: document.getElementById('customTemporal').checked
-      ? { strength: 0.14, block: 2, respectReducedMotion: true }
-      : false,
+    temporalShield: camera ? undefined : (temporal
+      ? { pattern: 'blocks', chroma: false, strength: 0.14, block: 2, respectReducedMotion: true }
+      : false),
+    cameraShield: camera,
     captureShield: document.getElementById('customTrace').checked
       ? { dynamicTrace: true, temporalPattern: true }
       : false,
@@ -373,7 +398,7 @@ function buildCustomOptions() {
     cachePayload: true,
     reloadOnResize: 'upscale',
     resizeUpscaleFactor: 1.75,
-    renderLoop: document.getElementById('customTemporal').checked ? 'auto' : 'static',
+    renderLoop: temporal || camera ? 'auto' : 'static',
     guards: {
       contextMenu: true,
       drag: true,
@@ -385,6 +410,12 @@ function buildCustomOptions() {
       devtools: document.getElementById('customDevtools').checked
     }
   };
+
+  if (!cameraShieldSupported && camera) {
+    // Older builds only know random-block temporal modulation.
+    options.temporalShield = { strength: camera.strength, block: camera.block, respectReducedMotion: true };
+    delete options.cameraShield;
+  }
 
   // Compatibility fallback for an older extracted ZIP. Archx 1.3+ understands
   // mode:'custom' + renderer. Older builds need the equivalent pipeline name.
@@ -431,6 +462,7 @@ async function start() {
     const [libraryPath, imagePath] = await Promise.all([loadArchx(), findImage()]);
     activeImage = imagePath;
     customRendererSupported = versionAtLeast(Archx.version, 1, 3);
+    cameraShieldSupported = versionAtLeast(Archx.version, 1, 4);
 
     document.getElementById('libraryStatus').textContent = `${libraryPath} (Archx ${Archx.version || 'unknown'})`;
     document.getElementById('imageStatus').textContent = imagePath;
@@ -441,6 +473,8 @@ async function start() {
     log(`Using image ${imagePath}`, 'ok');
     if (!customRendererSupported) {
       log('This extracted Archx build is older than 1.3. The Custom Builder will use a compatibility fallback; update dist/archx.min.js for mode:"custom" + renderer.', 'warn');
+    } else if (!cameraShieldSupported) {
+      log('This Archx build predates 1.4 patterned camera shields; camera selections will fall back to random-block temporal modulation.', 'warn');
     }
 
     const instances = [
@@ -473,7 +507,7 @@ async function start() {
         mode: 'fortress',
         qualityProfile: 'original',
         lens: { radius: 0.32, idlePixelate: 18 },
-        temporalShield: { strength: 0.16, block: 2 },
+        cameraShield: { pattern: 'checker', chroma: true, strength: 0.18, block: 2 },
         captureShield: true,
         watermark: '© Archnemix · Fortress · {session}',
         onExtract: 'black'

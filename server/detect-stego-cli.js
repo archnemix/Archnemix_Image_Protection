@@ -41,6 +41,7 @@ if (!input || args.help) {
   --grid-x <n>       detector grid columns (default 24)
   --grid-y <n>       detector grid rows (default 16)
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
+  --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
   --json             print machine-readable JSON only`);
   process.exit(input ? 0 : 1);
 }
@@ -52,12 +53,16 @@ if (!key && !args.json) {
 }
 
 const bytes = fs.readFileSync(input);
-const { data, info } = await sharp(bytes).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+const { data, info } = await sharp(bytes, {
+  failOn: 'warning',
+  limitInputPixels: 100_000_000,
+}).timeout({ seconds: 30 }).rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 const result = detectStegoFingerprint(new Uint8Array(data), info.width, info.height, {
   key,
   gridX: args['grid-x'] ? Number(args['grid-x']) : 24,
   gridY: args['grid-y'] ? Number(args['grid-y']) : 16,
   searchOffsets: !args['no-search'],
+  searchGeometry: !args['no-geometry'],
 });
 
 const expected = args.expect ? stegoFingerprint(args.expect) : null;
@@ -76,6 +81,7 @@ if (args.json) {
   console.log(`✔ StegoMark FOUND in ${input}`);
   console.log(`  fingerprint : ${result.fingerprint}`);
   console.log(`  confidence  : ${result.confidence} (cell agreement ${result.agreement}, corrections ${result.corrections})`);
+  if (result.geometry) console.log(`  geometry    : scale ${result.geometry.scaleX}×${result.geometry.scaleY}, origin ${result.geometry.originX},${result.geometry.originY}`);
   if (expected) console.log(`  expected    : ${expected} ${matchesExpectation ? '— MATCH' : '— does NOT match'}`);
   console.log('  Look this fingerprint up in your issuance registry (onStegoIssue) to identify the source view.');
 } else {
