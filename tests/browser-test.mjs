@@ -530,8 +530,18 @@ try {
         mode: 'custom', debug: true, lazy: false, cacheScope: 'temporal-interlace-test', ...options,
       });
       await inst.ready;
-      const before = inst._debug().glFrames;
-      await new Promise((r) => setTimeout(r, 220));
+      const beforeDbg = inst._debug();
+      const before = beforeDbg.glFrames;
+      const beforeIndex = beforeDbg.temporalIndex;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const now = inst._debug();
+        const advanced = now.temporalEngineActual === 'shader'
+          ? now.glFrames - before > 2
+          : now.temporalIndex - beforeIndex > 2;
+        if (advanced) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
       const dbg = inst._debug();
       const out = {
         loaded: inst.loaded,
@@ -581,23 +591,26 @@ try {
   const interlaceShotEl = await page.$('#temporal-interlace-shot');
   const phaseShots = [];
   const phaseSamples = [];
-  for (let i = 0; i < 4; i++) {
+  let maxPhaseMad = 0;
+  // A fixed screenshot cadence can parity-lock onto the same phase on a
+  // fast/slow CI compositor. Use irregular intervals and stop as soon as two
+  // real captures prove that different incomplete phases were presented.
+  for (const delay of [0, 17, 31, 47, 67, 89, 113, 139, 167, 197]) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
     phaseSamples.push(await page.evaluate(async () => {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const dbg = window.__temporalInterlaceShot.inst._debug();
       return { index: dbg.temporalIndex, phase: dbg.temporalPhase };
     }));
-    phaseShots.push(await sharp(await interlaceShotEl.screenshot()).removeAlpha().raw().toBuffer());
-    await new Promise((r) => setTimeout(r, 55));
-  }
-  let maxPhaseMad = 0;
-  for (let a = 0; a < phaseShots.length; a++) {
-    for (let b = a + 1; b < phaseShots.length; b++) {
+    const shot = await sharp(await interlaceShotEl.screenshot()).removeAlpha().raw().toBuffer();
+    for (const previous of phaseShots) {
       let diff = 0;
-      const len = Math.min(phaseShots[a].length, phaseShots[b].length);
-      for (let i = 0; i < len; i++) diff += Math.abs(phaseShots[a][i] - phaseShots[b][i]);
+      const len = Math.min(previous.length, shot.length);
+      for (let i = 0; i < len; i++) diff += Math.abs(previous[i] - shot[i]);
       maxPhaseMad = Math.max(maxPhaseMad, diff / len);
     }
+    phaseShots.push(shot);
+    if (maxPhaseMad > 8) break;
   }
   await page.evaluate(() => {
     const held = window.__temporalInterlaceShot;
