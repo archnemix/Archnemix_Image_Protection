@@ -520,6 +520,123 @@ try {
     cameraShield.vaultStillLoaded,
     JSON.stringify(cameraShield));
 
+  console.log('\n[7b2] Temporal interlace — shader and pre-rendered phase engines');
+  const temporalInterlace = await page.evaluate(async () => {
+    async function make(id, options, keep = false) {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id }, {
+        mode: 'custom', debug: true, lazy: false, cacheScope: 'temporal-interlace-test', ...options,
+      });
+      await inst.ready;
+      const before = inst._debug().glFrames;
+      await new Promise((r) => setTimeout(r, 220));
+      const dbg = inst._debug();
+      const out = {
+        loaded: inst.loaded,
+        engineRequested: dbg.temporalEngineRequested,
+        engineActual: dbg.temporalEngineActual,
+        interlace: dbg.temporalInterlace,
+        frameCount: dbg.temporalFrameCount,
+        frames2d: dbg.temporalFrames2d,
+        glContinuous: dbg.glContinuous,
+        glDelta: dbg.glFrames - before,
+      };
+      if (keep) {
+        host.id = 'temporal-interlace-shot';
+        window.__temporalInterlaceShot = { host, inst };
+      } else {
+        inst.destroy(); host.remove();
+      }
+      return out;
+    }
+
+    const shaderPixels = await make('gallery-010', {
+      temporalInterlace: {
+        profile: 'pixels60', engine: 'shader', phases: 4, refreshHz: 60, fill: 'black', activeGain: 1,
+      },
+    });
+    const frameStrips = await make('gallery-011', {
+      temporalInterlace: {
+        profile: 'strips60', engine: 'frames', fill: 'black', activeGain: 1,
+      },
+    }, true);
+    const frameBlocks = await make('gallery-012', {
+      temporalInterlace: {
+        profile: 'blocks60', engine: 'frames', phases: 3, refreshHz: 90,
+        fill: 'dim', hiddenScale: 0.2,
+      },
+    });
+    const shaderLens = await make('gallery-013', {
+      lens: true,
+      temporalInterlace: { engine: 'shader' },
+    });
+    const frameLens = await make('gallery-014', {
+      lens: true,
+      temporalInterlace: { engine: 'frames', layout: 'checker' },
+    });
+    return { shaderPixels, frameStrips, frameBlocks, shaderLens, frameLens };
+  });
+  const interlaceShotEl = await page.$('#temporal-interlace-shot');
+  const phaseShots = [];
+  const phaseSamples = [];
+  for (let i = 0; i < 4; i++) {
+    phaseSamples.push(await page.evaluate(async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const dbg = window.__temporalInterlaceShot.inst._debug();
+      return { index: dbg.temporalIndex, phase: dbg.temporalPhase };
+    }));
+    phaseShots.push(await sharp(await interlaceShotEl.screenshot()).removeAlpha().raw().toBuffer());
+    await new Promise((r) => setTimeout(r, 55));
+  }
+  let maxPhaseMad = 0;
+  for (let a = 0; a < phaseShots.length; a++) {
+    for (let b = a + 1; b < phaseShots.length; b++) {
+      let diff = 0;
+      const len = Math.min(phaseShots[a].length, phaseShots[b].length);
+      for (let i = 0; i < len; i++) diff += Math.abs(phaseShots[a][i] - phaseShots[b][i]);
+      maxPhaseMad = Math.max(maxPhaseMad, diff / len);
+    }
+  }
+  await page.evaluate(() => {
+    const held = window.__temporalInterlaceShot;
+    held?.inst.destroy();
+    held?.host.remove();
+    delete window.__temporalInterlaceShot;
+  });
+  check('GPU temporal-interlace uses the shader engine and clamps 4 requested phases to 2 at 60 Hz',
+    temporalInterlace.shaderPixels.loaded &&
+    temporalInterlace.shaderPixels.engineRequested === 'shader' &&
+    temporalInterlace.shaderPixels.engineActual === 'shader' &&
+    temporalInterlace.shaderPixels.interlace.layout === 'pixels' &&
+    temporalInterlace.shaderPixels.interlace.requestedPhases === 4 &&
+    temporalInterlace.shaderPixels.interlace.phases === 2 &&
+    temporalInterlace.shaderPixels.interlace.phaseHz === 30 &&
+    temporalInterlace.shaderPixels.glContinuous &&
+    temporalInterlace.shaderPixels.glDelta > 2,
+    JSON.stringify(temporalInterlace.shaderPixels));
+  check('Canvas temporal-interlace pre-renders strip and multi-phase block frame sets',
+    temporalInterlace.frameStrips.loaded &&
+    temporalInterlace.frameStrips.engineActual === 'frames' &&
+    temporalInterlace.frameStrips.frameCount === 2 &&
+    temporalInterlace.frameBlocks.loaded &&
+    temporalInterlace.frameBlocks.engineActual === 'frames' &&
+    temporalInterlace.frameBlocks.interlace.layout === 'blocks' &&
+    temporalInterlace.frameBlocks.frameCount === 3 &&
+    temporalInterlace.frameBlocks.interlace.phases === 3,
+    JSON.stringify({ strips: temporalInterlace.frameStrips, blocks: temporalInterlace.frameBlocks }));
+  check('successive real screenshots receive materially different interlace phases',
+    maxPhaseMad > 8, `max phase MAD=${maxPhaseMad.toFixed(1)} samples=${JSON.stringify(phaseSamples)}`);
+  check('Lens composes with both temporal-interlace engines instead of silently disabling interlace',
+    temporalInterlace.shaderLens.loaded &&
+    temporalInterlace.shaderLens.engineActual === 'shader' &&
+    temporalInterlace.shaderLens.glDelta > 2 &&
+    temporalInterlace.frameLens.loaded &&
+    temporalInterlace.frameLens.engineActual === 'frames' &&
+    temporalInterlace.frameLens.frameCount === 2,
+    JSON.stringify({ shaderLens: temporalInterlace.shaderLens, frameLens: temporalInterlace.frameLens }));
+
   console.log('\n[7c] v1.5 client fail-closed boundaries');
   const v15Client = await page.evaluate(async () => {
     const shield = window.__instances.shield;

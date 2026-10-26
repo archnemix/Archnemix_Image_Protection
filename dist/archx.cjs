@@ -40,6 +40,7 @@ __export(index_exports, {
   MAX_ARCHX_HEADER_BYTES: () => MAX_ARCHX_HEADER_BYTES,
   PRESETS: () => PRESETS,
   ProtectedImage: () => ProtectedImage,
+  TEMPORAL_INTERLACE_PROFILES: () => TEMPORAL_INTERLACE_PROFILES,
   VERSION: () => VERSION,
   applyForensicBlocks: () => applyForensicBlocks,
   auditIntegrity: () => auditIntegrity,
@@ -63,6 +64,7 @@ __export(index_exports, {
   isArchxContainer: () => isArchxContainer,
   mulberry32: () => mulberry32,
   normalizePerceptualFingerprint: () => normalizePerceptualFingerprint,
+  normalizeTemporalInterlace: () => normalizeTemporalInterlace,
   paddedSize: () => paddedSize,
   perceptualFingerprint: () => perceptualFingerprint,
   perceptualFingerprintDistance: () => perceptualFingerprintDistance,
@@ -1231,6 +1233,8 @@ var DEFAULTS = {
   // 'auto' (static images draw on demand; temporal shield animates) | 'static' | 'continuous'
   temporalShield: null,
   // true | { strength, block, pattern, chroma, respectReducedMotion } — complementary frames a single screenshot cannot average
+  temporalInterlace: null,
+  // true | 'balanced60'|'pixels60'|'strips60'|'blocks60' | { profile, engine, layout, phases, cellSize, fill, refreshHz, ... }
   cameraShield: null,
   // experimental alias/profile for temporalShield aimed at rolling-shutter/Bayer cameras
   watermark: null,
@@ -1331,7 +1335,7 @@ function mergeOptions(opts = {}) {
     if (clean.localScramble === void 0) merged.localScramble = true;
     if (clean.forensic === void 0) merged.forensic = true;
     if (clean.captureShield === void 0) merged.captureShield = true;
-    if (clean.temporalShield === void 0 && clean.cameraShield === void 0) {
+    if (clean.temporalShield === void 0 && clean.cameraShield === void 0 && !normalizeTemporalInterlace(merged.temporalInterlace)) {
       merged.temporalShield = { strength: 0.16, block: 2, pattern: "checker", chroma: true };
     }
     if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
@@ -1427,6 +1431,149 @@ function preset(name = "editorial", overrides = {}) {
     ...overrides,
     guards: { ...base.guards || {}, ...overrides.guards || {} }
   };
+}
+var TEMPORAL_INTERLACE_PROFILES = Object.freeze({
+  balanced60: Object.freeze({
+    engine: "auto",
+    layout: "checker",
+    cellSize: 2,
+    phases: 2,
+    fill: "lowres",
+    fillBlock: 12,
+    fillStrength: 1,
+    refreshHz: 60,
+    minPhaseHz: 30,
+    optimizeRefresh: true,
+    respectReducedMotion: true,
+    chroma: true
+  }),
+  pixels60: Object.freeze({
+    engine: "auto",
+    layout: "pixels",
+    cellSize: 1,
+    phases: 2,
+    fill: "lowres",
+    fillBlock: 8,
+    fillStrength: 1,
+    refreshHz: 60,
+    minPhaseHz: 30,
+    optimizeRefresh: true,
+    respectReducedMotion: true,
+    chroma: true
+  }),
+  strips60: Object.freeze({
+    engine: "auto",
+    layout: "strips",
+    axis: "rows",
+    cellSize: 2,
+    phases: 2,
+    fill: "lowres",
+    fillBlock: 12,
+    fillStrength: 1,
+    refreshHz: 60,
+    minPhaseHz: 30,
+    optimizeRefresh: true,
+    respectReducedMotion: true,
+    chroma: true
+  }),
+  blocks60: Object.freeze({
+    engine: "auto",
+    layout: "blocks",
+    cellSize: 8,
+    phases: 2,
+    fill: "lowres",
+    fillBlock: 16,
+    fillStrength: 1,
+    refreshHz: 60,
+    minPhaseHz: 30,
+    optimizeRefresh: true,
+    respectReducedMotion: true,
+    chroma: true
+  })
+});
+function clampTemporalNumber(value, fallback, min, max) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+function normalizeTemporalInterlace(raw) {
+  if (raw == null || raw === false) return null;
+  let input = {};
+  let profileName = "balanced60";
+  if (raw === true) {
+    input = {};
+  } else if (typeof raw === "string") {
+    if (["false", "off", "none", "disabled"].includes(raw.toLowerCase())) return null;
+    profileName = TEMPORAL_INTERLACE_PROFILES[raw] ? raw : "balanced60";
+  } else if (isPlainClientObject(raw)) {
+    input = raw;
+    if (input.enabled === false || input.profile === false) return null;
+    if (typeof input.profile === "string" && ["false", "off", "none", "disabled"].includes(input.profile.toLowerCase())) return null;
+    if (input.enabled === void 0 && input.on === false) return null;
+    if (typeof input.profile === "string" && TEMPORAL_INTERLACE_PROFILES[input.profile]) {
+      profileName = input.profile;
+    }
+  } else {
+    return null;
+  }
+  const merged = { ...TEMPORAL_INTERLACE_PROFILES[profileName] };
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== void 0) merged[key] = value;
+  }
+  const engineRaw = String(merged.engine || merged.drawingMode || merged.renderMode || "auto").toLowerCase();
+  const engine = ["shader", "gpu", "webgl", "fragment-shader"].includes(engineRaw) ? "shader" : ["frames", "frame", "pre-rendered", "prerendered", "canvas", "canvas2d", "2d"].includes(engineRaw) ? "frames" : "auto";
+  const layoutRaw = String(merged.layout || merged.pattern || "checker").toLowerCase();
+  const layout = layoutRaw === "bands" || layoutRaw === "stripes" ? "strips" : layoutRaw === "pixel" || layoutRaw === "pixel-level" ? "pixels" : layoutRaw === "squares" || layoutRaw === "checkerboard" ? "checker" : layoutRaw === "random-blocks" || layoutRaw === "random" ? "blocks" : ["pixels", "strips", "blocks", "checker"].includes(layoutRaw) ? layoutRaw : "checker";
+  const requestedPhases = Math.round(clampTemporalNumber(merged.phases, 2, 2, 4));
+  const refreshHz = clampTemporalNumber(merged.refreshHz ?? merged.displayHz, 60, 24, 480);
+  const minPhaseHz = clampTemporalNumber(merged.minPhaseHz ?? merged.minimumPhaseHz, 30, 1, 240);
+  const optimizeRefresh = merged.optimizeRefresh !== false && merged.optimizeForRefresh !== false;
+  const maxPhasesAtRefresh = Math.max(2, Math.floor(refreshHz / minPhaseHz));
+  const phases = optimizeRefresh ? Math.min(requestedPhases, maxPhasesAtRefresh) : requestedPhases;
+  const hasCellInput = input.cellSize !== void 0 || input.stripSize !== void 0 || input.block !== void 0;
+  const layoutDefaultCell = layout === "pixels" ? 1 : layout === "blocks" ? 8 : 2;
+  const cellSize = Math.round(clampTemporalNumber(
+    merged.cellSize ?? merged.stripSize ?? merged.block,
+    hasCellInput ? layoutDefaultCell : TEMPORAL_INTERLACE_PROFILES[profileName].cellSize || layoutDefaultCell,
+    1,
+    64
+  ));
+  let effectiveCellSize = cellSize;
+  if (!hasCellInput && input.layout !== void 0) effectiveCellSize = layoutDefaultCell;
+  const fillRaw = String(merged.fill || merged.hiddenFill || "lowres").toLowerCase();
+  const fill = ["blur", "pixelate", "pixelated", "local-average"].includes(fillRaw) ? "lowres" : fillRaw === "complementary" || fillRaw === "complement" ? "noise" : ["lowres", "dim", "black", "noise"].includes(fillRaw) ? fillRaw : "lowres";
+  const fillStrength = clampTemporalNumber(merged.fillStrength, 1, 0, 1);
+  const hiddenScale = clampTemporalNumber(merged.hiddenScale ?? merged.hiddenBrightness, 0.3, 0, 1);
+  const hiddenEffectiveScale = fill === "black" ? 1 - fillStrength : fill === "dim" ? 1 - fillStrength + fillStrength * hiddenScale : 1;
+  const compensation = clampTemporalNumber(
+    merged.compensation ?? merged.brightnessCompensation,
+    0.5,
+    0,
+    1
+  );
+  const exactGain = phases - (phases - 1) * hiddenEffectiveScale;
+  const computedGain = fill === "black" || fill === "dim" ? 1 + compensation * (exactGain - 1) : 1;
+  const activeGain = clampTemporalNumber(merged.activeGain, computedGain, 0.25, 4);
+  return Object.freeze({
+    profile: profileName,
+    engine,
+    layout,
+    axis: merged.axis === "columns" || merged.axis === "vertical" ? "columns" : "rows",
+    cellSize: effectiveCellSize,
+    phases,
+    requestedPhases,
+    refreshHz,
+    minPhaseHz,
+    optimizeRefresh,
+    phaseHz: refreshHz / phases,
+    fill,
+    fillBlock: Math.round(clampTemporalNumber(merged.fillBlock ?? merged.lowresBlock, 12, 2, 128)),
+    fillStrength,
+    hiddenScale,
+    activeGain,
+    noiseStrength: clampTemporalNumber(merged.noiseStrength ?? merged.strength, 0.16, 0, 0.45),
+    chroma: merged.chroma !== false,
+    respectReducedMotion: merged.respectReducedMotion !== false
+  });
 }
 var limiter = {
   max: 6,
@@ -2199,7 +2346,7 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalRaf, _temporalFrames, _temporalIndex, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -2261,9 +2408,12 @@ var ProtectedImage = class {
     __privateAdd(this, _glFrameBudget, 0);
     __privateAdd(this, _glFrames, 0);
     __privateAdd(this, _temporalSign, 1);
+    __privateAdd(this, _temporalPhase, 0);
     __privateAdd(this, _temporalRaf, 0);
     __privateAdd(this, _temporalFrames, null);
     __privateAdd(this, _temporalIndex, 0);
+    __privateAdd(this, _temporalEngineActual, null);
+    __privateAdd(this, _temporalInterlaceCache);
     __privateSet(this, _options, mergeOptions(options));
     __privateSet(this, _source, source);
     const host = $(target);
@@ -2944,11 +3094,19 @@ var ProtectedImage = class {
   _render() {
     if (!__privateGet(this, _bitmap) || __privateGet(this, _destroyed)) return;
     const mode = __privateGet(this, _options).mode;
-    const wantsWebGL = __privateGet(this, _options).renderer === "webgl" || __privateGet(this, _options).renderer !== "canvas" && mode === "vault";
+    const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
+    let wantsWebGL = __privateGet(this, _options).renderer === "webgl" || __privateGet(this, _options).renderer !== "canvas" && mode === "vault";
+    if (temporal?.engine === "shader") wantsWebGL = true;
+    else if (temporal?.engine === "frames") wantsWebGL = false;
+    __privateSet(this, _temporalEngineActual, null);
     if (wantsWebGL) {
-      if (this._tryRenderWebGL()) return;
+      if (this._tryRenderWebGL()) {
+        if (temporal) __privateSet(this, _temporalEngineActual, "shader");
+        return;
+      }
     }
-    if (__privateGet(this, _options).splitCanvases && !__privateGet(this, _options).lens && !__privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this)) this._renderSplit();
+    if (temporal) __privateSet(this, _temporalEngineActual, "frames");
+    if (__privateGet(this, _options).splitCanvases && !__privateGet(this, _options).lens && !temporal) this._renderSplit();
     else this._render2d();
   }
   /** Private, capped, un-scrambled working canvas (wiped after use). */
@@ -2972,7 +3130,8 @@ var ProtectedImage = class {
     __privateSet(this, _realCtx, ctx);
     const { full, fit } = this._workingCanvas(w, h);
     const temporalCfg = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
-    if (temporalCfg && !__privateGet(this, _options).lens) {
+    __privateSet(this, _temporalEngineActual, temporalCfg ? "frames" : null);
+    if (temporalCfg) {
       const frame = makeCanvas(__privateGet(this, _host).ownerDocument);
       frame.width = w;
       frame.height = h;
@@ -2996,9 +3155,25 @@ var ProtectedImage = class {
       __privateSet(this, _decoy, this._makeDecoy(full, w, h));
       full.width = 0;
       full.height = 0;
-      __privateMethod(this, _ProtectedImage_instances, setupTemporalFrames_fn).call(this, frame, temporalCfg);
-      frame.width = 0;
-      frame.height = 0;
+      if (__privateGet(this, _options).lens) {
+        if (__privateGet(this, _frameCanvas)) {
+          __privateGet(this, _frameCanvas).width = 0;
+          __privateGet(this, _frameCanvas).height = 0;
+        }
+        __privateSet(this, _frameCanvas, frame);
+        const cfg = typeof __privateGet(this, _options).lens === "object" ? __privateGet(this, _options).lens : {};
+        const factor = cfg.idlePixelate ?? 18;
+        const base = makeCanvas(__privateGet(this, _host).ownerDocument);
+        base.width = Math.max(8, Math.round(w / factor));
+        base.height = Math.max(8, Math.round(h / factor));
+        nativeDrawImage(getNativeContext(base, "2d"), frame, 0, 0, base.width, base.height);
+        __privateSet(this, _lensBase, base);
+        __privateMethod(this, _ProtectedImage_instances, setupTemporalFrames_fn).call(this, frame, temporalCfg);
+      } else {
+        __privateMethod(this, _ProtectedImage_instances, setupTemporalFrames_fn).call(this, frame, temporalCfg);
+        frame.width = 0;
+        frame.height = 0;
+      }
       this._poison(canvas, ctx);
       __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
       return;
@@ -3371,6 +3546,12 @@ var ProtectedImage = class {
       uniform float uTemporalOn; uniform float uTemporalSign;
       uniform float uTemporalStrength; uniform float uTemporalBlock;
       uniform float uTemporalPattern; uniform float uTemporalChroma;
+      uniform float uInterlaceOn; uniform float uInterlacePhase;
+      uniform float uInterlacePhases; uniform float uInterlaceLayout;
+      uniform float uInterlaceCell; uniform float uInterlaceAxis;
+      uniform float uInterlaceFill; uniform float uInterlaceFillBlock;
+      uniform float uInterlaceFillStrength; uniform float uInterlaceHiddenScale;
+      uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
       vec3 hash3(vec2 q){
@@ -3444,6 +3625,50 @@ var ProtectedImage = class {
         vec4 c = sampleImage(effUv);
         c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
         if(lensOutside>0.5) c.rgb *= 0.82;
+        // Literal temporal interlace: each spatial cell belongs to exactly
+        // one phase. Inactive cells retain only the configured fill. This
+        // runs before the watermark so attribution is present in every
+        // presented phase and in a one-frame capture.
+        if(uInterlaceOn>0.5){
+          vec2 interlaceCell = floor(gl_FragCoord.xy / max(uInterlaceCell, 1.0));
+          float assigned = 0.0;
+          if(uInterlaceLayout<0.5){
+            assigned = mod(interlaceCell.x + (uInterlacePhases<2.5 ? interlaceCell.y : 2.0*interlaceCell.y), uInterlacePhases);
+          } else if(uInterlaceLayout<1.5){
+            assigned = mod(uInterlaceAxis>0.5 ? interlaceCell.x : interlaceCell.y, uInterlacePhases);
+          } else if(uInterlaceLayout<2.5){
+            assigned = min(floor(hash(interlaceCell + 913.7) * uInterlacePhases), uInterlacePhases - 1.0);
+          } else {
+            assigned = mod(interlaceCell.x + interlaceCell.y, uInterlacePhases);
+          }
+          if(abs(assigned-uInterlacePhase)<0.5){
+            c.rgb *= uInterlaceActiveGain;
+          } else {
+            vec3 fillColor = c.rgb;
+            if(uInterlaceFill<0.5){
+              vec2 qxy = (floor(gl_FragCoord.xy / max(uInterlaceFillBlock, 1.0)) + 0.5) * uInterlaceFillBlock;
+              vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
+              vec2 fillUv = qUv * uFitScale + uFitOffset;
+              if(fillUv.x>=0.0 && fillUv.x<=1.0 && fillUv.y>=0.0 && fillUv.y<=1.0){
+                fillColor = sampleImage(fillUv).rgb;
+              }
+            } else if(uInterlaceFill<1.5){
+              fillColor = c.rgb * uInterlaceHiddenScale;
+            } else if(uInterlaceFill<2.5){
+              fillColor = vec3(0.0);
+            } else {
+              vec3 delta;
+              if(uTemporalChroma>0.5){
+                float v = hash(interlaceCell) - 0.5;
+                delta = vec3(v, -0.62*v, 0.78*v);
+              } else {
+                delta = hash3(interlaceCell) - 0.5;
+              }
+              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign;
+            }
+            c.rgb = mix(c.rgb, fillColor, uInterlaceFillStrength);
+          }
+        }
         if(uWmOn>0.5){
           vec4 wm = texture(uWm, vUv);
           c.rgb = mix(c.rgb, wm.rgb, wm.a);
@@ -3519,7 +3744,19 @@ var ProtectedImage = class {
       "uTemporalStrength",
       "uTemporalBlock",
       "uTemporalPattern",
-      "uTemporalChroma"
+      "uTemporalChroma",
+      "uInterlaceOn",
+      "uInterlacePhase",
+      "uInterlacePhases",
+      "uInterlaceLayout",
+      "uInterlaceCell",
+      "uInterlaceAxis",
+      "uInterlaceFill",
+      "uInterlaceFillBlock",
+      "uInterlaceFillStrength",
+      "uInterlaceHiddenScale",
+      "uInterlaceActiveGain",
+      "uInterlaceNoiseStrength"
     ].forEach((n) => {
       __privateGet(this, _glLoc)[n] = gl.getUniformLocation(prog, n);
     });
@@ -3692,15 +3929,40 @@ var ProtectedImage = class {
       gl.uniform2f(L.uResolution, w, h);
       gl.uniform1f(L.uLocked, Date.now() < __privateGet(this, _lockedUntil) ? 1 : 0);
       const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
-      gl.uniform1f(L.uTemporalOn, temporal ? 1 : 0);
+      const interlace = temporal?.interlace || null;
+      const interlacePhases = interlace?.phases || 2;
+      const interlacePhase = (__privateGet(this, _temporalPhase) % interlacePhases + interlacePhases) % interlacePhases;
+      gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
       gl.uniform1f(L.uTemporalSign, __privateGet(this, _temporalSign));
       gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength : 0);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
       gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
       gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
+      gl.uniform1f(L.uInterlaceOn, interlace ? 1 : 0);
+      gl.uniform1f(L.uInterlacePhase, interlacePhase);
+      gl.uniform1f(L.uInterlacePhases, interlacePhases);
+      gl.uniform1f(
+        L.uInterlaceLayout,
+        interlace?.layout === "pixels" ? 0 : interlace?.layout === "strips" ? 1 : interlace?.layout === "blocks" ? 2 : 3
+      );
+      gl.uniform1f(L.uInterlaceCell, interlace?.cellSize || 1);
+      gl.uniform1f(L.uInterlaceAxis, interlace?.axis === "columns" ? 1 : 0);
+      gl.uniform1f(
+        L.uInterlaceFill,
+        interlace?.fill === "dim" ? 1 : interlace?.fill === "black" ? 2 : interlace?.fill === "noise" ? 3 : 0
+      );
+      gl.uniform1f(L.uInterlaceFillBlock, interlace?.fillBlock || 12);
+      gl.uniform1f(L.uInterlaceFillStrength, interlace?.fillStrength ?? 1);
+      gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
+      gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
+      gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
-      if (temporal) __privateSet(this, _temporalSign, -__privateGet(this, _temporalSign));
+      if (temporal) {
+        __privateSet(this, _temporalSign, -__privateGet(this, _temporalSign));
+        __privateWrapper(this, _temporalIndex)._++;
+        __privateSet(this, _temporalPhase, interlace ? (interlacePhase + 1) % interlacePhases : (__privateGet(this, _temporalPhase) + 1) % 2);
+      }
       if (__privateGet(this, _glFrameBudget) !== Infinity && __privateGet(this, _glFrameBudget) > 0) __privateWrapper(this, _glFrameBudget)._--;
       const keepGoing = __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) || __privateGet(this, _glFrameBudget) > 0;
       if (keepGoing && __privateGet(this, _visible) && !__privateGet(this, _destroyed) && !__privateGet(this, _unloaded)) {
@@ -3768,6 +4030,13 @@ var ProtectedImage = class {
       temporalPattern: temporal?.pattern || null,
       temporalChroma: !!temporal?.chroma,
       temporalFrames2d: !!__privateGet(this, _temporalFrames),
+      temporalNoise: !!temporal?.noise,
+      temporalEngineRequested: temporal?.engine || null,
+      temporalEngineActual: __privateGet(this, _temporalEngineActual),
+      temporalPhase: __privateGet(this, _temporalPhase),
+      temporalIndex: __privateGet(this, _temporalIndex),
+      temporalFrameCount: __privateGet(this, _temporalFrames)?.length || 0,
+      temporalInterlace: temporal?.interlace ? { ...temporal.interlace } : null,
       tokenMethod: __privateGet(this, _options).tokenMethod,
       tokenTransport: __privateGet(this, _options).tokenTransport,
       proofOfPossession: __privateGet(this, _options).proofOfPossession,
@@ -3898,9 +4167,12 @@ _deviceBox = new WeakMap();
 _glFrameBudget = new WeakMap();
 _glFrames = new WeakMap();
 _temporalSign = new WeakMap();
+_temporalPhase = new WeakMap();
 _temporalRaf = new WeakMap();
 _temporalFrames = new WeakMap();
 _temporalIndex = new WeakMap();
+_temporalEngineActual = new WeakMap();
+_temporalInterlaceCache = new WeakMap();
 _ProtectedImage_instances = new WeakSet();
 /** Strike accounting: repeated extraction attempts escalate to lockout. */
 registerStrike_fn = function(kind) {
@@ -3981,26 +4253,52 @@ shouldUpgradeDerivative_fn = function(previousW, previousH) {
   return !!(previousW && size.w > previousW * factor || previousH && size.h > previousH * factor);
 };
 /* ---------------- source resolution ---------------- */
-/** Effective temporal-shield config, or null when disabled / reduced-motion. */
+/**
+ * Effective temporal config, or null when disabled / reduced-motion.
+ * Legacy temporalShield/cameraShield complementary noise and the newer
+ * literal temporalInterlace can be used independently or combined.
+ */
 temporalConfig_fn = function() {
   const o = __privateGet(this, _options);
+  const reducedMotion = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   let raw = o.cameraShield || o.temporalShield;
   if (raw == null && o.captureShield && typeof o.captureShield === "object") {
     raw = o.captureShield.temporalDither;
   }
-  if (!raw) return null;
-  const cfg = raw === true ? {} : raw;
-  if (!cfg || cfg.enabled === false) return null;
-  if (cfg.respectReducedMotion !== false && typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    return null;
+  let noise = null;
+  if (raw) {
+    const cfg = raw === true ? {} : raw;
+    const respected = !cfg || cfg.respectReducedMotion === false || !reducedMotion;
+    if (cfg && cfg.enabled !== false && respected) {
+      const pattern2 = ["blocks", "checker", "bands"].includes(cfg.pattern) ? cfg.pattern : "blocks";
+      const engineRaw = String(cfg.engine || cfg.drawingMode || "auto").toLowerCase();
+      noise = {
+        strength: Math.max(0, Math.min(0.45, Number(cfg.strength ?? 0.16))),
+        block: Math.max(1, Math.min(16, Math.round(Number(cfg.block ?? 2)))),
+        pattern: pattern2,
+        chroma: cfg.chroma === true,
+        engine: ["shader", "gpu", "webgl"].includes(engineRaw) ? "shader" : ["frames", "canvas", "canvas2d", "2d"].includes(engineRaw) ? "frames" : "auto"
+      };
+    }
   }
-  const pattern = ["blocks", "checker", "bands"].includes(cfg.pattern) ? cfg.pattern : "blocks";
+  if (__privateGet(this, _temporalInterlaceCache) === void 0) {
+    __privateSet(this, _temporalInterlaceCache, normalizeTemporalInterlace(o.temporalInterlace));
+  }
+  let interlace = __privateGet(this, _temporalInterlaceCache);
+  if (interlace && interlace.respectReducedMotion && reducedMotion) interlace = null;
+  if (!noise && !interlace) return null;
+  const legacyPattern = interlace?.layout === "strips" ? "bands" : interlace?.layout === "checker" || interlace?.layout === "pixels" ? "checker" : "blocks";
+  const pattern = noise?.pattern || legacyPattern;
   return {
-    strength: Math.max(0, Math.min(0.45, Number(cfg.strength ?? 0.16))),
-    block: Math.max(1, Math.min(16, Math.round(Number(cfg.block ?? 2)))),
+    strength: noise?.strength ?? 0,
+    block: noise?.block ?? interlace?.cellSize ?? 2,
     pattern,
     patternCode: pattern === "checker" ? 1 : pattern === "bands" ? 2 : 0,
-    chroma: cfg.chroma === true
+    chroma: noise?.chroma ?? interlace?.chroma ?? false,
+    noise: !!noise,
+    interlace,
+    engine: interlace?.engine || noise?.engine || "auto",
+    phases: interlace?.phases || 2
   };
 };
 waitForStableSize_fn = async function() {
@@ -4046,7 +4344,12 @@ releaseSourceBitmap_fn = function() {
   __privateSet(this, _bitmap, null);
   __privateSet(this, _bitmapReleased, true);
 };
-/** Build the complementary ±noise frame pair for 2D temporal dithering. */
+/**
+ * Build pre-rendered phase frames for Canvas2D. Legacy temporalShield
+ * keeps its original two complementary-noise frames. temporalInterlace
+ * instead assigns each spatial cell to exactly one phase; cells outside
+ * the current phase receive the configured low-detail/dim/black/noise fill.
+ */
 setupTemporalFrames_fn = function(frame, cfg) {
   __privateMethod(this, _ProtectedImage_instances, stopTemporal2d_fn).call(this, true);
   const w = frame.width, h = frame.height;
@@ -4057,55 +4360,171 @@ setupTemporalFrames_fn = function(frame, cfg) {
   } catch {
     return;
   }
-  const block = cfg.block;
-  const bw = Math.ceil(w / block), bh = Math.ceil(h / block);
-  const offsets = new Float32Array(bw * bh * 3);
-  const amp = cfg.strength * 255;
-  for (let by = 0; by < bh; by++) {
-    for (let bx = 0; bx < bw; bx++) {
-      const oi = (by * bw + bx) * 3;
-      if (cfg.pattern === "bands" && bx > 0) {
-        offsets[oi] = offsets[oi - 3];
-        offsets[oi + 1] = offsets[oi - 2];
-        offsets[oi + 2] = offsets[oi - 1];
-        continue;
-      }
-      const parity = cfg.pattern === "checker" ? bx + by & 1 ? 1 : -1 : 1;
-      if (cfg.chroma) {
-        const scalar = cfg.pattern === "checker" ? (0.35 + Math.random() * 0.65) * amp * parity : (Math.random() * 2 - 1) * amp;
-        offsets[oi] = scalar;
-        offsets[oi + 1] = -0.62 * scalar;
-        offsets[oi + 2] = 0.78 * scalar;
-      } else if (cfg.pattern === "checker") {
-        offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
-        offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
-        offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
-      } else {
-        offsets[oi] = (Math.random() * 2 - 1) * amp;
-        offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
-        offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
+  const interlace = cfg.interlace;
+  const phases = Math.max(2, Math.min(4, cfg.phases || 2));
+  const needNoise = !!cfg.noise || interlace?.fill === "noise";
+  const noiseBlock = Math.max(1, cfg.block || 1);
+  const nbw = Math.ceil(w / noiseBlock), nbh = Math.ceil(h / noiseBlock);
+  const offsets = needNoise ? new Float32Array(nbw * nbh * 3) : null;
+  const amp = (cfg.noise ? cfg.strength : interlace?.noiseStrength || 0) * 255;
+  if (offsets) {
+    for (let by = 0; by < nbh; by++) {
+      for (let bx = 0; bx < nbw; bx++) {
+        const oi = (by * nbw + bx) * 3;
+        if (cfg.pattern === "bands" && bx > 0) {
+          offsets[oi] = offsets[oi - 3];
+          offsets[oi + 1] = offsets[oi - 2];
+          offsets[oi + 2] = offsets[oi - 1];
+          continue;
+        }
+        const parity = cfg.pattern === "checker" ? bx + by & 1 ? 1 : -1 : 1;
+        if (cfg.chroma) {
+          const scalar = cfg.pattern === "checker" ? (0.35 + Math.random() * 0.65) * amp * parity : (Math.random() * 2 - 1) * amp;
+          offsets[oi] = scalar;
+          offsets[oi + 1] = -0.62 * scalar;
+          offsets[oi + 2] = 0.78 * scalar;
+        } else if (cfg.pattern === "checker") {
+          offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
+        } else {
+          offsets[oi] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
+        }
       }
     }
   }
-  const mk = (sign) => {
+  const cell = Math.max(1, interlace?.cellSize || noiseBlock);
+  const bw = Math.ceil(w / cell), bh = Math.ceil(h / cell);
+  let assignments = null;
+  if (interlace) {
+    assignments = new Uint8Array(bw * bh);
+    for (let by = 0; by < bh; by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        let phase = 0;
+        if (interlace.layout === "strips") {
+          phase = (interlace.axis === "columns" ? bx : by) % phases;
+        } else if (interlace.layout === "blocks") {
+          phase = Math.random() * phases | 0;
+        } else if (interlace.layout === "pixels") {
+          phase = (bx + (phases === 2 ? by : 2 * by)) % phases;
+        } else {
+          phase = (bx + by) % phases;
+        }
+        assignments[by * bw + bx] = phase;
+      }
+    }
+  }
+  let lowData = null;
+  let lowW = 0;
+  let lowH = 0;
+  let lowBlock = 1;
+  if (interlace?.fill === "lowres") {
+    lowBlock = Math.max(1, interlace.fillBlock || 12);
+    lowW = Math.max(1, Math.ceil(w / lowBlock));
+    lowH = Math.max(1, Math.ceil(h / lowBlock));
+    try {
+      const low = makeCanvas(__privateGet(this, _host).ownerDocument);
+      low.width = lowW;
+      low.height = lowH;
+      const lowCtx = getNativeContext(low, "2d");
+      setSmoothing(lowCtx, true);
+      nativeDrawImage(lowCtx, frame, 0, 0, lowW, lowH);
+      lowData = lowCtx.getImageData(0, 0, lowW, lowH).data;
+      low.width = 0;
+      low.height = 0;
+    } catch {
+      lowData = null;
+    }
+  }
+  const mk = (phase) => {
+    const sign = phase % 2 ? -1 : 1;
     const c = makeCanvas(__privateGet(this, _host).ownerDocument);
     c.width = w;
     c.height = h;
     const cctx = getNativeContext(c, "2d");
     const out = cctx.createImageData(w, h);
     const s = src.data, d = out.data;
+    if (!interlace) {
+      for (let by = 0; by < nbh; by++) {
+        const y0 = by * noiseBlock;
+        const y1 = Math.min(h, y0 + noiseBlock);
+        for (let y = y0; y < y1; y++) {
+          let p = y * w * 4;
+          for (let bx = 0; bx < nbw; bx++) {
+            const oi = (by * nbw + bx) * 3;
+            const x1 = Math.min(w, (bx + 1) * noiseBlock);
+            for (let x = bx * noiseBlock; x < x1; x++, p += 4) {
+              d[p] = s[p] + sign * offsets[oi];
+              d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
+              d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
+              d[p + 3] = 255;
+            }
+          }
+        }
+      }
+      cctx.putImageData(out, 0, 0);
+      return c;
+    }
+    const gain = interlace.activeGain || 1;
+    const fillMix = interlace.fillStrength;
     for (let by = 0; by < bh; by++) {
-      const y0 = by * block;
-      const y1 = Math.min(h, y0 + block);
-      for (let y = y0; y < y1; y++) {
-        let p = y * w * 4;
-        for (let bx = 0; bx < bw; bx++) {
-          const oi = (by * bw + bx) * 3;
-          const x1 = Math.min(w, (bx + 1) * block);
-          for (let x = bx * block; x < x1; x++, p += 4) {
-            d[p] = s[p] + sign * offsets[oi];
-            d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
-            d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
+      const y0 = by * cell;
+      const y1 = Math.min(h, y0 + cell);
+      for (let bx = 0; bx < bw; bx++) {
+        const active = assignments[by * bw + bx] === phase;
+        const x0 = bx * cell;
+        const x1 = Math.min(w, x0 + cell);
+        for (let y = y0; y < y1; y++) {
+          let p = (y * w + x0) * 4;
+          const lowY = lowData ? Math.min(lowH - 1, Math.floor(y / lowBlock)) : 0;
+          for (let x = x0; x < x1; x++, p += 4) {
+            const sr = s[p], sg = s[p + 1], sb = s[p + 2];
+            let r, g, b;
+            if (active) {
+              r = sr * gain;
+              g = sg * gain;
+              b = sb * gain;
+            } else {
+              let fr = sr, fg = sg, fb = sb;
+              if (interlace.fill === "lowres" && lowData) {
+                const lowX = Math.min(lowW - 1, Math.floor(x / lowBlock));
+                const li = (lowY * lowW + lowX) * 4;
+                fr = lowData[li];
+                fg = lowData[li + 1];
+                fb = lowData[li + 2];
+              } else if (interlace.fill === "dim") {
+                fr = sr * interlace.hiddenScale;
+                fg = sg * interlace.hiddenScale;
+                fb = sb * interlace.hiddenScale;
+              } else if (interlace.fill === "black") {
+                fr = 0;
+                fg = 0;
+                fb = 0;
+              } else if (interlace.fill === "noise" && offsets) {
+                const nbx = Math.min(nbw - 1, Math.floor(x / noiseBlock));
+                const nby = Math.min(nbh - 1, Math.floor(y / noiseBlock));
+                const oi = (nby * nbw + nbx) * 3;
+                fr = sr + sign * offsets[oi];
+                fg = sg + sign * offsets[oi + 1];
+                fb = sb + sign * offsets[oi + 2];
+              }
+              r = sr + (fr - sr) * fillMix;
+              g = sg + (fg - sg) * fillMix;
+              b = sb + (fb - sb) * fillMix;
+            }
+            if (cfg.noise && offsets) {
+              const nbx = Math.min(nbw - 1, Math.floor(x / noiseBlock));
+              const nby = Math.min(nbh - 1, Math.floor(y / noiseBlock));
+              const oi = (nby * nbw + nbx) * 3;
+              r += sign * offsets[oi];
+              g += sign * offsets[oi + 1];
+              b += sign * offsets[oi + 2];
+            }
+            d[p] = r;
+            d[p + 1] = g;
+            d[p + 2] = b;
             d[p + 3] = 255;
           }
         }
@@ -4114,21 +4533,29 @@ setupTemporalFrames_fn = function(frame, cfg) {
     cctx.putImageData(out, 0, 0);
     return c;
   };
-  __privateSet(this, _temporalFrames, [mk(1), mk(-1)]);
+  __privateSet(this, _temporalFrames, Array.from({ length: phases }, (_, phase) => mk(phase)));
   __privateSet(this, _temporalIndex, 0);
+  __privateSet(this, _temporalPhase, 0);
+  __privateSet(this, _temporalSign, 1);
   __privateMethod(this, _ProtectedImage_instances, paintTemporal2d_fn).call(this);
   if (__privateGet(this, _visible)) __privateMethod(this, _ProtectedImage_instances, startTemporal2d_fn).call(this);
 };
 paintTemporal2d_fn = function() {
   const ctx = __privateGet(this, _realCtx);
   const frames = __privateGet(this, _temporalFrames);
-  if (!ctx || !frames || __privateGet(this, _destroyed) || !__privateGet(this, _canvas)) return;
+  if (!ctx || !frames?.length || __privateGet(this, _destroyed) || !__privateGet(this, _canvas)) return;
+  const phase = (__privateGet(this, _temporalIndex) % frames.length + frames.length) % frames.length;
+  __privateSet(this, _temporalPhase, phase);
+  if (__privateGet(this, _options).lens && __privateGet(this, _frameCanvas)) {
+    __privateMethod(this, _ProtectedImage_instances, paintLens2d_fn).call(this);
+    return;
+  }
   if (Date.now() < __privateGet(this, _lockedUntil)) {
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, __privateGet(this, _canvas).width, __privateGet(this, _canvas).height);
     return;
   }
-  nativeDrawImage(ctx, frames[__privateGet(this, _temporalIndex) & 1], 0, 0);
+  nativeDrawImage(ctx, frames[phase], 0, 0);
 };
 startTemporal2d_fn = function() {
   if (__privateGet(this, _temporalRaf) || !__privateGet(this, _temporalFrames) || __privateGet(this, _destroyed)) return;
@@ -4179,7 +4606,9 @@ paintLens2d_fn = function() {
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.clip();
-    nativeDrawImage(ctx, frame, 0, 0);
+    const phaseFrames = __privateGet(this, _temporalFrames);
+    const sharpSource = phaseFrames?.length ? phaseFrames[(__privateGet(this, _temporalIndex) % phaseFrames.length + phaseFrames.length) % phaseFrames.length] : frame;
+    nativeDrawImage(ctx, sharpSource, 0, 0);
     ctx.restore();
     ctx.save();
     ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -4263,7 +4692,7 @@ function defineElement() {
   const elementInstances = /* @__PURE__ */ new WeakMap();
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
-      return ["src", "image-id", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "proof-of-possession", "cache-scope"];
+      return ["src", "image-id", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "temporal-interlace", "temporal-interlace-engine", "temporal-interlace-layout", "temporal-interlace-phases", "temporal-interlace-cell-size", "temporal-interlace-fill", "temporal-interlace-refresh-hz", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "proof-of-possession", "cache-scope"];
     }
     connectedCallback() {
       if (elementInstances.has(this)) return;
@@ -4282,6 +4711,37 @@ function defineElement() {
         } catch {
         }
       }
+      let temporalInterlace = presetOptions.temporalInterlace;
+      const interlaceAttr = this.getAttribute("temporal-interlace");
+      const hasInterlaceDetails = [
+        "temporal-interlace-engine",
+        "temporal-interlace-layout",
+        "temporal-interlace-phases",
+        "temporal-interlace-cell-size",
+        "temporal-interlace-fill",
+        "temporal-interlace-refresh-hz"
+      ].some((name) => this.hasAttribute(name));
+      if (interlaceAttr != null || hasInterlaceDetails) {
+        if (interlaceAttr === "false" || interlaceAttr === "off" || interlaceAttr === "none") {
+          temporalInterlace = false;
+        } else {
+          const details = {};
+          if (interlaceAttr && interlaceAttr !== "true") details.profile = interlaceAttr;
+          const engine = this.getAttribute("temporal-interlace-engine");
+          const layout = this.getAttribute("temporal-interlace-layout");
+          const phases = this.getAttribute("temporal-interlace-phases");
+          const cellSize = this.getAttribute("temporal-interlace-cell-size");
+          const fill = this.getAttribute("temporal-interlace-fill");
+          const refreshHz = this.getAttribute("temporal-interlace-refresh-hz");
+          if (engine) details.engine = engine;
+          if (layout) details.layout = layout;
+          if (phases) details.phases = Number(phases);
+          if (cellSize) details.cellSize = Number(cellSize);
+          if (fill) details.fill = fill;
+          if (refreshHz) details.refreshHz = Number(refreshHz);
+          temporalInterlace = Object.keys(details).length ? details : true;
+        }
+      }
       const inst = new ProtectedImage(inner, src, {
         ...presetOptions,
         mode: this.getAttribute("mode") || presetOptions.mode,
@@ -4297,6 +4757,7 @@ function defineElement() {
         captureShield: this.hasAttribute("capture-shield") ? true : presetOptions.captureShield,
         temporalShield: this.hasAttribute("temporal-shield") ? true : presetOptions.temporalShield,
         cameraShield: this.hasAttribute("camera-shield") ? { pattern: "checker", chroma: true } : presetOptions.cameraShield,
+        temporalInterlace,
         renderLoop: this.getAttribute("render-loop") || presetOptions.renderLoop,
         reloadOnResize: this.getAttribute("reload-on-resize") || presetOptions.reloadOnResize,
         onExtract: this.getAttribute("on-extract") || presetOptions.onExtract,
@@ -4329,6 +4790,8 @@ var Archx = {
   ProtectedImage,
   presets: PRESETS,
   preset,
+  temporalInterlaceProfiles: TEMPORAL_INTERLACE_PROFILES,
+  normalizeTemporalInterlace,
   config(partial = {}) {
     const clean = {};
     for (const [k, v] of Object.entries(partial)) if (v !== void 0) clean[k] = v;

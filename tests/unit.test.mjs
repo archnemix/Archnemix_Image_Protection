@@ -17,6 +17,7 @@ import {
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
 import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
+import { TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace } from '../src/archx.js';
 import {
   createArchxMiddleware, deriveStegoKey,
   auditArchxServerConfig, validateTokenClaims, validateImageId,
@@ -1131,4 +1132,44 @@ test('perceptual soft-binding fingerprint survives resize/re-encode and separate
     `unrelated synthetic image should separate: ${fingerprint} vs ${differentFingerprint}`);
   assert.throws(() => perceptualFingerprintDistance(fingerprint, 'not-hex'), /16 hex/);
   assert.throws(() => comparePerceptualFingerprints(fingerprint, fingerprint, { maxDistance: 65 }), /maxDistance/);
+});
+
+test('temporal interlace profiles are 60 Hz-safe by default and remain directly configurable', () => {
+  assert.deepEqual(Object.keys(TEMPORAL_INTERLACE_PROFILES), [
+    'balanced60', 'pixels60', 'strips60', 'blocks60',
+  ]);
+  assert.equal(normalizeTemporalInterlace(false), null);
+  assert.equal(normalizeTemporalInterlace('off'), null);
+  assert.equal(normalizeTemporalInterlace({ enabled: false }), null);
+  assert.equal(normalizeTemporalInterlace({ profile: false }), null);
+
+  const balanced = normalizeTemporalInterlace(true);
+  assert.equal(balanced.profile, 'balanced60');
+  assert.equal(balanced.engine, 'auto');
+  assert.equal(balanced.layout, 'checker');
+  assert.equal(balanced.phases, 2);
+  assert.equal(balanced.phaseHz, 30);
+  assert.equal(balanced.fill, 'lowres');
+  assert.equal(balanced.respectReducedMotion, true);
+
+  const strips = normalizeTemporalInterlace({
+    profile: 'strips60', engine: 'gpu', phases: 4, refreshHz: 60,
+  });
+  assert.equal(strips.engine, 'shader');
+  assert.equal(strips.layout, 'strips');
+  assert.equal(strips.requestedPhases, 4);
+  assert.equal(strips.phases, 2, '60 Hz optimization must not drop a subset below the 30 Hz floor');
+
+  const highRefresh = normalizeTemporalInterlace({
+    layout: 'pixels', phases: 4, refreshHz: 120, fill: 'black',
+  });
+  assert.equal(highRefresh.layout, 'pixels');
+  assert.equal(highRefresh.cellSize, 1);
+  assert.equal(highRefresh.phases, 4);
+  assert.equal(highRefresh.phaseHz, 30);
+  assert.ok(highRefresh.activeGain > 1 && highRefresh.activeGain <= 4);
+
+  const blocks = normalizeTemporalInterlace({ layout: 'blocks', engine: 'canvas' });
+  assert.equal(blocks.engine, 'frames');
+  assert.equal(blocks.cellSize, 8);
 });

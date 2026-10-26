@@ -382,6 +382,15 @@ possible. Four patterns recur:
   `temporalShield` therefore degrades a *single* OS/extension/DevTools frame,
   honours `prefers-reduced-motion` by default, and is layered under Lens,
   dynamic trace and baked marks instead of posing as a PrintScreen veto.
+  Literal **temporal interlace** is the stricter partition variant: only one
+  spatial subset is sharp in a presented phase, while the complementary cells
+  carry a low-detail, dim, black, or noise fill. It is also harsher. On the
+  60 Hz displays targeted by Archx's default profiles, even an optimal
+  two-phase cycle refreshes each subset at only 30 Hz; black inactive cells
+  maximize both missing information and luminance flicker. The shipped
+  default therefore uses fine 2-device-pixel checker cells and a locally
+  averaged fill, while still labelling the result a capture-cost/flicker
+  trade-off rather than an invisible selective-viewing system.
 
 The AI update cuts across all of the above. Peer-reviewed work on generative
 regeneration shows that adding noise and re-synthesizing an image with a
@@ -494,12 +503,18 @@ The camera research separates into three very different classes:
    opponent-colour (`chroma`) transform in both the WebGL shader and Canvas2D
    frame generator. Human temporal integration averages the +/− pair; a
    screenshot, short camera exposure, or asymmetric rolling-shutter sample can
-   retain noise, checker phase, or banding. Lens still prevents one frame
-   from containing the whole sharp image; dynamic traces and server marks add
-   attribution. The defeats remain obvious and are documented rather than
-   hidden: record and average frames, use a longer exposure, shift exposure
-   phase, stitch pointer-Lens discs, denoise/regenerate, or simply accept the
-   screen-resolution picture.
+   retain noise, checker phase, or banding. The v1.5 branch adds opt-in
+   `temporalInterlace` with pixel-level, checker, strip, and randomized-block
+   partitions over 2–4 phases. Its `shader` engine computes the current phase
+   mask from backing-pixel coordinates in the fragment shader; its `frames`
+   engine pre-renders one altered Canvas2D frame per phase. The 60 Hz
+   profiles deliberately clamp to two phases at a 30 Hz per-phase floor and
+   use locally averaged inactive colour by default. Lens still prevents one
+   frame from containing the whole sharp image; dynamic traces and server
+   marks add attribution. The defeats remain obvious and are documented
+   rather than hidden: record and average frames, capture/recombine phases,
+   use a longer exposure, shift exposure phase, stitch pointer-Lens discs,
+   denoise/regenerate, or simply accept the screen-resolution picture.
 
 #### Why StegoMark is not (yet) a phone-photo detector
 
@@ -741,11 +756,12 @@ error — see the README checklist).
     a lock/risk change — or the explicitly continuous temporal shield — asks
     for more. `reload()` remains the deliberate forced-refresh API.
 14. **Temporal and steganographic layers must be labelled by what they prove.**
-    The temporal shield proves only that one frame is an incomplete sample;
-    time integration/recording can recover more. StegoMark proves, when it
-    decodes, that a suspect copy is consistent with a registered fingerprint;
-    it does not prove a negative when filtering/regeneration has destroyed
-    the signal. Shipping the detector, CRC/confidence output and negative
+    The temporal shield and temporal interlace prove only that one frame is
+    an incomplete/noisy sample; time integration, recording, or collecting
+    each interlace phase can recover more. StegoMark proves, when it decodes,
+    that a suspect copy is consistent with a registered fingerprint; it does
+    not prove a negative when filtering/regeneration has destroyed the
+    signal. Shipping the detector, CRC/confidence output and negative
     controls matters more than calling either layer “screenshot-proof” or
     “AI-proof.”
 
@@ -766,12 +782,13 @@ error — see the README checklist).
     synchronized viewer; anti-camera LEDs need controllable illumination;
     neural screen-shooting watermarks need learned localization/synchronization.
     Archx borrows the page-feasible signal-processing ideas (complementary
-    checker/bands/chroma, incomplete reveal, redundant marks) and labels the
-    missing hardware/learning pieces as missing.
+    checker/bands/chroma, literal phase-partitioned subsets, incomplete
+    reveal, redundant marks) and labels the missing hardware/learning pieces
+    as missing.
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 30 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 31 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -818,8 +835,13 @@ error — see the README checklist).
   fresh proof can, and responses carry CDN/surrogate `no-store` plus
   proof-sensitive `Vary`. The soft-binding test registers a perceptual
   fingerprint during `scrambleImage()`, matches a resized/JPEG copy within
-  distance 10, and separates an unrelated synthetic image.
-- **Real browser (headless Chromium, 68 checks):** a page with 7 protected
+  distance 10, and separates an unrelated synthetic image. The temporal-
+  interlace normalizer test proves the four 60 Hz profiles exist, disabled
+  forms normalize to `null`, a 4-phase request is clamped to 2 phases at
+  60 Hz/30 Hz minimum, the same request remains 4 phases at a configured
+  120 Hz target, and shader/frames plus pixel/block aliases map to the
+  documented engines/layout defaults.
+- **Real browser (headless Chromium, 72 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
@@ -855,11 +877,17 @@ error — see the README checklist).
   chroma shield as complementary Canvas2D frames, exposes their normalized
   pattern/chroma only through the debug-gated test hook, scopes their token
   cache, and verifies `Archx.clearCaches()` does not blank already-painted
-  instances.
+  instances. Temporal-interlace checks render pixel subsets through the
+  shader engine, two-phase strips and three-phase randomized blocks through
+  pre-rendered Canvas2D frames, and Lens through both engines. In a retained
+  black-fill strip fixture, four real Puppeteer element screenshots produced
+  a maximum opposite-phase MAD of **95.9/255**, while the debug phase index
+  advanced between captures—evidence that the compositor presented different
+  incomplete phases, not merely that configuration state changed.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  **3.9 s** in the latest deliberately non-lazy headless test with
-  high-quality derivatives and 0 `<img>` tags; browser bundle **82.9 KiB
-  minified / 27.6 KiB gzipped**. The latest local benchmark measured
+  **3.7 s** in the latest deliberately non-lazy headless test with
+  high-quality derivatives and 0 `<img>` tags; browser bundle **94.3 KiB
+  minified / 30.9 KiB gzipped**. The latest local benchmark measured
   `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
   169.9 ms one-time per cached variant (70.8 ms at 480 px and 358.1 ms at
   1600 px). Static/per-image server outputs remain cacheable; per-token

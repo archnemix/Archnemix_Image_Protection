@@ -191,7 +191,7 @@ This showcase uses the JPG directly only to make the visual comparison easy.</pr
   <section class="panel" id="customPanel">
     <div class="eyebrow">No preset required</div>
     <h2>5 — Custom Flags Builder</h2>
-    <p>Change the direct flags below and press <strong>Apply custom flags</strong>. The generated call uses <code>mode: 'custom'</code> plus a direct <code>renderer</code> flag; on Archx 1.3+ you may also omit <code>mode</code> entirely and pass only <code>renderer</code> and the individual flags. Patterned <code>cameraShield</code> options require Archx 1.4+.</p>
+    <p>Change the direct flags below and press <strong>Apply custom flags</strong>. The generated call uses <code>mode: 'custom'</code> plus a direct <code>renderer</code> flag; on Archx 1.3+ you may also omit <code>mode</code> entirely and pass only <code>renderer</code> and the individual flags. Patterned <code>cameraShield</code> options require Archx 1.4+; temporal interlace requires a current build that exposes <code>Archx.normalizeTemporalInterlace</code>.</p>
 
     <div class="custom-layout">
       <form class="controls" id="customForm">
@@ -232,6 +232,78 @@ This showcase uses the JPG directly only to make the visual comparison easy.</pr
           </select>
           <small style="display:block;margin-top:6px;color:var(--muted)">These alternate complementary frames. A single capture keeps noise, but video averaging or a long exposure can defeat them; this is degradation, not camera-proofing.</small>
         </div>
+
+        <fieldset>
+          <legend>Temporal interlace — 60 Hz-first subset frames</legend>
+          <div>
+            <label for="customInterlaceProfile">Interlace profile</label>
+            <select id="customInterlaceProfile">
+              <option value="off" selected>Off — no subset-frame flicker</option>
+              <option value="balanced60">Balanced 60 Hz — 2px checker cells + low-detail fill</option>
+              <option value="pixels60">Pixels 60 Hz — 1px pixel-level subsets</option>
+              <option value="strips60">Strips 60 Hz — 2px alternating row strips</option>
+              <option value="blocks60">Blocks 60 Hz — randomized 8px square blocks</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlaceEngine">Drawing method</label>
+            <select id="customInterlaceEngine">
+              <option value="auto" selected>Auto — follow the selected renderer</option>
+              <option value="shader">GPU fragment shader — phase mask each presented frame</option>
+              <option value="frames">Pre-rendered frames — generate altered phase canvases once</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlaceLayout">Spatial layout override</label>
+            <select id="customInterlaceLayout">
+              <option value="" selected>Use the profile layout</option>
+              <option value="checker">Checker / square-cell subsets</option>
+              <option value="pixels">Pixel-level subsets</option>
+              <option value="strips">Row strips</option>
+              <option value="blocks">Randomized square blocks</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlacePhases">Requested phases</label>
+            <select id="customInterlacePhases">
+              <option value="2" selected>2 phases — each subset at 30 Hz on a 60 Hz display</option>
+              <option value="3">3 phases — optimized back to 2 at 60 Hz</option>
+              <option value="4">4 phases — optimized back to 2 at 60 Hz</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlaceCell">Cell / strip / block size</label>
+            <select id="customInterlaceCell">
+              <option value="" selected>Profile default</option>
+              <option value="1">1 device pixel</option>
+              <option value="2">2 device pixels</option>
+              <option value="4">4 device pixels</option>
+              <option value="8">8 device pixels</option>
+              <option value="16">16 device pixels</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlaceFill">Inactive-cell fill</label>
+            <select id="customInterlaceFill">
+              <option value="lowres" selected>Low-detail local colour — least brightness flicker</option>
+              <option value="dim">Dimmed original detail</option>
+              <option value="black">Black — literal missing subsets, strongest flicker</option>
+              <option value="noise">Complementary noise</option>
+            </select>
+          </div>
+          <div>
+            <label for="customInterlaceRefresh">Target display refresh</label>
+            <select id="customInterlaceRefresh">
+              <option value="60" selected>60 Hz — default target</option>
+              <option value="90">90 Hz</option>
+              <option value="120">120 Hz</option>
+              <option value="144">144 Hz</option>
+              <option value="240">240 Hz</option>
+            </select>
+          </div>
+          <label class="check"><input type="checkbox" id="customInterlaceOptimize" checked><span>Optimize phases for refresh rate<small>Keep each subset at or above 30 Hz when possible; at 60 Hz this clamps 3–4 requested phases to 2.</small></span></label>
+          <small style="color:var(--muted)">A single screenshot receives one incomplete phase, but screenshots from multiple phases, screen recording, and some camera exposures can recombine the image. Interlace always costs continuous presentation and is disabled for reduced-motion users by default.</small>
+        </fieldset>
 
         <fieldset>
           <legend>Direct protection flags</legend>
@@ -339,6 +411,7 @@ let activeImage = null;
 let customInstance = null;
 let customRendererSupported = false;
 let cameraShieldSupported = false;
+let temporalInterlaceSupported = false;
 
 function common(label) {
   return {
@@ -362,6 +435,24 @@ function buildCustomOptions() {
     block: cameraPattern === 'bands' ? 3 : 2,
     respectReducedMotion: true
   } : false;
+  const interlaceProfile = document.getElementById('customInterlaceProfile').value;
+  let temporalInterlace = false;
+  if (interlaceProfile !== 'off') {
+    temporalInterlace = {
+      profile: interlaceProfile,
+      engine: document.getElementById('customInterlaceEngine').value,
+      phases: Number(document.getElementById('customInterlacePhases').value),
+      fill: document.getElementById('customInterlaceFill').value,
+      refreshHz: Number(document.getElementById('customInterlaceRefresh').value),
+      minPhaseHz: 30,
+      optimizeRefresh: document.getElementById('customInterlaceOptimize').checked,
+      respectReducedMotion: true
+    };
+    const layout = document.getElementById('customInterlaceLayout').value;
+    const cellSize = document.getElementById('customInterlaceCell').value;
+    if (layout) temporalInterlace.layout = layout;
+    if (cellSize) temporalInterlace.cellSize = Number(cellSize);
+  }
 
   const options = {
     mode: 'custom',
@@ -380,7 +471,7 @@ function buildCustomOptions() {
     onExtract: document.getElementById('customExtract').value,
     memory: strict ? 'strict' : 'standard',
     localScramble: renderer === 'webgl' && strict,
-    splitCanvases: renderer === 'canvas' && document.getElementById('customSplit').checked,
+    splitCanvases: renderer === 'canvas' && !temporalInterlace && document.getElementById('customSplit').checked,
     splitGrid: 3,
     lens: document.getElementById('customLens').checked
       ? { radius: 0.30, idlePixelate: 18 }
@@ -389,6 +480,7 @@ function buildCustomOptions() {
       ? { pattern: 'blocks', chroma: false, strength: 0.14, block: 2, respectReducedMotion: true }
       : false),
     cameraShield: camera,
+    temporalInterlace,
     captureShield: document.getElementById('customTrace').checked
       ? { dynamicTrace: true, temporalPattern: true }
       : false,
@@ -398,7 +490,7 @@ function buildCustomOptions() {
     cachePayload: true,
     reloadOnResize: 'upscale',
     resizeUpscaleFactor: 1.75,
-    renderLoop: temporal || camera ? 'auto' : 'static',
+    renderLoop: temporal || camera || temporalInterlace ? 'auto' : 'static',
     guards: {
       contextMenu: true,
       drag: true,
@@ -415,6 +507,10 @@ function buildCustomOptions() {
     // Older builds only know random-block temporal modulation.
     options.temporalShield = { strength: camera.strength, block: camera.block, respectReducedMotion: true };
     delete options.cameraShield;
+  }
+
+  if (!temporalInterlaceSupported && temporalInterlace) {
+    delete options.temporalInterlace;
   }
 
   // Compatibility fallback for an older extracted ZIP. Archx 1.3+ understands
@@ -463,6 +559,7 @@ async function start() {
     activeImage = imagePath;
     customRendererSupported = versionAtLeast(Archx.version, 1, 3);
     cameraShieldSupported = versionAtLeast(Archx.version, 1, 4);
+    temporalInterlaceSupported = typeof Archx.normalizeTemporalInterlace === 'function';
 
     document.getElementById('libraryStatus').textContent = `${libraryPath} (Archx ${Archx.version || 'unknown'})`;
     document.getElementById('imageStatus').textContent = imagePath;
@@ -475,6 +572,9 @@ async function start() {
       log('This extracted Archx build is older than 1.3. The Custom Builder will use a compatibility fallback; update dist/archx.min.js for mode:"custom" + renderer.', 'warn');
     } else if (!cameraShieldSupported) {
       log('This Archx build predates 1.4 patterned camera shields; camera selections will fall back to random-block temporal modulation.', 'warn');
+    }
+    if (!temporalInterlaceSupported) {
+      log('This Archx bundle predates temporal interlace; rebuild or update dist/archx.min.js to use the 60 Hz subset-frame controls.', 'warn');
     }
 
     const instances = [

@@ -12,10 +12,11 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
 No `<img>` is ever created. There is no image URL in your HTML to copy, no file in the Network tab to save, and the picture itself is painted through a sealed, protected viewer that fights back at every step a thief normally takes. People who dig deeper get a **black card**, a **scrambled mosaic**, or a **heavily pixelated thumbnail** — your call. Your original file **never leaves the server**.
 
-- 📦 **82.9 KiB minified / 27.6 KiB gzipped**, zero runtime dependencies (browser)
+- 📦 **94.3 KiB minified / 30.9 KiB gzipped**, zero runtime dependencies (browser)
 - ⚡ Built for **hundreds of images per page** (lazy loading, decode concurrency cap, bitmap/payload caching, display-size-aware rendering) — 100-image gallery verified in tests. **Loaded images do not reload** on scroll/visibility/ordinary resize, and static WebGL images draw on demand instead of running a 60 fps GPU loop
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
 - 🧩 Four preset modes — **lite** (galleries), **shield** (default), **vault** (WebGL), and **fortress** (Vault + anti-hook lock, strike lockouts, strict memory wiping, dynamic capture trace, temporal anti-single-frame shield, and optional pointer lens) — plus `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so you are never locked into a preset
+- 🌓 Optional **temporal interlace**: assign pixel/checker/strip/block subsets to 2–4 phases so one presented frame is deliberately incomplete. Four 60 Hz-first profiles, GPU-shader or pre-rendered-frame engines, refresh-rate phase optimization, and reduced-motion respect. It is explicit opt-in because two-phase viewing on a 60 Hz monitor still flickers at 30 Hz per subset
 - 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens, header-carried payload tokens by default, race-safe one-time claims, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling
 - 🧬 Attribution fallback: an optional 64-bit perceptual **soft-binding fingerprint** can be registered at ingest and compared with a suspect copy after metadata or a pixel mark has been stripped (evidence, not access control or cryptographic proof)
 - 🕵️ Hardened internals: private fields, no public instance registry or host expando, secret-redacted option views, captured native APIs, and hooked-API / automation policies
@@ -35,7 +36,7 @@ npm run demo          # http://localhost:4173
 
 The demo compares a normal `<img>` with Archx Shield, Vault, and Fortress + Lens cards, and includes an **Attack Simulator**: buttons that execute real theft techniques (DOM scanning, `canvas.toDataURL()`, prototype bypass, network capture, payload reconstruction with a stolen client key, signed-URL replay, and print) in your browser and show you the loot. Nothing is mocked. In the reconstruction attack, the important result is that the server-baked watermark is still there.
 
-For a copy-and-run visual comparison, see [`examples/archx-showcase.html`](examples/archx-showcase.html). It shows one image as Normal → Lite → Shield → Vault → Fortress and includes a **Custom Flags Builder** (direct `renderer`, memory, forensic, Lens, temporal/camera-pattern, opponent-colour, split-canvas, quality, extraction, token/cache, and guard flags). Put that HTML beside your test JPG and the extracted repository folder, serve the parent folder over HTTP, and open it in a browser.
+For a copy-and-run visual comparison, see [`examples/archx-showcase.html`](examples/archx-showcase.html). It shows one image as Normal → Lite → Shield → Vault → Fortress and includes a **Custom Flags Builder** (direct `renderer`, memory, forensic, Lens, temporal/camera-pattern, 60 Hz temporal-interlace profile/engine/layout/phase/fill controls, opponent-colour, split-canvas, quality, extraction, token/cache, and guard flags). Put that HTML beside your test JPG and the extracted repository folder, serve the parent folder over HTTP, and open it in a browser.
 
 ## Quick start
 
@@ -236,6 +237,7 @@ The perceptual soft binding is a separate 64-bit DCT fingerprint of image struct
 | Browser screenshot extension, DevTools “Capture screenshot”, or CDP/remote capture | These use browser privileges above page JavaScript; a website cannot reliably detect installed extensions or veto a privileged visible-tab capture. View-source/Elements still reveals no master or signed URL. Fortress assumes capture and adds Lens + a drifting session/time trace | A degraded, attributable capture of what was visible — never the original file/master |
 | Photographing the monitor with a phone or second device | **Physically unstoppable and undetectable from the device displaying the page.** Mitigation is value destruction: entitled resolution, server-baked visible/forensic/Stego marks, dynamic capture trace, Fortress Lens, and optional checker/band opponent-colour temporal modulation designed to interact badly with Bayer sampling, rolling shutter, moiré, and short camera exposures | A camera copy with perspective/moiré/screen loss, mostly Lens mush outside one disc, carrying session attribution |
 | Single PrintScreen / extension frame under `temporalShield` | Two complementary frames alternate at refresh rate: random blocks, a parity checker, or horizontal bands, optionally in opponent colour. Eyes integrate the pair toward the image; one captured frame retains noise/stripes. Reduced-motion users are respected by default | One noisy half-frame. A screen recording, averaged captures, or long-exposure camera can reconstruct more — layer it with Lens/marks |
+| Single presented frame under `temporalInterlace` | Only the cells assigned to that phase retain sharp pixels; pixel-level, checker, strip, or randomized-block subsets cycle over 2–4 phases. Inactive cells get a low-detail local-colour fill by default (or dim/black/noise), and 60 Hz optimization clamps the cycle to two phases so each subset still updates at 30 Hz | One spatially incomplete frame. Capturing several presented phases, recording video, or using an integrating camera exposure can recombine most detail; interlace raises capture effort, it does not create a screenshot veto |
 | AI denoise/upscale/regeneration of a degraded capture | No web layer can honestly promise AI-proof pixels. Archx limits the source information (entitled derivative, Lens/temporal capture), keeps visible attribution, and adds evidence/control layers around it | At best a plausible regenerated approximation and a marked/attributable trail — not the withheld master pixels |
 | Reposted copy — “prove it's yours” | StegoMark embeds a blind, keyed, redundant 48-bit fingerprint + CRC in delivered pixels; `archx-detect` recovers it without the original and your `onStegoIssue` registry maps it to the issued view. An optional registered perceptual soft binding gives a second lookup path if metadata/marks were stripped | Attribution evidence for the measured resize/re-encode/mild-blur/photometric and bounded axis-aligned crop cases above—not rotation/perspective proof or standalone legal proof |
 
@@ -247,7 +249,7 @@ The perceptual soft binding is a separate 64-bit DCT fingerprint of image struct
 | `shield` *(default)* | 2D canvas + tile-unscramble, client watermark/forensic marks, integrity/automation monitoring, risk reactions (`splitCanvases` option = one canvas per tile) | Most valuable single images | + 64 `drawImage` tile copies (no per-pixel JS in the image path) |
 | `vault` | WebGL2 shader un-scrambles on the GPU; read-back returns black by platform design; forensic grain | Hero / premium / paid images. Browsers allow ~8–16 GL contexts — Archx budgets 8 and falls back to shield | 1 texture upload + a few presentation frames; static images then idle (`renderLoop:'auto'`) |
 | `fortress` | Vault renderer plus fail-closed integrity policy, strike lockouts, strict memory wiping, local pre-GPU scrambling for plain sources, DevTools guard on, dynamic capture trace, checker + opponent-colour camera shield, and optional trusted-pointer Lens | The small number of images where even a clean screenshot/photo is a serious loss | Vault cost + policy checks; camera/temporal shield deliberately animates. Reserve it for hero/paid content, not grids |
-| `custom` | No preset bundle: choose `renderer:'canvas'|'webgl'` and each flag (`forensic`, `memory`, `lens`, `temporalShield`, `cameraShield`, `splitCanvases`, guards, quality, extraction, token method/cache scope, policies) yourself. Omitting `mode` while passing `renderer` is also treated as custom | Sites that need a precise mix—e.g. Canvas for compatibility but strict memory and Lens, or WebGL without temporal flicker | Exactly the layers you enable; nothing extra is bundled by a mode name |
+| `custom` | No preset bundle: choose `renderer:'canvas'|'webgl'` and each flag (`forensic`, `memory`, `lens`, `temporalShield`, `cameraShield`, `temporalInterlace`, `splitCanvases`, guards, quality, extraction, token method/cache scope, policies) yourself. Omitting `mode` while passing `renderer` is also treated as custom | Sites that need a precise mix—e.g. Canvas for compatibility but strict memory and Lens, or WebGL without temporal flicker | Exactly the layers you enable; nothing extra is bundled by a mode name |
 
 Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `gallery`, `editorial`, `commerce`, and `screenshotResistant`. They are ordinary option objects — spread one and override any key.
 
@@ -283,7 +285,8 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `cacheBitmap` / `cachePayload` | `true` / `true` | session-level no-reload controls. `cacheBitmap` shares decoded results for identical non-strict sources; `cachePayload` privately retains scrambled bytes so strict-memory repaint/context recovery can decode locally instead of reminting/fetching. Explicit `reload()` bypasses both |
 | `reloadOnResize` / `resizeUpscaleFactor` | `'upscale'` / `1.75` | strict-memory resize policy: `'never'` keeps the painted canvas, `'upscale'` re-resolves only after a large size jump (locally from cached payload when enabled), `'always'` is the legacy eager behaviour. Normal modes repaint from the retained bitmap |
 | `renderLoop` | `'auto'` | WebGL presentation policy: `'auto'` = static images draw on demand and only temporal shield animates; `'static'` forces on-demand; `'continuous'` forces a RAF loop while visible. Lens/risk/resize changes request fresh frames automatically |
-| `temporalShield` | `null`; fortress enables checker+chroma | `true` or `{ strength, block, pattern:'blocks' \\| 'checker' \\| 'bands', chroma, respectReducedMotion }`. Alternates complementary frames so one OS/extension/DevTools screenshot is degraded. Can flicker/eye-strain and costs continuous rendering; recordings/averaged frames/long exposures can undo it. Set `false` to opt a Fortress image out |
+| `temporalShield` | `null`; fortress enables checker+chroma | `true` or `{ strength, block, pattern:'blocks' \\| 'checker' \\| 'bands', chroma, engine, respectReducedMotion }`. Alternates complementary frames so one OS/extension/DevTools screenshot is degraded. Can flicker/eye-strain and costs continuous rendering; recordings/averaged frames/long exposures can undo it. Set `false` to opt a Fortress image out |
+| `temporalInterlace` | `null` (never enabled by a preset) | `true`, `'balanced60' \\| 'pixels60' \\| 'strips60' \\| 'blocks60'`, or `{ profile, engine:'auto' \\| 'shader' \\| 'frames', layout:'checker' \\| 'pixels' \\| 'strips' \\| 'blocks', axis, cellSize, phases:2..4, fill:'lowres' \\| 'dim' \\| 'black' \\| 'noise', fillBlock, fillStrength, hiddenScale, activeGain, compensation, noiseStrength, chroma, refreshHz, minPhaseHz, optimizeRefresh, respectReducedMotion }`. Only the current spatial subset is sharp; other cells use the selected fill. `shader` evaluates the phase mask in WebGL; `frames` pre-renders one altered Canvas2D frame per phase; `auto` follows the effective renderer. The 60 Hz default is two phases with 2-device-pixel checker cells and a local-average fill. See the dedicated section below |
 | `cameraShield` | `null` | experimental separate-device profile using the same temporal engine: e.g. `{ pattern:'checker', chroma:true }` for Bayer/opponent-colour friction or `{ pattern:'bands', chroma:true }` for rolling-shutter rows. A truthy `cameraShield` takes precedence over a preset's generic `temporalShield`. It is capture degradation—not TPVM and not camera-proof; synchronized shutters/viewers or coded room lighting would require hardware outside page JS |
 | `splitCanvases` / `splitGrid` | `false` / `3` | paranoid mode: no single canvas holds the whole image |
 | `shadow` | `'closed'` | `'closed' \| 'open' \| 'none'` |
@@ -301,9 +304,72 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `alt` | `''` | sets `role="img"` + `aria-label` for screen readers |
 | `onLoad` / `onError` / `onClick` | `null` | lifecycle + genuine click forwarding (lightboxes keep working) |
 
+### Temporal interlace: deliberately incomplete presented frames
+
+`temporalInterlace` is separate from the older complementary-noise `temporalShield`. It partitions the backing image into spatial cells and assigns each cell to one phase. On each presented animation frame, only that phase's cells retain the sharp source pixels; cells assigned to other phases show a selectable fill. Visual persistence can integrate the cycle, while an ordinary one-frame screenshot or a fast camera exposure receives an incomplete partition.
+
+```js
+// 60 Hz default profile, drawn by whichever renderer is already effective.
+Archx.load.image('#hero', { id: 'watch-01' }, {
+  mode: 'custom',
+  renderer: 'webgl',
+  temporalInterlace: true,
+});
+
+// Explicit GPU fragment-shader masking with an override.
+Archx.load.image('#shader', { id: 'watch-02' }, {
+  mode: 'custom',
+  temporalInterlace: {
+    profile: 'pixels60',
+    engine: 'shader',      // WebGL phase mask; falls back to frames if GL is unavailable
+    phases: 4,              // optimized to 2 for refreshHz: 60 / minPhaseHz: 30
+    fill: 'lowres',
+  },
+});
+
+// Explicit pre-rendered Canvas2D phase frames.
+Archx.load.image('#frames', { id: 'watch-03' }, {
+  mode: 'custom',
+  temporalInterlace: {
+    profile: 'blocks60',
+    engine: 'frames',       // one altered full-size canvas per phase
+    layout: 'blocks',
+    cellSize: 8,
+    fill: 'dim',
+    hiddenScale: 0.25,
+  },
+});
+```
+
+All four built-in profiles target a **60 Hz** display and a 30 Hz minimum per-phase rate:
+
+| Profile | Layout | Cell size | Intended trade-off |
+|---|---|---:|---|
+| `balanced60` | checker-assigned square cells | 2 device px | Default for `temporalInterlace:true`; fine partition with locally averaged inactive colour |
+| `pixels60` | pixel-level cells distributed by `(x + y) mod phases` for 2 phases, `(x + 2y) mod phases` for 3–4 | 1 device px | Finest shimmer, but most sensitive to scaling, sub-pixel rendering, and camera sampling |
+| `strips60` | alternating row strips (`axis:'columns'` also available) | 2 device px | Easiest geometry to reason about; interacts visibly with scrolling/rolling-shutter capture |
+| `blocks60` | square blocks assigned randomly per render | 8 device px | Coarser holes in a one-frame capture, but the most obvious flicker/motion texture |
+
+Choose the drawing engine by where you want the cost:
+
+- **`engine:'shader'`** — the fragment shader derives the cell from `gl_FragCoord`, decides whether it belongs to the current phase, and synthesizes the inactive fill. It avoids extra full-size frame canvases and composes naturally with WebGL un-scrambling and Lens. The low-detail fill costs an extra texture sample for inactive fragments, and continuous presentation still costs GPU/compositor/battery work every animation frame.
+- **`engine:'frames'`** — Canvas2D builds one altered canvas per phase after the final overlays/watermark are baked, then cycles them with `drawImage`. Per-frame CPU pixel work is almost zero, but setup does one pixel pass per phase and memory is roughly one RGBA backing store per phase (about 7.9 MiB per uncompressed 1920×1080 frame before browser/compositor copies).
+- **`engine:'auto'`** follows the effective renderer. In debug builds, `_debug()` reports both `temporalEngineRequested` and `temporalEngineActual`, so a WebGL-budget/context fallback to frames is visible rather than silent.
+
+Important limits and safety defaults:
+
+- `refreshHz` is a **planning target**, not a hardware measurement: browsers do not give page JS a portable, trustworthy physical-refresh API. With `optimizeRefresh:true`, Archx uses `floor(refreshHz / minPhaseHz)` to cap requested phases. The default `60 / 30` therefore clamps 3–4 phases to 2; at a correctly configured 120 Hz target, 4 phases are allowed. The actual cadence is still the browser's `requestAnimationFrame`/compositor cadence.
+- Two-phase interlace on a real 60 Hz monitor updates each subset at 30 Hz. The default `fill:'lowres'` preserves local average colour to reduce brightness modulation, but it does **not** make a flicker pattern universally comfortable or safe. `fill:'black'` is the literal missing-subset version and is the harshest; partial active-pixel gain can also clip highlights. Keep `respectReducedMotion:true`, test with photosensitive users/content in mind, and avoid enabling interlace across a whole gallery.
+- Interlace is not a screenshot veto. Screenshots from different phases, screen recordings, compositor frame extraction, and some phone-camera exposures can recombine the subsets. Long exposures may integrate a nearly complete image; short/rolling-shutter exposures may show bands. Use it with server-side authorization, resolution caps, Lens, watermarks, and attribution—not as the only layer.
+- It can be combined with `temporalShield`/`cameraShield` complementary noise. Fortress does not turn literal interlace on by default, and enabling `temporalInterlace` suppresses Fortress's automatic generic `temporalShield` unless you also set that shield explicitly (`temporalInterlace:false` leaves the Fortress shield alone).
+- Shader interlace is applied before the client watermark texture, so the watermark remains present in each phase. Canvas frames are built from the already-composited frame, so baked overlays remain phase-partitioned with the image. With Lens, the sharp disc is sampled from the current phase rather than bypassing interlace.
+
+The normalized settings are inspectable before use with `Archx.normalizeTemporalInterlace(value)` (also exported as `normalizeTemporalInterlace` alongside `TEMPORAL_INTERLACE_PROFILES`). The web component accepts `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, and `temporal-interlace-refresh-hz` attributes.
+
 ### Also
 
 - `Archx.presets` / `Archx.preset(name, overrides?)` / exported `PRESETS` + `preset()` — frozen, inspectable direct-parameter bundles (`gallery`, `editorial`, `commerce`, `screenshotResistant`)
+- `Archx.temporalInterlaceProfiles` / `Archx.normalizeTemporalInterlace(value)` / exported `TEMPORAL_INTERLACE_PROFILES` + `normalizeTemporalInterlace()` — inspect and bound the 60 Hz-first subset-frame profiles before passing them to an image
 - `Archx.clearCaches()` — clears shared decoded-bitmap/token promises and rotates the page-session scope; call it on logout, tenant switch, or entitlement downgrade. Already-painted instances keep their current private frame until reload/destroy
 - `Archx.config({...})` — set global defaults (endpoint, token method, cache scope, session id, brand text…). Calling it with no useful update returns a sanitized view; configured `key`/`aesKey` values are shown only as `[redacted]`
 - `Archx.instanceCount` — number of live instances, without exposing the instance registry itself
@@ -312,7 +378,7 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 - `instance.options` — sanitized per-instance option view with secrets redacted
 - `Archx.load.gallery(container, items, options?)` — items: URLs or `{id, alt}` objects
 - `Archx.protectAll(selector?, options?)` — upgrade existing `<img data-protect>` in place
-- `<archx-image>` — attributes: `src`, `image-id`, `token-endpoint`, `token-method`, `token-transport`, `proof-of-possession`, `cache-scope`, `mode`, `preset`, `quality-profile`, `watermark`, `fit`, `grid`, `key`, `scrambled`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `render-loop`, `reload-on-resize`, `on-extract`, `alt` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
+- `<archx-image>` — attributes: `src`, `image-id`, `token-endpoint`, `token-method`, `token-transport`, `proof-of-possession`, `cache-scope`, `mode`, `preset`, `quality-profile`, `watermark`, `fit`, `grid`, `key`, `scrambled`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, `temporal-interlace-refresh-hz`, `render-loop`, `reload-on-resize`, `on-extract`, `alt` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
 - Server: `createArchxMiddleware(options)` needs `sharp` (optional peer; pinned examples use Sharp 0.35). Important direct controls:
   - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec`, `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens`, `proofOfPossession:'optional'|'required'|'off'`, `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
   - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `maxWidthCap`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'`, `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `steganography`, `onStegoIssue`, `stegoRegistryFailure`.
@@ -331,12 +397,12 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 
 Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
-- Browser bundle: **82.9 KiB minified / 27.6 KiB gzipped**, zero dependencies. The increase from v1.4 buys strict token-response/origin validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, and additional fail-closed lifecycle handling
-- 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags; the latest v1.5 run before final packaging measured **3.9 s** in the non-lazy path (production lazy mode streams them on scroll, and the gallery helper defaults to 1.5× oversampling)
+- Browser bundle: **94.3 KiB minified / 30.9 KiB gzipped**, zero dependencies. The v1.5 size buys strict token-response/origin validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
+- 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags; the latest run measured **3.7 s** in the non-lazy path (production lazy mode streams them on scroll, and the gallery helper defaults to 1.5× oversampling)
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Server pixel scramble measured **170–224 MP/s** in the latest local run (1.9 ms at 800×536, 10.1 ms at 1600×1072, 9.4 ms at 1920×1080); full down-scale + scramble + q95 WebP took **169.9 ms at 900 px** as a one-time cached cost per distinct output variant, with AES-GCM in run-to-run noise at that size. Optional perceptual-fingerprint computation is off in the request path and intended for ingest/CLI use
 - Quality: on the detailed 800 px watch benchmark, q95 reconstruction measured **41.0 dB PSNR / 1.43 MAD** versus 36.6 dB / 2.56 MAD at the old q82. `lossless:true` is exact at the delivered size (800 px test payload ~360 kB lossless WebP vs ~128 kB q95), so use it selectively for hero/product detail.
-- Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; Canvas2D temporal frames are generated in block spans with clamped-array stores; permanent 4xx/aborted fetches are not retried. The deliberate exception remains any temporal/camera pattern, which must present continuously while visible
+- Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; permanent 4xx/aborted fetches are not retried. Temporal work is the deliberate exception: shader interlace evaluates a small phase mask per fragment (plus one extra sample for inactive `lowres` fragments), while the frames engine spends one clamped-array pixel pass and one extra backing store per phase at setup, then only `drawImage`s. Either way, an interlaced image must present continuously while visible, so reserve it for selected hero/paid views rather than hundreds of thumbnails. In the Chromium interlace fixture, screenshots from opposite black-fill strip phases differed by **95.9 mean absolute channel value**, confirming that the compositor was actually presenting materially different incomplete frames
 - Server caches and security stores are entry- **and byte-bounded**, limiter clients expire, nonce claims fail closed when saturated, and image jobs pass through a bounded semaphore/queue. Trade-offs remain: per-token server watermarks/forensics/StegoMarks and `scrambleKeyMode:'per-token'` intentionally defeat cross-viewer output-cache reuse; Fortress strict memory bypasses the shared bitmap cache, but with default `cachePayload:true` it can decode privately retained scrambled bytes locally instead of reminting. Use the strongest per-viewer settings on valuable items, not every thumbnail.
 - Scrambled pixels compress worse than natural images (tile edges), so payloads run larger than an equivalent plain WebP. Lower `grid` (e.g. 6) if bytes matter more than shuffle strength.
 
@@ -345,7 +411,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 1. **The analog hole is real.** Anything visible can be screenshotted or photographed at screen resolution. Only DRM *video* pipelines (Widevine/EME + HDCP output protection) can black out screenshots, and browsers offer no equivalent for still images. Archx's answer: never ship more than display resolution, bake the watermark in, trace the session.
 2. **A skilled reverse-engineer controls the receiving browser.** Someone who instruments below JavaScript, patches the browser, forges native-function fingerprints before Archx loads, uses CDP/Juggler to pierce a closed shadow root, captures composited frames/GPU memory, or simply photographs the display can obtain some form of the visible pixels. Captured native references and audits catch ordinary post-load hooking and naive pre-hooks; they cannot create a trusted execution environment inside an attacker-owned browser. Stealth-automation fingerprints are likewise spoofable and must never replace authorization/quotas.
 3. **Payload + session key reconstruction is deliberately made low-value, not mathematically impossible.** The open-source decoder must run for legitimate viewers, so a determined viewer can reassemble the one web-size derivative they were sent. One-time/proof-bound entitled tokens stop external replay and oversized requests; proof of possession does not stop script or a browser operator in the legitimate page from causing that page to sign and load. Server-baked marks mean the reconstructed derivative is still watermarked/traced. They never recover the master resolution, metadata, or pixels the server withheld.
-4. **Lens + capture trace + temporal/camera shields are friction, not screenshot-proofing.** They prevent a single ordinary screenshot/photo from containing the whole sharp, unmarked frame and make scripted sweeps harder/noisier, but a patient person can move a real pointer and stitch discs, record/average temporal frames, or use a camera. Likewise, page JavaScript cannot veto the OS compositor, a screenshot extension's privileged visible-tab capture, DevTools/CDP capture, or another device's camera; shortcut/blur reactions only help when the browser exposes a signal in time. Expect attribution and delay—not impossibility.
+4. **Lens + capture trace + temporal/camera shields/interlace are friction, not screenshot-proofing.** They prevent a single ordinary screenshot/photo from containing the whole sharp, unmarked frame and make scripted sweeps harder/noisier, but a patient person can move a real pointer and stitch discs, record/average temporal frames, capture and recombine every interlace phase, or use a camera. Likewise, page JavaScript cannot veto the OS compositor, a screenshot extension's privileged visible-tab capture, DevTools/CDP capture, or another device's camera; shortcut/blur reactions only help when the browser exposes a signal in time. Expect attribution and delay—not impossibility.
 5. **AI regeneration and invisible-mark removal are real attacks.** Research on diffusion-based regeneration shows many pixel-level invisible watermarks can be weakened/removed while preserving the scene's semantics; perceptual fingerprints can also drift or be adversarially evaded, and an upscaler can invent plausible detail from a degraded capture. StegoMark, forensic blocks, C2PA-style provenance, and soft bindings are therefore evidence/discovery layers—not DRM. Your durable controls are not shipping the master, server authorization/entitlement, visible marks where appropriate, issuance logs, monitoring, and enforcement.
 6. **Authorization headers are not identity.** Origin/Referer help with CORS/CSRF context; IP and User-Agent are spoofable/changeable and can cause false rejects behind NAT, VPNs, mobile network changes, or browser updates. Your authenticated session and object-level `authorize()` decision are the security boundary, and Archx checks that boundary again at redemption.
 7. **One-time means a late failure can burn a token.** To close the parallel-replay race without letting a transient authorization failure spend a valid token, Archx verifies the signature/claims/proof, re-runs redemption authorization and binding checks, and only then synchronously claims the proof ID and nonce with no intervening `await`. A later quota/processing failure can still burn that token; mint a fresh one instead of retrying it. The bundled client re-mints once after a 401/403 payload response.
@@ -365,20 +431,20 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - [ ] Server-side watermark + forensic marking on for valuable derivatives; client `{session}` watermarks alone do not survive offline payload reconstruction
 - [ ] If StegoMark is enabled, persist every `onStegoIssue` fingerprint with image/user/order context and test your `archx-detect` investigation path; an unregistered fingerprint is only a number. Register perceptual soft bindings at ingest if you want a second discovery path, and calibrate the distance threshold on your own catalog/false-positive tolerance
 - [ ] Client `debug:false`, `tokenMethod:'POST'`, a viewer/tenant `cacheScope`, and `Archx.clearCaches()` on logout/account switch; no custom code that re-exposes instances/canvases on `window` or DOM elements
-- [ ] `fortress`/`vault` reserved for the few images that matter most; `lite` for bulk grids. Enable Lens/camera patterns only where flicker, GPU, accessibility, and legitimate-viewing trade-offs are acceptable; keep reduced-motion honoured and test on real 60/120 Hz displays + phone cameras before claiming camera degradation for your hardware
+- [ ] `fortress`/`vault` reserved for the few images that matter most; `lite` for bulk grids. Enable Lens/camera/interlace patterns only where flicker, GPU, accessibility, and legitimate-viewing trade-offs are acceptable; keep reduced-motion honoured and test on real 60/120 Hz displays + phone cameras before claiming camera degradation for your hardware
 - [ ] Keep full-resolution masters offline/backed-up — the server only needs web-size sources if you pre-resize
 
 ## Tests
 
 ```bash
-npm test            # 30 unit/integration tests (scramble/crypto, delivery quality,
+npm test            # 31 unit/integration tests (scramble/crypto, delivery quality,
                     # cover-aware sizing, server marks, StegoMark survival + crop geometry,
                     # perceptual soft bindings, strict config/claims, malformed HTTP, replay races,
                     # reauthorization, sender-constrained proofs, bounded stores/quotas/abuse,
-                    # trusted-hop proxy parsing, and Sharp processing limits)
-npm run test:browser  # 68 checks in real headless Chromium (encapsulation, decoys,
+                    # trusted-hop proxy parsing, Sharp processing limits, and 60 Hz interlace normalization)
+npm run test:browser  # 72 checks in real headless Chromium (encapsulation, decoys,
                       # native detail retention, WebGL black read-back,
-                      # Fortress Lens/camera patterns in WebGL+Canvas2D/capture trace/strikes/integrity,
+                      # Fortress Lens/camera + shader/frames temporal-interlace patterns/capture trace/strikes/integrity,
                       # POST + clean-header + proof-bound token flow, cache scopes, no-reload lifecycle,
                       # draw-on-demand GPU, token replay, guards, print, 100-image gallery…)
 npm run test:all

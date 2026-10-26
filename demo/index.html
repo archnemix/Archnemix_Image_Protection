@@ -130,6 +130,8 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <option value="lens-temporal">Lens + temporal shield + trace</option>
           <option value="lens">Lens + trace (no flicker)</option>
           <option value="temporal">Temporal shield + trace (full frame)</option>
+          <option value="interlace-shader">60 Hz temporal interlace — GPU shader subsets</option>
+          <option value="interlace-frames">60 Hz temporal interlace — pre-rendered strip frames</option>
           <option value="trace">Dynamic trace only</option>
         </select>
       </label>
@@ -173,7 +175,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <span class="tag best">⬢ ARCHX · FORTRESS + LENS</span>
           <h3>For the truly determined attacker</h3>
           <p>Vault + anti-hook integrity lock, strike lockouts, strict memory wiping, a dynamic session/time capture trace, a <b>temporal shield</b> (complementary noisy frames your eyes integrate but a single screenshot cannot) — and a <b>pointer lens</b>: only the disc under your mouse/touch is sharp, everywhere else is pixelated. One OS, extension, DevTools, or cross-device camera capture can never contain the whole clean sharp image. It still cannot magically veto your PrintScreen key — it makes that captured frame degraded and attributable.</p>
-          <div class="try">👉 Move your pointer over this card. Now screenshot or photograph it: you captured mush + one temporally-noised sharp circle + a moving trace code. Sweeping the lens to stitch patches is rate-tracked and reported. Try the capture-style selector above.</div>
+          <div class="try">👉 Move your pointer over this card. Now screenshot or photograph it: you captured mush + one temporally-noised sharp circle + a moving trace code. Sweeping the lens to stitch patches is rate-tracked and reported. Use the capture-style selector above to compare the two 60 Hz temporal-interlace engines: GPU shader subsets vs pre-rendered strip frames.</div>
         </div>
       </article>
     </div>
@@ -240,6 +242,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>Photograph the screen with a phone/second device</td><td><i>Physically unstoppable and undetectable from the displayed device.</i> The answer is value reduction: server-authorized resolution, baked visible/forensic marks, Fortress Lens, and a dynamic trace that changes while the camera is framing/stitching</td><td>A camera copy with screen/moiré loss, Lens mush outside one disc, and session attribution</td></tr>
           <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs many real-input captures and still carries marks</td></tr>
           <tr><td>One PrintScreen / extension frame of a temporal-shield image</td><td>Two complementary noisy frames alternate at refresh rate; human temporal integration averages them, a single captured frame keeps the noise. Screen <i>recording</i> or averaging many captures can undo this, so it is layered with Lens/trace/marks</td><td>One noisy half-frame, not the clean still</td></tr>
+          <tr><td>One presented frame of a temporal-interlace image</td><td>Only one pixel/checker/strip/block subset is sharp in that phase; inactive cells carry a low-detail fill by default. The 60 Hz profiles use two phases, drawn either by a GPU fragment shader or by alternating pre-rendered phase canvases</td><td>One spatially incomplete frame. Capturing every phase, recording video, or an integrating camera exposure can recombine it</td></tr>
           <tr><td>Denoise / AI-upscale / “recreate” a degraded capture</td><td>No pixel-layer defence is AI-proof. Archx reduces the information available (entitled derivative, Lens, temporal noise), keeps visible attribution, and adds evidence layers; server authorization and monitoring remain the real control plane</td><td>A plausible hallucination at best — not your exact pixels, and marked/attributable inputs</td></tr>
           <tr><td>Repost a screenshot/export and claim it is not yours</td><td>StegoMark blind fingerprint (48-bit ID + CRC, repeated keyed macro-cells) is baked server-side; test the suspect file with <code>archx-detect</code> and look the fingerprint up in your issuance registry</td><td>Attribution evidence identifying the issued image/view, even after common re-encoding/resizing</td></tr>
           <tr><td>Memory/cache forensics after viewing</td><td><code>no-store</code> everywhere; strict-memory mode (Fortress) closes decoded bitmaps right after paint/upload and skips the bitmap cache; clean working canvases are wiped immediately</td><td>Far less decoded material left sitting in RAM/cache</td></tr>
@@ -270,6 +273,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, {
   qualityProfile: 'original',          // lossless legitimate view at display size
   lens: true,                          // one screenshot != one sharp full image
   temporalShield: { strength: 0.16 },  // one captured frame != the clean still
+  // temporalInterlace: 'balanced60',  // optional literal subset phases (shader/frames configurable)
   captureShield: true,                 // drifting session/time trace (on in Fortress)
   cachePayload: true,                  // loaded once: scrolling/resizing never remints
   renderLoop: 'auto',                  // static images draw on demand, not 60fps forever
@@ -347,11 +351,17 @@ function buildCards() {
   const onExtract = document.getElementById('extract-kind').value;
   const qualityProfile = document.getElementById('quality-profile').value;
   const captureStyle = document.getElementById('capture-style').value;
+  const temporalInterlace = captureStyle === 'interlace-shader'
+    ? { profile: 'balanced60', engine: 'shader' }
+    : captureStyle === 'interlace-frames'
+      ? { profile: 'strips60', engine: 'frames' }
+      : false;
   const fortressCapture = {
     lens: captureStyle === 'lens-temporal' || captureStyle === 'lens',
     temporalShield: captureStyle === 'lens-temporal' || captureStyle === 'temporal'
       ? { strength: 0.16, block: 2 }
       : false,
+    temporalInterlace,
     captureShield: { dynamicTrace: true, temporalPattern: true },
   };
   // debug:true exists ONLY so this demo's attack buttons can play
