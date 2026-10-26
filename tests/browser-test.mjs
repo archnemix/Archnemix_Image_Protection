@@ -221,6 +221,50 @@ try {
     poison.attempts.includes('extract-dataurl') && poison.attempts.includes('extract-blob') && poison.attempts.includes('extract-pixels'),
     JSON.stringify([...new Set(poison.attempts)]));
 
+  const scrambledDecoy = await page.evaluate(async () => {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:190px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'gallery-016' }, {
+      mode: 'shield', debug: true, lazy: false, onExtract: 'scrambled', brand: 'TEST DECOY MARK',
+    });
+    await inst.ready;
+    const canvas = inst._debug().canvas;
+    const decode = async (url, w, h) => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+      const probe = document.createElement('canvas');
+      probe.width = w; probe.height = h;
+      const ctx = probe.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      return ctx.getImageData(0, 0, w, h).data;
+    };
+    const cleanUrl = HTMLCanvasElement.prototype.toDataURL.call(canvas, 'image/png');
+    const decoyUrl = canvas.toDataURL('image/png');
+    const clean = await decode(cleanUrl, 160, 101);
+    const decoy = await decode(decoyUrl, 160, 101);
+    let diff = 0;
+    let brightCenterPixels = 0;
+    for (let y = 0; y < 101; y++) {
+      for (let x = 0; x < 160; x++) {
+        const i = (y * 160 + x) * 4;
+        diff += Math.abs(clean[i] - decoy[i]) + Math.abs(clean[i + 1] - decoy[i + 1]) + Math.abs(clean[i + 2] - decoy[i + 2]);
+        if (y > 35 && y < 66 && decoy[i] > 245 && decoy[i + 1] > 245 && decoy[i + 2] > 245) brightCenterPixels++;
+      }
+    }
+    const out = {
+      loaded: inst.loaded,
+      mad: diff / (160 * 101) / 3,
+      brightCenterPixels,
+      decoyBytes: decoyUrl.length,
+    };
+    inst.destroy(); host.remove();
+    return out;
+  });
+  check('scrambled decoy is materially unlike the clean displayed derivative and carries a visible center mark',
+    scrambledDecoy.loaded && scrambledDecoy.mad > 18 && scrambledDecoy.brightCenterPixels > 20,
+    JSON.stringify(scrambledDecoy));
+
   console.log('\n[4] Vault (WebGL) — even the prototype bypass gets black');
   const vaultBypass = await page.evaluate(async () => {
     const canvas = window.__instances.vault._debug().canvas;
@@ -586,7 +630,10 @@ try {
       lens: true,
       temporalInterlace: { engine: 'frames', layout: 'checker' },
     });
-    return { shaderPixels, frameStrips, frameBlocks, shaderLens, frameLens };
+    const fortress60 = await make('gallery-015', {
+      temporalInterlace: { profile: 'fortress60', engine: 'frames' },
+    });
+    return { shaderPixels, frameStrips, frameBlocks, shaderLens, frameLens, fortress60 };
   });
   const interlaceShotEl = await page.$('#temporal-interlace-shot');
   const phaseShots = [];
@@ -649,6 +696,16 @@ try {
     temporalInterlace.frameLens.engineActual === 'frames' &&
     temporalInterlace.frameLens.frameCount === 2,
     JSON.stringify({ shaderLens: temporalInterlace.shaderLens, frameLens: temporalInterlace.frameLens }));
+  check('fortress60 uses three 20 Hz subsets with noise-filled hidden blocks',
+    temporalInterlace.fortress60.loaded &&
+    temporalInterlace.fortress60.engineActual === 'frames' &&
+    temporalInterlace.fortress60.frameCount === 3 &&
+    temporalInterlace.fortress60.interlace.profile === 'fortress60' &&
+    temporalInterlace.fortress60.interlace.phases === 3 &&
+    temporalInterlace.fortress60.interlace.phaseHz === 20 &&
+    temporalInterlace.fortress60.interlace.layout === 'blocks' &&
+    temporalInterlace.fortress60.interlace.fill === 'noise',
+    JSON.stringify(temporalInterlace.fortress60));
 
   console.log('\n[7c] v1.5 client fail-closed boundaries');
   const v15Client = await page.evaluate(async () => {
@@ -761,13 +818,230 @@ try {
   const integrityRestored = await page.evaluate(() => window.Archx.auditIntegrity());
   check('integrity audit is clean again after restoring the native fetch', integrityRestored.length === 0, JSON.stringify(integrityRestored));
 
+  const webglIntegrity = await page.evaluate(async () => {
+    const events = [];
+    const pluginEvents = [];
+    const unsubscribe = window.Archx.on((event) => { events.push(event); });
+    const plugin = window.Archx.use({
+      name: 'browser-test-plugin',
+      onEvent: (event) => { pluginEvents.push(event.type); },
+    });
+    const prototypes = [
+      typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype : null,
+      typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype : null,
+    ].filter(Boolean);
+    const saved = prototypes.map((proto) => ({
+      proto,
+      drawArrays: proto.drawArrays,
+      drawElements: proto.drawElements,
+    }));
+    for (const entry of saved) {
+      entry.proto.drawArrays = function (...args) { return entry.drawArrays.apply(this, args); };
+      entry.proto.drawElements = function (...args) { return entry.drawElements.apply(this, args); };
+    }
+    const details = window.Archx.auditIntegrityDetails();
+    const makeHost = () => {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      return host;
+    };
+    const fortressHost = makeHost();
+    const fortress = window.Archx.load.image(fortressHost, { id: 'gallery-006' }, {
+      mode: 'fortress', debug: true, lazy: false, automation: 'monitor',
+    });
+    await fortress.ready;
+    await new Promise((r) => setTimeout(r, 120));
+    const fortressResult = {
+      loaded: fortress.loaded,
+      issues: fortress._debug()?.integrityIssues || [],
+    };
+    fortress.destroy(); fortressHost.remove();
+
+    const vaultHost = makeHost();
+    const vault = window.Archx.load.image(vaultHost, { id: 'gallery-007' }, {
+      mode: 'vault', integrity: 'monitor', debug: true, lazy: false, automation: 'monitor',
+    });
+    await vault.ready;
+    await new Promise((r) => setTimeout(r, 180));
+    const vaultResult = {
+      loaded: vault.loaded,
+      issues: vault._debug()?.integrityIssues || [],
+    };
+    vault.destroy(); vaultHost.remove();
+
+    for (const entry of saved) {
+      entry.proto.drawArrays = entry.drawArrays;
+      entry.proto.drawElements = entry.drawElements;
+    }
+
+    const invalidHost = makeHost();
+    const invalid = window.Archx.load.image(invalidHost, { id: 'gallery-008' }, {
+      mode: 'shield', integrity: 'bogus', debug: true, lazy: false, automation: 'monitor',
+    });
+    await invalid.ready;
+    await new Promise((r) => setTimeout(r, 120));
+    const invalidResult = { loaded: invalid.loaded };
+    invalid.destroy(); invalidHost.remove();
+
+    const serializedEvents = JSON.stringify(events);
+    const out = {
+      auditIssues: window.Archx.auditIntegrity(),
+      details,
+      fortress: fortressResult,
+      vault: vaultResult,
+      invalid: invalidResult,
+      eventTypes: events.map((event) => event.type),
+      attemptKinds: events.filter((event) => event.type === 'archx.attempt').map((event) => event.kind),
+      pluginEvents,
+      eventKeys: [...new Set(events.flatMap((event) => Object.keys(event)))].sort(),
+      serializedEvents,
+    };
+    plugin.remove();
+    unsubscribe();
+    return out;
+  });
+  check('WebGL drawArrays/drawElements hooks are named by the integrity audit',
+    webglIntegrity.details.issues.some((name) => name.endsWith('.drawArrays')) &&
+      webglIntegrity.details.issues.some((name) => name.endsWith('.drawElements')),
+    JSON.stringify(webglIntegrity.details.issues));
+  check('fortress fails closed under patched WebGL draw calls',
+    webglIntegrity.fortress.loaded === false &&
+      webglIntegrity.fortress.issues.some((name) => name.includes('draw')),
+    JSON.stringify(webglIntegrity.fortress));
+  check('vault monitor policy reports but continues under patched WebGL draw calls',
+    webglIntegrity.vault.loaded === true &&
+      webglIntegrity.vault.issues.some((name) => name.includes('draw')),
+    JSON.stringify(webglIntegrity.vault));
+  check('invalid integrity mode fails closed instead of becoming monitor-only',
+    webglIntegrity.invalid.loaded === false &&
+      webglIntegrity.attemptKinds.some((kind) => kind.includes('invalid-mode')),
+    JSON.stringify(webglIntegrity.attemptKinds));
+  check('global/plugin monitoring receives only sanitized event fields',
+    webglIntegrity.pluginEvents.includes('archx.loaded') &&
+      !webglIntegrity.eventKeys.some((key) => /token|key|aes|secret|bitmap|canvas|source/i.test(key)) &&
+      !/gallery-00[678]/.test(webglIntegrity.serializedEvents),
+    JSON.stringify({ keys: webglIntegrity.eventKeys, types: webglIntegrity.eventTypes }));
+  check('WebGL integrity audit is clean after restoring draw methods',
+    webglIntegrity.auditIssues.length === 0, JSON.stringify(webglIntegrity.auditIssues));
+
+  // Reproduce the userscript ordering from the external review: this wrapper
+  // is installed before /src/index.js is evaluated, so Archx captures the
+  // wrapper itself as its drawArrays reference. The wrapper performs the
+  // original draw and immediately samples the bound framebuffer.
+  const hookPage = await browser.newPage();
+  await hookPage.setViewport({ width: 900, height: 700 });
+  const hookPageErrors = [];
+  hookPage.on('pageerror', (e) => hookPageErrors.push(e.message));
+  await hookPage.evaluateOnNewDocument(() => {
+    const capture = {
+      enabled: false,
+      drawCalls: 0,
+      sampledPixels: 0,
+      nonBlackPixels: 0,
+      maxChannel: 0,
+    };
+    window.__archxPreloadCapture = capture;
+    for (const ctor of [
+      typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext : null,
+      typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext : null,
+    ].filter(Boolean)) {
+      const proto = ctor.prototype;
+      const originalDrawArrays = proto.drawArrays;
+      const originalReadPixels = proto.readPixels;
+      proto.drawArrays = function (...args) {
+        const result = originalDrawArrays.apply(this, args);
+        if (!capture.enabled) return result;
+        capture.drawCalls++;
+        try {
+          const width = Math.max(1, Math.min(16, this.drawingBufferWidth || 1));
+          const height = Math.max(1, Math.min(16, this.drawingBufferHeight || 1));
+          const x = Math.max(0, Math.floor(((this.drawingBufferWidth || width) - width) / 2));
+          const y = Math.max(0, Math.floor(((this.drawingBufferHeight || height) - height) / 2));
+          const pixels = new Uint8Array(width * height * 4);
+          originalReadPixels.call(this, x, y, width, height, this.RGBA, this.UNSIGNED_BYTE, pixels);
+          capture.sampledPixels += width * height;
+          for (let i = 0; i < pixels.length; i += 4) {
+            const max = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+            if (max > capture.maxChannel) capture.maxChannel = max;
+            if (max > 8) capture.nonBlackPixels++;
+          }
+        } catch {}
+        return result;
+      };
+    }
+  });
+  await hookPage.goto(BASE + '/test-harness.html', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await hookPage.waitForFunction(() => window.__allLoaded === true, { timeout: 60000 });
+  const preloadHook = await hookPage.evaluate(async () => {
+    const capture = window.__archxPreloadCapture;
+    const reset = () => Object.assign(capture, {
+      enabled: true, drawCalls: 0, sampledPixels: 0, nonBlackPixels: 0, maxChannel: 0,
+    });
+    const snapshot = () => ({ ...capture, enabled: undefined });
+    const makeHost = () => {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:320px;height:200px';
+      document.body.appendChild(host);
+      return host;
+    };
+
+    reset();
+    const fortressHost = makeHost();
+    const fortress = window.Archx.load.image(fortressHost, { id: 'gallery-009' }, {
+      mode: 'fortress', debug: true, lazy: false, automation: 'monitor',
+    });
+    await fortress.ready;
+    await new Promise((r) => setTimeout(r, 180));
+    const fortressResult = {
+      loaded: fortress.loaded,
+      issues: fortress._debug()?.integrityIssues || [],
+      capture: snapshot(),
+    };
+    fortress.destroy(); fortressHost.remove();
+
+    reset();
+    const vaultHost = makeHost();
+    const vault = window.Archx.load.image(vaultHost, { id: 'gallery-010' }, {
+      mode: 'vault', integrity: 'monitor', debug: true, lazy: false, automation: 'monitor',
+    });
+    await vault.ready;
+    await new Promise((r) => setTimeout(r, 250));
+    const vaultResult = {
+      loaded: vault.loaded,
+      issues: vault._debug()?.integrityIssues || [],
+      capture: snapshot(),
+    };
+    vault.destroy(); vaultHost.remove();
+    capture.enabled = false;
+    return {
+      details: window.Archx.auditIntegrityDetails(),
+      fortress: fortressResult,
+      vault: vaultResult,
+    };
+  });
+  await hookPage.close();
+  check('pre-load drawArrays hook is Captured as non-native and fortress gives it no non-black frame',
+    preloadHook.details.capturedNonNative.some((name) => name.endsWith('.drawArrays')) &&
+      preloadHook.fortress.loaded === false &&
+      preloadHook.fortress.issues.some((name) => name.endsWith('.drawArrays')) &&
+      preloadHook.fortress.capture.nonBlackPixels === 0,
+    JSON.stringify({ preloadHook, hookPageErrors }));
+  check('documented residual risk: vault monitor renders while a pre-load drawArrays hook can read its framebuffer',
+    preloadHook.vault.loaded === true &&
+      preloadHook.vault.issues.some((name) => name.endsWith('.drawArrays')) &&
+      preloadHook.vault.capture.drawCalls > 0 &&
+      preloadHook.vault.capture.nonBlackPixels > 0 &&
+      preloadHook.vault.capture.maxChannel > 32,
+    JSON.stringify(preloadHook.vault));
+
   console.log('\n[8] Network payload — captured bytes are scrambled, master unreachable');
   const directMaster = await fetch(BASE + '/demo-masters/aurora-valley.jpg');
   check('GET master path directly -> 404', directMaster.status === 404);
   const noToken = await fetch(BASE + '/archx/i/aurora-valley');
   check('GET image route without token -> 403', noToken.status === 403);
   const token = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
-  const payloadRes = await fetch(BASE + token.url);
+  const payloadRes = await fetch(BASE + token.cleanUrl, { headers: { 'x-archx-token': token.token } });
   const payload = new Uint8Array(await payloadRes.arrayBuffer());
   check('payload content-type is not an image', (payloadRes.headers.get('content-type') || '').includes('octet-stream'));
   const headerLen = new DataView(payload.buffer).getUint32(6, false);
@@ -781,11 +1055,11 @@ try {
   check('demo payload carries server-baked watermark + forensic + StegoMark flags',
     header.wm === 1 && header.fx === 1 && header.sg === 1,
     JSON.stringify({ wm: header.wm, fx: header.fx, sg: header.sg }));
-  const replay = await fetch(BASE + token.url);
-  check('replaying the same signed URL is rejected (one-time token)', replay.status === 403, `HTTP ${replay.status}`);
+  const replay = await fetch(BASE + token.cleanUrl, { headers: { 'x-archx-token': token.token } });
+  check('replaying the same signed token is rejected (one-time token)', replay.status === 403, `HTTP ${replay.status}`);
   const token2 = await (await fetch(BASE + '/archx/token/aurora-valley?w=800', { method: 'POST', headers: { 'user-agent': 'Browser-A', 'x-archx-request': 'token' } })).json();
-  const wrongBrowser = await fetch(BASE + token2.url, { headers: { 'user-agent': 'Browser-B' } });
-  check('signed URL presented by a different browser/User-Agent is rejected', wrongBrowser.status === 403, `HTTP ${wrongBrowser.status}`);
+  const wrongBrowser = await fetch(BASE + token2.cleanUrl, { headers: { 'user-agent': 'Browser-B', 'x-archx-token': token2.token } });
+  check('signed token presented by a different browser/User-Agent is rejected', wrongBrowser.status === 403, `HTTP ${wrongBrowser.status}`);
 
   console.log('\n[9] Performance — 100-image protected gallery');
   const gallery = await page.evaluate(() => window.__loadGallery(100));

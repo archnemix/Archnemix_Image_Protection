@@ -6,7 +6,7 @@
  *   demo-masters/            ← masters live here, OUTSIDE every static route.
  *                              GET /demo-masters/... returns 404. The only way
  *                              pixels leave this folder is through /archx/*
- *                              (signed URL + down-scale + tile-scramble).
+ *                              (signed header token + down-scale + tile-scramble).
  *   demo/public-unprotected/ ← intentionally naked copies for comparison.
  *   demo/, src/, dist/       ← normal static assets (code is not secret).
  */
@@ -61,7 +61,7 @@ const archx = createArchxMiddleware({
   // Production hosts persist onStegoIssue fingerprints in their own database.
   // The demo deliberately exposes no HTTP registry/debug endpoint for them.
   // Determined-attacker hardening (all on for the demo):
-  oneTimeTokens: true,                    // a captured signed URL cannot be replayed
+  oneTimeTokens: true,                    // a captured signed token cannot be replayed
   bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it
   // Baked in BEFORE scrambling: even a perfectly un-shuffled stolen payload
   // remains watermarked. Gallery thumbs are spared the visible mark.

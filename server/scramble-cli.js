@@ -45,6 +45,9 @@ if (!input || !output || args.help) {
   --stego <payload>    bake a blind StegoMark ownership fingerprint (detect later with archx-detect)
   --stego-key <s>      StegoMark key (prefer ARCHX_STEGO_KEY; default: scramble key)
   --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
+  --stego-profile <p> standard (default) or robust low-frequency forensic profile
+  --stego-grid-x <n>  StegoMark grid columns 4–64 (profile default)
+  --stego-grid-y <n>  StegoMark grid rows 4–64 (profile default)
   --max-input-bytes <n> reject masters above this size (default 52428800)
   --max-input-pixels <n> reject masters above this pixel budget (default 40000000)
   --timeout-sec <n> Sharp processing timeout per image (default 10)`);
@@ -58,6 +61,15 @@ if (args.key || args['stego-key'] || args['forensic-seed']) {
 }
 const aesKey = args.encrypt ? (process.env.ARCHX_AES_KEY || generateKeyBase64()) : null;
 const generatedAesKey = !!args.encrypt && !process.env.ARCHX_AES_KEY;
+const stegoProfile = args['stego-profile'] || 'standard';
+const stegoGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
+const stegoGridY = args['stego-grid-y'] ? Number(args['stego-grid-y']) : undefined;
+if (!['standard', 'robust'].includes(stegoProfile) ||
+    (stegoGridX !== undefined && (!Number.isInteger(stegoGridX) || stegoGridX < 4 || stegoGridX > 64)) ||
+    (stegoGridY !== undefined && (!Number.isInteger(stegoGridY) || stegoGridY < 4 || stegoGridY > 64))) {
+  console.error('Archx protect: --stego-profile must be standard or robust; StegoMark grid values must be integers from 4 to 64');
+  process.exit(1);
+}
 const opts = {
   key,
   grid: args.grid ? Number(args.grid) : 8,
@@ -71,6 +83,12 @@ const opts = {
   stegoPayload: args.stego || null,
   stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || key,
   stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
+  stegoProfile,
+  steganography: {
+    profile: stegoProfile,
+    ...(stegoGridX !== undefined ? { gridX: stegoGridX } : {}),
+    ...(stegoGridY !== undefined ? { gridY: stegoGridY } : {}),
+  },
   contentFingerprint: true,
   maxInputBytes: args['max-input-bytes'] ? Number(args['max-input-bytes']) : undefined,
   maxInputPixels: args['max-input-pixels'] ? Number(args['max-input-pixels']) : undefined,
@@ -87,7 +105,7 @@ async function protectOne(inPath, outPath) {
   const { bytes, header, stegoFingerprint, perceptualFingerprint } = await scrambleImage(inputBytes, opts);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, bytes);
-  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB${stegoFingerprint ? `, StegoMark ${stegoFingerprint}` : ''}${perceptualFingerprint ? `, soft-binding ${perceptualFingerprint}` : ''})`);
+  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB${stegoFingerprint ? `, StegoMark ${stegoFingerprint} (${stegoProfile})` : ''}${perceptualFingerprint ? `, soft-binding ${perceptualFingerprint}` : ''})`);
 }
 
 const stat = fs.statSync(input);

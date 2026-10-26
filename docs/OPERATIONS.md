@@ -32,11 +32,40 @@ semaphores may remain process-local. They affect performance, not the
 one-time-use security invariant. An optional shared output cache can be used
 as L2 through the same store object.
 
+Run both non-throwing audits in deployment tests or a readiness check:
+
+```js
+import {
+  auditArchxProductionConfig,
+  auditArchxServerConfig,
+} from '@archnemix/image-protection/server';
+
+const audit = auditArchxServerConfig(options);
+const production = auditArchxProductionConfig(options, {
+  expectedInstances: Number(process.env.ARCHX_EXPECTED_INSTANCES || 1),
+});
+// Gate the release on audit.ok and production.ready.
+// Neither audit summary contains a secret value.
+```
+
+`auditArchxServerConfig()` answers whether the middleware accepts the
+configuration. `auditArchxProductionConfig()` additionally reports
+blockers for anonymous catalogues without recalibrated controls, query
+tokens, missing/optional proof of possession, reusable delivery tokens,
+long token TTLs, unregistered StegoMark issuance, and process-local state
+behind more than one instance. Keep its secret-free summary with release
+evidence. For a new production configuration, start from
+`withHardenedProductionDefaults(options)` and make any relaxation explicit,
+owned, and tested rather than accidental.
+
 ## 2. Shared `stateStore` contract
 
-There is intentionally no bundled Redis/Dynamo adapter in the published
-package: production sites already have different drivers, credentials, TLS,
-and failure policies. Supply an adapter with this shape:
+The package now ships a framework-neutral Redis/Valkey adapter at
+`@archnemix/image-protection/redis`. It accepts an ioredis- or
+node-redis-compatible client supplied and operated by the host; the host
+still owns credentials, TLS, persistence/eviction, failover, and latency.
+For DynamoDB/Upstash HTTP/another backend, supply an adapter with this
+shape:
 
 ```js
 const stateStore = {
@@ -91,9 +120,22 @@ Contract requirements:
    because several handlers may share it; close it during application
    shutdown.
 
-Example:
+Bundled Redis example:
 
 ```js
+import Redis from 'ioredis';
+import { createRedisStateStore } from '@archnemix/image-protection/redis';
+
+const redis = new Redis(process.env.REDIS_URL, {
+  enableReadyCheck: true,
+  maxRetriesPerRequest: 1,
+});
+const stateStore = createRedisStateStore({
+  client: redis,
+  prefix: 'archx:prod',
+  clientFlavor: 'ioredis',
+});
+
 app.use(createArchxMiddleware({
   secrets: {
     '2026-01': process.env.ARCHX_SECRET_2026_01,
@@ -110,8 +152,9 @@ app.use(createArchxMiddleware({
 
 ### Redis/Valkey implementation notes
 
-Use a private, authenticated TLS endpoint. Each operation below touches one
-Redis key, so a correctly written implementation can work with Cluster:
+Use a private, authenticated TLS endpoint. The bundled adapter performs
+each operation below against one Redis key, so it does not rely on
+cross-key transactions and can work with Cluster:
 
 - `claimOnce`: `SET key 1 NX PX ttlMs`; return `true` only for `OK`.
 - `hitWindow`: use a Lua script over a sorted set. In one script, remove
@@ -127,6 +170,20 @@ Redis key, so a correctly written implementation can work with Cluster:
   separate cache cluster/database so large derivative values cannot evict
   short-lived replay claims. Scrambled/encrypted derivatives are still
   access-controlled data; encrypt transport and restrict network access.
+
+The shipped adapter signature is
+`createRedisStateStore({ client, prefix, clientFlavor, closeClient })`.
+`clientFlavor` defaults to `'auto'` and may be pinned to `'ioredis'`,
+`'node-redis'`, or `'generic'`; `closeClient` defaults to `false` because the
+host owns the client. Keys are `prefix + ':' + middlewareKey` and can expose
+the operational IP/image components described above—protect Redis access and
+TTL/retention accordingly rather than assuming key names are anonymized.
+Middleware cache byte/entry limits still bound what Archx asks the adapter
+to store. Its `stats()` deliberately does not scan the keyspace. Configure
+Redis eviction so memory pressure cannot silently delete replay/quota keys;
+keep `noeviction` or a reviewed equivalent for security state, alert before
+capacity pressure, and treat command errors as an outage rather than
+expecting a fallback.
 
 Redis replication deserves an explicit decision. With asynchronous
 replication, a newly promoted replica might miss a very recent claim. For a
@@ -189,9 +246,12 @@ reproducible by the attacker. The master is still not exposed merely by a
 signing-key compromise if authorization and file-system boundaries held, but
 an attacker who can also pass `authorize()` could mint valid derivatives.
 
-When StegoMark is enabled, `onStegoIssue` receives `keyId`. Persist it with
-the fingerprint, image, viewer/order, nonce, and issue time so investigators
-know which retired secret derives the detector key.
+When StegoMark is enabled, `onStegoIssue` receives `keyId`, `profile`, the
+bounded grid/strength, fingerprint, image, viewer, buyer, order, delivery,
+trace hash, nonce, derivative dimensions/quality, and times. Persist those
+fields transactionally so investigators know which retired secret and
+profile derive the detector key. The record intentionally contains no
+signing secret, access token, scramble key, or AES key.
 
 ## 4. CDN and reverse-proxy configuration
 
@@ -240,7 +300,8 @@ Create a Cache Rule for the token and payload paths:
 With an authorized test account and a disposable image:
 
 1. Mint one token through the public CDN hostname using the header-token
-   flow; do not place the token in a URL if `allowQueryTokens:false`.
+   flow. Keep `allowQueryTokens:false` (the default) and do not place the
+   token in a URL.
 2. Redeem it once and confirm `200` plus origin `private, no-store` headers.
 3. Redeem the exact same token again. It must be `403`, never a cached `200`.
 4. Check CDN diagnostics: Cloudflare should show `BYPASS` or `DYNAMIC` (not
@@ -314,7 +375,41 @@ Suggested starting alerts (tune to real traffic):
 - spikes in `token-replay`, `proof-replay`, `viewer-binding`, or proof errors;
 - repeated quota exhaustion by one `actor.viewerHash` or IP;
 - `archx.stego_registry_failed` above zero;
+- `archx.provenance_issue_failed` above zero;
 - sustained processing errors/timeouts or Sharp queue saturation.
+
+### StegoMark registry, delivery telemetry, and provenance
+
+Return stable `buyerId`, `orderId`, `deliveryId`, and, when useful,
+`traceId` from `authorize()`. Archx turns those values into a signed trace
+hash, uses them for `{buyer}`/`{order}`/`{delivery}`/`{trace}` visible-mark
+text and trace-derived StegoMark subjects, and rechecks them at redemption.
+Persist the complete `onStegoIssue` record before considering issuance
+successful. With `stegoRegistryFailure:'deny'` (the default and production
+expectation), a failed or timed-out registry write returns `503`, spends the
+one-time token/proof, and emits `archx.stego_registry_failed`; require a
+fresh mint after recovery rather than silently delivering an untraceable
+derivative. `'allow'` is an explicit availability-over-attribution policy,
+not equivalent protection.
+
+Successful deliveries can be forwarded with `onDelivery` to product
+analytics, a monitoring queue, or an operator-managed reverse-image-search
+workflow. The frozen record contains image/viewer/buyer/order/delivery
+context, key ID, trace hash, width/quality/format, cache/result metadata,
+and completion time only—never an access token, proof, scramble key, AES
+key, payload bytes, or master path. Callback failures cannot revoke an
+already-completed response, so queue/retry inside the host sink if loss is
+unacceptable.
+
+`onProvenanceIssue` is the external C2PA/provenance extension point. It is
+awaited at token issuance with the same key-free actor/order/trace context
+and may create or reserve a manifest record in the host's signing service.
+It does not receive derivative bytes and therefore does not itself sign or
+embed C2PA. `provenanceFailure:'deny'` (default) blocks issuance and emits
+`archx.provenance_issue_failed`; `'allow'` continues token issuance and
+must be reconciled by the operator. Never add the full token response to a
+provenance manifest: it is short-lived delivery material, not public
+provenance evidence.
 
 Expose `handler.stats()` only on an authenticated private operations route.
 It contains operational counts and key IDs, not secret values.
@@ -368,7 +463,8 @@ npm run load-test -- \
 ```
 
 Record with every result: Git commit, image dimensions/formats, derivative
-width/quality, proof mode, watermark/Stego settings, instance count and CPU,
+width/quality, proof mode, watermark/Stego profile and registry latency,
+instance count and CPU,
 Sharp concurrency/queue settings, authorization database latency, state-store
 type/region/latency, cache state (cold/warm), CDN behavior, and error counts.
 Test at least:
@@ -393,6 +489,17 @@ for a load-balanced or multi-region service.
 Expected behavior is `503`. Keep it that way. Check network/TLS/auth,
 backend latency, connection limits, and failover status. Do not restart into
 single-instance memory mode behind a load balancer as a workaround.
+
+### StegoMark registry or provenance hook unavailable
+
+The fail-closed defaults intentionally produce generic `503` responses. Do
+not temporarily switch a valuable licensed catalogue to
+`stegoRegistryFailure:'allow'` or `provenanceFailure:'allow'` without an
+approved exception and a reconciliation queue: the delivered derivative may
+be impossible to connect back to a buyer/order. Restore the sink, reconcile
+any explicitly allowed deliveries from `onDelivery`, and mint fresh tokens
+for affected viewers. Investigate sink timeouts against
+`securityEventTimeoutMs`, database locks, and network latency.
 
 ### Suspected CDN shared-cache leak
 

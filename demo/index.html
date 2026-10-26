@@ -154,7 +154,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag good">✓ ARCHX · SHIELD</span>
           <h3>Shield mode + signed scrambled delivery</h3>
-          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed URL. The watermark, forensic mark and blind <b>StegoMark ownership fingerprint</b> are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked and testable later with <code>archx-detect</code>. Once loaded, this card never reloads on scroll/resize.</p>
+          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed token sent in a header against a clean URL. The watermark, forensic mark and blind <b>StegoMark ownership fingerprint</b> are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked and testable later with <code>archx-detect</code>. Once loaded, this card never reloads on scroll/resize.</p>
           <div class="try">👉 Right-click, drag, inspect. Then run Attack ② below to see the decoy an extractor receives.</div>
         </div>
       </article>
@@ -191,7 +191,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <button class="btn attack" data-attack="dataurl">② canvas.toDataURL() extraction<small>The standard “grab the canvas as a PNG” move</small></button>
         <button class="btn attack" data-attack="prototype">③ Prototype-bypass extraction<small>HTMLCanvasElement.prototype.toDataURL.call(canvas) — the expert move</small></button>
         <button class="btn attack" data-attack="network">④ Capture the network payload<small>Grab what actually crossed the wire and try to view it as an image</small></button>
-        <button class="btn attack" data-attack="direct">⑤ Guess / reuse URLs<small>Fetch the master path directly; replay an expired/tampered signed URL</small></button>
+        <button class="btn attack" data-attack="direct">⑤ Guess / reuse delivery credentials<small>Fetch the master path directly; replay an expired/tampered signed token</small></button>
         <button class="btn attack" data-attack="print">⑥ Print the page<small>Media-query blackout — use your browser's print preview to verify</small></button>
       </div>
       <div id="attack-log">Attack log — press a button, or right-click / drag / long-press a protected card…
@@ -227,7 +227,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>Drag to desktop / new tab</td><td><code>dragstart</code> blocked, <code>-webkit-user-drag:none</code></td><td>Nothing</td></tr>
           <tr><td>DevTools → Elements</td><td>Closed shadow DOM; source URL held in JS closures/private fields, never in attributes</td><td>An empty-looking custom element</td></tr>
           <tr><td>DevTools → Network (Img)</td><td>Bytes arrive via <code>fetch()</code> as <code>application/octet-stream</code> .archx containers — not classified as images</td><td>An opaque <code>data.bin</code></td></tr>
-          <tr><td>Open/reuse the image URL</td><td>HMAC-signed URLs expire in ~120s, are bound to one image id, can be <b>one-time-use</b> and <b>bound to the requesting IP/User-Agent</b>; your backend entitlement caps the resolution regardless of what the client asks for</td><td><code>403 invalid or expired token</code></td></tr>
+          <tr><td>Open/reuse the clean image URL or token</td><td>The URL alone carries no bearer token. HMAC-signed header tokens expire in ~120s, are bound to one image id, can be <b>one-time-use</b> and <b>bound to the requesting IP/User-Agent/proof key</b>; your backend entitlement caps the resolution regardless of what the client asks for</td><td><code>403 invalid or expired token</code></td></tr>
           <tr><td>Guess the master path</td><td>Masters live outside every static route; only the signer endpoint can read them, and it never returns them</td><td><code>404</code></td></tr>
           <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top). Watermark + block forensic mark are applied <b>before</b> scrambling</td><td>A meaningless mosaic / ciphertext. Even with the stolen session key + a rewritten un-shuffler: a downscaled, server-watermarked copy</td></tr>
           <tr><td>Hook browser APIs (userscript/extension patches <code>fetch</code>/<code>drawImage</code>/<code>createImageBitmap</code>)</td><td>Native references captured at library load and used internally; integrity audit detects replaced/non-native APIs — Fortress fails closed. All internals are <code>#private</code>: no <code>element.__archx</code>, no public instance registry, no debug hook in production</td><td>Hooks installed after load are bypassed; pre-installed naive hooks are detected &amp; reported/locked</td></tr>
@@ -429,7 +429,7 @@ async function attackPrototype() {
 async function attackNetwork() {
   log('④ Capturing the protected payload off the wire (as DevTools → “Save response” would)…');
   const token = await (await fetch('/archx/token/aurora-valley?w=900', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
-  const buf = new Uint8Array(await (await fetch(token.url)).arrayBuffer());
+  const buf = new Uint8Array(await (await fetch(token.cleanUrl, { headers: { 'x-archx-token': token.token } })).arrayBuffer());
   log(`   Captured ${buf.length} bytes, content-type application/octet-stream, first bytes: ${new TextDecoder('utf-8', { fatal: false }).decode(buf.slice(0, 6))}…`);
   // Try 1: view raw capture as an image
   const rawUrl = URL.createObjectURL(new Blob([buf], { type: 'image/webp' }));
@@ -474,17 +474,17 @@ async function attackNetwork() {
 }
 
 async function attackDirect() {
-  log('⑤ Trying to fetch the master directly + replaying signed URLs…');
+  log('⑤ Trying to fetch the master directly + replaying signed header tokens…');
   const direct = await fetch('/demo-masters/aurora-valley.jpg');
   log(`   GET /demo-masters/aurora-valley.jpg  →  HTTP ${direct.status} (masters are outside every static route)`, direct.status === 404 ? 'good' : 'bad');
   const token = await (await fetch('/archx/token/aurora-valley?w=900', { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
-  const tampered = token.url.replace(/t=([^.]+)\./, (m, body) => 't=' + body.slice(0, -2) + 'XX.');
-  const replay = await fetch(tampered);
-  log(`   GET signed URL with tampered signature  →  HTTP ${replay.status}`, replay.status === 403 ? 'good' : 'bad');
-  const firstUse = await fetch(token.url);
+  const tampered = token.token.replace(/^([^.]+)\./, (m, body) => body.slice(0, -2) + 'XX.');
+  const replay = await fetch(token.cleanUrl, { headers: { 'x-archx-token': tampered } });
+  log(`   GET clean URL with a tampered header-token signature  →  HTTP ${replay.status}`, replay.status === 403 ? 'good' : 'bad');
+  const firstUse = await fetch(token.cleanUrl, { headers: { 'x-archx-token': token.token } });
   await firstUse.arrayBuffer();
-  const secondUse = await fetch(token.url);
-  log(`   Same signed URL used twice  →  1st: HTTP ${firstUse.status}, replay: HTTP ${secondUse.status} (one-time tokens; also User-Agent-bound and dead after 120s)`,
+  const secondUse = await fetch(token.cleanUrl, { headers: { 'x-archx-token': token.token } });
+  log(`   Same signed header token used twice  →  1st: HTTP ${firstUse.status}, replay: HTTP ${secondUse.status} (one-time tokens; also User-Agent-bound and dead after 120s)`,
     firstUse.status === 200 && secondUse.status === 403 ? 'good' : 'bad');
 }
 

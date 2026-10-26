@@ -66,7 +66,25 @@ const NATIVES = (() => {
   const canvasProto = typeof HTMLCanvasElement !== 'undefined' ? HTMLCanvasElement.prototype : null;
   const ctx2dProto = typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype : null;
   const docProto = typeof Document !== 'undefined' ? Document.prototype : null;
+  const gl1Proto = typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype : null;
   const gl2Proto = typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype : null;
+  const glMethods = {
+    texImage2D: grab(gl2Proto, 'texImage2D') || grab(gl1Proto, 'texImage2D'),
+    readPixels: grab(gl2Proto, 'readPixels') || grab(gl1Proto, 'readPixels'),
+    drawArrays: grab(gl2Proto, 'drawArrays') || grab(gl1Proto, 'drawArrays'),
+    drawElements: grab(gl2Proto, 'drawElements') || grab(gl1Proto, 'drawElements'),
+    createTexture: grab(gl2Proto, 'createTexture') || grab(gl1Proto, 'createTexture'),
+    bindTexture: grab(gl2Proto, 'bindTexture') || grab(gl1Proto, 'bindTexture'),
+    bindFramebuffer: grab(gl2Proto, 'bindFramebuffer') || grab(gl1Proto, 'bindFramebuffer'),
+    createFramebuffer: grab(gl2Proto, 'createFramebuffer') || grab(gl1Proto, 'createFramebuffer'),
+    framebufferTexture2D: grab(gl2Proto, 'framebufferTexture2D') || grab(gl1Proto, 'framebufferTexture2D'),
+    createShader: grab(gl2Proto, 'createShader') || grab(gl1Proto, 'createShader'),
+    shaderSource: grab(gl2Proto, 'shaderSource') || grab(gl1Proto, 'shaderSource'),
+    compileShader: grab(gl2Proto, 'compileShader') || grab(gl1Proto, 'compileShader'),
+    createProgram: grab(gl2Proto, 'createProgram') || grab(gl1Proto, 'createProgram'),
+    linkProgram: grab(gl2Proto, 'linkProgram') || grab(gl1Proto, 'linkProgram'),
+    useProgram: grab(gl2Proto, 'useProgram') || grab(gl1Proto, 'useProgram'),
+  };
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, 'fetch'),
@@ -80,8 +98,13 @@ const NATIVES = (() => {
     ctxDrawImage: grab(ctx2dProto, 'drawImage'),
     ctxGetImageData: grab(ctx2dProto, 'getImageData'),
     docCreateElement: grab(docProto, 'createElement'),
-    glTexImage2D: grab(gl2Proto, 'texImage2D'),
-    glReadPixels: grab(gl2Proto, 'readPixels'),
+    glTexImage2D: glMethods.texImage2D,
+    glReadPixels: glMethods.readPixels,
+    glDrawArrays: glMethods.drawArrays,
+    glDrawElements: glMethods.drawElements,
+    webgl: Object.freeze(glMethods),
+    webgl1: Object.freeze(Object.fromEntries(Object.keys(glMethods).map((name) => [name, grab(gl1Proto, name)]))),
+    webgl2: Object.freeze(Object.fromEntries(Object.keys(glMethods).map((name) => [name, grab(gl2Proto, name)]))),
   });
 })();
 
@@ -103,15 +126,118 @@ export function auditIntegrity() {
     ['CanvasRenderingContext2D.prototype.drawImage', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ['CanvasRenderingContext2D.prototype.getImageData', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
     ['Document.prototype.createElement', typeof Document !== 'undefined' ? Document.prototype.createElement : null, NATIVES.docCreateElement],
-    ['WebGL2RenderingContext.prototype.texImage2D', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.texImage2D : null, NATIVES.glTexImage2D],
-    ['WebGL2RenderingContext.prototype.readPixels', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.readPixels : null, NATIVES.glReadPixels],
   ];
+  const webglMethodNames = [
+    'texImage2D', 'readPixels', 'drawArrays', 'drawElements',
+    'createTexture', 'bindTexture', 'bindFramebuffer', 'createFramebuffer',
+    'framebufferTexture2D', 'createShader', 'shaderSource', 'compileShader',
+    'createProgram', 'linkProgram', 'useProgram',
+  ];
+  for (const [label, ctor, capturedMap] of [
+    ['WebGLRenderingContext', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext : null, NATIVES.webgl1],
+    ['WebGL2RenderingContext', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext : null, NATIVES.webgl2],
+  ]) {
+    for (const method of webglMethodNames) {
+      current.push([
+        `${label}.prototype.${method}`,
+        ctor ? ctor.prototype[method] : null,
+        capturedMap?.[method] ?? null,
+      ]);
+    }
+  }
   const issues = [];
   for (const [name, now, captured] of current) {
     if (!captured && !now) continue; // API absent in this environment
     if (now !== captured || (captured && !isNativeFn(captured))) issues.push(name);
   }
   return issues;
+}
+
+/**
+ * Detailed integrity report. `issues` is the backwards-compatible name list;
+ * `capturedNonNative` identifies functions that already looked replaced when
+ * this module was evaluated (an early userscript/extension may have run),
+ * while `changedSinceLoad` identifies later replacement. A clean report is
+ * not proof of an unhooked browser: native-looking proxies, browser/CDP-level
+ * capture, compromised extensions, and modified browsers can evade it.
+ */
+export function auditIntegrityDetails() {
+  const issues = auditIntegrity();
+  const capturedByName = new Map([
+    ['fetch', NATIVES.fetch],
+    ['createImageBitmap', NATIVES.createImageBitmap],
+    ['URL.createObjectURL', NATIVES.createObjectURL],
+    ['HTMLCanvasElement.prototype.getContext', NATIVES.canvasGetContext],
+    ['HTMLCanvasElement.prototype.toDataURL', NATIVES.canvasToDataURL],
+    ['HTMLCanvasElement.prototype.toBlob', NATIVES.canvasToBlob],
+    ['CanvasRenderingContext2D.prototype.drawImage', NATIVES.ctxDrawImage],
+    ['CanvasRenderingContext2D.prototype.getImageData', NATIVES.ctxGetImageData],
+    ['Document.prototype.createElement', NATIVES.docCreateElement],
+  ]);
+  for (const [label, capturedMap] of [
+    ['WebGLRenderingContext', NATIVES.webgl1],
+    ['WebGL2RenderingContext', NATIVES.webgl2],
+  ]) {
+    for (const [method, fn] of Object.entries(capturedMap || {})) {
+      capturedByName.set(`${label}.prototype.${method}`, fn);
+    }
+  }
+  const capturedNonNative = issues.filter((name) => {
+    const captured = capturedByName.get(name);
+    return !!captured && !isNativeFn(captured);
+  });
+  return Object.freeze({
+    ok: issues.length === 0,
+    issues: Object.freeze(issues),
+    capturedNonNative: Object.freeze(capturedNonNative),
+    changedSinceLoad: Object.freeze(issues.filter((name) => !capturedNonNative.includes(name))),
+    checked: Object.freeze([
+      'fetch',
+      'createImageBitmap',
+      'URL.createObjectURL',
+      'canvas context/readback',
+      'CanvasRenderingContext2D draw/readback',
+      'Document.createElement',
+      'WebGL/WebGL2 texture, framebuffer, shader/program, draw, and readback methods',
+    ]),
+    note: 'Tripwire only: a clean result does not prove the absence of pre-load, native-looking, extension, CDP, or modified-browser hooks.',
+  });
+}
+
+/**
+ * Early-load snapshot for applications that can place a tiny trusted inline
+ * or same-origin bootstrap before third-party scripts. Call as early as
+ * possible, keep the returned opaque snapshot in a closure, and compare with
+ * verifyEarlyIntegritySnapshot() after Archx loads. This narrows—but cannot
+ * eliminate—the race with userscripts/extensions that run before page code.
+ */
+export function captureEarlyIntegritySnapshot() {
+  const snapshot = Object.freeze({
+    fetch: globalThis.fetch || null,
+    createImageBitmap: globalThis.createImageBitmap || null,
+    canvasGetContext: typeof HTMLCanvasElement !== 'undefined' ? HTMLCanvasElement.prototype.getContext : null,
+    webglDrawArrays: typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.drawArrays : null,
+    webgl2DrawArrays: typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.drawArrays : null,
+    webglReadPixels: typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.readPixels : null,
+    webgl2ReadPixels: typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.readPixels : null,
+    at: Date.now(),
+  });
+  return snapshot;
+}
+
+export function verifyEarlyIntegritySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return Object.freeze({ ok: false, issues: Object.freeze(['missing-snapshot']) });
+  const checks = [
+    ['fetch', globalThis.fetch || null, snapshot.fetch],
+    ['createImageBitmap', globalThis.createImageBitmap || null, snapshot.createImageBitmap],
+    ['HTMLCanvasElement.prototype.getContext', typeof HTMLCanvasElement !== 'undefined' ? HTMLCanvasElement.prototype.getContext : null, snapshot.canvasGetContext],
+    ['WebGLRenderingContext.prototype.drawArrays', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.drawArrays : null, snapshot.webglDrawArrays],
+    ['WebGL2RenderingContext.prototype.drawArrays', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.drawArrays : null, snapshot.webgl2DrawArrays],
+    ['WebGLRenderingContext.prototype.readPixels', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.readPixels : null, snapshot.webglReadPixels],
+    ['WebGL2RenderingContext.prototype.readPixels', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.readPixels : null, snapshot.webgl2ReadPixels],
+  ];
+  const issues = checks.filter(([, now, before]) => (before || now) && now !== before).map(([name]) => name);
+  return Object.freeze({ ok: issues.length === 0, issues: Object.freeze(issues), snapshotAt: snapshot.at || null });
 }
 
 /** Cheap automation signals (headless/bot browsers). Spoofable — a tripwire. */
@@ -149,6 +275,11 @@ function getNativeContext(canvas, type, attrs) {
 }
 function nativeDrawImage(ctx, ...args) {
   return NATIVES.ctxDrawImage ? NATIVES.ctxDrawImage.call(ctx, ...args) : ctx.drawImage(...args);
+}
+function nativeGlDrawArrays(gl, mode, first, count) {
+  return NATIVES.glDrawArrays
+    ? NATIVES.glDrawArrays.call(gl, mode, first, count)
+    : gl.drawArrays(mode, first, count);
 }
 
 /* ================================================================== */
@@ -224,6 +355,7 @@ const DEFAULTS = {
   onLoad: null,
   onError: null,
   onClick: null,
+  onEvent: null,                // (sanitizedEvent, instance) => void — generic monitoring/plugin hook; never receives tokens/keys/pixels
   alt: '',
 };
 
@@ -234,6 +366,124 @@ const instances = new Set();
  * our internals. A module-private WeakMap gives no such handle. */
 const hostToInstance = new WeakMap();
 let pageSessionId = null;
+
+/*
+ * Monitoring/plugin extension points.
+ *
+ * Plugins and global listeners receive only a frozen, sanitized event:
+ * event type, timestamp, mode, and coarse outcome/reason. They never receive
+ * a token response, token, scramble key, AES key, proof, source object,
+ * canvas, bitmap, image bytes, or raw error object. This makes the hook safe
+ * to forward to analytics/monitoring/reverse-image-search workflows without
+ * creating a new key-leak channel. Listener failures are swallowed so a
+ * monitoring bug cannot change image authorization or rendering policy.
+ */
+const globalEventListeners = new Set();
+const installedPlugins = new Map();
+
+function sanitizeClientEvent(type, details = {}, instance = null) {
+  let mode = null;
+  try { mode = instance?.options?.requestedMode || instance?.options?.mode || null; } catch {}
+  const cleanText = (value, max = 160) => {
+    if (value == null) return null;
+    const text = String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
+    return text || null;
+  };
+  return Object.freeze({
+    schemaVersion: 1,
+    service: 'archx-client',
+    type: cleanText(type, 80) || 'archx.event',
+    at: new Date().toISOString(),
+    mode: cleanText(mode, 32),
+    kind: cleanText(details.kind, 120),
+    reason: cleanText(details.reason, 160),
+    outcome: cleanText(details.outcome, 48),
+    issues: Array.isArray(details.issues)
+      ? Object.freeze(details.issues.slice(0, 40).map((issue) => cleanText(issue, 120)).filter(Boolean))
+      : null,
+  });
+}
+
+function emitClientEvent(type, details = {}, instance = null) {
+  const event = sanitizeClientEvent(type, details, instance);
+  const invoke = (listener) => {
+    try {
+      const result = listener(event, instance);
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch { /* monitoring must never alter rendering/authorization */ }
+  };
+  for (const listener of [...globalEventListeners]) invoke(listener);
+  for (const plugin of installedPlugins.values()) {
+    if (typeof plugin.onEvent === 'function') invoke(plugin.onEvent);
+  }
+  try {
+    const perInstance = instance?.options?.onEvent;
+    if (typeof perInstance === 'function') invoke(perInstance);
+  } catch {}
+  return event;
+}
+
+/** Subscribe to sanitized client telemetry. Returns an unsubscribe function. */
+export function onClientEvent(listener) {
+  if (typeof listener !== 'function') throw new TypeError('Archx.on: listener must be a function');
+  globalEventListeners.add(listener);
+  return () => { globalEventListeners.delete(listener); };
+}
+
+/** Remove a global sanitized-telemetry listener previously passed to Archx.on(). */
+export function offClientEvent(listener) {
+  return globalEventListeners.delete(listener);
+}
+
+/**
+ * Install a monitoring/integration plugin. Supported plugin surface:
+ * `{ name, onEvent(event, instance), setup(api), teardown() }`.
+ * `setup` receives only { on, off, version }—not instance internals.
+ */
+export function usePlugin(plugin) {
+  if (!plugin || typeof plugin !== 'object') throw new TypeError('Archx.use: plugin must be an object');
+  const name = typeof plugin.name === 'string' && plugin.name.trim()
+    ? plugin.name.trim().slice(0, 80)
+    : `plugin-${installedPlugins.size + 1}`;
+  if (plugin.onEvent !== undefined && typeof plugin.onEvent !== 'function') {
+    throw new TypeError('Archx.use: plugin.onEvent must be a function when supplied');
+  }
+  if (plugin.setup !== undefined && typeof plugin.setup !== 'function') {
+    throw new TypeError('Archx.use: plugin.setup must be a function when supplied');
+  }
+  if (plugin.teardown !== undefined && typeof plugin.teardown !== 'function') {
+    throw new TypeError('Archx.use: plugin.teardown must be a function when supplied');
+  }
+  const previous = installedPlugins.get(name);
+  if (previous?.teardown) {
+    try { previous.teardown(); } catch {}
+  }
+  const record = Object.freeze({ name, onEvent: plugin.onEvent || null, teardown: plugin.teardown || null });
+  installedPlugins.set(name, record);
+  if (typeof plugin.setup === 'function') {
+    try {
+      plugin.setup(Object.freeze({ on: onClientEvent, off: offClientEvent, version: VERSION }));
+    } catch {
+      installedPlugins.delete(name);
+      throw new Error(`Archx.use: plugin "${name}" setup failed`);
+    }
+  }
+  emitClientEvent('archx.plugin_installed', { kind: name, outcome: 'installed' });
+  return Object.freeze({
+    name,
+    remove() {
+      const current = installedPlugins.get(name);
+      if (!current) return false;
+      installedPlugins.delete(name);
+      try { current.teardown?.(); } catch {}
+      return true;
+    },
+  });
+}
+
+export function listPlugins() {
+  return Object.freeze([...installedPlugins.keys()]);
+}
 
 function structuredCloneSafe(obj) {
   return JSON.parse(JSON.stringify(obj, (k, v) => (typeof v === 'function' ? undefined : v)));
@@ -400,6 +650,19 @@ export const TEMPORAL_INTERLACE_PROFILES = Object.freeze({
     engine: 'auto', layout: 'blocks', cellSize: 8, phases: 2,
     fill: 'lowres', fillBlock: 16, fillStrength: 1,
     refreshHz: 60, minPhaseHz: 30, optimizeRefresh: true,
+    respectReducedMotion: true, chroma: true,
+  }),
+  // Higher-cost capture-resistant profile: three phases mean each spatial
+  // subset is fully present only once per three display frames (about 20 Hz
+  // per subset on a 60 Hz display), hidden cells use keyed noise instead of a
+  // locally useful average, and the active subset is not gain-compensated.
+  // This is visibly harsher and still cannot stop multi-frame/video capture;
+  // it is an explicit quality/security trade-off, not a new guarantee.
+  fortress60: Object.freeze({
+    engine: 'auto', layout: 'blocks', cellSize: 6, phases: 3,
+    fill: 'noise', fillBlock: 10, fillStrength: 1, noiseStrength: 0.55,
+    hiddenScale: 0, activeGain: 1,
+    refreshHz: 60, minPhaseHz: 20, optimizeRefresh: true,
     respectReducedMotion: true, chroma: true,
   }),
 });
@@ -1381,8 +1644,25 @@ export class ProtectedImage {
     }
     this.#root = root;
     const doc = this.#host.ownerDocument;
-    const style = doc.createElement('style');
-    style.textContent = SHADOW_CSS;
+    // Prefer a constructable stylesheet inside shadow DOM. That avoids a
+    // dynamically inserted <style> element in modern browsers and is the
+    // cleanest path under strict style-src policies. Older browsers and
+    // shadow:'none' still need the <style> fallback documented in the CSP
+    // guide; Archx does not pretend one policy fits every browser.
+    let style = null;
+    let adoptedStyles = false;
+    if (root !== this.#host && typeof CSSStyleSheet !== 'undefined' && 'adoptedStyleSheets' in root) {
+      try {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(SHADOW_CSS);
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+        adoptedStyles = true;
+      } catch { /* fall back to a style element */ }
+    }
+    if (!adoptedStyles) {
+      style = doc.createElement('style');
+      style.textContent = SHADOW_CSS;
+    }
     const wrap = doc.createElement('div');
     wrap.className = 'wrap loading' + (o.showBadge ? ' show-badge' : '');
     wrap.innerHTML = `
@@ -1393,7 +1673,8 @@ export class ProtectedImage {
       <div class="shield"></div>
       <div class="risk"></div>
       <div class="err"><span>⚠<br>Protected image unavailable</span></div>`;
-    root.append(style, wrap);
+    if (style) root.append(style, wrap);
+    else root.append(wrap);
     this.#wrap = wrap;
     this.#canvas = wrap.querySelector('canvas.main');
     this.#tilesEl = wrap.querySelector('.tiles');
@@ -1410,6 +1691,7 @@ export class ProtectedImage {
     const attempt = (kind) => {
       try { o.onAttempt && o.onAttempt(kind, this); } catch {}
       this.#host.dispatchEvent(new CustomEvent('archx-attempt', { detail: { kind }, bubbles: true }));
+      emitClientEvent('archx.attempt', { kind, outcome: 'detected' }, this);
       this.#registerStrike(kind);
     };
     this.#attemptHandler = attempt;
@@ -2066,6 +2348,10 @@ export class ProtectedImage {
   #securityGate() {
     const o = this.#options;
     if (Date.now() < this.#lockedUntil) return false;
+    if (!['off', 'monitor', 'lock'].includes(o.integrity)) {
+      if (this.#attemptHandler) this.#attemptHandler('integrity:invalid-mode');
+      return false;
+    }
     if (o.integrity !== 'off') {
       this.#integrityIssues = auditIntegrity();
       if (this.#integrityIssues.length) {
@@ -2097,6 +2383,11 @@ export class ProtectedImage {
     if (!this.#securityGate()) {
       this.#wrap.classList.remove('loading');
       this.#wrap.classList.add('error');
+      emitClientEvent('archx.blocked', {
+        reason: 'integrity-automation-or-lockout-policy',
+        outcome: 'blocked',
+        issues: this.#integrityIssues,
+      }, this);
       this.#host.dispatchEvent(new CustomEvent('archx-error', {
         detail: { error: new Error('Archx: blocked by integrity/automation/lockout policy') }, bubbles: true,
       }));
@@ -2139,11 +2430,13 @@ export class ProtectedImage {
       this.#unloaded = false;
       this.#wrap.classList.remove('loading', 'error');
       this.#host.dispatchEvent(new CustomEvent('archx-load', { bubbles: true }));
+      emitClientEvent('archx.loaded', { outcome: 'loaded' }, this);
       try { this.#options.onLoad && this.#options.onLoad(this); } catch {}
     } catch (err) {
       if (this.#destroyed) return;
       this.#wrap.classList.remove('loading');
       this.#wrap.classList.add('error');
+      emitClientEvent('archx.error', { reason: 'load-failed', outcome: 'error' }, this);
       this.#host.dispatchEvent(new CustomEvent('archx-error', { detail: { error: err }, bubbles: true }));
       try { this.#options.onError && this.#options.onError(err, this); } catch {}
     } finally {
@@ -2704,24 +2997,54 @@ export class ProtectedImage {
       nativeDrawImage(ctx, tiny, 0, 0, w, h); // blocky pixelated upscale
       tiny.width = 0;
       ctx.save();
-      ctx.globalAlpha = 0.5; ctx.fillStyle = '#fff';
-      ctx.font = `700 ${Math.max(14, w / 18)}px system-ui,sans-serif`;
+      const markSize = Math.max(14, w / 18);
+      ctx.font = `700 ${markSize}px system-ui,sans-serif`;
       ctx.textAlign = 'center'; ctx.translate(w / 2, h / 2); ctx.rotate(-Math.PI / 8);
+      ctx.fillStyle = 'rgba(0,0,0,0.58)';
+      ctx.fillRect(-w * 0.75, -markSize * 0.92, w * 1.5, markSize * 1.45);
+      ctx.globalAlpha = 0.96; ctx.fillStyle = '#fff';
       ctx.fillText(String((typeof o.watermark === 'string' ? o.watermark : o.watermark?.text) || o.brand), 0, 0);
       ctx.restore();
       return decoy;
     }
     if (kind === 'scrambled') {
       decoy.width = w; decoy.height = h;
+      // Never scramble the clean full-resolution working canvas directly:
+      // first destroy detail at 144px wide, then upscale without smoothing,
+      // scramble that already-degraded staging image, and visibly mark it.
+      // Even a perfect unscramble therefore recovers only a coarse, branded
+      // preview rather than the displayed derivative's detail.
+      const tinyW = 144;
+      const tinyH = Math.max(1, Math.round((h / Math.max(1, w)) * tinyW));
+      const tiny = makeCanvas();
+      tiny.width = tinyW; tiny.height = tinyH;
+      nativeDrawImage(getNativeContext(tiny, '2d'), cleanCanvas, 0, 0, tinyW, tinyH);
+      const staging = makeCanvas();
+      staging.width = w; staging.height = h;
+      const stagingCtx = getNativeContext(staging, '2d');
+      stagingCtx.imageSmoothingEnabled = false;
+      nativeDrawImage(stagingCtx, tiny, 0, 0, w, h);
+      tiny.width = 0; tiny.height = 0;
+
       const g = 8;
       const plan = buildScramblePlan(g, 'decoy-' + sessionId());
-      const tw = cleanCanvas.width / g, th = cleanCanvas.height / g;
+      const tw = staging.width / g, th = staging.height / g;
       const dw = w / g, dh = h / g;
       for (let dest = 0; dest < plan.count; dest++) {
         const source = plan.order[dest];
-        nativeDrawImage(ctx, cleanCanvas, (source % g) * tw, Math.floor(source / g) * th, tw, th,
+        nativeDrawImage(ctx, staging, (source % g) * tw, Math.floor(source / g) * th, tw, th,
           (dest % g) * dw, Math.floor(dest / g) * dh, dw + 1, dh + 1);
       }
+      staging.width = 0; staging.height = 0;
+      ctx.save();
+      const markSize = Math.max(14, w / 18);
+      ctx.font = `700 ${markSize}px system-ui,sans-serif`;
+      ctx.textAlign = 'center'; ctx.translate(w / 2, h / 2); ctx.rotate(-Math.PI / 8);
+      ctx.fillStyle = 'rgba(0,0,0,0.58)';
+      ctx.fillRect(-w * 0.75, -markSize * 0.92, w * 1.5, markSize * 1.45);
+      ctx.globalAlpha = 0.96; ctx.fillStyle = '#fff';
+      ctx.fillText(String((typeof o.watermark === 'string' ? o.watermark : o.watermark?.text) || o.brand), 0, 0);
+      ctx.restore();
       return decoy;
     }
     // black (default)
@@ -3253,7 +3576,7 @@ export class ProtectedImage {
       gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
       gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
       gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
       if (temporal) {
         this.#temporalSign = -this.#temporalSign;
@@ -3552,6 +3875,14 @@ const Archx = {
   clearCaches() { clearBitmapCache(); pageSessionId = null; },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,
+  auditIntegrityDetails,
+  captureEarlyIntegritySnapshot,
+  verifyEarlyIntegritySnapshot,
+  /** Sanitized global monitoring hooks (never tokens, keys, pixels, or raw errors). */
+  on: onClientEvent,
+  off: offClientEvent,
+  use: usePlugin,
+  plugins: listPlugins,
   /** Cheap headless/automation signals present in this browser. */
   detectAutomation,
 };

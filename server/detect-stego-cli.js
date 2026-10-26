@@ -46,8 +46,9 @@ if (!input || args.help) {
   --expect <payload> expected owner/order/viewer payload or 12-hex fingerprint
   --expect-fingerprint <16hex> registered perceptual soft-binding fingerprint
   --max-distance <n> maximum perceptual Hamming distance 0–64 (default 10)
-  --grid-x <n>       detector grid columns, integer 4–64 (default 24)
-  --grid-y <n>       detector grid rows, integer 4–64 (default 16)
+  --profile <p>      auto (default), standard, or robust
+  --grid-x <n>       detector grid columns, integer 4–64 (profile default)
+  --grid-y <n>       detector grid rows, integer 4–64 (profile default)
   --max-input-bytes <n> reject files above this size before reading (default 52428800)
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
   --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
@@ -65,13 +66,15 @@ if (!key && !args.json) {
   console.warn('⚠  No StegoMark key supplied: trying the empty key. Detection needs the embed-time key.');
 }
 
-const gridX = args['grid-x'] ? Number(args['grid-x']) : 24;
-const gridY = args['grid-y'] ? Number(args['grid-y']) : 16;
+const profile = args.profile || 'auto';
+const gridX = args['grid-x'] ? Number(args['grid-x']) : undefined;
+const gridY = args['grid-y'] ? Number(args['grid-y']) : undefined;
 const maxInputBytes = args['max-input-bytes'] ? Number(args['max-input-bytes']) : 50 * 1024 * 1024;
-if (!Number.isInteger(gridX) || gridX < 4 || gridX > 64 ||
-    !Number.isInteger(gridY) || gridY < 4 || gridY > 64 ||
+if (!['auto', 'standard', 'robust'].includes(profile) ||
+    (gridX !== undefined && (!Number.isInteger(gridX) || gridX < 4 || gridX > 64)) ||
+    (gridY !== undefined && (!Number.isInteger(gridY) || gridY < 4 || gridY > 64)) ||
     !Number.isInteger(maxInputBytes) || maxInputBytes < 1024 || maxInputBytes > 500 * 1024 * 1024) {
-  console.error('Archx detect: grid values must be integers from 4 to 64 and max-input-bytes must be a bounded integer');
+  console.error('Archx detect: profile must be auto, standard, or robust; grid values must be integers from 4 to 64; max-input-bytes must be a bounded integer');
   process.exit(2);
 }
 const expectedPerceptual = args['expect-fingerprint']
@@ -121,6 +124,7 @@ try {
   }
   result = detectStegoFingerprint(data, info.width, info.height, {
     key,
+    profile,
     gridX,
     gridY,
     searchOffsets: !args['no-search'],
@@ -163,6 +167,7 @@ if (args.json) {
 } else if (result.found) {
   console.log(`✔ StegoMark FOUND in ${input}`);
   console.log(`  fingerprint : ${result.fingerprint}`);
+  console.log(`  profile     : ${result.profile || 'standard'}`);
   console.log(`  confidence  : ${result.confidence} (cell agreement ${result.agreement}, corrections ${result.corrections})`);
   if (result.geometry) console.log(`  geometry    : scale ${result.geometry.scaleX}×${result.geometry.scaleY}, origin ${result.geometry.originX},${result.geometry.originY}`);
   if (expected) console.log(`  expected    : ${expected} ${matchesExpectation ? '— MATCH' : '— does NOT match'}`);

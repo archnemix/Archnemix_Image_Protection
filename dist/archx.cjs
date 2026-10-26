@@ -44,9 +44,11 @@ __export(index_exports, {
   VERSION: () => VERSION,
   applyForensicBlocks: () => applyForensicBlocks,
   auditIntegrity: () => auditIntegrity,
+  auditIntegrityDetails: () => auditIntegrityDetails,
   base64ToBytes: () => base64ToBytes,
   buildScramblePlan: () => buildScramblePlan,
   bytesToBase64: () => bytesToBase64,
+  captureEarlyIntegritySnapshot: () => captureEarlyIntegritySnapshot,
   comparePerceptualFingerprints: () => comparePerceptualFingerprints,
   decodeBmpImage: () => decodeBmpImage,
   decodeContainer: () => decodeContainer,
@@ -62,9 +64,12 @@ __export(index_exports, {
   generateKeyBase64: () => generateKeyBase64,
   hashSeed: () => hashSeed,
   isArchxContainer: () => isArchxContainer,
+  listPlugins: () => listPlugins,
   mulberry32: () => mulberry32,
   normalizePerceptualFingerprint: () => normalizePerceptualFingerprint,
   normalizeTemporalInterlace: () => normalizeTemporalInterlace,
+  offClientEvent: () => offClientEvent,
+  onClientEvent: () => onClientEvent,
   paddedSize: () => paddedSize,
   perceptualFingerprint: () => perceptualFingerprint,
   perceptualFingerprintDistance: () => perceptualFingerprintDistance,
@@ -74,7 +79,9 @@ __export(index_exports, {
   sniffImageInfo: () => sniffImageInfo,
   stegoFingerprint: () => stegoFingerprint,
   tileRect: () => tileRect,
-  validateArchxHeader: () => validateArchxHeader
+  usePlugin: () => usePlugin,
+  validateArchxHeader: () => validateArchxHeader,
+  verifyEarlyIntegritySnapshot: () => verifyEarlyIntegritySnapshot
 });
 module.exports = __toCommonJS(index_exports);
 
@@ -572,15 +579,181 @@ function stegoFingerprint(value) {
   const hi = Math.floor(b % 16777216).toString(16).padStart(6, "0");
   return lo + hi;
 }
-function stegoCrc16(bytes) {
-  let crc = 65535;
-  for (const byte of bytes) {
-    crc ^= byte << 8;
+var STEGO_CRC16_TABLE = (() => {
+  const table = new Uint16Array(256);
+  for (let byte = 0; byte < 256; byte++) {
+    let crc = byte << 8;
     for (let i = 0; i < 8; i++) {
       crc = crc & 32768 ? (crc << 1 ^ 4129) & 65535 : crc << 1 & 65535;
     }
+    table[byte] = crc;
+  }
+  return table;
+})();
+function stegoCrc16(bytes) {
+  let crc = 65535;
+  for (const byte of bytes) {
+    crc = (crc << 8 ^ STEGO_CRC16_TABLE[(crc >> 8 ^ byte) & 255]) & 65535;
   }
   return crc;
+}
+function stegoBytesToBits(bytes) {
+  const bits = new Uint8Array(bytes.length * 8);
+  bytes.forEach((byte, i) => {
+    for (let b = 0; b < 8; b++) bits[i * 8 + b] = byte >> 7 - b & 1;
+  });
+  return bits;
+}
+function robustStegoCodeBits(fingerprint, key) {
+  const payload = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
+  const crc = stegoCrc16(payload);
+  const first = [...payload, crc >> 8 & 255, crc & 255];
+  const keyByte = Math.floor(hashSeed("archx-stego-robust:" + String(key ?? ""), 20907) % 256);
+  const keyed = new Uint8Array(first.length + 1);
+  keyed.set(first, 0);
+  keyed[keyed.length - 1] = keyByte;
+  const check = stegoCrc16(keyed);
+  return stegoBytesToBits(new Uint8Array([
+    ...first,
+    check >> 8 & 255,
+    check & 255,
+    165,
+    90
+  ]));
+}
+function robustStegoBytesValid(bytes, key) {
+  if (!bytes || bytes.length !== 12) return false;
+  if (stegoCrc16(bytes.subarray(0, 6)) !== (bytes[6] << 8 | bytes[7])) return false;
+  if (bytes[10] !== 165 || bytes[11] !== 90) return false;
+  const keyByte = Math.floor(hashSeed("archx-stego-robust:" + String(key ?? ""), 20907) % 256);
+  const keyed = new Uint8Array(9);
+  keyed.set(bytes.subarray(0, 8), 0);
+  keyed[8] = keyByte;
+  return stegoCrc16(keyed) === (bytes[8] << 8 | bytes[9]);
+}
+function robustStegoBitsValid(bits, key) {
+  if (!bits || bits.length !== 96) return false;
+  const bytes = new Uint8Array(12);
+  for (let i = 0; i < 12; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  return robustStegoBytesValid(bytes, key);
+}
+function robustStegoFingerprintFromBits(bits) {
+  let fingerprint = "";
+  for (let i = 0; i < 6; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+    fingerprint += byte.toString(16).padStart(2, "0");
+  }
+  return fingerprint;
+}
+function repairRobustViaFirstCrc(scores, hard, key) {
+  const first = Uint8Array.from(hard.subarray(0, 64));
+  const syndromeOf = (bits) => {
+    const bytes = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) {
+      let byte = 0;
+      for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+      bytes[i] = byte;
+    }
+    return stegoCrc16(bytes.subarray(0, 6)) ^ (bytes[6] << 8 | bytes[7]);
+  };
+  const target = syndromeOf(first);
+  const buildCanonical = (correctedFirst) => {
+    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
+    const canonical = robustStegoCodeBits(fingerprint, key);
+    let flips = 0;
+    let softCost = 0;
+    for (let i = 0; i < 96; i++) {
+      if (canonical[i] === hard[i]) continue;
+      flips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    return flips <= 8 ? { bits: canonical, flips, softCost } : null;
+  };
+  if (target === 0) return buildCanonical(first);
+  const columns = new Uint16Array(64);
+  for (let i = 0; i < 64; i++) {
+    first[i] ^= 1;
+    columns[i] = syndromeOf(first) ^ target;
+    first[i] ^= 1;
+  }
+  const weakest = Array.from({ length: 64 }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 32);
+  const leftCandidates = weakest.filter((_, index) => index % 2 === 0);
+  const rightCandidates = weakest.filter((_, index) => index % 2 === 1);
+  const subsetMaps = (candidates) => {
+    const byWeight = Array.from({ length: 4 }, () => /* @__PURE__ */ new Map());
+    const visit = (start, chosen, syndrome, cost) => {
+      const map = byWeight[chosen.length];
+      const previous = map.get(syndrome);
+      if (!previous || cost < previous.cost) map.set(syndrome, { indices: [...chosen], cost });
+      if (chosen.length >= 3) return;
+      for (let i = start; i < candidates.length; i++) {
+        const bit = candidates[i];
+        chosen.push(bit);
+        visit(i + 1, chosen, syndrome ^ columns[bit], cost + Math.abs(scores[bit] || 0));
+        chosen.pop();
+      }
+    };
+    visit(0, [], 0, 0);
+    return byWeight;
+  };
+  const leftMaps = subsetMaps(leftCandidates);
+  const rightMaps = subsetMaps(rightCandidates);
+  let bestCanonical = null;
+  for (let total = 1; total <= 6; total++) {
+    for (let leftWeight = 0; leftWeight <= Math.min(3, total); leftWeight++) {
+      const rightWeight = total - leftWeight;
+      if (rightWeight < 0 || rightWeight > 3) continue;
+      for (const [syndrome, left] of leftMaps[leftWeight]) {
+        const right = rightMaps[rightWeight].get(target ^ syndrome);
+        if (!right) continue;
+        const corrected = Uint8Array.from(first);
+        for (const bit of [...left.indices, ...right.indices]) corrected[bit] ^= 1;
+        if (syndromeOf(corrected) !== 0) continue;
+        const candidate = buildCanonical(corrected);
+        if (!candidate) continue;
+        if (!bestCanonical || candidate.softCost < bestCanonical.softCost || candidate.softCost === bestCanonical.softCost && candidate.flips < bestCanonical.flips) {
+          bestCanonical = candidate;
+        }
+      }
+    }
+  }
+  return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
+}
+function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
+  const bits = Uint8Array.from(hard);
+  const bytes = new Uint8Array(12);
+  for (let i = 0; i < 12; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (robustStegoBytesValid(bytes, key)) return { bits, flips: 0 };
+  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key);
+  if (syndromeRepair) return syndromeRepair;
+  const candidates = Array.from({ length: bits.length }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 24);
+  const flip = (index) => {
+    bits[index] ^= 1;
+    bytes[index >> 3] ^= 1 << 7 - (index & 7);
+  };
+  const search = (start, depth, targetDepth) => {
+    if (depth === targetDepth) return robustStegoBytesValid(bytes, key);
+    for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
+      flip(candidates[i]);
+      if (search(i + 1, depth + 1, targetDepth)) return true;
+      flip(candidates[i]);
+    }
+    return false;
+  };
+  for (let flips = 1; flips <= maxFlips; flips++) {
+    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips };
+  }
+  return null;
 }
 function stegoCodeBits(fingerprint) {
   const bytes = new Uint8Array(6);
@@ -653,22 +826,46 @@ function stegoGrid(w, h, gridX, gridY) {
   }
   return { gx, gy };
 }
+function robustStegoLayout(cellCount, key) {
+  const order = Array.from({ length: cellCount }, (_, i) => i);
+  const polarity = new Int8Array(cellCount);
+  const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
+  const rand = mulberry32(hashSeed("archx-stego-robust-layout:" + String(key ?? ""), 20907));
+  for (let i = cellCount - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  for (let i = 0; i < cellCount; i++) {
+    polarity[i] = rand() > 0.5 ? 1 : -1;
+    for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
+      segmentPolarity[i * STEGO_ROW_SEGMENTS + segment] = rand() > 0.5 ? 1 : -1;
+    }
+  }
+  return { order, polarity, segmentPolarity };
+}
 function embedStegoFingerprint(rgba, w, h, payload, {
   key = "",
   strength = 6,
-  gridX = 24,
-  gridY = 16
+  gridX,
+  gridY,
+  profile = "standard"
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
   if (w < 64 || h < 64) throw new Error("Archx stego: image too small (minimum 64\xD764)");
+  const robust = profile === "robust";
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const rowSegments = STEGO_ROW_SEGMENTS;
+  const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const bits = stegoCodeBits(fingerprint);
-  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const bits = robust ? robustStegoCodeBits(fingerprint, key) : stegoCodeBits(fingerprint);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key) : stegoLayout(cellCount, key);
   const out = new Uint8Array(src);
-  const amp = Math.max(1, Math.min(16, Number(strength) || 6));
+  const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
+  const amp = robust ? Math.min(16, baseAmp * 1.35) : baseAmp;
   for (let cy = 0; cy < gy; cy++) {
     const y0 = Math.floor(cy * h / gy);
     const y1 = Math.floor((cy + 1) * h / gy);
@@ -696,13 +893,13 @@ function embedStegoFingerprint(rgba, w, h, payload, {
       const cellH = y1 - y0;
       for (let y = y0; y < y1; y++) {
         const segment = Math.min(
-          STEGO_ROW_SEGMENTS - 1,
-          Math.floor((y - y0) * STEGO_ROW_SEGMENTS / cellH)
+          rowSegments - 1,
+          Math.floor((y - y0) * rowSegments / cellH)
         );
-        const segmentSign = segmentPolarity[cell * STEGO_ROW_SEGMENTS + segment];
+        const segmentSign = segmentPolarity[cell * rowSegments + segment];
         let i = (y * w + x0) * 4;
         for (let x = x0; x < x1; x++, i += 4) {
-          const band = Math.min(3, Math.floor((x - x0) * 4 / cellW));
+          const band = Math.min(columnBands - 1, Math.floor((x - x0) * columnBands / cellW));
           const pattern = (band % 2 === 0 ? 1 : -1) * (bit ? 1 : -1) * pol * segmentSign;
           const delta = cellAmp * pattern;
           out[i] = Math.max(0, Math.min(255, src[i] + delta));
@@ -716,16 +913,63 @@ function embedStegoFingerprint(rgba, w, h, payload, {
 }
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
-  gridX = 24,
-  gridY = 16,
+  gridX,
+  gridY,
+  profile = "standard",
   searchOffsets = false,
   searchGeometry = false
 } = {}) {
+  if (profile === "auto") {
+    const standard = detectStegoFingerprint(rgba, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile: "standard",
+      searchOffsets,
+      searchGeometry: false
+    });
+    if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
+    const robust2 = detectStegoFingerprint(rgba, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile: "robust",
+      searchOffsets,
+      searchGeometry: false
+    });
+    const initial = robust2?.found && !standard?.found ? robust2 : standard?.found && !robust2?.found ? standard : (robust2?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust2 : standard;
+    if (!searchGeometry || initial?.found) return initial;
+    const standardGeometry = detectStegoFingerprint(rgba, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile: "standard",
+      searchOffsets,
+      searchGeometry: true
+    });
+    if (standardGeometry?.found) return standardGeometry;
+    const robustGeometry = detectStegoFingerprint(rgba, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile: "robust",
+      searchOffsets,
+      searchGeometry: true
+    });
+    return robustGeometry?.found || (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0) ? robustGeometry : standardGeometry;
+  }
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
-  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const robust = profile === "robust";
+  const effectiveProfile = robust ? "robust" : "standard";
+  const codeLength = robust ? 96 : 64;
+  const rowSegments = STEGO_ROW_SEGMENTS;
+  const columnBands = 4;
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key) : stegoLayout(cellCount, key);
   const cw = w / gx, ch = h / gy;
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
@@ -733,8 +977,8 @@ function detectStegoFingerprint(rgba, w, h, {
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
     const oy = originY ?? fy * ch;
-    const bitScores = new Float64Array(64);
-    const bitCounts = new Uint16Array(64);
+    const bitScores = new Float64Array(codeLength);
+    const bitCounts = new Uint16Array(codeLength);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
@@ -748,20 +992,20 @@ function detectStegoFingerprint(rgba, w, h, {
         const x0 = Math.max(0, Math.round(rawX0));
         const x1 = Math.min(w, Math.round(rawX1));
         if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
-        const sums = new Float64Array(STEGO_ROW_SEGMENTS * 4);
-        const counts = new Uint32Array(STEGO_ROW_SEGMENTS * 4);
+        const sums = new Float64Array(rowSegments * columnBands);
+        const counts = new Uint32Array(rowSegments * columnBands);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
         const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
         for (let y = y0; y < y1; y += step) {
           const segment = Math.max(0, Math.min(
-            STEGO_ROW_SEGMENTS - 1,
-            Math.floor((y - rawY0) * STEGO_ROW_SEGMENTS / cellH0)
+            rowSegments - 1,
+            Math.floor((y - rawY0) * rowSegments / cellH0)
           ));
           let i = (y * w + x0) * 4;
           for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.max(0, Math.min(3, Math.floor((x - rawX0) * 4 / cellW0)));
-            const idx = segment * 4 + band;
+            const band = Math.max(0, Math.min(columnBands - 1, Math.floor((x - rawX0) * columnBands / cellW0)));
+            const idx = segment * columnBands + band;
             sums[idx] += src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
             counts[idx]++;
           }
@@ -769,48 +1013,85 @@ function detectStegoFingerprint(rgba, w, h, {
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
         let validSegments = 0;
+        const robustSegmentResponses = robust ? [] : null;
         const cellIndex = cy * gx + cx;
-        for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
-          const base = segment * 4;
-          if (counts[base] === 0 || counts[base + 1] === 0 || counts[base + 2] === 0 || counts[base + 3] === 0) continue;
+        for (let segment = 0; segment < rowSegments; segment++) {
+          const base = segment * columnBands;
+          let complete = true;
+          for (let band = 0; band < columnBands; band++) {
+            if (counts[base + band] === 0) {
+              complete = false;
+              break;
+            }
+          }
+          if (!complete) continue;
           validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
-          const m2 = sums[base + 2] / counts[base + 2];
-          const m3 = sums[base + 3] / counts[base + 3];
           const weight = Math.min(counts[base], counts[base + 1], counts[base + 2], counts[base + 3]);
-          segmentScoreSum += -(-m0 + 3 * m1 - 3 * m2 + m3) / 8 * polarity[cellIndex] * segmentPolarity[cellIndex * STEGO_ROW_SEGMENTS + segment] * weight;
+          const response = -(-m0 + 3 * m1 - 3 * (sums[base + 2] / counts[base + 2]) + sums[base + 3] / counts[base + 3]) / 8;
+          const signedResponse = response * polarity[cellIndex] * segmentPolarity[cellIndex * rowSegments + segment];
+          if (robust) robustSegmentResponses.push(signedResponse);
+          segmentScoreSum += signedResponse * weight;
           segmentWeightSum += weight;
         }
         if (!segmentWeightSum || validSegments < 2) continue;
-        const rawScore = segmentScoreSum / segmentWeightSum;
+        let rawScore = segmentScoreSum / segmentWeightSum;
+        if (robust) {
+          const values = robustSegmentResponses.sort((a, b) => a - b);
+          const middle = Math.floor(values.length / 2);
+          rawScore = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+        }
         const score = Math.max(-12, Math.min(12, rawScore));
-        const bitIndex = order[cy * gx + cx] % 64;
+        const bitIndex = order[cy * gx + cx] % codeLength;
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         cellScores.push({ bitIndex, score });
       }
     }
-    const votedBits = new Uint8Array(64);
-    const reliability = new Float64Array(64);
-    for (let i = 0; i < 64; i++) {
-      votedBits[i] = bitScores[i] >= 0 ? 1 : 0;
-      reliability[i] = Math.abs(bitScores[i]) / Math.max(1, bitCounts[i]);
+    const votedBits = new Uint8Array(codeLength);
+    const reliability = new Float64Array(codeLength);
+    const voteScores = new Float64Array(codeLength);
+    if (robust) {
+      const groups = Array.from({ length: codeLength }, () => []);
+      for (const { bitIndex, score } of cellScores) groups[bitIndex].push(score);
+      for (let i = 0; i < codeLength; i++) {
+        const values = groups[i].sort((a, b) => a - b);
+        if (!values.length) continue;
+        const middle = Math.floor(values.length / 2);
+        voteScores[i] = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+        votedBits[i] = voteScores[i] >= 0 ? 1 : 0;
+        reliability[i] = Math.abs(voteScores[i]);
+      }
+    } else {
+      for (let i = 0; i < codeLength; i++) {
+        voteScores[i] = bitScores[i] / Math.max(1, bitCounts[i]);
+        votedBits[i] = bitScores[i] >= 0 ? 1 : 0;
+        reliability[i] = Math.abs(voteScores[i]);
+      }
     }
-    const corrected = correctStegoBits(votedBits, reliability);
+    const corrected = robust ? (() => {
+      const repaired = repairRobustStegoBits(reliability, votedBits, key, 5);
+      return repaired ? { bits: repaired.bits, corrections: repaired.flips } : { bits: votedBits, corrections: -1 };
+    })() : correctStegoBits(votedBits, reliability);
     const bits = corrected.bits;
-    const bytes = stegoBitsToBytes(bits);
-    const fingerprint = [...bytes.subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const crcValid = stegoCrcValid(bits);
+    const fingerprint = robust ? robustStegoFingerprintFromBits(bits) : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const crcValid = robust ? robustStegoBitsValid(bits, key) : stegoCrcValid(bits);
     const agreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!bits[bitIndex]).length;
     const agreement = cellScores.length ? agreeing / cellScores.length : 0;
-    const meanAbs = bitScores.reduce((s, v, i) => s + Math.abs(v) / Math.max(1, bitCounts[i]), 0) / 64;
+    const meanAbs = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
     const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - Math.max(0, corrected.corrections) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
+    const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 : minBitCount >= 1;
+    const correctionCount = Math.max(0, corrected.corrections);
+    const robustCorrectionOk = !robust || correctionCount <= 3 || correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && minBitCount >= 1,
+      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk,
       fingerprint,
+      profile: effectiveProfile,
+      observedBits,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
       confidence: Math.round(confidence * 1e3) / 1e3,
@@ -1086,7 +1367,25 @@ var NATIVES = (() => {
   const canvasProto = typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype : null;
   const ctx2dProto = typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype : null;
   const docProto = typeof Document !== "undefined" ? Document.prototype : null;
+  const gl1Proto = typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype : null;
   const gl2Proto = typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype : null;
+  const glMethods = {
+    texImage2D: grab(gl2Proto, "texImage2D") || grab(gl1Proto, "texImage2D"),
+    readPixels: grab(gl2Proto, "readPixels") || grab(gl1Proto, "readPixels"),
+    drawArrays: grab(gl2Proto, "drawArrays") || grab(gl1Proto, "drawArrays"),
+    drawElements: grab(gl2Proto, "drawElements") || grab(gl1Proto, "drawElements"),
+    createTexture: grab(gl2Proto, "createTexture") || grab(gl1Proto, "createTexture"),
+    bindTexture: grab(gl2Proto, "bindTexture") || grab(gl1Proto, "bindTexture"),
+    bindFramebuffer: grab(gl2Proto, "bindFramebuffer") || grab(gl1Proto, "bindFramebuffer"),
+    createFramebuffer: grab(gl2Proto, "createFramebuffer") || grab(gl1Proto, "createFramebuffer"),
+    framebufferTexture2D: grab(gl2Proto, "framebufferTexture2D") || grab(gl1Proto, "framebufferTexture2D"),
+    createShader: grab(gl2Proto, "createShader") || grab(gl1Proto, "createShader"),
+    shaderSource: grab(gl2Proto, "shaderSource") || grab(gl1Proto, "shaderSource"),
+    compileShader: grab(gl2Proto, "compileShader") || grab(gl1Proto, "compileShader"),
+    createProgram: grab(gl2Proto, "createProgram") || grab(gl1Proto, "createProgram"),
+    linkProgram: grab(gl2Proto, "linkProgram") || grab(gl1Proto, "linkProgram"),
+    useProgram: grab(gl2Proto, "useProgram") || grab(gl1Proto, "useProgram")
+  };
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, "fetch"),
@@ -1100,8 +1399,13 @@ var NATIVES = (() => {
     ctxDrawImage: grab(ctx2dProto, "drawImage"),
     ctxGetImageData: grab(ctx2dProto, "getImageData"),
     docCreateElement: grab(docProto, "createElement"),
-    glTexImage2D: grab(gl2Proto, "texImage2D"),
-    glReadPixels: grab(gl2Proto, "readPixels")
+    glTexImage2D: glMethods.texImage2D,
+    glReadPixels: glMethods.readPixels,
+    glDrawArrays: glMethods.drawArrays,
+    glDrawElements: glMethods.drawElements,
+    webgl: Object.freeze(glMethods),
+    webgl1: Object.freeze(Object.fromEntries(Object.keys(glMethods).map((name) => [name, grab(gl1Proto, name)]))),
+    webgl2: Object.freeze(Object.fromEntries(Object.keys(glMethods).map((name) => [name, grab(gl2Proto, name)])))
   });
 })();
 function isNativeFn(fn) {
@@ -1123,16 +1427,112 @@ function auditIntegrity() {
     ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
     ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
-    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
-    ["WebGL2RenderingContext.prototype.texImage2D", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.texImage2D : null, NATIVES.glTexImage2D],
-    ["WebGL2RenderingContext.prototype.readPixels", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null, NATIVES.glReadPixels]
+    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement]
   ];
+  const webglMethodNames = [
+    "texImage2D",
+    "readPixels",
+    "drawArrays",
+    "drawElements",
+    "createTexture",
+    "bindTexture",
+    "bindFramebuffer",
+    "createFramebuffer",
+    "framebufferTexture2D",
+    "createShader",
+    "shaderSource",
+    "compileShader",
+    "createProgram",
+    "linkProgram",
+    "useProgram"
+  ];
+  for (const [label, ctor, capturedMap] of [
+    ["WebGLRenderingContext", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext : null, NATIVES.webgl1],
+    ["WebGL2RenderingContext", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext : null, NATIVES.webgl2]
+  ]) {
+    for (const method of webglMethodNames) {
+      current.push([
+        `${label}.prototype.${method}`,
+        ctor ? ctor.prototype[method] : null,
+        capturedMap?.[method] ?? null
+      ]);
+    }
+  }
   const issues = [];
   for (const [name, now, captured] of current) {
     if (!captured && !now) continue;
     if (now !== captured || captured && !isNativeFn(captured)) issues.push(name);
   }
   return issues;
+}
+function auditIntegrityDetails() {
+  const issues = auditIntegrity();
+  const capturedByName = /* @__PURE__ */ new Map([
+    ["fetch", NATIVES.fetch],
+    ["createImageBitmap", NATIVES.createImageBitmap],
+    ["URL.createObjectURL", NATIVES.createObjectURL],
+    ["HTMLCanvasElement.prototype.getContext", NATIVES.canvasGetContext],
+    ["HTMLCanvasElement.prototype.toDataURL", NATIVES.canvasToDataURL],
+    ["HTMLCanvasElement.prototype.toBlob", NATIVES.canvasToBlob],
+    ["CanvasRenderingContext2D.prototype.drawImage", NATIVES.ctxDrawImage],
+    ["CanvasRenderingContext2D.prototype.getImageData", NATIVES.ctxGetImageData],
+    ["Document.prototype.createElement", NATIVES.docCreateElement]
+  ]);
+  for (const [label, capturedMap] of [
+    ["WebGLRenderingContext", NATIVES.webgl1],
+    ["WebGL2RenderingContext", NATIVES.webgl2]
+  ]) {
+    for (const [method, fn] of Object.entries(capturedMap || {})) {
+      capturedByName.set(`${label}.prototype.${method}`, fn);
+    }
+  }
+  const capturedNonNative = issues.filter((name) => {
+    const captured = capturedByName.get(name);
+    return !!captured && !isNativeFn(captured);
+  });
+  return Object.freeze({
+    ok: issues.length === 0,
+    issues: Object.freeze(issues),
+    capturedNonNative: Object.freeze(capturedNonNative),
+    changedSinceLoad: Object.freeze(issues.filter((name) => !capturedNonNative.includes(name))),
+    checked: Object.freeze([
+      "fetch",
+      "createImageBitmap",
+      "URL.createObjectURL",
+      "canvas context/readback",
+      "CanvasRenderingContext2D draw/readback",
+      "Document.createElement",
+      "WebGL/WebGL2 texture, framebuffer, shader/program, draw, and readback methods"
+    ]),
+    note: "Tripwire only: a clean result does not prove the absence of pre-load, native-looking, extension, CDP, or modified-browser hooks."
+  });
+}
+function captureEarlyIntegritySnapshot() {
+  const snapshot = Object.freeze({
+    fetch: globalThis.fetch || null,
+    createImageBitmap: globalThis.createImageBitmap || null,
+    canvasGetContext: typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null,
+    webglDrawArrays: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null,
+    webgl2DrawArrays: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null,
+    webglReadPixels: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null,
+    webgl2ReadPixels: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null,
+    at: Date.now()
+  });
+  return snapshot;
+}
+function verifyEarlyIntegritySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return Object.freeze({ ok: false, issues: Object.freeze(["missing-snapshot"]) });
+  const checks = [
+    ["fetch", globalThis.fetch || null, snapshot.fetch],
+    ["createImageBitmap", globalThis.createImageBitmap || null, snapshot.createImageBitmap],
+    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, snapshot.canvasGetContext],
+    ["WebGLRenderingContext.prototype.drawArrays", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null, snapshot.webglDrawArrays],
+    ["WebGL2RenderingContext.prototype.drawArrays", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null, snapshot.webgl2DrawArrays],
+    ["WebGLRenderingContext.prototype.readPixels", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null, snapshot.webglReadPixels],
+    ["WebGL2RenderingContext.prototype.readPixels", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null, snapshot.webgl2ReadPixels]
+  ];
+  const issues = checks.filter(([, now, before]) => (before || now) && now !== before).map(([name]) => name);
+  return Object.freeze({ ok: issues.length === 0, issues: Object.freeze(issues), snapshotAt: snapshot.at || null });
 }
 function detectAutomation() {
   const signals = [];
@@ -1162,6 +1562,9 @@ function getNativeContext(canvas, type, attrs) {
 }
 function nativeDrawImage(ctx, ...args) {
   return NATIVES.ctxDrawImage ? NATIVES.ctxDrawImage.call(ctx, ...args) : ctx.drawImage(...args);
+}
+function nativeGlDrawArrays(gl, mode, first, count) {
+  return NATIVES.glDrawArrays ? NATIVES.glDrawArrays.call(gl, mode, first, count) : gl.drawArrays(mode, first, count);
 }
 var DEFAULTS = {
   mode: "shield",
@@ -1280,12 +1683,117 @@ var DEFAULTS = {
   onLoad: null,
   onError: null,
   onClick: null,
+  onEvent: null,
+  // (sanitizedEvent, instance) => void — generic monitoring/plugin hook; never receives tokens/keys/pixels
   alt: ""
 };
 var globalConfig = structuredCloneSafe(DEFAULTS);
 var instances = /* @__PURE__ */ new Set();
 var hostToInstance = /* @__PURE__ */ new WeakMap();
 var pageSessionId = null;
+var globalEventListeners = /* @__PURE__ */ new Set();
+var installedPlugins = /* @__PURE__ */ new Map();
+function sanitizeClientEvent(type, details = {}, instance = null) {
+  let mode = null;
+  try {
+    mode = instance?.options?.requestedMode || instance?.options?.mode || null;
+  } catch {
+  }
+  const cleanText = (value, max = 160) => {
+    if (value == null) return null;
+    const text = String(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
+    return text || null;
+  };
+  return Object.freeze({
+    schemaVersion: 1,
+    service: "archx-client",
+    type: cleanText(type, 80) || "archx.event",
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    mode: cleanText(mode, 32),
+    kind: cleanText(details.kind, 120),
+    reason: cleanText(details.reason, 160),
+    outcome: cleanText(details.outcome, 48),
+    issues: Array.isArray(details.issues) ? Object.freeze(details.issues.slice(0, 40).map((issue) => cleanText(issue, 120)).filter(Boolean)) : null
+  });
+}
+function emitClientEvent(type, details = {}, instance = null) {
+  const event = sanitizeClientEvent(type, details, instance);
+  const invoke = (listener) => {
+    try {
+      const result = listener(event, instance);
+      if (result && typeof result.catch === "function") result.catch(() => {
+      });
+    } catch {
+    }
+  };
+  for (const listener of [...globalEventListeners]) invoke(listener);
+  for (const plugin of installedPlugins.values()) {
+    if (typeof plugin.onEvent === "function") invoke(plugin.onEvent);
+  }
+  try {
+    const perInstance = instance?.options?.onEvent;
+    if (typeof perInstance === "function") invoke(perInstance);
+  } catch {
+  }
+  return event;
+}
+function onClientEvent(listener) {
+  if (typeof listener !== "function") throw new TypeError("Archx.on: listener must be a function");
+  globalEventListeners.add(listener);
+  return () => {
+    globalEventListeners.delete(listener);
+  };
+}
+function offClientEvent(listener) {
+  return globalEventListeners.delete(listener);
+}
+function usePlugin(plugin) {
+  if (!plugin || typeof plugin !== "object") throw new TypeError("Archx.use: plugin must be an object");
+  const name = typeof plugin.name === "string" && plugin.name.trim() ? plugin.name.trim().slice(0, 80) : `plugin-${installedPlugins.size + 1}`;
+  if (plugin.onEvent !== void 0 && typeof plugin.onEvent !== "function") {
+    throw new TypeError("Archx.use: plugin.onEvent must be a function when supplied");
+  }
+  if (plugin.setup !== void 0 && typeof plugin.setup !== "function") {
+    throw new TypeError("Archx.use: plugin.setup must be a function when supplied");
+  }
+  if (plugin.teardown !== void 0 && typeof plugin.teardown !== "function") {
+    throw new TypeError("Archx.use: plugin.teardown must be a function when supplied");
+  }
+  const previous = installedPlugins.get(name);
+  if (previous?.teardown) {
+    try {
+      previous.teardown();
+    } catch {
+    }
+  }
+  const record = Object.freeze({ name, onEvent: plugin.onEvent || null, teardown: plugin.teardown || null });
+  installedPlugins.set(name, record);
+  if (typeof plugin.setup === "function") {
+    try {
+      plugin.setup(Object.freeze({ on: onClientEvent, off: offClientEvent, version: VERSION }));
+    } catch {
+      installedPlugins.delete(name);
+      throw new Error(`Archx.use: plugin "${name}" setup failed`);
+    }
+  }
+  emitClientEvent("archx.plugin_installed", { kind: name, outcome: "installed" });
+  return Object.freeze({
+    name,
+    remove() {
+      const current = installedPlugins.get(name);
+      if (!current) return false;
+      installedPlugins.delete(name);
+      try {
+        current.teardown?.();
+      } catch {
+      }
+      return true;
+    }
+  });
+}
+function listPlugins() {
+  return Object.freeze([...installedPlugins.keys()]);
+}
 function structuredCloneSafe(obj) {
   return JSON.parse(JSON.stringify(obj, (k, v) => typeof v === "function" ? void 0 : v));
 }
@@ -1486,6 +1994,29 @@ var TEMPORAL_INTERLACE_PROFILES = Object.freeze({
     fillStrength: 1,
     refreshHz: 60,
     minPhaseHz: 30,
+    optimizeRefresh: true,
+    respectReducedMotion: true,
+    chroma: true
+  }),
+  // Higher-cost capture-resistant profile: three phases mean each spatial
+  // subset is fully present only once per three display frames (about 20 Hz
+  // per subset on a 60 Hz display), hidden cells use keyed noise instead of a
+  // locally useful average, and the active subset is not gain-compensated.
+  // This is visibly harsher and still cannot stop multi-frame/video capture;
+  // it is an explicit quality/security trade-off, not a new guarantee.
+  fortress60: Object.freeze({
+    engine: "auto",
+    layout: "blocks",
+    cellSize: 6,
+    phases: 3,
+    fill: "noise",
+    fillBlock: 10,
+    fillStrength: 1,
+    noiseStrength: 0.55,
+    hiddenScale: 0,
+    activeGain: 1,
+    refreshHz: 60,
+    minPhaseHz: 20,
     optimizeRefresh: true,
     respectReducedMotion: true,
     chroma: true
@@ -2455,8 +2986,21 @@ var ProtectedImage = class {
     }
     __privateSet(this, _root, root);
     const doc = __privateGet(this, _host).ownerDocument;
-    const style = doc.createElement("style");
-    style.textContent = SHADOW_CSS;
+    let style = null;
+    let adoptedStyles = false;
+    if (root !== __privateGet(this, _host) && typeof CSSStyleSheet !== "undefined" && "adoptedStyleSheets" in root) {
+      try {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(SHADOW_CSS);
+        root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+        adoptedStyles = true;
+      } catch {
+      }
+    }
+    if (!adoptedStyles) {
+      style = doc.createElement("style");
+      style.textContent = SHADOW_CSS;
+    }
     const wrap = doc.createElement("div");
     wrap.className = "wrap loading" + (o.showBadge ? " show-badge" : "");
     wrap.innerHTML = `
@@ -2467,7 +3011,8 @@ var ProtectedImage = class {
       <div class="shield"></div>
       <div class="risk"></div>
       <div class="err"><span>\u26A0<br>Protected image unavailable</span></div>`;
-    root.append(style, wrap);
+    if (style) root.append(style, wrap);
+    else root.append(wrap);
     __privateSet(this, _wrap, wrap);
     __privateSet(this, _canvas, wrap.querySelector("canvas.main"));
     __privateSet(this, _tilesEl, wrap.querySelector(".tiles"));
@@ -2486,6 +3031,7 @@ var ProtectedImage = class {
       } catch {
       }
       __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-attempt", { detail: { kind }, bubbles: true }));
+      emitClientEvent("archx.attempt", { kind, outcome: "detected" }, this);
       __privateMethod(this, _ProtectedImage_instances, registerStrike_fn).call(this, kind);
     };
     __privateSet(this, _attemptHandler, attempt);
@@ -3004,6 +3550,11 @@ var ProtectedImage = class {
     if (!__privateMethod(this, _ProtectedImage_instances, securityGate_fn).call(this)) {
       __privateGet(this, _wrap).classList.remove("loading");
       __privateGet(this, _wrap).classList.add("error");
+      emitClientEvent("archx.blocked", {
+        reason: "integrity-automation-or-lockout-policy",
+        outcome: "blocked",
+        issues: __privateGet(this, _integrityIssues)
+      }, this);
       __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-error", {
         detail: { error: new Error("Archx: blocked by integrity/automation/lockout policy") },
         bubbles: true
@@ -3045,6 +3596,7 @@ var ProtectedImage = class {
       __privateSet(this, _unloaded, false);
       __privateGet(this, _wrap).classList.remove("loading", "error");
       __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-load", { bubbles: true }));
+      emitClientEvent("archx.loaded", { outcome: "loaded" }, this);
       try {
         __privateGet(this, _options).onLoad && __privateGet(this, _options).onLoad(this);
       } catch {
@@ -3053,6 +3605,7 @@ var ProtectedImage = class {
       if (__privateGet(this, _destroyed)) return;
       __privateGet(this, _wrap).classList.remove("loading");
       __privateGet(this, _wrap).classList.add("error");
+      emitClientEvent("archx.error", { reason: "load-failed", outcome: "error" }, this);
       __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-error", { detail: { error: err }, bubbles: true }));
       try {
         __privateGet(this, _options).onError && __privateGet(this, _options).onError(err, this);
@@ -3360,12 +3913,15 @@ var ProtectedImage = class {
       nativeDrawImage(ctx, tiny, 0, 0, w, h);
       tiny.width = 0;
       ctx.save();
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = "#fff";
-      ctx.font = `700 ${Math.max(14, w / 18)}px system-ui,sans-serif`;
+      const markSize = Math.max(14, w / 18);
+      ctx.font = `700 ${markSize}px system-ui,sans-serif`;
       ctx.textAlign = "center";
       ctx.translate(w / 2, h / 2);
       ctx.rotate(-Math.PI / 8);
+      ctx.fillStyle = "rgba(0,0,0,0.58)";
+      ctx.fillRect(-w * 0.75, -markSize * 0.92, w * 1.5, markSize * 1.45);
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#fff";
       ctx.fillText(String((typeof o.watermark === "string" ? o.watermark : o.watermark?.text) || o.brand), 0, 0);
       ctx.restore();
       return decoy;
@@ -3373,15 +3929,29 @@ var ProtectedImage = class {
     if (kind === "scrambled") {
       decoy.width = w;
       decoy.height = h;
+      const tinyW = 144;
+      const tinyH = Math.max(1, Math.round(h / Math.max(1, w) * tinyW));
+      const tiny = makeCanvas();
+      tiny.width = tinyW;
+      tiny.height = tinyH;
+      nativeDrawImage(getNativeContext(tiny, "2d"), cleanCanvas, 0, 0, tinyW, tinyH);
+      const staging = makeCanvas();
+      staging.width = w;
+      staging.height = h;
+      const stagingCtx = getNativeContext(staging, "2d");
+      stagingCtx.imageSmoothingEnabled = false;
+      nativeDrawImage(stagingCtx, tiny, 0, 0, w, h);
+      tiny.width = 0;
+      tiny.height = 0;
       const g = 8;
       const plan = buildScramblePlan(g, "decoy-" + sessionId());
-      const tw = cleanCanvas.width / g, th = cleanCanvas.height / g;
+      const tw = staging.width / g, th = staging.height / g;
       const dw = w / g, dh = h / g;
       for (let dest = 0; dest < plan.count; dest++) {
         const source = plan.order[dest];
         nativeDrawImage(
           ctx,
-          cleanCanvas,
+          staging,
           source % g * tw,
           Math.floor(source / g) * th,
           tw,
@@ -3392,6 +3962,20 @@ var ProtectedImage = class {
           dh + 1
         );
       }
+      staging.width = 0;
+      staging.height = 0;
+      ctx.save();
+      const markSize = Math.max(14, w / 18);
+      ctx.font = `700 ${markSize}px system-ui,sans-serif`;
+      ctx.textAlign = "center";
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(-Math.PI / 8);
+      ctx.fillStyle = "rgba(0,0,0,0.58)";
+      ctx.fillRect(-w * 0.75, -markSize * 0.92, w * 1.5, markSize * 1.45);
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#fff";
+      ctx.fillText(String((typeof o.watermark === "string" ? o.watermark : o.watermark?.text) || o.brand), 0, 0);
+      ctx.restore();
       return decoy;
     }
     decoy.width = Math.max(320, Math.min(w, 800));
@@ -3956,7 +4540,7 @@ var ProtectedImage = class {
       gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
       gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
       gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
       if (temporal) {
         __privateSet(this, _temporalSign, -__privateGet(this, _temporalSign));
@@ -4319,6 +4903,10 @@ waitForStableSize_fn = async function() {
 securityGate_fn = function() {
   const o = __privateGet(this, _options);
   if (Date.now() < __privateGet(this, _lockedUntil)) return false;
+  if (!["off", "monitor", "lock"].includes(o.integrity)) {
+    if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "integrity:invalid-mode");
+    return false;
+  }
   if (o.integrity !== "off") {
     __privateSet(this, _integrityIssues, auditIntegrity());
     if (__privateGet(this, _integrityIssues).length) {
@@ -4818,6 +5406,14 @@ var Archx = {
   },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,
+  auditIntegrityDetails,
+  captureEarlyIntegritySnapshot,
+  verifyEarlyIntegritySnapshot,
+  /** Sanitized global monitoring hooks (never tokens, keys, pixels, or raw errors). */
+  on: onClientEvent,
+  off: offClientEvent,
+  use: usePlugin,
+  plugins: listPlugins,
   /** Cheap headless/automation signals present in this browser. */
   detectAutomation
 };

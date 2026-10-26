@@ -3,15 +3,16 @@
  * node:http). Masters stay on disk OUTSIDE your static folder; this is the
  * only route that can read them, and it only ever returns a down-scaled,
  * tile-scrambled (optionally AES-GCM-encrypted) .archx payload behind a
- * short-lived HMAC-signed URL.
+ * short-lived HMAC-signed token.
  *
- *   POST {basePath}/token/:id?w=1200  -> { url, key, aesKey?, grid, exp }
- *   GET  {basePath}/i/:id?t=...       -> application/octet-stream (.archx)
+ *   POST {basePath}/token/:id?w=1200 -> { url, cleanUrl, token, key, aesKey?, grid, exp }
+ *   GET  {basePath}/i/:id + X-Archx-Token -> application/octet-stream (.archx)
+ *        (`?t=` is accepted only with explicit legacy `allowQueryTokens:true`)
  *
  * Secure defaults are deny-by-default: startup fails unless the host supplies
  * an `authorize(req, id, { phase })` callback or explicitly sets
  * `allowAnonymous: true` for an intentionally public catalog. Authorization
- * runs again when the signed URL is redeemed, so revocation/session changes
+ * runs again when the signed token is redeemed, so revocation/session changes
  * take effect inside the token TTL. There is no URL that returns the master.
  *
  * Client-side scrambling/AES is NOT DRM: any key delivered to a browser must
@@ -511,8 +512,8 @@ function isPlainObject(value) {
 }
 
 const TOKEN_CLAIM_FIELDS = new Set([
-  'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'wm',
-  'sg', 'sgp', 'sgs', 'sge', 'sgx', 'sgy', 'nsg', 'b', 'jkt',
+  'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm',
+  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'nsg', 'b', 'jkt',
 ]);
 
 /** Strict server-side claim validation for v2 Archx image tokens. Signature
@@ -542,12 +543,14 @@ export function validateTokenClaims(payload, {
     if (payload.fmt != null && !['webp', 'png', 'jpeg'].includes(payload.fmt)) return false;
     if (payload.ls !== undefined && payload.ls !== 1) return false;
     if (payload.sgp !== undefined && payload.sgp !== 0) return false;
+    if (payload.sgv !== undefined && payload.sgv !== 2) return false;
     if (payload.sge !== undefined && payload.sge !== 0 && payload.sge !== 1) return false;
     if (payload.nsg !== undefined && payload.nsg !== 1) return false;
     if (payload.sgs !== undefined && (typeof payload.sgs !== 'number' || !Number.isFinite(payload.sgs) || payload.sgs < 1 || payload.sgs > 16)) return false;
     if (payload.sgx !== undefined && (!Number.isInteger(payload.sgx) || payload.sgx < 4 || payload.sgx > 64)) return false;
     if (payload.sgy !== undefined && (!Number.isInteger(payload.sgy) || payload.sgy < 4 || payload.sgy > 64)) return false;
     if (payload.vh !== undefined && (typeof payload.vh !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(payload.vh))) return false;
+    if (payload.th !== undefined && (typeof payload.th !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(payload.th))) return false;
     if (payload.jkt !== undefined && (typeof payload.jkt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload.jkt))) return false;
     if (payload.sg !== undefined && (typeof payload.sg !== 'string' || !payload.sg || payload.sg.length > 512 || /[\u0000-\u001f\u007f]/.test(payload.sg))) return false;
     if (payload.wm !== undefined && payload.wm !== null && !validateWatermarkValue(payload.wm)) return false;
@@ -655,9 +658,10 @@ function validateStegoConfig(value) {
   try {
     if (typeof value === 'boolean') return true;
     if (!isPlainObject(value)) return false;
-    const fields = new Set(['perToken', 'strength', 'gridX', 'gridY']);
+    const fields = new Set(['perToken', 'profile', 'strength', 'gridX', 'gridY']);
     if (Object.keys(value).some((field) => !fields.has(field))) return false;
     if (value.perToken !== undefined && typeof value.perToken !== 'boolean') return false;
+    if (value.profile !== undefined && !['standard', 'robust'].includes(value.profile)) return false;
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
     if (value.gridY !== undefined && (!Number.isInteger(value.gridY) || value.gridY < 4 || value.gridY > 64)) return false;
@@ -693,6 +697,7 @@ export function normalizeAuthorizationResult(auth) {
 
     const knownFields = [
       'allow', 'allowed', 'authorized', 'viewerId', 'userId', 'subject', 'sessionId',
+      'buyerId', 'orderId', 'deliveryId', 'traceId',
       'permissions', 'scopes', 'scope', 'maxWidth', 'quality', 'lossless', 'format',
       'watermark', 'steganography', 'stegoFingerprint',
     ];
@@ -705,6 +710,14 @@ export function normalizeAuthorizationResult(auth) {
       viewerId = String(auth[field]);
       if (!viewerId || viewerId.length > 512 || /[\u0000-\u001f\u007f]/.test(viewerId)) return null;
       break;
+    }
+    const traceFields = {};
+    for (const field of ['buyerId', 'orderId', 'deliveryId', 'traceId']) {
+      if (!(field in auth) || auth[field] == null) continue;
+      if (!['string', 'number', 'bigint'].includes(typeof auth[field])) return null;
+      const value = String(auth[field]);
+      if (!value || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+      traceFields[field] = value;
     }
     if ('maxWidth' in auth && auth.maxWidth !== undefined &&
         (typeof auth.maxWidth !== 'number' || !Number.isFinite(auth.maxWidth) || auth.maxWidth < 64 || auth.maxWidth > 1000000)) return null;
@@ -724,6 +737,7 @@ export function normalizeAuthorizationResult(auth) {
       normalized[field] = isPlainObject(auth[field]) ? { ...auth[field] } : auth[field];
     }
     if (viewerId) normalized.viewerId = viewerId;
+    Object.assign(normalized, traceFields);
     return Object.freeze(normalized);
   } catch { return null; }
 }
@@ -745,7 +759,8 @@ function inspectServerConfig(options = {}) {
     'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
     'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'onAbuse',
-    'onSecurityEvent', 'onStegoIssue', 'oneTimeTokenMaxEntries', 'oneTimeTokens', 'proofOfPossession',
+    'onDelivery', 'onProvenanceIssue', 'onSecurityEvent', 'onStegoIssue', 'oneTimeTokenMaxEntries',
+    'oneTimeTokens', 'proofOfPossession', 'provenanceFailure',
     'outputCacheMax', 'outputCacheMaxBytes', 'processing', 'processingConcurrency',
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
@@ -997,6 +1012,8 @@ function inspectServerConfig(options = {}) {
   if (options.onSecurityEvent != null && typeof options.onSecurityEvent !== 'function') fail('onSecurityEvent must be a function');
   if (options.onAbuse != null && typeof options.onAbuse !== 'function') fail('onAbuse must be a function');
   if (options.onStegoIssue != null && typeof options.onStegoIssue !== 'function') fail('onStegoIssue must be a function');
+  if (options.onProvenanceIssue != null && typeof options.onProvenanceIssue !== 'function') fail('onProvenanceIssue must be a function');
+  if (options.onDelivery != null && typeof options.onDelivery !== 'function') fail('onDelivery must be a function');
   if (options.serverWatermark != null && typeof options.serverWatermark !== 'function' &&
       !validateWatermarkValue(options.serverWatermark)) fail('serverWatermark must be a bounded string, watermark object, or function');
   if (options.forensic !== undefined) {
@@ -1009,7 +1026,7 @@ function inspectServerConfig(options = {}) {
     }
   }
   if (options.steganography !== undefined && !validateStegoConfig(options.steganography)) {
-    fail('steganography must be boolean or a bounded { perToken, strength, gridX, gridY } object');
+    fail('steganography must be boolean or a bounded { perToken, profile, strength, gridX, gridY } object');
   }
   if (options.bindTokenTo !== undefined) {
     if (!isPlainObject(options.bindTokenTo)) fail('bindTokenTo must be an object');
@@ -1095,24 +1112,35 @@ function inspectServerConfig(options = {}) {
     trustedProxyHops: options.trustedProxyHops ?? 0,
     requireSameSiteTokenRequests: options.requireSameSiteTokenRequests !== false,
     requireTokenRequestHeader: options.requireTokenRequestHeader !== false,
-    allowQueryTokens: options.allowQueryTokens !== false,
+    // Bearer tokens belong in X-Archx-Token by default. Query transport is
+    // retained only as an explicit compatibility opt-in because URL tokens
+    // leak through history, Referer headers, screenshots of logs, and many
+    // proxy/telemetry pipelines.
+    allowQueryTokens: options.allowQueryTokens === true,
     proofOfPossession: options.proofOfPossession === true ? 'required'
       : options.proofOfPossession === false ? 'off'
         : (options.proofOfPossession ?? 'optional'),
     callbackTimeoutMs: options.callbackTimeoutMs ?? options.authorizeTimeoutMs ?? 10000,
     stegoRegistryFailure: options.stegoRegistryFailure ?? 'deny',
+    provenanceFailure: options.provenanceFailure ?? 'deny',
     publicDirs: Object.freeze([
       ...(options.publicDir ? [options.publicDir] : []),
       ...(Array.isArray(options.publicDirs) ? options.publicDirs : []),
     ]),
   });
   if (!['deny', 'allow'].includes(config.stegoRegistryFailure)) fail("stegoRegistryFailure must be 'deny' or 'allow'");
+  if (!['deny', 'allow'].includes(config.provenanceFailure)) fail("provenanceFailure must be 'deny' or 'allow'");
   if (!['optional', 'required', 'off'].includes(config.proofOfPossession)) {
     fail("proofOfPossession must be 'optional', 'required', 'off', true, or false");
   }
+  if (config.allowQueryTokens) warn('allowQueryTokens is enabled for compatibility: bearer tokens can leak through URLs, history, Referer headers, and logs; prefer header transport');
   if (config.proofOfPossession === 'off') warn('proofOfPossession is off: tokens remain bearer tokens if copied before expiry');
+  if (config.proofOfPossession === 'optional') warn("proofOfPossession is optional: only tokens minted with a browser proof key are sender-constrained; use 'required' for the hardened production baseline when every supported client can present proofs");
+  if (config.abuseDetection.action === 'event') warn("abuseDetection.action is 'event': suspicious distinct-image access is recorded through onSecurityEvent but is not blocked by Archx unless the host acts on it or selects action:'deny'");
+  if (options.steganography && !options.onStegoIssue) warn('StegoMark is enabled without onStegoIssue: fingerprints will not be registered to a viewer/order, sharply limiting leak tracing');
+  if (options.encrypt === true) warn('encrypt is enabled: the AES and scramble keys in the mint response are necessarily visible to the authorized browser/page and are not secrets from that viewer');
   if (options.allowClientQuality) warn('allowClientQuality lets browsers request quality up to the server entitlement; keep authorize() caps strict');
-  if (config.oneTimeTokens === false) warn('oneTimeTokens is disabled: signed URLs can be replayed until expiry');
+  if (config.oneTimeTokens === false) warn('oneTimeTokens is disabled: signed tokens can be replayed until expiry');
   return { ok: issues.length === 0, issues, warnings, config: issues.length ? null : config };
 }
 
@@ -1139,11 +1167,97 @@ export function auditArchxServerConfig(options = {}) {
       processing: config.processing,
       processingConcurrency: config.processingConcurrency,
       requireTokenRequestHeader: config.requireTokenRequestHeader,
+      requireSameSiteTokenRequests: config.requireSameSiteTokenRequests,
       allowQueryTokens: config.allowQueryTokens,
       proofOfPossession: config.proofOfPossession,
+      abuseDetection: config.abuseDetection,
+      quotasConfigured: Object.values(config.quotas).some((value) => typeof value === 'number' && value > 0),
+      stegoRegistryConfigured: typeof options.onStegoIssue === 'function',
+      provenanceHookConfigured: typeof options.onProvenanceIssue === 'function',
+      deliveryHookConfigured: typeof options.onDelivery === 'function',
+      securityEventHookConfigured: typeof (options.onSecurityEvent || options.onAbuse) === 'function',
       trustProxy: config.trustProxy,
       trustedProxyHops: config.trustedProxyHops,
     }) : null,
+  });
+}
+
+/**
+ * Defaults for a hardened paid/premium deployment. This helper only fills
+ * fields the host left undefined; it cannot supply the secret, masters,
+ * authorization callback, quotas, shared store, or client compatibility
+ * decision for proof-of-possession. Run auditArchxProductionConfig() on the
+ * final options in deployment tests.
+ */
+export function withHardenedProductionDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx hardened production defaults: options must be an object');
+  }
+  const abuse = isPlainObject(options.abuseDetection) ? options.abuseDetection : {};
+  return {
+    tokenMethods: ['POST'],
+    requireSameSiteTokenRequests: true,
+    requireTokenRequestHeader: true,
+    allowQueryTokens: false,
+    proofOfPossession: 'required',
+    oneTimeTokens: true,
+    ttlSec: 120,
+    callbackTimeoutMs: 10000,
+    stegoRegistryFailure: 'deny',
+    provenanceFailure: 'deny',
+    ...options,
+    abuseDetection: {
+      distinctImages: 250,
+      windowMs: 600000,
+      ...abuse,
+      action: abuse.action ?? 'deny',
+    },
+  };
+}
+
+/**
+ * Stricter, named production-readiness audit. `auditArchxServerConfig()`
+ * answers "is this configuration internally valid and fail-closed?" This
+ * audit additionally answers "does it match the hardened baseline for a
+ * valuable catalog?" It never returns secret values.
+ */
+export function auditArchxProductionConfig(options = {}, { expectedInstances = 1 } = {}) {
+  const base = auditArchxServerConfig(options);
+  const blockers = [...base.issues];
+  const recommendations = [];
+  if (!Number.isInteger(expectedInstances) || expectedInstances < 1 || expectedInstances > 10000) {
+    blockers.push('expectedInstances must be an integer from 1 to 10000');
+  }
+  const summary = base.summary;
+  if (summary) {
+    if (summary.authorization !== 'authorize-callback') blockers.push('production deployments for valuable images need an authorize() callback; explicit anonymous access is a public catalog, not an entitlement boundary');
+    if (summary.allowQueryTokens) blockers.push('allowQueryTokens must be false so bearer tokens stay out of URLs, history, Referer headers, and logs');
+    if (summary.proofOfPossession !== 'required') blockers.push("proofOfPossession must be explicitly set to 'required' for the hardened baseline, after confirming every supported client can present proofs");
+    if (!summary.oneTimeTokens) blockers.push('oneTimeTokens must be enabled');
+    if (summary.tokenMethods.some((method) => method !== 'POST')) blockers.push("tokenMethods must be ['POST'] for the hardened baseline");
+    if (!summary.requireTokenRequestHeader) blockers.push('requireTokenRequestHeader must be enabled');
+    if (!summary.requireSameSiteTokenRequests) blockers.push('requireSameSiteTokenRequests must be enabled');
+    if (Number.isInteger(expectedInstances) && expectedInstances > 1 &&
+        (summary.deploymentMode !== 'multi-instance' || summary.stateStore === 'memory')) {
+      blockers.push('expectedInstances > 1 requires deploymentMode multi-instance with a shared, atomic stateStore');
+    }
+    if (options.steganography && !summary.stegoRegistryConfigured) {
+      blockers.push('StegoMark is enabled without onStegoIssue, so issued fingerprints cannot be traced to a buyer/order/delivery registry');
+    }
+    if (summary.abuseDetection.action !== 'deny') recommendations.push("abuseDetection.action is 'event': Archx records suspicious access but does not block it; select 'deny' or document the host response runbook");
+    if (!summary.quotasConfigured) recommendations.push('configure per-viewer/IP/image quotas appropriate to the catalog and pricing model');
+    if (!summary.securityEventHookConfigured) recommendations.push('configure onSecurityEvent and alert on replay, quota, scraping, registry, and state-store events');
+    if (expectedInstances === 1 && summary.stateStore === 'memory') recommendations.push('the memory state store is valid only for one middleware process; declare and test the shared-store topology before adding a second process');
+    if (!summary.provenanceHookConfigured) recommendations.push('configure onProvenanceIssue if an external C2PA/provenance registry or reverse-image monitoring workflow needs a signed issuance record');
+    if (!summary.deliveryHookConfigured) recommendations.push('configure onDelivery if token issuance/redemption must feed monitoring, reverse-image-search, or enforcement systems');
+  }
+  return Object.freeze({
+    ok: base.ok,
+    ready: blockers.length === 0,
+    blockers: Object.freeze([...new Set(blockers)]),
+    recommendations: Object.freeze(recommendations),
+    warnings: base.warnings,
+    summary,
   });
 }
 
@@ -1204,6 +1318,8 @@ export function createArchxMiddleware(options = {}) {
   const steganography = options.steganography ?? false;
   const stegoGlobalCfg = typeof steganography === 'object' && steganography ? steganography : {};
   const onStegoIssue = options.onStegoIssue || null;
+  const onProvenanceIssue = options.onProvenanceIssue || null;
+  const onDelivery = options.onDelivery || null;
   const onSecurityEvent = options.onSecurityEvent || options.onAbuse || null;
 
   const allowedExtensions = new Set(
@@ -1533,9 +1649,53 @@ export function createArchxMiddleware(options = {}) {
     } catch { /* monitoring must never alter authorization */ }
   }
 
+  function emitDeliveryEvent(type, details = {}) {
+    if (!onDelivery) return;
+    // Deliberately metadata-only: never pass the bearer token, scramble key,
+    // AES key, proof, request headers, or master path to a monitoring hook.
+    const event = Object.freeze({
+      schemaVersion: 1,
+      eventId: crypto.randomUUID(),
+      service: 'archx',
+      type,
+      at: new Date().toISOString(),
+      imageId: details.id || null,
+      phase: details.phase || null,
+      viewerHash: details.viewerHash || null,
+      traceHash: details.traceHash || null,
+      keyId: details.keyId || null,
+      width: Number.isInteger(details.width) ? details.width : null,
+      quality: details.quality ?? null,
+      format: details.format || null,
+      stegoFingerprint: details.stegoFingerprint || null,
+      stegoProfile: details.stegoProfile || null,
+      bytes: Number.isInteger(details.bytes) ? details.bytes : null,
+    });
+    try {
+      const result = onDelivery(event);
+      if (result && typeof result.catch === 'function') result.catch(() => {});
+    } catch { /* monitoring must never alter delivery authorization */ }
+  }
+
   function authorizationViewerId(auth) {
     if (!auth || typeof auth !== 'object') return '';
     try { return String(auth.viewerId || '').slice(0, 256); } catch { return ''; }
+  }
+
+  function authorizationTrace(auth, viewerId = '', keySecret = secret) {
+    const trace = {
+      buyerId: auth?.buyerId ? String(auth.buyerId).slice(0, 256) : null,
+      orderId: auth?.orderId ? String(auth.orderId).slice(0, 256) : null,
+      deliveryId: auth?.deliveryId ? String(auth.deliveryId).slice(0, 256) : null,
+      traceId: auth?.traceId ? String(auth.traceId).slice(0, 256) : null,
+    };
+    const subject = trace.traceId || [trace.buyerId, trace.orderId, trace.deliveryId, viewerId]
+      .filter(Boolean).join(':');
+    return Object.freeze({
+      ...trace,
+      subject,
+      hash: subject ? hmacShort('trace', subject, 20, keySecret) : '',
+    });
   }
 
   async function authorizeRequest(req, id, phase, token = null) {
@@ -1721,10 +1881,16 @@ export function createArchxMiddleware(options = {}) {
   }
 
   function fillPlaceholders(text, ctx) {
+    const trace = ctx.trace || {};
+    const fallback = String(ctx.nonce).slice(0, 6);
     return String(text)
       .replaceAll('{id}', ctx.id)
-      .replaceAll('{nonce}', String(ctx.nonce).slice(0, 6))
-      .replaceAll('{viewer}', ctx.viewerId ? String(ctx.viewerId) : String(ctx.nonce).slice(0, 6));
+      .replaceAll('{nonce}', fallback)
+      .replaceAll('{viewer}', ctx.viewerId ? String(ctx.viewerId) : fallback)
+      .replaceAll('{buyer}', trace.buyerId ? String(trace.buyerId) : fallback)
+      .replaceAll('{order}', trace.orderId ? String(trace.orderId) : fallback)
+      .replaceAll('{delivery}', trace.deliveryId ? String(trace.deliveryId) : fallback)
+      .replaceAll('{trace}', trace.traceId ? String(trace.traceId) : (trace.hash || fallback));
   }
 
   async function resolveBindingValue(setting, req, fallback) {
@@ -1898,6 +2064,7 @@ export function createArchxMiddleware(options = {}) {
         const entitlement = await authorizeRequest(req, id, 'token');
         if (!entitlement) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'authorization' });
         const viewerId = authorizationViewerId(entitlement);
+        const trace = authorizationTrace(entitlement, viewerId);
         const quota = await quotaExceeded(req, id, viewerId, 'token');
         if (quota) {
           return deny(req, res, 429, 'quota exceeded', {
@@ -1957,7 +2124,7 @@ export function createArchxMiddleware(options = {}) {
         const exp = iat + ttlMs;
         const watermark = await resolveWatermark(
           entitlement.watermark ?? serverWatermark,
-          { req, id, nonce, viewerId, exp },
+          { req, id, nonce, viewerId, trace, exp },
         );
         const tokenPayload = {
           v: 2,
@@ -1968,6 +2135,7 @@ export function createArchxMiddleware(options = {}) {
         };
         const viewerHash = viewerId ? hmacShort('viewer', viewerId, 20) : '';
         if (viewerId) tokenPayload.vh = viewerHash;
+        if (trace.hash) tokenPayload.th = trace.hash;
         if (proofThumbprint) tokenPayload.jkt = proofThumbprint;
         if (watermark) tokenPayload.wm = watermark;
 
@@ -1989,18 +2157,22 @@ export function createArchxMiddleware(options = {}) {
         // will be baked into this view's pixels, and let the host persist the
         // fingerprint -> image/viewer/order mapping via onStegoIssue.
         const effectiveStego = entitlement.steganography ?? steganography;
+        let issuedFingerprint = null;
+        let issuedStegoProfile = null;
         if (effectiveStego) {
           tokenPayload.sge = 1;
           const entStegoCfg = typeof effectiveStego === 'object' ? effectiveStego : {};
           const stegoPerToken = entStegoCfg.perToken ?? stegoGlobalCfg.perToken ?? true;
-          let issuedFingerprint;
+          issuedStegoProfile = entStegoCfg.profile ?? stegoGlobalCfg.profile ?? 'standard';
+          if (issuedStegoProfile === 'robust') tokenPayload.sgv = 2;
+          const fingerprintSubjectHash = trace.hash || viewerHash;
           if (entitlement.stegoFingerprint) {
             tokenPayload.sg = String(entitlement.stegoFingerprint);
             issuedFingerprint = resolveStegoFingerprint(entitlement.stegoFingerprint);
           } else {
             if (!stegoPerToken) tokenPayload.sgp = 0;
             issuedFingerprint = deriveStegoFingerprint({
-              id, nonce, viewerHash, secret, perToken: stegoPerToken,
+              id, nonce, viewerHash: fingerprintSubjectHash, secret, perToken: stegoPerToken,
             });
           }
           const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
@@ -2012,7 +2184,20 @@ export function createArchxMiddleware(options = {}) {
           if (onStegoIssue) {
             try {
               await withCallbackTimeout(onStegoIssue, [{
-                req, id, viewerId, nonce, exp, fingerprint: issuedFingerprint, keyId: activeSecretId,
+                req,
+                id,
+                viewerId,
+                buyerId: trace.buyerId,
+                orderId: trace.orderId,
+                deliveryId: trace.deliveryId,
+                traceId: trace.traceId,
+                traceHash: trace.hash || null,
+                nonce,
+                exp,
+                issuedAt: new Date(iat).toISOString(),
+                fingerprint: issuedFingerprint,
+                profile: issuedStegoProfile,
+                keyId: activeSecretId,
               }], 'onStegoIssue callback');
             } catch {
               emitSecurityEvent('archx.stego_registry_failed', req, { id, phase, viewerId, status: 503 });
@@ -2023,6 +2208,42 @@ export function createArchxMiddleware(options = {}) {
           }
         } else if (steganography) {
           tokenPayload.nsg = 1; // entitlement explicitly opted this view out
+        }
+        if (onProvenanceIssue) {
+          // C2PA-ready extension point: the host may create/sign/store a
+          // Content Credentials manifest (or another provenance record) and
+          // bind it to these soft-binding identifiers. Archx does not claim
+          // to implement C2PA signing itself, and this record contains no
+          // bearer token, scramble key, AES key, or proof material.
+          try {
+            await withCallbackTimeout(onProvenanceIssue, [Object.freeze({
+              schemaVersion: 1,
+              type: 'archx.provenance_issued',
+              req,
+              id,
+              viewerId,
+              viewerHash: viewerHash || null,
+              buyerId: trace.buyerId,
+              orderId: trace.orderId,
+              deliveryId: trace.deliveryId,
+              traceId: trace.traceId,
+              traceHash: trace.hash || null,
+              nonce,
+              exp,
+              issuedAt: new Date(iat).toISOString(),
+              keyId: activeSecretId,
+              width: w,
+              quality: deliveryQuality,
+              format: deliveryFormat,
+              stegoFingerprint: issuedFingerprint,
+              stegoProfile: issuedStegoProfile,
+            })], 'onProvenanceIssue callback');
+          } catch {
+            emitSecurityEvent('archx.provenance_failed', req, { id, phase, viewerId, status: 503 });
+            if (cfg.provenanceFailure !== 'allow') {
+              return sendJson(req, res, 503, { error: 'service unavailable' });
+            }
+          }
         }
         if (bindTokenTo.session === true && !viewerId) {
           return deny(req, res, 403, 'forbidden', { id, phase, reason: 'session-binding-unavailable' });
@@ -2043,9 +2264,14 @@ export function createArchxMiddleware(options = {}) {
         const token = signToken(tokenPayload, secret);
         const imagePath = `${basePath}/i/${encodeURIComponent(id)}`;
         const out = {
-          // Compatibility URL for existing clients. New clients use `token`
-          // in X-Archx-Token with the clean URL below, keeping bearer material
-          // out of URLs, browser history, Referer headers, and proxy logs.
+          // `url` is the clean URL by default. Only an explicit
+          // allowQueryTokens compatibility opt-in appends ?t=. New clients
+          // use `token` in X-Archx-Token with cleanUrl, keeping bearer
+          // material out of URLs, browser history, Referer headers, and
+          // proxy logs. Header transport does NOT hide token/key/aesKey from
+          // JavaScript or a viewer controlling the authorized browser: that
+          // browser must receive them to redeem, unscramble, and decrypt.
+          // Never log this response object.
           url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
           cleanUrl: imagePath,
           token,
@@ -2054,6 +2280,18 @@ export function createArchxMiddleware(options = {}) {
           exp,
         };
         if (encrypt) out.aesKey = deriveAesKey(id, nonce);
+        emitDeliveryEvent('archx.token_issued', {
+          id,
+          phase,
+          viewerHash: viewerHash || null,
+          traceHash: trace.hash || null,
+          keyId: activeSecretId,
+          width: w,
+          quality: deliveryQuality,
+          format: deliveryFormat,
+          stegoFingerprint: issuedFingerprint,
+          stegoProfile: issuedStegoProfile,
+        });
         return sendJson(req, res, 200, out);
       }
 
@@ -2103,6 +2341,13 @@ export function createArchxMiddleware(options = {}) {
           if (!currentViewerHash || !safeEqual(payload.vh, currentViewerHash)) {
             return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'viewer-binding' });
           }
+        }
+        const currentTrace = authorizationTrace(entitlement, currentViewerId, issuingSecret);
+        const currentHasTraceFields = ['buyerId', 'orderId', 'deliveryId', 'traceId']
+          .some((field) => entitlement[field] != null);
+        if (payload.th && currentHasTraceFields &&
+            (!currentTrace.hash || !safeEqual(payload.th, currentTrace.hash))) {
+          return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'trace-binding' });
         }
         if (payload.b) {
           try {
@@ -2181,8 +2426,8 @@ export function createArchxMiddleware(options = {}) {
         const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret);
         const forensicSeed = forensic
           ? hmacShort('forensic', forensicPerToken
-              ? `${id}:${payload.n}:${payload.vh || ''}`
-              : `${id}:static:${payload.vh || ''}`, 32, issuingSecret)
+              ? `${id}:${payload.n}:${payload.th || payload.vh || ''}`
+              : `${id}:static:${payload.th || payload.vh || ''}`, 32, issuingSecret)
           : null;
         const deliveryQuality = effectiveQuality;
         const deliveryLossless = effectiveLossless;
@@ -2206,24 +2451,25 @@ export function createArchxMiddleware(options = {}) {
           ? (payload.sg || deriveStegoFingerprint({
               id,
               nonce: payload.n,
-              viewerHash: payload.vh || '',
+              viewerHash: payload.th || payload.vh || '',
               secret: issuingSecret,
               perToken: payload.sgp !== 0,
             }))
           : null;
+        const effectiveStegoProfile = payload.sgv === 2 ? 'robust' : 'standard';
         const effectiveStegoStrength = payload.sgs ?? stegoGlobalCfg.strength ?? 6;
         const effectiveStegoGridX = payload.sgx ?? stegoGlobalCfg.gridX;
         const effectiveStegoGridY = payload.sgy ?? stegoGlobalCfg.gridY;
         const wmCachePart = payload.wm ? hmacShort('wm', JSON.stringify(payload.wm), 12, issuingSecret) : 'nowm';
         const stegoCachePart = stegoPayload
-          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? 24}:y${effectiveStegoGridY ?? 16}`
+          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}`
           : 'nosg';
         const cacheKey = [
           id, masterVersion, `kid:${payload.kid}`, effectiveWidth,
           scrambleKeyMode === 'per-token' ? payload.n : 's',
           encrypt ? 'e' : 'p', wmCachePart,
           forensicSeed ? (forensicPerToken ? payload.n : 'fx') : 'nofx',
-          payload.vh || '',
+          `${payload.vh || ''}:${payload.th || ''}`,
           `q${deliveryQuality}`, deliveryLossless ? 'ls' : 'lq', deliveryFormat, stegoCachePart,
         ].join('|');
         const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
@@ -2286,8 +2532,10 @@ export function createArchxMiddleware(options = {}) {
                   stegoPayload,
                   stegoKey: stegoPayload ? deriveStegoKey(id, issuingSecret) : null,
                   stegoStrength: effectiveStegoStrength,
+                  stegoProfile: effectiveStegoProfile,
                   steganography: stegoPayload ? {
                     ...stegoGlobalCfg,
+                    profile: effectiveStegoProfile,
                     ...(effectiveStegoGridX != null ? { gridX: effectiveStegoGridX } : {}),
                     ...(effectiveStegoGridY != null ? { gridY: effectiveStegoGridY } : {}),
                   } : null,
@@ -2320,6 +2568,19 @@ export function createArchxMiddleware(options = {}) {
           'Content-Disposition': 'inline; filename="data.bin"',
           'Content-Security-Policy': "default-src 'none'; sandbox",
           ...protectedHeaders(req),
+        });
+        emitDeliveryEvent('archx.image_delivered', {
+          id,
+          phase,
+          viewerHash: payload.vh || null,
+          traceHash: payload.th || null,
+          keyId: payload.kid || null,
+          width: effectiveWidth,
+          quality: deliveryQuality,
+          format: deliveryFormat,
+          stegoFingerprint: stegoPayload ? resolveStegoFingerprint(stegoPayload) : null,
+          stegoProfile: stegoPayload ? effectiveStegoProfile : null,
+          bytes: bytes.length,
         });
         return res.end(bytes);
       }

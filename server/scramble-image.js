@@ -362,11 +362,13 @@ export async function scrambleImage(input, opts = {}) {
   const stegoPayload = opts.stegoPayload ?? stegoCfg.payload ??
     (opts.steganography === true ? key || 'archx' : null);
   if (stegoPayload != null && stegoPayload !== '') {
+    const stegoProfile = opts.stegoProfile ?? stegoCfg.profile ?? 'standard';
     rawPixels = embedStegoFingerprint(rawPixels, w, h, stegoPayload, {
       key: opts.stegoKey ?? stegoCfg.key ?? key,
+      profile: stegoProfile,
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
-      gridX: stegoCfg.gridX ?? 24,
-      gridY: stegoCfg.gridY ?? 16,
+      gridX: stegoCfg.gridX ?? (stegoProfile === 'robust' ? 20 : 24),
+      gridY: stegoCfg.gridY ?? (stegoProfile === 'robust' ? 14 : 16),
     });
     stegoMarked = true;
     resolvedStegoFingerprint = stegoFingerprint(stegoPayload);

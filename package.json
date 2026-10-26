@@ -26,6 +26,7 @@
       "default": "./dist/archx.esm.js"
     },
     "./server": "./server/middleware.js",
+    "./redis": "./server/redis-state-store.js",
     "./scramble": "./src/scramble.js"
   },
   "files": [
@@ -38,6 +39,7 @@
     "src/index.js",
     "src/scramble.js",
     "server/middleware.js",
+    "server/redis-state-store.js",
     "server/scramble-image.js",
     "server/scramble-cli.js",
     "server/detect-stego-cli.js",

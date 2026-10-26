@@ -25,13 +25,13 @@ privacy retention, and contractual commitments.
 | --- | --- | --- |
 | Identity and sessions | Calls `authorize()` at token mint and redemption | Authentication, session security, account lifecycle, MFA/admin controls |
 | Object authorization | Deny-by-default callback contract and entitlement tightening | Correct image/viewer/order entitlement logic and tests |
-| Token replay | One-time claims through a local or shared store | Correct multi-instance store, consistency, TLS, and operations |
+| Token replay | One-time claims through a local store or the bundled Redis/Valkey-compatible shared-store adapter | Correct multi-instance deployment, Redis client/TLS/eviction settings, consistency, and operations |
 | Secrets | Keyring/`kid` rotation and weak-secret rejection | KMS/secret manager, generation, distribution, rotation records |
 | Image processing | Sharp budgets, format checks, timeouts, bounded queues | Current Node/Sharp/libvips, malware/content policy for masters, resource isolation |
 | Network/CDN | Private/no-store origin headers and runbook | CDN bypass rules, WAF/TLS, log redaction, deployed verification |
-| Monitoring | Versioned security events and handler stats | SIEM ingestion, alert ownership, retention, incident response |
+| Monitoring | Versioned security events, metadata-only successful-delivery events, sanitized browser telemetry/plugins, and handler stats | SIEM ingestion, reverse-image-search/monitoring alert ownership, retention, privacy review, incident response |
 | Availability | Fail-closed state-store behavior and load-test tool | Capacity, redundancy, backups, regional failover exercises |
-| Watermark evidence | StegoMark/forensic issuance hooks and detector tooling | Durable registry, chain of custody, investigation/legal process |
+| Watermark evidence | Standard/robust StegoMark, forensic issuance hooks, buyer/order/delivery registry fields, detector tooling, and an external provenance hook | Durable registry, key/profile retention, C2PA signing service if used, chain of custody, investigation/legal process |
 | Compliance evidence | Source, tests, CI, SBOM process, this map | Organization policies, audits, vendor review, customer contracts |
 
 ## OWASP ASVS-oriented self-assessment
@@ -48,14 +48,14 @@ repository; it still requires correct deployment and testing.
 | V4 Access control | Implemented framework | Deny-by-default mint+redeem authorization, strict entitlement normalization, current entitlement can tighten but not widen signed width/quality. Host must test object-level authorization. |
 | V5 Validation, sanitization, encoding | Implemented | Strict image IDs, paths, token claim allowlists, URL/body budgets, origin values, callback results, and image signatures/dimensions. |
 | V6 Stored cryptography | Implemented with limits | HMAC-SHA-256 tokens, versioned key IDs/keyring, optional AES-GCM payload obfuscation, WebCrypto proof keys. Client-delivered keys are not DRM. Host owns key custody. |
-| V7 Error handling and logging | Implemented framework | Generic client errors and versioned security events without token/proof material. Host owns SIEM retention/alerts and must protect raw viewer/IP fields. |
+| V7 Error handling and logging | Implemented framework | Generic client errors; versioned security, delivery, and browser-monitoring events exclude tokens, proofs, scramble keys, and AES keys by construction and tests. Host owns transport-log redaction, SIEM retention/alerts, and protection of raw viewer/IP fields. |
 | V8 Data protection | Partial | Masters remain outside public roots, derivatives are capped/scrambled/marked, responses are private/no-store. Host owns storage encryption, backups, CDN rules, and privacy classification. |
-| V9 Communications | Host responsibility | HTTPS, TLS certificates, HSTS, and proxy trust belong to the deployment. Header-token transport is available and recommended. |
+| V9 Communications | Host responsibility | HTTPS, TLS certificates, HSTS, and proxy trust belong to the deployment. Header-token transport is the default; query tokens require explicit legacy opt-in and are reported by the production audit. |
 | V10 Malicious code | Partial | Lockfile, CI, dependency audit, Dependabot, and SBOM process. No claim of malware scanning for uploaded masters. |
 | V11 Business logic | Implemented framework | Short token TTLs, one-time claims, proof replay claims, quotas, distinct-image detection, entitlement re-checks, and state-store fail-closed behavior. |
 | V12 Files and resources | Implemented | Indexed masters only, real-path containment, symlink/public-dir checks, byte/pixel/dimension/format/time/concurrency budgets. |
 | V13 API and web service | Implemented | Exact routes/methods, token request header, Fetch Metadata checks, exact CORS origins, bounded stores/queues, rate limits. |
-| V14 Configuration | Implemented framework | Strict unknown-option rejection, secret/deployed-mode checks, non-throwing secret-free config audit. Host must run it in deployment tests. |
+| V14 Configuration | Implemented framework | Strict unknown-option rejection, secret/deployed-mode checks, non-throwing secret-free config audit, hardened-default helper, and a production-readiness audit with expected instance count. The audit distinguishes supported development settings from production blockers; the host must run and gate it in deployment tests. |
 
 ## SOC 2 readiness map
 
@@ -85,13 +85,18 @@ Before engaging an auditor or penetration tester, provide:
 2. A data-flow diagram for browser, CDN/WAF, application, `authorize()`,
    state store, master storage, Stego registry, logs/SIEM, and secret manager.
 3. Production-like configuration with secrets redacted, including
-   `handler.configAudit` output and CDN rules.
+   `handler.configAudit`, `auditArchxProductionConfig()` output for the
+   real instance count, CDN rules, and log-redaction evidence proving that
+   token responses and delivery keys are not retained.
 4. Test accounts representing anonymous, free, paid, revoked, downgraded,
    and cross-tenant users.
 5. Test cases for direct-master access, traversal/symlinks, token tampering,
-   replay across instances, proof theft/replay, authorization changes inside
-   the TTL, quota bypass, malformed/oversized images, Sharp resource limits,
-   CDN shared-cache behavior, state-store outage/failover, and key retirement.
+   replay across instances, proof theft/replay, client attempts to widen
+   width/quality, authorization and buyer/order trace changes inside the TTL,
+   quota bypass, malformed/oversized images, Sharp resource limits,
+   registry/provenance-hook failure, CDN shared-cache behavior,
+   state-store outage/failover, patched browser/WebGL API behavior and the
+   chosen Fortress-versus-Vault policy, and key retirement.
 6. Load-test results and the environment details listed in
    `docs/OPERATIONS.md`.
 7. A list of accepted residual risks: screenshots/cameras, authorized-user

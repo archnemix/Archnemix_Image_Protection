@@ -20,10 +20,12 @@ import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
 import { TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace } from '../src/archx.js';
 import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
-  auditArchxServerConfig, validateTokenClaims, validateImageId,
+  auditArchxServerConfig, auditArchxProductionConfig, withHardenedProductionDefaults,
+  validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
 } from '../server/middleware.js';
+import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 
 function signTokenForTest(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -150,6 +152,13 @@ function postToken(url, { headers = {}, ...init } = {}) {
     method: 'POST',
     headers: { 'x-archx-request': 'token', ...headers },
     ...init,
+  });
+}
+
+function redeemToken(base, tokenResponse, { headers = {}, ...init } = {}) {
+  return fetch(base + tokenResponse.cleanUrl, {
+    ...init,
+    headers: { ...headers, 'x-archx-token': tokenResponse.token },
   });
 }
 
@@ -322,10 +331,11 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   const tokenRes = await postToken(base + '/archx/token/cat?w=300');
   assert.equal(tokenRes.status, 200);
   const token = await tokenRes.json();
-  assert.ok(token.url.startsWith('/archx/i/cat?t='));
+  assert.equal(token.url, '/archx/i/cat', 'query bearer transport is off by default');
+  assert.equal(token.cleanUrl, '/archx/i/cat');
   assert.ok(token.key, 'token response carries the un-scramble key for the legitimate client');
 
-  const imgRes = await fetch(base + token.url);
+  const imgRes = await redeemToken(base, token);
   assert.equal(imgRes.status, 200);
   assert.equal(imgRes.headers.get('content-type'), 'application/octet-stream');
   assert.match(imgRes.headers.get('cache-control') || '', /no-store/);
@@ -345,24 +355,26 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   // Cover-aware sizing: a 320x240 source in a 120x120 box needs a 160px-wide
   // derivative (120 * 4/3), not a 120px one that would be cropped+upscaled.
   const coverToken = await (await postToken(base + '/archx/token/cat?bw=120&bh=120&fit=cover')).json();
-  const coverBytes = new Uint8Array(await (await fetch(base + coverToken.url)).arrayBuffer());
+  const coverBytes = new Uint8Array(await (await redeemToken(base, coverToken)).arrayBuffer());
   assert.equal(decodeContainer(coverBytes).header.w, 160);
 
   // tampered token -> 403
-  const tampered = token.url.replace(/t=([^.]+)\./, (_, b) => 't=' + b.slice(0, -2) + 'XX.');
-  assert.equal((await fetch(base + tampered)).status, 403);
+  const tampered = token.token.replace(/^([^.]+)\./, (_, b) => b.slice(0, -2) + 'XX.');
+  assert.equal((await fetch(base + token.cleanUrl, {
+    headers: { 'x-archx-token': tampered },
+  })).status, 403);
   // expired token -> 403 (sign one in the past with the same secret)
   const expired = signTokenForTest({
     v: 2, aud: 'archx:image', scope: 'image:view', id: 'cat', w: 300,
     iat: Date.now() - 120000, exp: Date.now() - 5000, n: 'expired-nonce-123',
   }, 'http-secret-for-unit-tests-32chars-minimum');
-  assert.equal((await fetch(`${base}/archx/i/cat?t=${expired}`)).status, 403);
+  assert.equal((await fetch(`${base}/archx/i/cat`, { headers: { 'x-archx-token': expired } })).status, 403);
   // token minted for a different id -> 403
   const other = signTokenForTest({
     v: 2, aud: 'archx:image', scope: 'image:view', id: 'dog', w: 300,
     iat: Date.now(), exp: Date.now() + 60000, n: 'other-nonce-12345',
   }, 'http-secret-for-unit-tests-32chars-minimum');
-  assert.equal((await fetch(`${base}/archx/i/cat?t=${other}`)).status, 403);
+  assert.equal((await fetch(`${base}/archx/i/cat`, { headers: { 'x-archx-token': other } })).status, 403);
 });
 
 test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, origin allowlist, server watermark/forensic', async (t) => {
@@ -395,9 +407,9 @@ test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, or
   const token = await tokenRes.json();
 
   // Wrong User-Agent cannot spend the token…
-  assert.equal((await fetch(base + token.url, asBrowser('BrowserB'))).status, 403);
+  assert.equal((await redeemToken(base, token, asBrowser('BrowserB'))).status, 403);
   // …the right browser can, exactly once.
-  const ok = await fetch(base + token.url, asBrowser('BrowserA'));
+  const ok = await redeemToken(base, token, asBrowser('BrowserA'));
   assert.equal(ok.status, 200);
   const bytes = new Uint8Array(await ok.arrayBuffer());
   const { header } = decodeContainer(bytes);
@@ -405,7 +417,7 @@ test('hardened middleware: one-time + UA-bound tokens, entitlement width cap, or
   assert.equal(header.wm, 1, 'server watermark baked pre-scramble');
   assert.equal(header.fx, 1, 'forensic mark baked pre-scramble');
   // Replay of the same (still unexpired) URL -> 403: one-time use.
-  assert.equal((await fetch(base + token.url, asBrowser('BrowserA'))).status, 403);
+  assert.equal((await redeemToken(base, token, asBrowser('BrowserA'))).status, 403);
 });
 
 test('middleware direct controls: entitlement quality/format wins and StegoMark issuance is registered', async (t) => {
@@ -431,7 +443,7 @@ test('middleware direct controls: entitlement quality/format wins and StegoMark 
   assert.equal(issued[0].viewerId, 'buyer-7');
   assert.match(issued[0].fingerprint, /^[0-9a-f]{12}$/);
 
-  const bytes = new Uint8Array(await (await fetch(base + token.url)).arrayBuffer());
+  const bytes = new Uint8Array(await (await redeemToken(base, token)).arrayBuffer());
   const { header, payload } = decodeContainer(bytes);
   assert.equal(header.sg, 1);
   assert.equal(header.mime, 'image/png');
@@ -617,7 +629,7 @@ test('hardened HTTP edge cases: malformed requests, race-safe replay, redemption
   // Twenty truly parallel spends of one URL: exactly one may win.
   const raced = await mint();
   const statuses = await Promise.all(Array.from({ length: 20 }, async () => {
-    const res = await fetch(base + raced.url);
+    const res = await redeemToken(base, raced);
     await res.arrayBuffer();
     return res.status;
   }));
@@ -627,19 +639,19 @@ test('hardened HTTP edge cases: malformed requests, race-safe replay, redemption
   // A token issued to Alice cannot be redeemed after the session becomes Mallory.
   const transferred = await mint();
   viewerId = 'mallory';
-  assert.equal((await fetch(base + transferred.url)).status, 403);
+  assert.equal((await redeemToken(base, transferred)).status, 403);
   viewerId = 'alice';
 
   // Revocation during the token TTL wins over a valid signature/expiry.
   const revoked = await mint();
   allowed = false;
-  assert.equal((await fetch(base + revoked.url)).status, 403);
+  assert.equal((await redeemToken(base, revoked)).status, 403);
   allowed = true;
 
   // Redemption authorization can tighten the signed resolution, never widen it.
   const narrowed = await mint();
   entitlementWidth = 120;
-  const narrowedRes = await fetch(base + narrowed.url);
+  const narrowedRes = await redeemToken(base, narrowed);
   assert.equal(narrowedRes.status, 200);
   assert.equal(narrowedRes.headers.get('content-security-policy'), "default-src 'none'; sandbox");
   assert.equal(narrowedRes.headers.get('cross-origin-resource-policy'), 'same-origin');
@@ -647,7 +659,7 @@ test('hardened HTTP edge cases: malformed requests, race-safe replay, redemption
   assert.equal(decodeContainer(narrowedBytes).header.w, 120);
   entitlementWidth = 220;
 
-  const duplicateToken = `${narrowed.url}&t=second-token`;
+  const duplicateToken = `${narrowed.cleanUrl}?t=${narrowed.token}&t=second-token`;
   assert.equal((await fetch(base + duplicateToken)).status, 403);
   assert.equal((await fetch(base + '/archx/i/cat?t=' + 'A'.repeat(9000))).status, 403);
 
@@ -876,6 +888,7 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
   const issued = [];
   const { base, handler } = await startArchxFixture(t, {
     callbackTimeoutMs: 100,
+    allowQueryTokens: true, // explicit compatibility opt-in under test
     onStegoIssue: async (record) => { issued.push(record); },
     authorize: async () => {
       if (slowAuthorize) await new Promise((resolve) => setTimeout(resolve, 250));
@@ -907,7 +920,7 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
   };
   const first = await mint();
   assert.ok(first.token && first.cleanUrl && !first.cleanUrl.includes('?t='));
-  assert.ok(first.url.includes('?t='), 'query URL remains available for legacy clients by default');
+  assert.ok(first.url.includes('?t='), 'query URL remains available only with explicit allowQueryTokens compatibility opt-in');
 
   assert.equal((await fetch(base + first.url, {
     headers: { 'x-archx-token': first.token },
@@ -919,7 +932,7 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
   assert.ok(isArchxContainer(new Uint8Array(await headerRes.arrayBuffer())));
 
   const second = await mint();
-  assert.equal((await fetch(base + second.url)).status, 200, 'legacy query transport still works when enabled');
+  assert.equal((await fetch(base + second.url)).status, 200, 'legacy query transport still works only when explicitly enabled');
 
   authMode = 'denied';
   assert.equal((await postToken(base + '/archx/token/cat?w=200')).status, 403,
@@ -1136,7 +1149,7 @@ test('perceptual soft-binding fingerprint survives resize/re-encode and separate
 
 test('temporal interlace profiles are 60 Hz-safe by default and remain directly configurable', () => {
   assert.deepEqual(Object.keys(TEMPORAL_INTERLACE_PROFILES), [
-    'balanced60', 'pixels60', 'strips60', 'blocks60',
+    'balanced60', 'pixels60', 'strips60', 'blocks60', 'fortress60',
   ]);
   assert.equal(normalizeTemporalInterlace(false), null);
   assert.equal(normalizeTemporalInterlace('off'), null);
@@ -1172,6 +1185,13 @@ test('temporal interlace profiles are 60 Hz-safe by default and remain directly 
   const blocks = normalizeTemporalInterlace({ layout: 'blocks', engine: 'canvas' });
   assert.equal(blocks.engine, 'frames');
   assert.equal(blocks.cellSize, 8);
+
+  const fortress = normalizeTemporalInterlace('fortress60');
+  assert.equal(fortress.phases, 3);
+  assert.equal(fortress.phaseHz, 20);
+  assert.equal(fortress.fill, 'noise');
+  assert.equal(fortress.layout, 'blocks');
+  assert.equal(fortress.activeGain, 1);
 });
 
 function tokenPayloadForTest(token) {
@@ -1223,8 +1243,8 @@ test('shared state store blocks cross-instance replay and quota bypass', async (
 
   const token = await (await postToken(baseA + '/archx/token/cat?w=160')).json();
   assert.equal(tokenPayloadForTest(token.token).kid, 'primary');
-  assert.equal((await fetch(baseB + token.url)).status, 200, 'instance B may redeem a token minted by A');
-  assert.equal((await fetch(baseA + token.url)).status, 403, 'the shared nonce claim blocks replay back on A');
+  assert.equal((await redeemToken(baseB, token)).status, 200, 'instance B may redeem a token minted by A');
+  assert.equal((await redeemToken(baseA, token)).status, 403, 'the shared nonce claim blocks replay back on A');
 
   assert.equal((await postToken(baseB + '/archx/token/cat?w=160')).status, 200);
   assert.equal((await postToken(baseA + '/archx/token/cat?w=160')).status, 429,
@@ -1263,7 +1283,7 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
 
   const oldToken = await (await postToken(oldBase + '/archx/token/cat?w=160')).json();
   assert.equal(tokenPayloadForTest(oldToken.token).kid, '2026-01');
-  const oldResponse = await fetch(rotatedBase + oldToken.url);
+  const oldResponse = await redeemToken(rotatedBase, oldToken);
   assert.equal(oldResponse.status, 200, 'rollover keyring still verifies the previous key');
   const oldBytes = new Uint8Array(await oldResponse.arrayBuffer());
   const oldDecoded = decodeContainer(oldBytes);
@@ -1275,10 +1295,10 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
 
   const newToken = await (await postToken(rotatedBase + '/archx/token/cat?w=160')).json();
   assert.equal(tokenPayloadForTest(newToken.token).kid, '2026-02');
-  assert.equal((await fetch(retiredBase + newToken.url)).status, 200);
+  assert.equal((await redeemToken(retiredBase, newToken)).status, 200);
 
   const retiredOldToken = await (await postToken(oldBase + '/archx/token/cat?w=160')).json();
-  assert.equal((await fetch(retiredBase + retiredOldToken.url)).status, 403,
+  assert.equal((await redeemToken(retiredBase, retiredOldToken)).status, 403,
     'removing the old key completes retirement after the rollover window');
   assert.equal(rotatedHandler.configAudit.summary.activeSecretId, '2026-02');
   assert.equal(rotatedHandler.configAudit.summary.signingKeyCount, 2);
@@ -1327,4 +1347,265 @@ test('multi-instance configuration and state-store failures fail closed with str
   assert.equal(failure.severity, 'error');
   assert.equal(failure.outcome, 'error');
   assert.equal(failure.request.method, 'POST');
+});
+
+test('hardened production defaults and production audit expose unsafe combinations without secrets', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-production-audit-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const authorize = async () => ({ viewerId: 'viewer-1' });
+  const hardened = withHardenedProductionDefaults({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    authorize,
+    steganography: true,
+    onStegoIssue: async () => {},
+  });
+  assert.equal(hardened.allowQueryTokens, false);
+  assert.equal(hardened.proofOfPossession, 'required');
+  assert.equal(hardened.oneTimeTokens, true);
+  assert.equal(hardened.abuseDetection.action, 'deny');
+  assert.equal(withHardenedProductionDefaults({ allowQueryTokens: true }).allowQueryTokens, true,
+    'explicit host compatibility choices are preserved for audit rather than silently rewritten');
+
+  const unsafe = auditArchxProductionConfig({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    allowQueryTokens: true,
+    proofOfPossession: 'off',
+    oneTimeTokens: false,
+    tokenMethods: ['GET', 'POST'],
+    steganography: true,
+  }, { expectedInstances: 3 });
+  assert.equal(unsafe.ok, true, 'the configuration is internally valid even though it is not production-ready');
+  assert.equal(unsafe.ready, false);
+  assert.ok(unsafe.blockers.some((issue) => /allowQueryTokens/i.test(issue)));
+  assert.ok(unsafe.blockers.some((issue) => /proofOfPossession/i.test(issue)));
+  assert.ok(unsafe.blockers.some((issue) => /expectedInstances > 1/i.test(issue)));
+  assert.ok(unsafe.blockers.some((issue) => /onStegoIssue/i.test(issue)));
+  assert.ok(unsafe.recommendations.some((issue) => /does not block/i.test(issue)));
+  assert.equal(JSON.stringify(unsafe).includes(TEST_SECRET), false);
+
+  const sharedStore = Object.freeze({
+    kind: 'shared-production-test',
+    claimOnce: async () => true,
+    hitWindow: async () => ({ limited: false, retryAfterSec: 0, count: 1 }),
+    trackDistinct: async () => ({ distinct: 1, isNew: true }),
+  });
+  const ready = auditArchxProductionConfig(withHardenedProductionDefaults({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    authorize,
+    steganography: { profile: 'robust' },
+    onStegoIssue: async () => {},
+    onSecurityEvent: () => {},
+    quotas: { perViewer: 25 },
+    deploymentMode: 'multi-instance',
+    stateStore: sharedStore,
+  }), { expectedInstances: 3 });
+  assert.equal(ready.ready, true, JSON.stringify(ready.blockers));
+  assert.equal(ready.summary.allowQueryTokens, false);
+  assert.equal(ready.summary.stateStore, 'shared-production-test');
+
+  const traced = normalizeAuthorizationResult({
+    viewerId: 'viewer-1', buyerId: 42, orderId: 'ORDER-42', deliveryId: 'D-1', traceId: 'TRACE-1',
+  });
+  assert.equal(traced.buyerId, '42');
+  assert.equal(traced.orderId, 'ORDER-42');
+  assert.equal(normalizeAuthorizationResult({ viewerId: 'v', orderId: { id: 1 } }), null);
+});
+
+test('buyer/order authorization drives signed caps, robust Stego registry, provenance, and key-free delivery hooks', async (t) => {
+  const stegoRecords = [];
+  const provenanceRecords = [];
+  const deliveryEvents = [];
+  const securityEvents = [];
+  const { base } = await startArchxFixture(t, {
+    encrypt: true,
+    serverWatermark: 'BUYER {buyer} ORDER {order}',
+    steganography: { perToken: true, profile: 'robust', strength: 6 },
+    onStegoIssue: async (record) => { stegoRecords.push(record); },
+    onProvenanceIssue: async (record) => { provenanceRecords.push(record); },
+    onDelivery: (event) => { deliveryEvents.push(event); },
+    onSecurityEvent: (event) => { securityEvents.push(event); },
+    authorize: async () => ({
+      viewerId: 'viewer-42',
+      buyerId: 'buyer-42',
+      orderId: 'ORDER-42',
+      deliveryId: 'DELIVERY-42',
+      traceId: 'TRACE-42',
+      maxWidth: 220,
+      quality: 42,
+      format: 'jpeg',
+    }),
+  }, { cat: [640, 420] });
+
+  const tokenRes = await postToken(base + '/archx/token/cat?w=4000&q=100');
+  assert.equal(tokenRes.status, 200);
+  const token = await tokenRes.json();
+  const claims = tokenPayloadForTest(token.token);
+  assert.equal(claims.w, 220, 'tampered client width cannot widen the server entitlement');
+  assert.equal(claims.q, 42, 'tampered client quality cannot widen the server entitlement');
+  assert.equal(claims.fmt, 'jpeg');
+  assert.equal(claims.sgv, 2, 'robust Stego profile is signed into the token');
+  assert.match(claims.th, /^[A-Za-z0-9_-]{20}$/);
+  assert.equal(token.url, token.cleanUrl);
+  assert.equal(token.url.includes('?t='), false);
+
+  assert.equal(stegoRecords.length, 1);
+  assert.equal(stegoRecords[0].buyerId, 'buyer-42');
+  assert.equal(stegoRecords[0].orderId, 'ORDER-42');
+  assert.equal(stegoRecords[0].deliveryId, 'DELIVERY-42');
+  assert.equal(stegoRecords[0].traceId, 'TRACE-42');
+  assert.equal(stegoRecords[0].profile, 'robust');
+  assert.match(stegoRecords[0].fingerprint, /^[0-9a-f]{12}$/);
+  assert.equal(provenanceRecords.length, 1);
+  assert.equal(provenanceRecords[0].stegoFingerprint, stegoRecords[0].fingerprint);
+  assert.equal(provenanceRecords[0].traceHash, claims.th);
+
+  assert.equal((await fetch(`${base}${token.cleanUrl}?t=${token.token}`)).status, 403,
+    'query transport is rejected by default and does not spend the token');
+  const imageRes = await redeemToken(base, token);
+  assert.equal(imageRes.status, 200);
+  const bytes = new Uint8Array(await imageRes.arrayBuffer());
+  const { header } = decodeContainer(bytes);
+  assert.equal(header.w, 220);
+  assert.equal(header.mime, 'image/jpeg');
+  assert.equal(header.sg, 1);
+  assert.equal(header.wm, 1);
+  assert.equal(header.encrypted, true);
+
+  const stripRequest = (record) => {
+    const { req, ...safe } = record;
+    return safe;
+  };
+  const hookMaterial = JSON.stringify({
+    stego: stegoRecords.map(stripRequest),
+    provenance: provenanceRecords.map(stripRequest),
+    delivery: deliveryEvents,
+    security: securityEvents,
+  });
+  for (const secretMaterial of [TEST_SECRET, token.token, token.key, token.aesKey]) {
+    assert.equal(hookMaterial.includes(secretMaterial), false, 'hooks/events must never receive token or key material');
+  }
+  assert.deepEqual(deliveryEvents.map((event) => event.type), ['archx.token_issued', 'archx.image_delivered']);
+  assert.equal(deliveryEvents[1].stegoProfile, 'robust');
+  assert.equal(deliveryEvents[1].traceHash, claims.th);
+});
+
+test('provenance hook failure denies issuance by default and emits a structured event', async (t) => {
+  const events = [];
+  const { base } = await startArchxFixture(t, {
+    allowAnonymous: true,
+    onProvenanceIssue: async () => { throw new Error('registry unavailable'); },
+    onSecurityEvent: (event) => { events.push(event); },
+  });
+  assert.equal((await postToken(base + '/archx/token/cat?w=160')).status, 503);
+  assert.ok(events.some((event) => event.type === 'archx.provenance_failed'));
+});
+
+test('robust StegoMark profile survives direct, resized/JPEG, edited, and center-cropped copies', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const raw = new Uint8Array(data);
+  const marked = embedStegoFingerprint(raw, info.width, info.height, 'ORDER-ROBUST', {
+    key: 'owner-key', profile: 'robust',
+  });
+  const expected = stegoFingerprint('ORDER-ROBUST');
+
+  const direct = detectStegoFingerprint(marked, info.width, info.height, { key: 'owner-key', profile: 'robust' });
+  assert.equal(direct.found, true, JSON.stringify(direct));
+  assert.equal(direct.fingerprint, expected);
+  assert.equal(direct.profile, 'robust');
+
+  const detectBytes = async (bytes, options = {}) => {
+    const decoded = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    return detectStegoFingerprint(new Uint8Array(decoded.data), decoded.info.width, decoded.info.height, {
+      key: 'owner-key', profile: 'auto', searchOffsets: true, ...options,
+    });
+  };
+  const rawInput = { raw: { width: info.width, height: info.height, channels: 4 } };
+  const resized = await sharp(Buffer.from(marked), rawInput).resize({ width: 448 }).jpeg({ quality: 82 }).toBuffer();
+  const resizedFound = await detectBytes(resized);
+  assert.equal(resizedFound.found, true, JSON.stringify(resizedFound));
+  assert.equal(resizedFound.fingerprint, expected);
+  assert.equal(resizedFound.profile, 'robust');
+
+  const edited = await sharp(Buffer.from(marked), rawInput)
+    .modulate({ brightness: 1.05, saturation: 1.1 }).blur(0.4).jpeg({ quality: 80 }).toBuffer();
+  const editedFound = await detectBytes(edited);
+  assert.equal(editedFound.found, true, JSON.stringify(editedFound));
+  assert.equal(editedFound.fingerprint, expected);
+
+  // Crop recovery is asserted on photographic content (the catalog use case),
+  // rather than the flat SVG fixture whose hard edges deliberately stress
+  // cell voting. The same 90% center-crop + resize + JPEG path is used.
+  const photoBytes = fs.readFileSync(new URL('../demo-masters/aurora-valley.jpg', import.meta.url));
+  const photoRaw = await sharp(photoBytes).resize(640, 420, { fit: 'fill' }).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  const photoMarked = embedStegoFingerprint(new Uint8Array(photoRaw.data), 640, 420, 'ORDER-ROBUST', {
+    key: 'owner-key', profile: 'robust',
+  });
+  const cropped = await sharp(Buffer.from(photoMarked), rawInput)
+    .extract({ left: 32, top: 21, width: 576, height: 378 }).resize(640, 420).jpeg({ quality: 85 }).toBuffer();
+  const croppedFound = await detectBytes(cropped, { profile: 'robust', searchGeometry: true });
+  assert.equal(croppedFound.found, true, JSON.stringify(croppedFound));
+  assert.equal(croppedFound.fingerprint, expected);
+  assert.ok(croppedFound.observedBits >= 88);
+
+  assert.equal(detectStegoFingerprint(raw, info.width, info.height, {
+    key: 'owner-key', profile: 'robust',
+  }).found, false, 'unmarked control must not become a confident robust attribution');
+});
+
+test('Redis state-store adapter uses atomic client operations and preserves the middleware contract', async () => {
+  const calls = [];
+  const values = new Map();
+  const client = {
+    defineCommand() {},
+    async set(key, value, px, ttl, nx) {
+      calls.push(['set', key, value, px, ttl, nx || null]);
+      if (nx === 'NX' && values.has(key)) return null;
+      values.set(key, Buffer.isBuffer(value) ? value : Buffer.from(String(value)));
+      return 'OK';
+    },
+    async getBuffer(key) {
+      calls.push(['getBuffer', key]);
+      return values.get(key) || null;
+    },
+    async eval(script, numKeys, key, ...args) {
+      calls.push(['eval', key, numKeys, args.map(String), script === REDIS_STATE_STORE_SCRIPTS.hitWindow ? 'window' : 'distinct']);
+      if (script === REDIS_STATE_STORE_SCRIPTS.hitWindow) {
+        const count = Number(values.get(key)?.toString() || 0) + 1;
+        values.set(key, Buffer.from(String(count)));
+        return count > Number(args[2]) ? [1, 7, count - 1] : [0, 0, count];
+      }
+      const member = String(args[0]);
+      const members = new Set(JSON.parse(values.get(key)?.toString() || '[]'));
+      const isNew = members.has(member) ? 0 : 1;
+      members.add(member);
+      values.set(key, Buffer.from(JSON.stringify([...members])));
+      return [members.size, isNew];
+    },
+  };
+  const store = createRedisStateStore({ client, prefix: 'archx:test:', clientFlavor: 'ioredis' });
+  assert.equal(store.kind, 'redis');
+  assert.equal(await store.claimOnce('nonce:abc', 1000), true);
+  assert.equal(await store.claimOnce('nonce:abc', 1000), false);
+  assert.equal(await store.claimOnce('nonce:bad', 0), false);
+  assert.deepEqual(await store.hitWindow('rate:ip', { limit: 1, windowMs: 60000, now: 1000 }),
+    { limited: false, retryAfterSec: 0, count: 1 });
+  assert.deepEqual(await store.hitWindow('rate:ip', { limit: 1, windowMs: 60000, now: 1001 }),
+    { limited: true, retryAfterSec: 7, count: 1 });
+  assert.deepEqual(await store.trackDistinct('abuse:viewer', 'cat', { now: 1000 }),
+    { distinct: 1, isNew: true });
+  assert.deepEqual(await store.trackDistinct('abuse:viewer', 'cat', { now: 1001 }),
+    { distinct: 1, isNew: false });
+  assert.equal(await store.setCache('cache:item', Buffer.from([1, 2, 3]), { ttlMs: 5000 }), true);
+  assert.deepEqual([...await store.getCache('cache:item')], [1, 2, 3]);
+  assert.ok(calls.every((call) => String(call[1]).startsWith('archx:test:')));
+  assert.ok(calls.some((call) => call[0] === 'set' && call[3] === 'PX' && call[5] === 'NX'));
+  assert.ok(calls.some((call) => call[0] === 'eval' && call[4] === 'window'));
+  assert.ok(calls.some((call) => call[0] === 'eval' && call[4] === 'distinct'));
+  assert.throws(() => createRedisStateStore({ client: {}, prefix: 'x' }), /eval|call|sendCommand/);
 });

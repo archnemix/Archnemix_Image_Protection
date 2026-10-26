@@ -35,7 +35,9 @@ your evidence; it cannot repeal the "analog hole."
   and more visible.
 - **Anonymous reposting:** visible watermarks, forensic marks, and optional
   StegoMark fingerprints can connect a suspect copy to an image, viewer,
-  order, or campaign if you save the issuance records.
+  buyer, order, or campaign if you save the issuance records. The stronger
+  `robust` StegoMark profile is intended for valuable licensed previews;
+  standard remains available for older issuances.
 
 ## What Archx cannot promise
 
@@ -67,8 +69,11 @@ your evidence; it cannot repeal the "analog hole."
 - Require an account or an explicit preview entitlement for large comps.
 - Use short-lived one-time tokens, per-account quotas, distinct-image alerts,
   and server-baked watermarks.
-- Save every StegoMark issuance against image, account, license inquiry, and
-  time.
+- Have the authorization check return the prospective buyer, order, and
+  delivery IDs so the visible mark and StegoMark are derived for that
+  transaction rather than for the image alone.
+- Save every StegoMark issuance against image, account, buyer, order,
+  delivery, profile, license inquiry, key ID, and time.
 - Deliver purchased masters through your normal licensed-download system,
   not through the public preview route.
 
@@ -78,7 +83,10 @@ your evidence; it cannot repeal the "analog hole."
   and delivery time; a cancelled order should stop working immediately.
 - Give each customer only the size and quality included in their plan.
 - Use proof-of-possession mode when your supported browsers allow it.
-- Disable query-string tokens so access secrets do not appear in URLs/logs.
+- Keep query-string tokens disabled (the current default) so access secrets
+  do not appear in URLs/logs.
+- Treat a buyer/order mismatch between request and delivery as a stop signal;
+  the server can reject a token after the current order or delivery changes.
 - Keep an audit trail of which account viewed which image and when, subject
   to your privacy policy.
 
@@ -90,8 +98,12 @@ your evidence; it cannot repeal the "analog hole."
    surrounding page, and any license/order details.
 3. Preserve the original master, RAW files, invoices, model/property
    releases, publication history, and your issuance registry.
-4. Run `archx-detect` or ask your developer to run the StegoMark and
-   perceptual-fingerprint checks. Record the tool version and settings.
+4. Run `archx-detect` (including `profile:'auto'` when the issuance version is
+   unknown) or ask your developer to run the StegoMark and
+   perceptual-fingerprint checks. Record the tool version, profile, and
+   settings. If your separate provenance system added Content Credentials,
+   verify that record independently; it is ownership/provenance evidence,
+   not an access control.
 5. Compare the recovered fingerprint with your registry. A match identifies
    a candidate issuance; corroborate it with account/order and server logs.
 6. Ask qualified legal counsel about takedown, licensing, or enforcement in
@@ -103,8 +115,12 @@ your evidence; it cannot repeal the "analog hole."
 - Are the masters outside the public web folder, and can you show that the
   direct master URL returns "not found"?
 - Is access checked when the image is requested and again when delivered?
+- Does the production configuration pass the Archx audit with query tokens
+  off, proof of possession required, and no unresolved warnings treated as
+  acceptable without a written exception?
 - If there is more than one server, do all servers share the one-time-token
-  and quota records?
+  and quota records through the bundled Redis adapter or an equivalently
+  tested atomic store?
 - How are signing secrets generated, rotated, and retired?
 - Does the CDN bypass shared caching for protected token/image routes? Has
   a replay test through the public CDN hostname passed?
@@ -118,6 +134,9 @@ your evidence; it cannot repeal the "analog hole."
   viewing token be used twice?
 - Which browsers and phones were actually tested with the selected viewer
   settings?
+- If Fortress is selected, what should a legitimate customer do when an
+  extension patches a browser/WebGL API and the protected viewer refuses to
+  open? Is Vault monitoring an accepted support fallback for that asset?
 
 ## A realistic protection promise
 

@@ -12,13 +12,13 @@ not a claim that every browser/OS combination below has been certified.
 | Sharp | `^0.35.5` peer dependency | Locked development dependency | Keep Sharp/libvips current; image decoding is a security boundary. |
 | Express | Express-compatible middleware signature | Plain `node:http` integration tests | Express itself is not a package dependency. Confirm mount-path behavior in your app. |
 | Operating system | Any OS supported by Node + Sharp prebuilds/source build | Linux CI/sandbox | File-path, symlink, and timestamp behavior should be tested on the production OS/filesystem. |
-| State store | Built-in memory or host adapter | Memory store plus a shared-store contract test | Redis/Dynamo adapters are host-supplied and need their own integration tests. |
+| State store | Built-in memory, bundled Redis/Valkey adapter, or custom host adapter | Memory store, shared-store contract tests, and a fake-client Redis adapter test | The bundled adapter accepts an ioredis/node-redis-compatible client; production latency, eviction, persistence, and failover still require staging integration tests. |
 
 ## Browser support
 
 | Browser / platform | Status | Expected behavior |
 | --- | --- | --- |
-| Chromium (headless, repository test build) | **Automated: 72 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, temporal shader/frames modes, gallery lifecycle, and guard behavior are exercised. |
+| Chromium (headless, repository test build) | **Automated: 82 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, and guard behavior are exercised. |
 | Google Chrome, current stable and previous major | Expected | Same Chromium platform family. Test your exact site CSP, cookies, CDN, and extensions before release. |
 | Microsoft Edge, current stable and previous major | Expected | Chromium-based; same caveats as Chrome. |
 | Brave and other Chromium browsers | Expected with site testing | Privacy/network defaults or extension policies can affect fetch, WebGL, storage, and proof-key behavior. |
@@ -38,10 +38,29 @@ not a claim that every browser/OS combination below has been certified.
 | Proof of possession | Non-extractable WebCrypto ECDSA P-256 key | Client `auto` can proceed where policy allows; server `required` intentionally rejects clients that cannot present a valid proof. |
 | Temporal interlace shader | WebGL fragment shader | `frames` uses pre-rendered Canvas phase frames; `auto` selects an available engine. |
 | Temporal interlace phases | Two phases for a 60 Hz-safe default | More phases are clamped by refresh assumptions; reduced-motion settings should disable flicker-oriented presentation. |
-| Token transport | `X-Archx-Token` header + clean URL | Query-token compatibility can be enabled server-side, but it exposes bearer material to URL-logging surfaces. |
+| Token transport | `X-Archx-Token` header + clean URL | Query-token compatibility is off by default and requires an explicit server opt-in; it exposes bearer material to URL-logging surfaces. |
 | Token mint method | `POST` + `X-Archx-Request` | A temporary GET bridge exists for legacy clients; it is not the preferred production posture. |
 | Output cache | Local L1 plus optional shared L2 | Shared-cache failure falls back to authorized reprocessing. Replay/quota state never falls back locally in multi-instance mode. |
-| StegoMark | Server-side pixel embedding through Sharp | Detection is empirical and format/geometry dependent; use the compatibility/robustness limits in the research docs and test your catalog. |
+| StegoMark | Server-side pixel embedding through Sharp | `standard` remains backward-compatible. `robust` uses larger cells, a dual-CRC/marker codeword, median voting, and bounded correction; detection remains empirical and format/geometry dependent, so test it on your catalog and preserve the issued profile. |
+
+## CSP and viewer construction
+
+Archx does not use `eval`, generated scripts, blob/object image URLs, or
+remote code. The browser test exercises a policy built around self-hosted
+scripts, `'self'` connections, `worker-src 'none'`, and `img-src 'none'`.
+`style-src 'self' 'unsafe-inline'` remains the compatibility baseline because
+the viewer also sets element properties that browsers surface in `style`.
+The library prefers constructable shadow stylesheets in Chromium and falls
+back to a shadow `<style>` element where needed, but deployments should test
+the style policy in each supported browser before removing the inline-style
+exception.
+
+If an operator captures `Archx.captureEarlyIntegritySnapshot()` from an
+early, integrity-pinned first-party script and later calls
+`Archx.verifyEarlyIntegritySnapshot(snapshot)`, it can distinguish methods
+already patched before the viewer bundle loaded from methods replaced later. A
+userscript or extension running before the page can still win that race, so
+the snapshot is diagnostic evidence rather than a browser trust proof.
 
 ## Operating-system considerations
 

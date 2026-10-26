@@ -1,4 +1,36 @@
-import Archx, { ProtectedImage, VERSION, PRESETS, preset, TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace, auditIntegrity, detectAutomation } from './archx.js';
-export { ProtectedImage, VERSION, PRESETS, preset, TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace, auditIntegrity, detectAutomation };
+import Archx, {
+  ProtectedImage,
+  VERSION,
+  PRESETS,
+  preset,
+  TEMPORAL_INTERLACE_PROFILES,
+  normalizeTemporalInterlace,
+  auditIntegrity,
+  auditIntegrityDetails,
+  captureEarlyIntegritySnapshot,
+  verifyEarlyIntegritySnapshot,
+  onClientEvent,
+  offClientEvent,
+  usePlugin,
+  listPlugins,
+  detectAutomation,
+} from './archx.js';
+export {
+  ProtectedImage,
+  VERSION,
+  PRESETS,
+  preset,
+  TEMPORAL_INTERLACE_PROFILES,
+  normalizeTemporalInterlace,
+  auditIntegrity,
+  auditIntegrityDetails,
+  captureEarlyIntegritySnapshot,
+  verifyEarlyIntegritySnapshot,
+  onClientEvent,
+  offClientEvent,
+  usePlugin,
+  listPlugins,
+  detectAutomation,
+};
 export * from './scramble.js';
 export default Archx;

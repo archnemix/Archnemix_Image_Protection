@@ -40,7 +40,24 @@ normal legal/commercial enforcement process alongside Archx.
 
 For more than one middleware process, use `deploymentMode:'multi-instance'`
 with a shared, atomic `stateStore`; process-local replay/quota state behind a
-load balancer is outside the supported security model. Rotate signing keys
-with the versioned keyring described in `docs/OPERATIONS.md`, verify that the
-CDN bypasses shared caching for token/payload routes, and treat a state-store
-outage as a fail-closed `503` rather than weakening replay controls.
+load balancer is outside the supported security model. The bundled
+`@archnemix/image-protection/redis` adapter still requires the host to own,
+secure, monitor, and integration-test its Redis/Valkey client and deployment.
+Rotate signing keys with the versioned keyring described in
+`docs/OPERATIONS.md`, verify that the CDN bypasses shared caching for
+token/payload routes, and treat a state-store outage as a fail-closed `503`
+rather than weakening replay controls.
+
+Payload tokens belong in `X-Archx-Token` by default. Enabling
+`allowQueryTokens` is a legacy compatibility exception, not an equivalent
+posture. Never log a complete token response: its token, scramble key, and
+optional AES key are intentionally visible to the authorized browser that
+must redeem and decode the derivative. Run
+`auditArchxProductionConfig(options, { expectedInstances })` in deployment
+tests and treat its blockers as release failures unless a documented,
+reviewed exception exists.
+
+Client integrity checks are tripwires. Fortress may refuse an image when a
+browser extension has patched fetch, canvas, or WebGL APIs; Vault's monitor
+policy can continue while reporting the same signal. Neither result proves
+that an attacker-owned browser is clean or compromised.

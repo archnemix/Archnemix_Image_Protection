@@ -639,6 +639,103 @@ implementation:
    the retained master and issuance log—not cryptographic identity and not a
    substitute for withholding the master.
 
+### 2.13 Second enterprise review: safer defaults, demonstrated hooks, and leak tracing
+
+The second external review was less about another viewer trick than about
+whether the library would steer a competent operator toward the safe
+deployment—and whether its language around the demonstrated attacks was
+precise. Five conclusions drove this pass:
+
+1. **Safe settings lose when the insecure setting is the default.**
+   Query-string payload tokens were historically convenient, but bearer
+   material in a URL reaches history, Referer, Resource Timing, bookmarks,
+   screenshots of network panels, and ordinary access logs. The server now
+   defaults `allowQueryTokens:false`; a legacy consumer must select the
+   compatibility exception explicitly. `withHardenedProductionDefaults()`
+   fills unset fields with POST-only minting, same-site/custom-header
+   checks, required proof of possession, one-time tokens, a 120-second TTL,
+   fail-closed Stego/provenance behavior, and blocking abuse detection.
+   `auditArchxProductionConfig()` is deliberately a second check, not a
+   synonym for startup validation: it reports expected instance count,
+   query tokens, optional PoP, reusable tokens, abuse-detection
+   `action:'event'` (record-only), unregistered Stego issuance, and other
+   production blockers without exposing a secret.
+
+2. **The demonstrated WebGL hook must be named as a limit, then regression
+   tested.** A script already running before Archx in an attacker-controlled
+   page can wrap WebGL methods and inspect the framebuffer once Archx draws
+   the authorized derivative. Expanding the integrity surface to texture,
+   framebuffer, shader/program, draw, and readback methods—and distinguishing
+   an early first-party integrity snapshot from later mutation—makes some
+   hooks observable, but it cannot turn an untrusted browser into a trusted
+   display path. The regression suite therefore checks patched
+   `drawArrays`/`drawElements`, verifies that invalid integrity modes fail
+   closed, and records the product distinction: Fortress locks when a runtime
+   hook is detected during load, while Vault can report and continue. That
+   Vault continuation means a fetch hook may observe delivery traffic;
+   Fortress's availability risk is false refusals when a legitimate
+   extension patches the same APIs.
+
+3. **Delivery keys are visible to their intended decrypting browser.**
+   Any docs that call client-side scramble/AES keys “hidden” are misleading.
+   Header transport reduces URL/log leakage; it does not conceal a token or
+   key from page code, DevTools operated by the authorized viewer, or a
+   compromised same-origin script. The useful controls are scope and time:
+   derive keys from a short-lived, one-image token; re-authorize at
+   redemption; bind proof of possession; and keep tokens/keys out of logs,
+   errors, security events, delivery telemetry, provenance records, and
+   browser plugin events. Tests now assert that sanitized telemetry carries
+   no token/key-shaped fields while still supporting monitoring and
+   operator-managed reverse-image-search queues.
+
+4. **Per-delivery attribution needs to be a first-class transaction ID.**
+   `authorize()` can now return `buyerId`, `orderId`, `deliveryId`, and
+   `traceId` at both mint and redemption. The server validates and bounds
+   those fields, signs a trace hash and Stego profile/version into the token,
+   rechecks changed trace fields, supports visible-mark placeholders, and
+   derives the Stego subject from the trace. `onStegoIssue` has the complete
+   key-free registry record; `onDelivery` is metadata-only success
+   telemetry; `onProvenanceIssue` is a clean issuance hook for an external
+   C2PA/provenance service rather than a false claim that Archx itself signs
+   Content Credentials. Registry and provenance failures deny by default,
+   with explicit lower-assurance continue policies only when an operator
+   chooses and can reconcile them.
+
+5. **Robust steganography needs a larger codeword and a false-positive
+   budget, not just more amplitude.** The backwards-compatible standard
+   mark retains its 48-bit fingerprint + CRC-16 over 24×16 macro-cells. The
+   new robust profile uses a separately keyed 20×14 layout, amplitude up to
+   `min(16, 1.35 × base)`, and a 96-bit codeword containing the 48-bit
+   fingerprint, one CRC over the fingerprint, a second keyed CRC over the
+   first 64 bits, and fixed markers. Detection median-aggregates segments
+   and votes by median per code bit, requires at least 88 observed bits and
+   128 scored cells for bounded crop acceptance, then tries exact decode,
+   syndrome-guided meet-in-the-middle repair, and byte-level repair. The
+   important negative result shaped acceptance: on a flat synthetic 90%
+   crop, aggressive repair can find a nearby wrong fingerprint that passes
+   the CRC structure. Candidates needing four or five corrections therefore
+   require strong mean signal and cell agreement; otherwise the detector
+   returns `found:false`. At the final tuning, robust decoded direct,
+   resize/JPEG, and brightness/saturation/blur/JPEG cases on the synthetic
+   fixture, and direct/resize/edit plus a 90% center crop on the natural
+   `aurora-valley` fixture, each with the exact fingerprint and zero
+   corrections; the unmarked natural control stayed negative. Rotation,
+   perspective, phone-photo, and AI-regeneration recovery remain unproven,
+   and flat-graphics crop recovery is not claimed.
+
+The same review produced narrower product hardening: a bundled atomic
+Redis/Valkey state-store adapter at `./redis`; detail-destroying, visibly
+marked scrambled decoys; constructable shadow stylesheets where available;
+an explicit byte/Blob custom-transport source boundary (HTTP bodies are
+stream-read under a cap, but AES-GCM containers are not rendered
+progressively before whole-message authentication); and `fortress60`, a
+deliberately harsher three-phase temporal profile with
+6 px blocks, noise fill, and 20 Hz per-phase presentation on a 60 Hz target.
+Multiple captures/recordings can still recombine phases. The CSP evidence
+also stays specific: the tested policy avoids scripts/blob/workers, but
+`style-src 'self' 'unsafe-inline'` remains the compatibility baseline until
+a deployment proves a tighter style policy across its browser matrix.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -788,7 +885,7 @@ error — see the README checklist).
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 31 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 39 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -836,12 +933,23 @@ error — see the README checklist).
   proof-sensitive `Vary`. The soft-binding test registers a perceptual
   fingerprint during `scrambleImage()`, matches a resized/JPEG copy within
   distance 10, and separates an unrelated synthetic image. The temporal-
-  interlace normalizer test proves the four 60 Hz profiles exist, disabled
-  forms normalize to `null`, a 4-phase request is clamped to 2 phases at
-  60 Hz/30 Hz minimum, the same request remains 4 phases at a configured
-  120 Hz target, and shader/frames plus pixel/block aliases map to the
-  documented engines/layout defaults.
-- **Real browser (headless Chromium, 72 checks):** a page with 7 protected
+  interlace normalizer test proves the five named 60 Hz profiles exist
+  (including three-phase `fortress60`), disabled forms normalize to `null`,
+  a 4-phase request is clamped to 2 phases at 60 Hz/30 Hz minimum, the same
+  request remains 4 phases at a configured 120 Hz target, and shader/frames
+  plus pixel/block aliases map to the documented engines/layout defaults.
+  The second-review regressions additionally prove query tokens are off by
+  default while an explicit legacy opt-in works; hardened defaults fill
+  only unset fields; the production audit flags query tokens, optional PoP,
+  reusable tokens, record-only abuse handling, unregistered Stego issuance,
+  and multi-instance memory state; buyer/order/delivery/trace fields reach
+  key-free Stego, provenance, delivery, and security hooks; a provenance
+  failure denies by default; and the bundled Redis adapter satisfies the
+  fake-client `SET NX PX` plus single-key Lua contract. The robust
+  StegoMark unit fixture recovers exactly after resize/JPEG, ordinary
+  photometric editing, and a photographic center crop while the unmarked
+  control remains negative.
+- **Real browser (headless Chromium, 82 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
@@ -854,8 +962,19 @@ error — see the README checklist).
   earlier failing 11.28 / 0.53 measurement to 7.03 / 0.85 before the
   additional stego layer). `toDataURL`/`toBlob`/
   `getImageData` all return decoys and fire attempt events; repeated probes
-  trigger the configured strike blackout. Replacing `fetch` is both reported
-  by `auditIntegrity()` and causes Fortress to fail closed. Trusted pointer
+  trigger the configured strike blackout. Replacing `fetch` and patching
+  WebGL `drawArrays`/`drawElements` are reported by the detailed integrity
+  audit; Fortress fails closed under the demonstrated fetch-hook fixture,
+  Vault reports it and continues, and invalid integrity values fail closed.
+  A separate page installs a framebuffer-reading `drawArrays` wrapper with
+  Puppeteer's `evaluateOnNewDocument` *before* the Archx module evaluates:
+  `capturedNonNative` names both WebGL variants, Fortress gives the hook no
+  non-black pixels, and Vault's monitor policy intentionally renders while
+  the hook samples 256 non-black center pixels—an executable record of the
+  residual risk, not a claim that the hook was prevented.
+  Global/plugin telemetry is asserted to be coarse and key-free, and the
+  degraded scrambled decoy for `gallery-016` differs materially from its
+  clean derivative (MAD 39.60 in the latest regression). Trusted pointer
   movement positions the Lens while a synthetic untrusted event does not; the
   dynamic capture trace is active with session/time text, and a PrintScreen
   signal immediately blackouts. Strict mode reports the bitmap released and
@@ -887,8 +1006,8 @@ error — see the README checklist).
   configuration state changed.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
   **about 3.7–4.0 s** in recent deliberately non-lazy headless tests with
-  high-quality derivatives and 0 `<img>` tags; browser bundle **94.3 KiB
-  minified / 30.9 KiB gzipped**. The latest local benchmark measured
+  high-quality derivatives and 0 `<img>` tags; browser bundle **102.5 KiB
+  minified / 33.0 KiB gzipped**. The latest local benchmark measured
   `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
   169.9 ms one-time per cached variant (70.8 ms at 480 px and 358.1 ms at
   1600 px). Static/per-image server outputs remain cacheable; per-token
@@ -910,6 +1029,20 @@ error — see the README checklist).
   results support resize/re-encode/mild-blur/photometric and bounded
   axis-aligned-crop claims only—not rotation, perspective, screen-photo, or
   AI-regeneration attribution.
+
+- **Robust StegoMark follow-up matrix (final 20×14 tuning):** on the
+  synthetic SVG master, the robust profile recovered fingerprint
+  `15b03266f7f1` exactly with 0 corrections for direct output,
+  resize-to-448 + JPEG q82, and brightness 1.05/saturation 1.1/blur 0.4 +
+  JPEG q80 (cell agreement 0.982/0.979/0.982). On the natural 640×420
+  `aurora-valley` fixture it recovered the same exact fingerprint with 0
+  corrections direct, after resize/JPEG, after the photometric edit, and
+  after a 90% center crop + resize/JPEG q85 with geometry search; the
+  unmarked natural control returned `found:false`. A flat synthetic 90%
+  crop remained unreliable and, under overly permissive repair, could
+  produce a CRC-valid wrong neighbor—hence the final high-correction
+  evidence gate and the explicit decision not to claim flat-graphics crop
+  recovery.
 ## 6. Sources
 
 - MDN, *Use cross-origin images in a canvas* (tainted-canvas rules) —

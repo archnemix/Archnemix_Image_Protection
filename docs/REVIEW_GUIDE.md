@@ -47,11 +47,17 @@ npm pack --dry-run
 ```
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
-and then runs the real-Chromium browser suite. At the v1.5 review point the
-expected results are 34/34 Node tests and 72/72 Chromium checks, including a
-100-image protected gallery with no protected `<img>` elements. The Node
-suite includes a two-handler shared-state replay/quota test and a
-signing-key-rotation test.
+and then runs the real-Chromium browser suite. At the current review point
+the expected results are 39/39 Node tests and 82/82 Chromium checks,
+including a 100-image protected gallery with no protected `<img>` elements.
+The Node suite includes production-default/audit tests, a two-handler
+shared-state replay/quota test, a Redis adapter fake-client contract test,
+buyer/order/provenance hook tests, robust StegoMark transforms, and a
+signing-key-rotation test. Chromium additionally patches WebGL draw methods
+after load and, in a separate page, installs a framebuffer-reading
+`drawArrays` hook before the Archx module evaluates; it contrasts Fortress
+fail-closed handling with Vault's documented monitor-and-render residual
+risk.
 
 To inspect the product manually:
 
@@ -70,8 +76,9 @@ at the top of that file.
 
 | Path | Purpose | Review priority |
 | --- | --- | --- |
-| `server/middleware.js` | Token mint/redemption boundary: authorization, claims, proof of possession, quotas, replay state, proxy handling, security headers | Critical |
-| `server/scramble-image.js` | Sharp derivative pipeline, format/dimension/pixel/time budgets, marks, scrambling | Critical |
+| `server/middleware.js` | Token mint/redemption boundary: authorization, hardened defaults/audit, buyer/order tracing, claims, proof of possession, quotas, replay state, proxy handling, security/delivery/provenance events | Critical |
+| `server/redis-state-store.js` | Bundled atomic Redis/Valkey state-store adapter | Critical for multi-instance review |
+| `server/scramble-image.js` | Sharp derivative pipeline, format/dimension/pixel/time budgets, marks and StegoMark profiles, scrambling | Critical |
 | `src/scramble.js` | Shared container, scramble, AES-GCM, forensic, StegoMark, fingerprint, and BMP primitives | High |
 | `src/archx.js` | Browser loader/viewer: token fetch/proofs, decode/cache lifecycle, Canvas/WebGL renderers, guards, Lens, temporal effects | High |
 | `server/scramble-cli.js` | `archx-protect` command-line tool | Medium |
@@ -100,10 +107,18 @@ are intentionally ignored by Git.
 Inspect `createArchxMiddleware()` and follow one request through:
 
 - strict configuration and startup failure modes;
+- `withHardenedProductionDefaults()` and
+  `auditArchxProductionConfig()`—do supported development settings remain
+  distinguishable from production blockers, with no secret in either audit?
 - image-ID and path validation/containment;
-- `authorize()` at both mint and redemption;
+- `authorize()` at both mint and redemption, including buyer/order/
+  delivery/trace changes between the two calls;
 - callback deadlines and ambiguous-result handling;
 - v2 claim validation and entitlement tightening;
+- default rejection of `?t=` query tokens and whether the explicit legacy
+  opt-in is impossible to enable accidentally;
+- deliberate client attempts to widen width/height or quality—the server
+  must retain the lower of the signed/current entitlements;
 - one-time nonce and proof replay state, including whether a declared
   multi-instance deployment uses one shared atomic store;
 - `kid` selection, active/previous signing keys, and issuing-key derivations
@@ -137,7 +152,13 @@ Follow a token image through `src/archx.js`:
 - no implicit remint on visibility or ordinary resize;
 - Canvas/WebGL fallback and context-loss paths;
 - private fields, shadow-root failure, and public option redaction;
-- production instances never enabling `debug:true` accidentally.
+- production instances never enabling `debug:true` accidentally;
+- detailed/early integrity snapshots for fetch, canvas, WebCrypto, and
+  WebGL texture/framebuffer/shader/draw/readback methods—tripwires only;
+- sanitized `onEvent`, `Archx.on()`, and plugin payloads: no token, proof,
+  key, source, image bytes, canvas, or raw internal error should cross that
+  telemetry boundary;
+- the checked-in Chromium CSP and the remaining inline-style caveat.
 
 Then check the rendering-only boundaries: poisoned read-back, split
 canvases, Lens, guards, strike lockouts, and temporal effects. These are
@@ -153,7 +174,8 @@ Review `normalizeTemporalInterlace()` and both engines:
   the debug-gated test hook;
 - layouts: checker, pixels, strips, and randomized blocks;
 - fills: `lowres`, `dim`, `black`, and `noise`;
-- refresh optimization: the 60 Hz/30 Hz default clamps to two phases;
+- refresh optimization: the 60 Hz/30 Hz default clamps to two phases, while
+  `fortress60` intentionally chooses three 20 Hz phases;
 - reduced-motion behavior and continuous CPU/GPU/memory cost;
 - Lens composition and legacy `temporalShield` compatibility.
 
@@ -164,22 +186,34 @@ and integrating camera exposures can recombine phases.
 ### 5. Attribution
 
 Review StegoMark as evidence, not access control. Check key derivation,
-fingerprint registration through `onStegoIssue`, detector false-positive
-controls, geometry search limits, and the measured transform matrix in the
-README/research notes. The perceptual soft binding is a second discovery
-signal; neither mark is represented as AI-regeneration-proof.
+trace-derived subjects, fingerprint registration through `onStegoIssue`,
+fail-closed registry behavior, detector false-positive controls and
+high-correction evidence gates, geometry search limits, standard versus
+robust profile selection, and the measured transform matrix in the
+README/research notes. Challenge robust decoding on unmarked controls,
+wrong keys, errors near the correction limit, and reproductions beyond the
+tested axis-aligned transforms. The perceptual soft binding is a second
+discovery signal; neither mark is represented as rotation-, perspective-,
+or AI-regeneration-proof. `onProvenanceIssue` is intentionally only a
+key-free hook for an external provenance/C2PA system, not a built-in signer.
 
 ### 6. Operations and assurance claims
 
 Review `docs/OPERATIONS.md` against an actual staging deployment rather than
 accepting diagrams or configuration prose:
 
-- mint on instance A, redeem on B, and replay on A;
+- run the production audit with the real instance count and keep the
+  secret-free summary with release evidence;
+- use a real Redis/Valkey deployment—not only the fake-client contract
+  test—to mint on instance A, redeem on B, and replay on A;
 - exhaust a quota across A and B;
 - stop or delay the shared store and confirm `503`, not a local fallback;
+- fail or delay the StegoMark registry and provenance hook and confirm the
+  configured deny policy and alerts;
 - rotate and then retire a signing key during the rollover window;
 - repeat the replay and cross-viewer tests through the public CDN hostname;
-- forward security events to the intended SIEM and trigger test alerts;
+- forward security/delivery events to the intended SIEM/monitoring system
+  and trigger test alerts while proving tokens/keys are absent from logs;
 - run the load tool against staging with production-like images, auth, and
   state-store placement;
 - exercise regional failover with unexpired tokens.
@@ -193,8 +227,13 @@ funded bug bounty unless separate evidence exists outside this repository.
 - Request a master path directly and confirm it is not served.
 - Mint a token, redeem it once, replay it, and present it from another
   proof key/browser context.
-- Revoke or downgrade authorization between mint and redemption.
+- Move the token into `?t=` and confirm hardened production rejects it.
+- Revoke or downgrade authorization between mint and redemption; repeat
+  with a changed buyer/order/delivery identity.
 - Request dimensions/quality beyond an entitlement.
+- Patch `fetch` or a WebGL draw method before/after load and compare the
+  selected Fortress fail-closed and Vault monitor policies; classify the
+  result as a tripwire, not proof of browser integrity.
 - Load a large gallery, scroll away/back, resize ordinarily, and confirm
   that the network panel does not show needless remints.
 - Try canvas read-back, page source, DevTools capture, print, PrintScreen,

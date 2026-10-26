@@ -12,7 +12,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
 No `<img>` is ever created. There is no image URL in your HTML to copy, no file in the Network tab to save, and the picture itself is painted through a sealed, protected viewer that fights back at every step a thief normally takes. People who dig deeper get a **black card**, a **scrambled mosaic**, or a **heavily pixelated thumbnail** — your call. Your original file **never leaves the server**.
 
-- 📦 **94.3 KiB minified / 30.9 KiB gzipped**, zero runtime dependencies (browser)
+- 📦 **102.5 KiB minified / 33.0 KiB gzipped**, zero runtime dependencies (browser)
 - ⚡ Built for **hundreds of images per page** (lazy loading, decode concurrency cap, bitmap/payload caching, display-size-aware rendering) — 100-image gallery verified in tests. **Loaded images do not reload** on scroll/visibility/ordinary resize, and static WebGL images draw on demand instead of running a 60 fps GPU loop
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
 - 🧩 Four preset modes — **lite** (galleries), **shield** (default), **vault** (WebGL), and **fortress** (Vault + anti-hook lock, strike lockouts, strict memory wiping, dynamic capture trace, temporal anti-single-frame shield, and optional pointer lens) — plus `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so you are never locked into a preset
@@ -89,25 +89,29 @@ Keep masters **outside** your static/public folder and let the middleware be the
 
 ```js
 // server (Express-compatible; plain node:http works too)
-import { createArchxMiddleware } from '@archnemix/image-protection/server';
+import {
+  createArchxMiddleware,
+  withHardenedProductionDefaults,
+  auditArchxProductionConfig,
+} from '@archnemix/image-protection/server';
 
-app.use(createArchxMiddleware({
+app.use(createArchxMiddleware(withHardenedProductionDefaults({
   secret: process.env.ARCHX_SECRET,     // required, random, at least 32 bytes
   imagesDir: './masters',               // NEVER serve this folder statically
   publicDirs: ['./public'],             // startup rejects overlap with masters
-  ttlSec: 120,                          // signed URLs die after 2 minutes
+  ttlSec: 120,                          // signed tokens die after 2 minutes
   grid: 8,                              // 8×8 tile scramble
   quality: 95,                          // high-fidelity WebP; or lossless:true for exact delivered pixels
   tokenMethods: ['POST'],               // secure default; the client POSTs with X-Archx-Request
   requireTokenRequestHeader: true,      // default; rejects simple cross-site mint attempts
-  allowQueryTokens: false,              // strongest: payload token only in X-Archx-Token, never a URL
-  proofOfPossession: 'required',        // copied tokens need the page's non-extractable P-256 key too
+  allowQueryTokens: false,              // now the default; true is explicit legacy compatibility only
+  proofOfPossession: 'required',        // hardened preset: copied tokens need the page's non-extractable P-256 key too
   callbackTimeoutMs: 10000,             // hung authorize/watermark/registry callbacks fail closed
-  oneTimeTokens: true,                  // a captured signed URL/token cannot be replayed
+  oneTimeTokens: true,                  // a captured signed token cannot be replayed
   bindTokenTo: { userAgent: true, session: true }, // friction only; authorize() is the boundary
   allowedOrigins: ['https://example.com'], // exact origins; '*' is rejected
   quotas: { perViewer: 500, perViewerImage: 20, perIp: 2000, windowMs: 3600000 },
-  abuseDetection: { distinctImages: 250, windowMs: 600000, action: 'event' },
+  abuseDetection: { distinctImages: 250, windowMs: 600000, action: 'deny' }, // 'event' only records; it does not block
   processing: {
     maxInputBytes: 50 * 1024 * 1024,
     maxInputPixels: 40000000,
@@ -119,15 +123,28 @@ app.use(createArchxMiddleware({
     blockUntrustedSharpLoaders: true,   // default; process-global libvips loader allowlist
   },
   processingConcurrency: 2,             // bounded Sharp work + bounded queue
-  serverWatermark: '© Studio · viewer {viewer}',
+  serverWatermark: '© Studio · buyer {buyer} · order {order}',
   forensic: true,                       // seeded block mark, also pre-scramble
   forensicPerToken: true,
   // Blind ownership fingerprint: recoverable later from a suspect screenshot
   // with archx-detect / detectStegoFingerprint(), no original needed.
-  steganography: { perToken: true, strength: 6 },
+  steganography: { perToken: true, profile: 'robust', strength: 6 },
   stegoRegistryFailure: 'deny',         // do not issue an unregistered marked view
-  onStegoIssue: async ({ id, viewerId, fingerprint }) =>
-    db.fingerprints.save({ id, viewerId, fingerprint }),
+  onStegoIssue: async (record) =>
+    db.fingerprints.save({
+      imageId: record.id, viewerId: record.viewerId,
+      buyerId: record.buyerId, orderId: record.orderId,
+      deliveryId: record.deliveryId, traceId: record.traceId,
+      fingerprint: record.fingerprint, profile: record.profile,
+      keyId: record.keyId, issuedAt: record.issuedAt,
+    }),
+  // Optional C2PA/provenance extension point: create/sign/store the external
+  // manifest in your provenance system and bind it to this soft-binding record.
+  onProvenanceIssue: async (record) => provenanceRegistry.save(record),
+  provenanceFailure: 'deny',
+  // Metadata-only monitoring/reverse-image-search hook. It never receives a
+  // token, scramble key, AES key, proof, headers, pixels, or master path.
+  onDelivery: async (event) => deliveryLog.write(event),
   onSecurityEvent: async (event) => securityLog.write(event), // sanitized; no tokens/keys/headers
   // Required unless allowAnonymous:true is an intentional public-catalog choice.
   // It runs at phase:'token' AND again at phase:'image', so logout/revocation
@@ -137,14 +154,22 @@ app.use(createArchxMiddleware({
     if (!user || !await db.canView(user.id, id)) return false;
     return {
       viewerId: user.id,
+      buyerId: user.buyerId || user.id,
+      orderId: user.currentOrderId,
+      deliveryId: user.currentDeliveryId,
       permissions: ['image:view'],
       maxWidth: user.paid ? 1600 : 800,
       quality: user.paid ? 'lossless' : 90,
     };
   },
-  // encrypt: true,                     // + AES-GCM transport/obfuscation (not DRM)
-}));
+  // encrypt: true,                     // AES-GCM transport/obfuscation (not DRM). The token
+  // response's token, key, and aesKey are visible to the authorized browser
+  // and page JavaScript; never log that response or treat those values as
+  // secrets from the viewer.
+})));
 ```
+
+Run `auditArchxProductionConfig(finalOptions, { expectedInstances })` in deployment tests. Unlike the basic validity audit, it returns production `blockers` for anonymous entitlement mode, query bearer tokens, non-required proof of possession, reusable tokens, GET minting, missing request/site gates, a memory store in a multi-instance topology, and StegoMark without a registry. `withHardenedProductionDefaults()` fills only fields you left undefined; it cannot choose your quotas, authorization policy, shared store, or supported-client proof policy.
 
 > **Fail-closed startup:** v1.5 throws during `createArchxMiddleware()` if the secret is missing/short/known-demo, no supported masters are indexed, origins/processing values are invalid, masters overlap declared `publicDir`/`publicDirs`, both `authorize` and explicit `allowAnonymous:true` are absent, or an unknown/misspelled top-level or nested security option is present. There is no weak-secret test bypass. Use `auditArchxServerConfig(options)` for a non-throwing, secret-free preflight report. Server-side Sharp work requires **Node ≥20.9.0** and **Sharp ^0.35.5**.
 
@@ -152,7 +177,7 @@ app.use(createArchxMiddleware({
 
 1. Add `authorize(req, id, { phase, token })`; reserve `allowAnonymous:true` for catalogs that are deliberately public. Authorization results are normalized fail-closed: return `true`, `false`, or an explicit object such as `{ viewerId, permissions:['image:view'], maxWidth }`; ambiguous values (`{allowed:false}`, `{allow:0}`, string scopes in an array field, string widths/qualities, invalid watermarks/Stego settings) deny.
 2. Rotate any short/demo secret to at least 32 random bytes and remove retired bypass/test surfaces: `allowWeakSecretForTests`, public `signToken`/`verifyToken` exports, `handler._test`, and `handler.index` are gone (use `handler.stats().images`). Claims remain strict v2, including an optional-claim allowlist and bounded watermark/binding/Stego fields.
-3. Update custom token clients to `POST` with `X-Archx-Request: token` (required by default) and redeem the separate `token` in `X-Archx-Token` against `cleanUrl`. The legacy query-token `url` remains enabled for compatibility; set `allowQueryTokens:false` when all clients support header transport. The bundled browser client defaults to `proofOfPossession:'auto'`: it presents an ephemeral public P-256 key at mint and a short-lived proof at redemption, and the server's default `'optional'` policy binds the signed token to that key when one is presented. Use server `proofOfPossession:'required'` plus client `proofOfPossession:'required'` for the strongest token-theft posture; a custom client must implement the same narrow proof protocol or the server policy must remain `'optional'`. Only as a temporary legacy bridge, set server `tokenMethods:['GET','POST']` and client `tokenMethod:'GET'`.
+3. Update custom token clients to `POST` with `X-Archx-Request: token` (required by default) and redeem the separate `token` in `X-Archx-Token` against `cleanUrl`. Query bearer transport is **off by default**; set `allowQueryTokens:true` only as an explicit, temporary compatibility bridge, and expect the production audit to flag it. Header transport reduces URL/history/Referer/log leakage—it does not hide the token, scramble key, or AES key from page JavaScript or the authorized viewer. The bundled browser client defaults to `proofOfPossession:'auto'`: it presents an ephemeral public P-256 key at mint and a short-lived proof at redemption, and the bare server default `'optional'` binds the signed token to that key when one is presented. `withHardenedProductionDefaults()` instead selects `'required'`; pair it with client `proofOfPossession:'required'`. A custom client must implement the same narrow proof protocol or the server policy must remain `'optional'`. Proof of possession limits replay of a copied token without the page's non-extractable private key; it cannot hide the decrypted derivative from the legitimate browser displaying it. Only as a temporary legacy bridge, set server `tokenMethods:['GET','POST']` and client `tokenMethod:'GET'`.
 4. Use image IDs matching `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`; paths, dots/extensions, traversal, unknown IDs, malformed percent-encoding, simultaneous query+header tokens, and oversized URLs/bodies fail with generic controlled responses.
 5. Remove `allowedOrigins:['*']`; exact origins only. When Fetch Metadata is present, only `same-origin` (or an exact allowlisted origin) may mint by default. Client IP comes from the socket unless `trustProxy:true` **and** an exact `trustedProxyHops` count are configured; X-Forwarded-For is then selected from the right. Origin/Referer/User-Agent/IP are supplemental signals, never substitutes for your session/entitlement check.
 
@@ -180,9 +205,15 @@ tracking would otherwise reset per instance. Declare the deployment and
 supply one shared, atomic adapter:
 
 ```js
+import Redis from 'ioredis'; // host-owned dependency; node-redis is also supported
+import { createRedisStateStore } from '@archnemix/image-protection/redis';
+
+const redis = new Redis(process.env.REDIS_URL);
+const stateStore = createRedisStateStore({ client: redis, prefix: 'archx:prod' });
+
 createArchxMiddleware({
   deploymentMode: 'multi-instance', // startup rejects a missing/memory store
-  stateStore: myRedisArchxStore,    // claimOnce + hitWindow + trackDistinct
+  stateStore,                       // SET NX PX claims + Lua window/distinct operations
   stateStoreTimeoutMs: 250,         // security-state failures return 503
   secrets: {
     '2026-01': process.env.ARCHX_SECRET_2026_01,
@@ -209,7 +240,7 @@ export ARCHX_SCRAMBLE_KEY='<long random secret>'
 export ARCHX_FORENSIC_SEED='campaign-or-batch-id'
 npx archx-protect photo.jpg photo.archx --max-width 1400 \
   --watermark "© Studio" \
-  --stego "ORDER-1042-or-owner-batch" --lossless \
+  --stego "ORDER-1042-or-owner-batch" --stego-profile robust --lossless \
   --max-input-bytes 52428800 --max-input-pixels 40000000 --timeout-sec 10
 npx archx-protect ./masters ./protected --encrypt
 ```
@@ -227,7 +258,8 @@ Archx.load.image('#hero', '/protected/photo.archx', { key: window.__ARCHX_STATIC
 ```bash
 # Static/CLI marks. ARCHX_STEGO_KEY should be the embed-time key (for the
 # example above, the value of ARCHX_SCRAMBLE_KEY unless you set one separately).
-# Geometry search is on by default; add --no-geometry for a faster uncropped-only pass:
+# Geometry search and --profile auto (standard + robust) are on by default;
+# add --no-geometry for a faster uncropped-only pass:
 ARCHX_STEGO_KEY="$ARCHX_SCRAMBLE_KEY" \
   npx archx-detect suspect-screenshot.png --expect "ORDER-1042"
 
@@ -239,7 +271,7 @@ ARCHX_SECRET="$ARCHX_SECRET" npx archx-detect suspect.jpg --image-id aurora-vall
 npx archx-detect suspect.jpg --expect-fingerprint 0123456789abcdef --max-distance 10 --json
 ```
 
-A confident result prints a 12-hex fingerprint and the recovered crop geometry. With the token server, persist that value from `onStegoIssue` next to the image/user/order, then look the detected fingerprint up. StegoMark is a redundant keyed 48-bit ID + CRC with soft error correction. In the current three-photo, 800 px matrix it survived ordinary resize/JPEG, mild blur, photometric changes, 90% center crops (3/3), 15% left-edge removal (3/3), 10% bottom removal (3/3), and 80% center crops (2/3); it failed a 2° rotation (0/3). It is attribution evidence, **not** an AI-proof lock or a promise for perspective phone photos: aggressive denoising/diffusion regeneration, severe/asymmetric geometry, or a wrong detector key/grid can defeat it. For a phone photo, first crop tightly to the displayed rectangle and correct perspective/rotation manually, then run the detector.
+A confident result prints a 12-hex fingerprint, the detected profile, and the recovered crop geometry. With the token server, persist that value from `onStegoIssue` next to image, viewer, buyer, order, delivery, trace ID, profile, signing `keyId`, and issuance time, then look the detected fingerprint up. `standard` is the backwards-compatible redundant keyed 48-bit ID + CRC-16 with soft correction. `robust` uses larger 20×14 macro-cells, about 1.35× amplitude, a 96-bit codeword (the same fingerprint + first CRC + keyed second CRC + marker), median cell/segment voting, syndrome-guided repair, and stricter acceptance for heavily corrected candidates. In the earlier three-photo, 800 px standard-profile matrix it survived ordinary resize/JPEG, mild blur, photometric changes, 90% center crops (3/3), 15% left-edge removal (3/3), 10% bottom removal (3/3), and 80% center crops (2/3); it failed a 2° rotation (0/3). The robust regression additionally recovers direct copies, a 448 px JPEG-q82 resize, brightness/saturation + mild blur JPEG-q80 edits, and a photographic 90% center crop resized back to 640×420. A non-match is **not proof that a copy is unrelated**: aggressive denoising/diffusion regeneration, severe/asymmetric geometry, rotation/perspective, wrong key/grid/profile, or heavy filtering can produce a false negative. It is attribution evidence, **not** permanent, impossible to remove, or standalone legal proof. For a phone photo, first crop tightly to the displayed rectangle and correct perspective/rotation manually, then run the detector.
 
 The perceptual soft binding is a separate 64-bit DCT fingerprint of image structure. It is useful as a C2PA-style lookup key when metadata and pixel marks are separated from a copy, and the unit suite verifies a resized/JPEG copy within the default distance threshold. It can collide or drift under crops, compositing, heavy edits, adversarial perturbation, or semantic regeneration; corroborate a match with issuance records and the original before making an ownership claim.
 
@@ -290,7 +322,7 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 ### `Archx.load.image(target, source, options?) → ProtectedImage`
 
 - `target`: CSS selector or element (give it a size via CSS/`aspect-ratio`, or Archx derives it from the image)
-- `source`: URL string · `File`/`Blob` · `ArrayBuffer` · `{ id }` for the token server · URL of an `.archx` asset
+- `source`: URL string · `File`/`Blob` · `ArrayBuffer`/`Uint8Array` · `{ id }` for the token server · URL of an `.archx` asset. The byte/Blob forms are also the custom-transport extension point: an application-owned streaming or chunked-encryption transport may assemble a complete `.archx` container and hand it to Archx, while retaining responsibility for that transport's authentication and replay policy
 - returns an instance immediately; `instance.ready` resolves after first paint. `instance.reload(newSource?)` is the explicit forced-refresh/source-change path; ordinary visibility/resize repainting never calls it implicitly. `instance.destroy()` releases observers, canvases, textures, and cached payload state.
 
 ### Key options
@@ -300,9 +332,9 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `mode` | `'shield'` | `'lite' \| 'shield' \| 'vault' \| 'fortress' \| 'custom'` ('fortress' is a stricter Vault preset; 'custom' applies no preset bundle; explicit options always win) |
 | `renderer` | `'auto'` | `'auto' \| 'canvas' \| 'webgl'`. Direct pipeline selection for custom setups: use with `mode:'custom'`, or omit `mode` and pass `renderer` plus individual flags. `'webgl'` falls back to Canvas if WebGL/context budget is unavailable |
 | `watermark` | `null` | string or `{text, opacity, tile, corner, color}` — baked into the same pixels; `{session}` expands to a per-visitor id |
-| `onExtract` | `'black'` | decoy for canvas grabbers: `'black' \| 'lowres' \| 'scrambled'` |
+| `onExtract` | `'black'` | decoy for canvas grabbers: `'black' \| 'lowres' \| 'scrambled'`. `scrambled` first destroys detail at 144 px wide, pixel-upscales, tile-scrambles that degraded staging image, and overlays the brand/watermark, so even a perfect unscramble does not recover the clean displayed derivative |
 | `tokenEndpoint` | `null` | e.g. `'/archx/token/'` (id is appended) |
-| `tokenTransport` | `'header'` | `'header' \| 'query' \| 'auto'`. Header transport redeems the separate token in `X-Archx-Token` against a clean payload URL, keeping bearer material out of URLs/history/Referer/proxy logs/Resource Timing names; query transport is for legacy token servers |
+| `tokenTransport` | `'header'` | `'header' \| 'query' \| 'auto'`. Header transport redeems the separate token in `X-Archx-Token` against a clean payload URL, keeping bearer material out of URLs/history/Referer/proxy logs/Resource Timing names; query transport requires an explicit server `allowQueryTokens:true` legacy opt-in |
 | `proofOfPossession` | `'auto'` | `'auto' \| 'required' \| 'off'` (or boolean). Auto creates one ephemeral non-extractable ECDSA P-256 key pair per page when WebCrypto is available, binds minted tokens to its thumbprint, and signs a 60-second method/path/token-hash proof for each payload. Required fails closed without WebCrypto. It stops token replay in another browser; it does not stop the legitimate page/browser from displaying authorized pixels |
 | `fetchTimeoutMs` / `maxResponseBytes` / `maxDecodedPixels` / `maxDecodedDimension` | `20000` / 64 MiB / 40 MP / 16384 | bounded streaming fetches and pre/post-decode budgets for token and direct sources; hostile SVG/oversized/redirected/cross-origin token responses fail closed |
 | `tokenMethod` | `'POST'` | `'POST' \\| 'GET'`. POST sends `X-Archx-Request: token`, `cache:'no-store'`, and works with the server's POST-only default. GET is only a legacy bridge when the server explicitly enables it |
@@ -318,12 +350,12 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `reloadOnResize` / `resizeUpscaleFactor` | `'upscale'` / `1.75` | strict-memory resize policy: `'never'` keeps the painted canvas, `'upscale'` re-resolves only after a large size jump (locally from cached payload when enabled), `'always'` is the legacy eager behaviour. Normal modes repaint from the retained bitmap |
 | `renderLoop` | `'auto'` | WebGL presentation policy: `'auto'` = static images draw on demand and only temporal shield animates; `'static'` forces on-demand; `'continuous'` forces a RAF loop while visible. Lens/risk/resize changes request fresh frames automatically |
 | `temporalShield` | `null`; fortress enables checker+chroma | `true` or `{ strength, block, pattern:'blocks' \\| 'checker' \\| 'bands', chroma, engine, respectReducedMotion }`. Alternates complementary frames so one OS/extension/DevTools screenshot is degraded. Can flicker/eye-strain and costs continuous rendering; recordings/averaged frames/long exposures can undo it. Set `false` to opt a Fortress image out |
-| `temporalInterlace` | `null` (never enabled by a preset) | `true`, `'balanced60' \\| 'pixels60' \\| 'strips60' \\| 'blocks60'`, or `{ profile, engine:'auto' \\| 'shader' \\| 'frames', layout:'checker' \\| 'pixels' \\| 'strips' \\| 'blocks', axis, cellSize, phases:2..4, fill:'lowres' \\| 'dim' \\| 'black' \\| 'noise', fillBlock, fillStrength, hiddenScale, activeGain, compensation, noiseStrength, chroma, refreshHz, minPhaseHz, optimizeRefresh, respectReducedMotion }`. Only the current spatial subset is sharp; other cells use the selected fill. `shader` evaluates the phase mask in WebGL; `frames` pre-renders one altered Canvas2D frame per phase; `auto` follows the effective renderer. The 60 Hz default is two phases with 2-device-pixel checker cells and a local-average fill. See the dedicated section below |
+| `temporalInterlace` | `null` (never enabled by a preset) | `true`, `'balanced60' \\| 'pixels60' \\| 'strips60' \\| 'blocks60' \\| 'fortress60'`, or `{ profile, engine:'auto' \\| 'shader' \\| 'frames', layout:'checker' \\| 'pixels' \\| 'strips' \\| 'blocks', axis, cellSize, phases:2..4, fill:'lowres' \\| 'dim' \\| 'black' \\| 'noise', fillBlock, fillStrength, hiddenScale, activeGain, compensation, noiseStrength, chroma, refreshHz, minPhaseHz, optimizeRefresh, respectReducedMotion }`. Only the current spatial subset is sharp; other cells use the selected fill. `shader` evaluates the phase mask in WebGL; `frames` pre-renders one altered Canvas2D frame per phase; `auto` follows the effective renderer. The 60 Hz default is two phases with 2-device-pixel checker cells and a local-average fill. See the dedicated section below |
 | `cameraShield` | `null` | experimental separate-device profile using the same temporal engine: e.g. `{ pattern:'checker', chroma:true }` for Bayer/opponent-colour friction or `{ pattern:'bands', chroma:true }` for rolling-shutter rows. A truthy `cameraShield` takes precedence over a preset's generic `temporalShield`. It is capture degradation—not TPVM and not camera-proof; synchronized shutters/viewers or coded room lighting would require hardware outside page JS |
 | `splitCanvases` / `splitGrid` | `false` / `3` | paranoid mode: no single canvas holds the whole image |
 | `shadow` | `'closed'` | `'closed' \| 'open' \| 'none'` |
 | `forensic` | `true` (Lite defaults it off) | client-side per-session marks; an explicit `forensic:true` enables it even with Lite/custom Canvas. Pair with server `forensic` when reconstruction-resistance matters |
-| `integrity` | `'monitor'`; fortress: `'lock'` | hooked-API policy: `'off' \| 'monitor' \| 'lock'`. `monitor` reports through `onAttempt`; `lock` refuses/blackouts rather than feeding a hooked pipeline |
+| `integrity` | `'monitor'`; fortress: `'lock'` | hooked-API policy: `'off' \| 'monitor' \| 'lock'`; any other value fails closed. The audit covers fetch/bitmap/object-URL, canvas context/read-back, 2D draw/read-back, document creation, and WebGL/WebGL2 texture, framebuffer, shader/program, draw, and readback methods. `monitor` reports and continues; `lock` refuses rather than feeding a hooked pipeline. This catches many post-load and non-native pre-load hooks, but a clean result does not prove the absence of native-looking, extension, CDP, or modified-browser hooks |
 | `automation` | `'monitor'` | headless/bot tripwire policy: `'off' \| 'monitor' \| 'lock'`. Signals are spoofable, so don't use this as your only bot defense |
 | `memory` | `'standard'`; fortress: `'strict'` | strict mode bypasses shared bitmap caching, closes decoded bitmaps promptly, and wipes CPU-side clean working canvases after use/upload |
 | `localScramble` | `false`; fortress: `true` | for plain client-only sources in Vault/Fortress, tile-scramble locally before GPU upload so the texture source is not a clean image |
@@ -335,6 +367,7 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `onAttempt(kind, instance)` | `null` | hook analytics/logging/banning. Kinds include `contextmenu`, `drag`, `copy`, `longpress`, `extract-*`, `screenshot-key`, `integrity:*`, `automation:*`, and `lens-scan`. Also fires as a bubbling `archx-attempt` DOM event |
 | `alt` | `''` | sets `role="img"` + `aria-label` for screen readers |
 | `onLoad` / `onError` / `onClick` | `null` | lifecycle + genuine click forwarding (lightboxes keep working) |
+| `onEvent(event, instance)` | `null` | generic sanitized monitoring hook. The frozen event contains only schema/service/type/time/mode/coarse kind/reason/outcome/issues—never token responses, tokens, scramble/AES keys, proofs, source objects, pixels, canvases, or raw errors. The same stream is available globally through `Archx.on()` and plugins installed with `Archx.use()` |
 
 ### Temporal interlace: deliberately incomplete presented frames
 
@@ -373,7 +406,7 @@ Archx.load.image('#frames', { id: 'watch-03' }, {
 });
 ```
 
-All four built-in profiles target a **60 Hz** display and a 30 Hz minimum per-phase rate:
+Four balanced profiles target a **60 Hz** display and a 30 Hz minimum per-phase rate; `fortress60` deliberately lowers that floor to 20 Hz:
 
 | Profile | Layout | Cell size | Intended trade-off |
 |---|---|---:|---|
@@ -381,6 +414,7 @@ All four built-in profiles target a **60 Hz** display and a 30 Hz minimum per-ph
 | `pixels60` | pixel-level cells distributed by `(x + y) mod phases` for 2 phases, `(x + 2y) mod phases` for 3–4 | 1 device px | Finest shimmer, but most sensitive to scaling, sub-pixel rendering, and camera sampling |
 | `strips60` | alternating row strips (`axis:'columns'` also available) | 2 device px | Easiest geometry to reason about; interacts visibly with scrolling/rolling-shutter capture |
 | `blocks60` | square blocks assigned randomly per render | 8 device px | Coarser holes in a one-frame capture, but the most obvious flicker/motion texture |
+| `fortress60` | randomized blocks, 3 phases, noise fill | 6 device px | Higher-cost 20 Hz-per-subset profile; hidden blocks carry keyed noise instead of locally useful colour. More flicker/visual cost and still recombinable from multiple frames/video |
 
 Choose the drawing engine by where you want the cost:
 
@@ -406,30 +440,39 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 - `Archx.config({...})` — set global defaults (endpoint, token method, cache scope, session id, brand text…). Calling it with no useful update returns a sanitized view; configured `key`/`aesKey` values are shown only as `[redacted]`
 - `Archx.instanceCount` — number of live instances, without exposing the instance registry itself
 - `Archx.auditIntegrity()` / `auditIntegrity()` — names of sensitive browser APIs that currently differ from the native references captured when the module loaded
+- `Archx.auditIntegrityDetails()` — structured report separating methods already non-native at module capture from later changes, with the checked surface and tripwire caveat
+- `Archx.captureEarlyIntegritySnapshot()` / `verifyEarlyIntegritySnapshot()` — optional early-bootstrap comparison for a trusted first-party snippet placed before third-party scripts; it narrows but does not eliminate the userscript/extension race
+- `Archx.on(listener)` / `Archx.off(listener)` / `Archx.use(plugin)` / `Archx.plugins()` — sanitized global telemetry and plugin registration for monitoring or reverse-image-search workflows. A plugin may provide `{ name, setup({on,off,version}), onEvent, teardown }`; setup receives no instance internals
 - `Archx.detectAutomation()` / `detectAutomation()` — current cheap headless/automation signals (a tripwire, not a bot-proof identity check)
 - `instance.options` — sanitized per-instance option view with secrets redacted
 - `Archx.load.gallery(container, items, options?)` — items: URLs or `{id, alt}` objects
 - `Archx.protectAll(selector?, options?)` — upgrade existing `<img data-protect>` in place
 - `<archx-image>` — attributes: `src`, `image-id`, `token-endpoint`, `token-method`, `token-transport`, `proof-of-possession`, `cache-scope`, `mode`, `preset`, `quality-profile`, `watermark`, `fit`, `grid`, `key`, `scrambled`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, `temporal-interlace-refresh-hz`, `render-loop`, `reload-on-resize`, `on-extract`, `alt` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
 - Server: `createArchxMiddleware(options)` needs `sharp` (optional peer; pinned examples use Sharp 0.35). Important direct controls:
-  - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec`, `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens`, `proofOfPossession:'optional'|'required'|'off'`, `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
-  - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `maxWidthCap`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'`, `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `steganography`, `onStegoIssue`, `stegoRegistryFailure`.
+  - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec`, `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens` (default `false`), `proofOfPossession:'optional'|'required'|'off'` (bare default `'optional'`; hardened defaults select `'required'`), `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
+  - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `maxWidthCap`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'`, `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `steganography`, `onStegoIssue`, `stegoRegistryFailure:'deny'|'allow'`, `onProvenanceIssue`, `provenanceFailure:'deny'|'allow'`, `onDelivery`.
   - **Abuse/CPU/memory:** `rateLimitPerMinute`, `tokenRateLimitPerMinute`, `rateLimitMaxClients`/`maxTrackedClients`, `oneTimeTokenMaxEntries`, `quotas:{windowMs,perIp,perViewer,perIpImage,perViewerImage}`, `abuseDetection:{distinctImages,windowMs,action:'event'|'deny'}`, `onSecurityEvent` (or legacy `onAbuse`), `processing:{maxInputBytes,maxInputPixels,maxInputWidth,maxInputHeight,maxOutputPixels,processingTimeoutSec,allowedInputFormats}`, `processingConcurrency`, `processingQueueMax`, `processingQueueTimeoutMs`, `outputCacheMax`, `outputCacheMaxBytes`, `masterCacheMaxBytes`, `cacheMasters`.
-  - `authorize(req, id, { phase, token })` may return `true`/`false` or `{ allow, viewerId|userId|subject|sessionId, permissions|scopes|scope, maxWidth, watermark, quality, lossless, format, steganography, stegoFingerprint }`. If scopes are supplied, one of `image:view`, `archx:image:view`, or `*` is required. It runs before minting and again before bytes are served; current entitlements can tighten width/quality/format but cannot widen signed claims. Viewer IDs are HMAC-hashed before token/cache/forensic/Stego derivation. `allowClientQuality:true` only lets the browser request `q=` when no entitlement quality overrides it.
+  - `authorize(req, id, { phase, token })` may return `true`/`false` or `{ allow, viewerId|userId|subject|sessionId, buyerId, orderId, deliveryId, traceId, permissions|scopes|scope, maxWidth, watermark, quality, lossless, format, steganography, stegoFingerprint }`. If scopes are supplied, one of `image:view`, `archx:image:view`, or `*` is required. It runs before minting and again before bytes are served; current entitlements can tighten width/quality/format but cannot widen signed claims. Viewer IDs and the buyer/order/delivery/trace subject are HMAC-hashed before token/cache/forensic/Stego derivation; the raw trace fields are supplied only to your server-side registry/provenance callbacks, never to browser delivery events. `allowClientQuality:true` only lets the browser request `q=` when no entitlement quality overrides it.
   - Token requests include the display box (`bw`, `bh`, `fit`, optional `q`); the server validates them as strict integers/enums and uses source aspect to sign a cover-safe derivative width before entitlement caps. Responses use `Cache-Control: private,no-store`, CDN/surrogate `no-store` controls, credential/token/proof-sensitive `Vary`, `nosniff`, `Referrer-Policy:no-referrer`, same-origin/cross-origin CORP as configured, exact-origin credentialled CORS only, a sandboxed CSP on payloads, `Retry-After` on 429s, and generic error bodies that do not leak paths/stacks/decoder/token details.
-  - `auditArchxServerConfig(options)` gives a frozen, secret-free preflight result. A live handler exposes only `handler.configAudit`, `handler.stats()`, and `handler.close()` for graceful shutdown/cache/limiter cleanup; there is no public live index, test hook, generic token signer, or generic token verifier. `validateImageId()`, `validateTokenClaims()`, and `computeJwkThumbprint()` are exported for host-side validation/tests.
-  - `serverWatermark` may be a string, SVG-watermark config object, or async function receiving `{ req, id, nonce, viewerId, exp }`. `{id}`, `{nonce}`, and `{viewer}` placeholders are expanded. It is composited before forensic/Stego marking, tile scrambling, encoding, and optional encryption.
+  - `auditArchxServerConfig(options)` gives a frozen, secret-free validity result; `auditArchxProductionConfig(options, { expectedInstances })` adds named production blockers/recommendations, and `withHardenedProductionDefaults(options)` fills safer defaults without overwriting explicit host choices. A live handler exposes only `handler.configAudit`, `handler.stats()`, and `handler.close()` for graceful shutdown/cache/limiter cleanup; there is no public live index, test hook, generic token signer, or generic token verifier. `validateImageId()`, `validateTokenClaims()`, and `computeJwkThumbprint()` are exported for host-side validation/tests.
+  - `serverWatermark` may be a string, SVG-watermark config object, or async function receiving `{ req, id, nonce, viewerId, trace, exp }`. `{id}`, `{nonce}`, `{viewer}`, `{buyer}`, `{order}`, `{delivery}`, and `{trace}` placeholders are expanded. It is composited before forensic/Stego marking, tile scrambling, encoding, and optional encryption.
   - `forensic:true` uses the default 32 px / delta-2 block mark; or pass `{ blockSize, delta }`. With `forensicPerToken:true` the seed changes per signed delivery (more attribution, less output-cache reuse); set it `false` for static per-image/viewer marks when gallery throughput matters more.
-  - `steganography:true` or `{ strength, gridX, gridY, perToken }` enables StegoMark. The fingerprint is HMAC-derived from image + viewer hash + (nonce or `static`), never returned to the browser; `onStegoIssue({ req, id, viewerId, nonce, exp, fingerprint })` is your registry hook. `deriveStegoFingerprint()` / `deriveStegoKey()` are exported for investigations, and `embedStegoFingerprint()` / `detectStegoFingerprint()` / `stegoFingerprint()` are exported from the scramble core. Detection accepts `searchOffsets` and `searchGeometry`. Direct `scrambleImage()` callers can pass `stegoPayload`, `stegoKey`, `stegoStrength`, plus the same processing-limit options.
+  - `steganography:true` or `{ profile:'standard'|'robust', strength, gridX, gridY, perToken }` enables StegoMark. The fingerprint is HMAC-derived from image + trace/viewer hash + (nonce or `static`), never returned to the browser; `onStegoIssue({ req, id, viewerId, buyerId, orderId, deliveryId, traceId, traceHash, nonce, exp, issuedAt, fingerprint, profile, keyId })` is your registry hook. `onProvenanceIssue` receives a similar key-free issuance record for an external C2PA/provenance workflow, and `onDelivery` receives only frozen delivery metadata. `deriveStegoFingerprint()` / `deriveStegoKey()` are exported for investigations, and `embedStegoFingerprint()` / `detectStegoFingerprint()` / `stegoFingerprint()` are exported from the scramble core. Detection accepts `profile:'standard'|'robust'|'auto'`, `searchOffsets`, and `searchGeometry`, and reports the matching profile/observed-bit count. Direct `scrambleImage()` callers can pass `stegoPayload`, `stegoKey`, `stegoStrength`, and `stegoProfile`, plus the same processing-limit options.
   - Direct `scrambleImage()` callers can pass `contentFingerprint:true` to receive a `perceptualFingerprint` for an ingest registry; the token middleware does not compute it per request. The core exports `perceptualFingerprint()`, `normalizePerceptualFingerprint()`, `perceptualFingerprintDistance()`, and `comparePerceptualFingerprints()` for offline monitoring/takedown tooling.
   - Sharp masters are treated as untrusted: byte-only inputs, pre-decode format/dimension sniffing cross-checked against Sharp metadata, byte/pixel/width/height/output budgets, detected-format and process-global libvips-loader allowlists, rejection of multi-page and >4-channel inputs, `failOn:'warning'`, native timeouts, metadata-stripping output, and a bounded processing semaphore. Corrupt/oversized inputs become controlled 413/415/503 responses rather than stack leaks.
   - Marked `.archx` headers carry `wm:1`, `fx:1`, and/or `sg:1` flags so your pipeline can verify what was embedded without exposing seed/text/fingerprint derivation in the payload.
+
+### CSP and browser-mode trade-offs
+
+A typical same-origin deployment needs the Archx script/module source allowed by `script-src`, token/payload endpoints allowed by `connect-src`, image decoding/blob workers as required by your build, and `worker-src blob:` only if your chosen browser path/config uses blob workers. Archx does not require third-party script origins. For shadow-DOM viewers, modern browsers use a constructable `CSSStyleSheet`, avoiding a dynamically inserted `<style>` element. Older browsers and `shadow:'none'` fall back to an injected `<style>` element, so a policy such as `style-src 'self'` with no unsafe-inline exception may block viewer styling there; host `width`/`height`/`aspectRatio` options also assign inline element styles. Test the exact policy in every supported browser rather than assuming the strictest style policy works unchanged.
+
+Fortress is intentionally fail-closed: if its integrity audit sees a hooked fetch/canvas/WebGL method, it refuses to load and reports `archx.blocked`. That protects a small number of premium images from ordinary post-load capture hooks, but it can false-positive for customers running privacy, accessibility, translation, screenshot, or enterprise-monitoring extensions that patch browser APIs. Vault's default is different: `integrity:'monitor'` reports the same signal and continues, which avoids most support lockouts but means the hook may observe delivery/rendering. Choose per image class, surface the event to support tooling, and provide a lower-resolution public fallback or support path for legitimate customers rather than silently applying Fortress site-wide.
 
 ## Performance
 
 Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
-- Browser bundle: **94.3 KiB minified / 30.9 KiB gzipped**, zero dependencies. The v1.5 size buys strict token-response/origin validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
+- Browser bundle: **102.5 KiB minified / 33.0 KiB gzipped**, zero dependencies. The current size buys strict token-response/origin validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
 - 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags; recent local runs measure **about 3.7–4.0 s** in the non-lazy path (production lazy mode streams them on scroll, and the gallery helper defaults to 1.5× oversampling)
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Server pixel scramble measured **170–224 MP/s** in the latest local run (1.9 ms at 800×536, 10.1 ms at 1600×1072, 9.4 ms at 1920×1080); full down-scale + scramble + q95 WebP took **169.9 ms at 900 px** as a one-time cached cost per distinct output variant, with AES-GCM in run-to-run noise at that size. Optional perceptual-fingerprint computation is off in the request path and intended for ingest/CLI use
@@ -449,36 +492,40 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 7. **One-time means a late failure can burn a token.** To close the parallel-replay race without letting a transient authorization failure spend a valid token, Archx verifies the signature/claims/proof, re-runs redemption authorization and binding checks, and only then atomically claims the proof ID and nonce through the configured state store. In a multi-instance deployment that store must be shared and atomic across every process. A later quota/processing failure can still burn that token; mint a fresh one instead of retrying it. The bundled client re-mints once after a 401/403 payload response.
 8. **Client-only mode is only as strong as the URL you feed it.** If the same full-resolution file is also sitting at a guessable public URL, protect the door, not the window: move masters behind the token server (or at least only ever publish down-scaled derivatives). Local scrambling before GPU upload protects the texture path, not the public network file.
 9. **SEO / sharing trade-off:** protected images have no indexable `<img src>` (that's the point). Keep SEO-critical thumbnails as normal images and protect the valuable full views; use `alt` for accessibility.
+10. **No progressive rendering of unauthenticated encrypted prefixes.** Token and direct HTTP responses are consumed with a bounded streamed reader, so an oversized body is rejected during receipt rather than after unbounded buffering. An AES-GCM payload is still decoded only after the complete ciphertext and authentication tag arrive; displaying an unauthenticated prefix would trade integrity for latency. Custom chunked transports can use the Blob/`ArrayBuffer`/`Uint8Array` source extension point after assembling and authenticating a complete container under their own protocol.
 
 ## Security checklist for production
 
 - [ ] Masters in a folder that is **not** statically served (test the direct URL → 404)
-- [ ] `ARCHX_SECRET` random and **≥32 bytes**, from the environment; run `auditArchxServerConfig()` in deployment tests and compare `handler.configAudit`/stats in staging vs production (without logging secrets)
-- [ ] For more than one server process, set `deploymentMode:'multi-instance'` with a shared atomic `stateStore`; test mint-on-A/redeem-on-B/replay-on-A and confirm a store outage returns 503 rather than falling back locally
-- [ ] Rotate signing keys through the `secrets` keyring + `activeSecretId`, keep the previous key only through the token rollover window, and persist StegoMark `keyId` values for later investigations
-- [ ] HTTPS everywhere (tokens/keys ride along), short `ttlSec` (60–180 s), POST token minting, `oneTimeTokens:true`, and object-level `authorize(req,id,{phase})` tests for horizontal/vertical access (another user's image, revoked user, downgraded plan)
-- [ ] Prefer `allowQueryTokens:false` and pair server `proofOfPossession:'required'` with client `proofOfPossession:'required'` once every supported client implements the proof protocol
+- [ ] `ARCHX_SECRET` random and **≥32 bytes**, from the environment; run both `auditArchxServerConfig()` and `auditArchxProductionConfig(options,{expectedInstances})` in deployment tests, gate on their secret-free results, and compare `handler.configAudit`/stats in staging vs production (without logging secrets or token responses)
+- [ ] For more than one server process, set `deploymentMode:'multi-instance'` with the bundled `./redis` adapter or an equivalently atomic shared `stateStore`; test mint-on-A/redeem-on-B/replay-on-A against staging infrastructure and confirm a store outage returns 503 rather than falling back locally
+- [ ] Rotate signing keys through the `secrets` keyring + `activeSecretId`, keep the previous key only through the token rollover window, and persist StegoMark `keyId` + `profile` values for later investigations
+- [ ] HTTPS everywhere (tokens/keys ride along), short `ttlSec` (60–180 s), POST token minting, `oneTimeTokens:true`, and object-level `authorize(req,id,{phase})` tests for horizontal/vertical access (another user's image, revoked user, downgraded plan, changed buyer/order/delivery identity, tampered width/quality request)
+- [ ] Keep the default `allowQueryTokens:false` and pair server `proofOfPossession:'required'` with client `proofOfPossession:'required'` once every supported client implements the proof protocol; remember that abuseDetection `action:'event'` records only and does not block
 - [ ] Verify every CDN/WAF/reverse-proxy rule honors origin `private,no-store`/`CDN-Cache-Control`/`Surrogate-Control`; never add a cache rule for token or payload paths based only on a static-looking URL
 - [ ] Exact `allowedOrigins` only; treat Origin/Referer/User-Agent/IP as signals. Enable session binding where a stable viewer ID exists; use IP binding cautiously for mobile/VPN users. Set `trustProxy:true` only with the exact `trustedProxyHops` count behind proxies that strip/set `X-Forwarded-For`; otherwise the socket IP remains authoritative
 - [ ] Tune token/image rate limits, per-viewer/IP/image quotas, distinct-image abuse alerting, `onSecurityEvent`, bounded cache/store sizes, and Sharp bytes/pixels/dimensions/formats/timeout/concurrency to your catalog and CPU budget
 - [ ] Negative-test the deployed routes: direct master path, traversal/double-encoding/malformed `%`, extra path segments, wrong method, duplicate/oversized tokens, sizing abuse, replay race, revoked session, corrupt/oversized master, and quota exhaustion
 - [ ] Server-side watermark + forensic marking on for valuable derivatives; client `{session}` watermarks alone do not survive offline payload reconstruction
-- [ ] If StegoMark is enabled, persist every `onStegoIssue` fingerprint with image/user/order context and test your `archx-detect` investigation path; an unregistered fingerprint is only a number. Register perceptual soft bindings at ingest if you want a second discovery path, and calibrate the distance threshold on your own catalog/false-positive tolerance
+- [ ] If StegoMark is enabled, persist every `onStegoIssue` fingerprint with image/user/buyer/order/delivery/profile/key context, alert on registry failures, and test your `archx-detect` investigation path on resized/recompressed/edited/cropped samples from your own catalog; an unregistered fingerprint is only a number. Register perceptual soft bindings at ingest if you want a second discovery path, and calibrate the distance threshold on your own catalog/false-positive tolerance
 - [ ] Client `debug:false`, `tokenMethod:'POST'`, a viewer/tenant `cacheScope`, and `Archx.clearCaches()` on logout/account switch; no custom code that re-exposes instances/canvases on `window` or DOM elements
+- [ ] Test the deployed CSP in every supported browser (including the current inline-style compatibility exception); decide the support path before choosing Fortress, because legitimate extensions that patch fetch/canvas/WebGL can cause fail-closed false positives while Vault monitoring intentionally continues
 - [ ] `fortress`/`vault` reserved for the few images that matter most; `lite` for bulk grids. Enable Lens/camera/interlace patterns only where flicker, GPU, accessibility, and legitimate-viewing trade-offs are acceptable; keep reduced-motion honoured and test on real 60/120 Hz displays + phone cameras before claiming camera degradation for your hardware
 - [ ] Keep full-resolution masters offline/backed-up — the server only needs web-size sources if you pre-resize
 
 ## Tests
 
 ```bash
-npm test            # 34 unit/integration tests (scramble/crypto, delivery quality,
-                    # cover-aware sizing, server marks, StegoMark survival + crop geometry,
-                    # perceptual soft bindings, strict config/claims, malformed HTTP, replay races,
-                    # reauthorization, sender-constrained proofs, bounded stores/quotas/abuse,
-                    # trusted-hop proxy parsing, Sharp processing limits, 60 Hz interlace normalization,
-                    # cross-instance shared state, signing-key rotation, and fail-closed store errors)
-npm run test:browser  # 72 checks in real headless Chromium (encapsulation, decoys,
-                      # native detail retention, WebGL black read-back,
+npm test            # 39 unit/integration tests (scramble/crypto, delivery quality,
+                    # cover-aware sizing, server marks, standard/robust StegoMark survival + crop geometry,
+                    # perceptual soft bindings, strict config/claims, hardened production defaults/audit,
+                    # buyer/order hooks, malformed HTTP, replay races, reauthorization, sender-constrained proofs,
+                    # bounded stores/quotas/abuse, trusted-hop proxy parsing, Sharp processing limits,
+                    # 60 Hz interlace normalization, cross-instance shared state, Redis adapter contract,
+                    # signing-key rotation, and fail-closed store errors)
+npm run test:browser  # 82 checks in real headless Chromium (encapsulation, decoys,
+                      # native detail retention, WebGL black read-back, post-load and pre-load draw-hook
+                      # Fortress/Vault policy regressions, sanitized plugin telemetry,
                       # Fortress Lens/camera + shader/frames temporal-interlace patterns/capture trace/strikes/integrity,
                       # POST + clean-header + proof-bound token flow, cache scopes, no-reload lifecycle,
                       # draw-on-demand GPU, token replay, guards, print, 100-image gallery…)
@@ -493,7 +540,7 @@ npm run load-test -- --requests=500 --concurrency=50 --width=1200
 ```
 src/         browser library (archx.js) + shared scramble/crypto core (scramble.js)
 dist/        committed built bundles (ESM / CJS / minified browser-global; regenerate, do not hand-edit)
-server/      token+scramble middleware, image scrambler, archx-protect + archx-detect CLIs, demo server
+server/      token+scramble middleware, Redis state-store adapter, image scrambler, archx-protect + archx-detect CLIs, demo server
 demo/        interactive demo + attack simulator, automated-test harness
 demo-masters/  three tracked demo originals — deliberately NOT web-accessible; generated gallery is ignored
 docs/        reviewer guide, research, operations, compliance readiness,

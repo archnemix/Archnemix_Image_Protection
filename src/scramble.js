@@ -597,15 +597,208 @@ export function stegoFingerprint(value) {
   return lo + hi;
 }
 
-function stegoCrc16(bytes) {
-  let crc = 0xffff;
-  for (const byte of bytes) {
-    crc ^= byte << 8;
+const STEGO_CRC16_TABLE = (() => {
+  const table = new Uint16Array(256);
+  for (let byte = 0; byte < 256; byte++) {
+    let crc = byte << 8;
     for (let i = 0; i < 8; i++) {
       crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
     }
+    table[byte] = crc;
+  }
+  return table;
+})();
+
+function stegoCrc16(bytes) {
+  let crc = 0xffff;
+  for (const byte of bytes) {
+    crc = ((crc << 8) ^ STEGO_CRC16_TABLE[((crc >> 8) ^ byte) & 255]) & 0xffff;
   }
   return crc;
+}
+
+function stegoBytesToBits(bytes) {
+  const bits = new Uint8Array(bytes.length * 8);
+  bytes.forEach((byte, i) => {
+    for (let b = 0; b < 8; b++) bits[i * 8 + b] = (byte >> (7 - b)) & 1;
+  });
+  return bits;
+}
+
+// Robust profile codeword: the same public 48-bit fingerprint and CRC-16,
+// followed by a second keyed CRC over the payload+CRC and a short marker.
+// The detector uses the extra redundancy only after the ordinary CRC has
+// identified a plausible partially damaged vector. This is still a heuristic
+// forensic mark—not an unremovable or guaranteed identifier.
+function robustStegoCodeBits(fingerprint, key) {
+  const payload = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
+  const crc = stegoCrc16(payload);
+  const first = [...payload, (crc >> 8) & 255, crc & 255];
+  const keyByte = Math.floor(hashSeed('archx-stego-robust:' + String(key ?? ''), 0x51ab) % 256);
+  const keyed = new Uint8Array(first.length + 1);
+  keyed.set(first, 0);
+  keyed[keyed.length - 1] = keyByte;
+  const check = stegoCrc16(keyed);
+  return stegoBytesToBits(new Uint8Array([
+    ...first,
+    (check >> 8) & 255,
+    check & 255,
+    0xa5,
+    0x5a,
+  ]));
+}
+
+function robustStegoBytesValid(bytes, key) {
+  if (!bytes || bytes.length !== 12) return false;
+  if (stegoCrc16(bytes.subarray(0, 6)) !== ((bytes[6] << 8) | bytes[7])) return false;
+  if (bytes[10] !== 0xa5 || bytes[11] !== 0x5a) return false;
+  const keyByte = Math.floor(hashSeed('archx-stego-robust:' + String(key ?? ''), 0x51ab) % 256);
+  const keyed = new Uint8Array(9);
+  keyed.set(bytes.subarray(0, 8), 0);
+  keyed[8] = keyByte;
+  return stegoCrc16(keyed) === ((bytes[8] << 8) | bytes[9]);
+}
+
+function robustStegoBitsValid(bits, key) {
+  if (!bits || bits.length !== 96) return false;
+  const bytes = new Uint8Array(12);
+  for (let i = 0; i < 12; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  return robustStegoBytesValid(bytes, key);
+}
+
+function robustStegoFingerprintFromBits(bits) {
+  let fingerprint = '';
+  for (let i = 0; i < 6; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
+    fingerprint += byte.toString(16).padStart(2, '0');
+  }
+  return fingerprint;
+}
+
+function repairRobustViaFirstCrc(scores, hard, key) {
+  const first = Uint8Array.from(hard.subarray(0, 64));
+  const syndromeOf = (bits) => {
+    const bytes = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) {
+      let byte = 0;
+      for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
+      bytes[i] = byte;
+    }
+    return stegoCrc16(bytes.subarray(0, 6)) ^ ((bytes[6] << 8) | bytes[7]);
+  };
+  const target = syndromeOf(first);
+  const buildCanonical = (correctedFirst) => {
+    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
+    const canonical = robustStegoCodeBits(fingerprint, key);
+    let flips = 0;
+    let softCost = 0;
+    for (let i = 0; i < 96; i++) {
+      if (canonical[i] === hard[i]) continue;
+      flips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    return flips <= 8 ? { bits: canonical, flips, softCost } : null;
+  };
+  if (target === 0) return buildCanonical(first);
+
+  const columns = new Uint16Array(64);
+  for (let i = 0; i < 64; i++) {
+    first[i] ^= 1;
+    columns[i] = syndromeOf(first) ^ target;
+    first[i] ^= 1;
+  }
+  const weakest = Array.from({ length: 64 }, (_, index) => index)
+    .sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b]))
+    .slice(0, 32);
+  // Interleave the weakest candidates between halves so a meet-in-the-middle
+  // search can represent up to three likely errors on each side.
+  const leftCandidates = weakest.filter((_, index) => index % 2 === 0);
+  const rightCandidates = weakest.filter((_, index) => index % 2 === 1);
+  const subsetMaps = (candidates) => {
+    const byWeight = Array.from({ length: 4 }, () => new Map());
+    const visit = (start, chosen, syndrome, cost) => {
+      const map = byWeight[chosen.length];
+      const previous = map.get(syndrome);
+      if (!previous || cost < previous.cost) map.set(syndrome, { indices: [...chosen], cost });
+      if (chosen.length >= 3) return;
+      for (let i = start; i < candidates.length; i++) {
+        const bit = candidates[i];
+        chosen.push(bit);
+        visit(i + 1, chosen, syndrome ^ columns[bit], cost + Math.abs(scores[bit] || 0));
+        chosen.pop();
+      }
+    };
+    visit(0, [], 0, 0);
+    return byWeight;
+  };
+  const leftMaps = subsetMaps(leftCandidates);
+  const rightMaps = subsetMaps(rightCandidates);
+  // Rank every first-CRC syndrome solution by the soft cost of the complete
+  // canonical 96-bit codeword. Accepting the first low-weight CRC collision
+  // would be unsafe: the second CRC and marker observations must also be
+  // close to the candidate before it can become an attribution.
+  let bestCanonical = null;
+  for (let total = 1; total <= 6; total++) {
+    for (let leftWeight = 0; leftWeight <= Math.min(3, total); leftWeight++) {
+      const rightWeight = total - leftWeight;
+      if (rightWeight < 0 || rightWeight > 3) continue;
+      for (const [syndrome, left] of leftMaps[leftWeight]) {
+        const right = rightMaps[rightWeight].get(target ^ syndrome);
+        if (!right) continue;
+        const corrected = Uint8Array.from(first);
+        for (const bit of [...left.indices, ...right.indices]) corrected[bit] ^= 1;
+        if (syndromeOf(corrected) !== 0) continue;
+        const candidate = buildCanonical(corrected);
+        if (!candidate) continue;
+        if (!bestCanonical || candidate.softCost < bestCanonical.softCost ||
+            (candidate.softCost === bestCanonical.softCost && candidate.flips < bestCanonical.flips)) {
+          bestCanonical = candidate;
+        }
+      }
+    }
+  }
+  return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
+}
+
+function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
+  const bits = Uint8Array.from(hard);
+  const bytes = new Uint8Array(12);
+  for (let i = 0; i < 12; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (robustStegoBytesValid(bytes, key)) return { bits, flips: 0 };
+  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key);
+  if (syndromeRepair) return syndromeRepair;
+  // Byte-level flips plus the table CRC keep an exhaustive search of the
+  // 24 weakest bits to five flips practical during offline geometry search.
+  const candidates = Array.from({ length: bits.length }, (_, index) => index)
+    .sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b]))
+    .slice(0, 24);
+  const flip = (index) => {
+    bits[index] ^= 1;
+    bytes[index >> 3] ^= 1 << (7 - (index & 7));
+  };
+  const search = (start, depth, targetDepth) => {
+    if (depth === targetDepth) return robustStegoBytesValid(bytes, key);
+    for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
+      flip(candidates[i]);
+      if (search(i + 1, depth + 1, targetDepth)) return true;
+      flip(candidates[i]);
+    }
+    return false;
+  };
+  for (let flips = 1; flips <= maxFlips; flips++) {
+    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips };
+  }
+  return null;
 }
 
 function stegoCodeBits(fingerprint) {
@@ -690,19 +883,45 @@ function stegoGrid(w, h, gridX, gridY) {
   return { gx, gy };
 }
 
+function robustStegoLayout(cellCount, key) {
+  const order = Array.from({ length: cellCount }, (_, i) => i);
+  const polarity = new Int8Array(cellCount);
+  const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
+  const rand = mulberry32(hashSeed('archx-stego-robust-layout:' + String(key ?? ''), 0x51ab));
+  for (let i = cellCount - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  for (let i = 0; i < cellCount; i++) {
+    polarity[i] = rand() > 0.5 ? 1 : -1;
+    for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
+      segmentPolarity[i * STEGO_ROW_SEGMENTS + segment] = rand() > 0.5 ? 1 : -1;
+    }
+  }
+  return { order, polarity, segmentPolarity };
+}
+
 export function embedStegoFingerprint(rgba, w, h, payload, {
-  key = '', strength = 6, gridX = 24, gridY = 16,
+  key = '', strength = 6, gridX, gridY, profile = 'standard',
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
   if (w < 64 || h < 64) throw new Error('Archx stego: image too small (minimum 64×64)');
+  const robust = profile === 'robust';
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const rowSegments = STEGO_ROW_SEGMENTS;
+  const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const bits = stegoCodeBits(fingerprint);
-  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const bits = robust ? robustStegoCodeBits(fingerprint, key) : stegoCodeBits(fingerprint);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust
+    ? robustStegoLayout(cellCount, key)
+    : stegoLayout(cellCount, key);
   const out = new Uint8Array(src);
-  const amp = Math.max(1, Math.min(16, Number(strength) || 6));
+  const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
+  const amp = robust ? Math.min(16, baseAmp * 1.35) : baseAmp;
 
   for (let cy = 0; cy < gy; cy++) {
     const y0 = Math.floor((cy * h) / gy);
@@ -733,13 +952,13 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
 
       for (let y = y0; y < y1; y++) {
         const segment = Math.min(
-          STEGO_ROW_SEGMENTS - 1,
-          Math.floor(((y - y0) * STEGO_ROW_SEGMENTS) / cellH),
+          rowSegments - 1,
+          Math.floor(((y - y0) * rowSegments) / cellH),
         );
-        const segmentSign = segmentPolarity[cell * STEGO_ROW_SEGMENTS + segment];
+        const segmentSign = segmentPolarity[cell * rowSegments + segment];
         let i = (y * w + x0) * 4;
         for (let x = x0; x < x1; x++, i += 4) {
-          const band = Math.min(3, Math.floor(((x - x0) * 4) / cellW));
+          const band = Math.min(columnBands - 1, Math.floor(((x - x0) * columnBands) / cellW));
           const pattern = (band % 2 === 0 ? 1 : -1) * (bit ? 1 : -1) * pol * segmentSign;
           const delta = cellAmp * pattern;
           // Clamp per channel: a saturated red channel must not suppress the
@@ -756,13 +975,47 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
 }
 
 export function detectStegoFingerprint(rgba, w, h, {
-  key = '', gridX = 24, gridY = 16, searchOffsets = false, searchGeometry = false,
+  key = '', gridX, gridY, profile = 'standard', searchOffsets = false, searchGeometry = false,
 } = {}) {
+  if (profile === 'auto') {
+    const standard = detectStegoFingerprint(rgba, w, h, {
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false,
+    });
+    if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
+    const robust = detectStegoFingerprint(rgba, w, h, {
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false,
+    });
+    const initial = robust?.found && !standard?.found
+      ? robust
+      : standard?.found && !robust?.found
+        ? standard
+        : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
+    if (!searchGeometry || initial?.found) return initial;
+    const standardGeometry = detectStegoFingerprint(rgba, w, h, {
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true,
+    });
+    if (standardGeometry?.found) return standardGeometry;
+    const robustGeometry = detectStegoFingerprint(rgba, w, h, {
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true,
+    });
+    return robustGeometry?.found || (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0)
+      ? robustGeometry
+      : standardGeometry;
+  }
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
-  const { gx, gy } = stegoGrid(w, h, gridX, gridY);
+  const robust = profile === 'robust';
+  const effectiveProfile = robust ? 'robust' : 'standard';
+  const codeLength = robust ? 96 : 64;
+  const rowSegments = STEGO_ROW_SEGMENTS;
+  const columnBands = 4;
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust
+    ? robustStegoLayout(cellCount, key)
+    : stegoLayout(cellCount, key);
   const cw = w / gx, ch = h / gy;
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
 
@@ -771,8 +1024,8 @@ export function detectStegoFingerprint(rgba, w, h, {
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
     const oy = originY ?? fy * ch;
-    const bitScores = new Float64Array(64);
-    const bitCounts = new Uint16Array(64);
+    const bitScores = new Float64Array(codeLength);
+    const bitCounts = new Uint16Array(codeLength);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
@@ -786,20 +1039,20 @@ export function detectStegoFingerprint(rgba, w, h, {
         const x0 = Math.max(0, Math.round(rawX0));
         const x1 = Math.min(w, Math.round(rawX1));
         if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
-        const sums = new Float64Array(STEGO_ROW_SEGMENTS * 4);
-        const counts = new Uint32Array(STEGO_ROW_SEGMENTS * 4);
+        const sums = new Float64Array(rowSegments * columnBands);
+        const counts = new Uint32Array(rowSegments * columnBands);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
         const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
         for (let y = y0; y < y1; y += step) {
           const segment = Math.max(0, Math.min(
-            STEGO_ROW_SEGMENTS - 1,
-            Math.floor(((y - rawY0) * STEGO_ROW_SEGMENTS) / cellH0),
+            rowSegments - 1,
+            Math.floor(((y - rawY0) * rowSegments) / cellH0),
           ));
           let i = (y * w + x0) * 4;
           for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.max(0, Math.min(3, Math.floor(((x - rawX0) * 4) / cellW0)));
-            const idx = segment * 4 + band;
+            const band = Math.max(0, Math.min(columnBands - 1, Math.floor(((x - rawX0) * columnBands) / cellW0)));
+            const idx = segment * columnBands + band;
             sums[idx] += (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
             counts[idx]++;
           }
@@ -810,45 +1063,93 @@ export function detectStegoFingerprint(rgba, w, h, {
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
         let validSegments = 0;
+        const robustSegmentResponses = robust ? [] : null;
         const cellIndex = cy * gx + cx;
-        for (let segment = 0; segment < STEGO_ROW_SEGMENTS; segment++) {
-          const base = segment * 4;
-          if (counts[base] === 0 || counts[base + 1] === 0 || counts[base + 2] === 0 || counts[base + 3] === 0) continue;
+        for (let segment = 0; segment < rowSegments; segment++) {
+          const base = segment * columnBands;
+          let complete = true;
+          for (let band = 0; band < columnBands; band++) {
+            if (counts[base + band] === 0) { complete = false; break; }
+          }
+          if (!complete) continue;
           validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
-          const m2 = sums[base + 2] / counts[base + 2];
-          const m3 = sums[base + 3] / counts[base + 3];
           const weight = Math.min(counts[base], counts[base + 1], counts[base + 2], counts[base + 3]);
-          segmentScoreSum += (-(-m0 + 3 * m1 - 3 * m2 + m3) / 8) *
-            polarity[cellIndex] * segmentPolarity[cellIndex * STEGO_ROW_SEGMENTS + segment] * weight;
+          // Both profiles use the third-difference response: it cancels smooth
+          // image gradients that otherwise swamp a two-band difference. The
+          // robust profile gains low-frequency resilience from its larger
+          // macro-cells/bands, redundant 96-bit codeword, and higher amplitude.
+          const response = (-(-m0 + 3 * m1 - 3 * (sums[base + 2] / counts[base + 2]) + (sums[base + 3] / counts[base + 3])) / 8);
+          const signedResponse = response *
+            polarity[cellIndex] * segmentPolarity[cellIndex * rowSegments + segment];
+          if (robust) robustSegmentResponses.push(signedResponse);
+          segmentScoreSum += signedResponse * weight;
           segmentWeightSum += weight;
         }
         if (!segmentWeightSum || validSegments < 2) continue;
-        const rawScore = segmentScoreSum / segmentWeightSum;
+        let rawScore = segmentScoreSum / segmentWeightSum;
+        if (robust) {
+          // Median across row segments: one segment crossed by a hard image
+          // edge should not dominate the whole macro-cell in the robust path.
+          const values = robustSegmentResponses.sort((a, b) => a - b);
+          const middle = Math.floor(values.length / 2);
+          rawScore = values.length % 2
+            ? values[middle]
+            : (values[middle - 1] + values[middle]) / 2;
+        }
         // Clip outliers: one hard image edge crossing a cell can otherwise
         // outvote five correctly-marked repetitions of the same code bit.
         const score = Math.max(-12, Math.min(12, rawScore));
-        const bitIndex = order[cy * gx + cx] % 64;
+        const bitIndex = order[cy * gx + cx] % codeLength;
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         cellScores.push({ bitIndex, score });
       }
     }
-    const votedBits = new Uint8Array(64);
-    const reliability = new Float64Array(64);
-    for (let i = 0; i < 64; i++) {
-      votedBits[i] = bitScores[i] >= 0 ? 1 : 0;
-      reliability[i] = Math.abs(bitScores[i]) / Math.max(1, bitCounts[i]);
+    const votedBits = new Uint8Array(codeLength);
+    const reliability = new Float64Array(codeLength);
+    const voteScores = new Float64Array(codeLength);
+    if (robust) {
+      // Robust repetitions are fewer than in the standard 64-bit layout.
+      // Median voting prevents one hard image edge (already clipped to ±12)
+      // from outvoting the other repetitions of the same code bit; the
+      // standard profile retains its original summed-vote decoder exactly.
+      const groups = Array.from({ length: codeLength }, () => []);
+      for (const { bitIndex, score } of cellScores) groups[bitIndex].push(score);
+      for (let i = 0; i < codeLength; i++) {
+        const values = groups[i].sort((a, b) => a - b);
+        if (!values.length) continue;
+        const middle = Math.floor(values.length / 2);
+        voteScores[i] = values.length % 2
+          ? values[middle]
+          : (values[middle - 1] + values[middle]) / 2;
+        votedBits[i] = voteScores[i] >= 0 ? 1 : 0;
+        reliability[i] = Math.abs(voteScores[i]);
+      }
+    } else {
+      for (let i = 0; i < codeLength; i++) {
+        voteScores[i] = bitScores[i] / Math.max(1, bitCounts[i]);
+        votedBits[i] = bitScores[i] >= 0 ? 1 : 0;
+        reliability[i] = Math.abs(voteScores[i]);
+      }
     }
-    const corrected = correctStegoBits(votedBits, reliability);
+    const corrected = robust
+      ? (() => {
+          const repaired = repairRobustStegoBits(reliability, votedBits, key, 5);
+          return repaired
+            ? { bits: repaired.bits, corrections: repaired.flips }
+            : { bits: votedBits, corrections: -1 };
+        })()
+      : correctStegoBits(votedBits, reliability);
     const bits = corrected.bits;
-    const bytes = stegoBitsToBytes(bits);
-    const fingerprint = [...bytes.subarray(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
-    const crcValid = stegoCrcValid(bits);
+    const fingerprint = robust
+      ? robustStegoFingerprintFromBits(bits)
+      : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const crcValid = robust ? robustStegoBitsValid(bits, key) : stegoCrcValid(bits);
     const agreeing = cellScores.filter(({ bitIndex, score }) => (score >= 0) === !!bits[bitIndex]).length;
     const agreement = cellScores.length ? agreeing / cellScores.length : 0;
-    const meanAbs = bitScores.reduce((s, v, i) => s + Math.abs(v) / Math.max(1, bitCounts[i]), 0) / 64;
+    const meanAbs = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
     // Unmarked photos naturally show ~0.60–0.68 self-agreement (majority
     // vote bias) and weak mean signal; genuine marks sit far above both.
     const evidence = Math.max(0, agreement - 0.64) * 2.4 +
@@ -858,10 +1159,27 @@ export function detectStegoFingerprint(rgba, w, h, {
       ? Math.max(0, Math.min(0.99, 0.42 + evidence))
       : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
+    const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    // A center crop can remove every repetition of a few robust code bits.
+    // Accept that bounded case only when at least 88/96 bits were observed
+    // and the dual-CRC/marker codeword plus signal thresholds all validate;
+    // the standard profile keeps its stricter every-bit-observed rule.
+    const bitCoverageOk = robust
+      ? observedBits >= 88 && cellScores.length >= 128
+      : minBitCount >= 1;
+    // The robust syndrome decoder can search farther than the standard
+    // decoder. To prefer "not found" over a wrong attribution, candidates
+    // needing four or five corrections must also show strong raw signal and
+    // cell agreement; a weak, heavily repaired candidate is not evidence.
+    const correctionCount = Math.max(0, corrected.corrections);
+    const robustCorrectionOk = !robust || correctionCount <= 3 ||
+      (correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95);
     return {
       found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
-        cellScores.length >= 96 && minBitCount >= 1,
+        cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk,
       fingerprint,
+      profile: effectiveProfile,
+      observedBits,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
       confidence: Math.round(confidence * 1000) / 1000,
