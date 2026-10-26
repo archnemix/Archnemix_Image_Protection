@@ -8,10 +8,52 @@ import sharp from 'sharp';
 import {
   buildScramblePlan, paddedSize, scramblePixels,
   encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
-  embedStegoFingerprint, stegoFingerprint,
+  embedStegoFingerprint, stegoFingerprint, sniffImageInfo,
+  perceptualFingerprint as computePerceptualFingerprint,
 } from '../src/scramble.js';
 
 export { generateKeyBase64 };
+
+const SHARP_LOADERS = Object.freeze({
+  jpeg: 'VipsForeignLoadJpeg',
+  png: 'VipsForeignLoadPng',
+  webp: 'VipsForeignLoadWebp',
+  avif: 'VipsForeignLoadHeif',
+  gif: 'VipsForeignLoadNsgif',
+  tiff: 'VipsForeignLoadTiff',
+});
+let sharpLoadersBlocked = false;
+const sharpLoadersUnblocked = new Set();
+
+/**
+ * Restrict libvips' native file loaders to the formats Archx actually uses.
+ * Sharp/libvips choose a loader by sniffing content, so an extension check
+ * alone cannot stop a GIF/TIFF/SVG/PDF parser from being reached. This is a
+ * process-global Sharp setting; the internally generated SVG watermark and
+ * the explicitly allowed master formats are unblocked.
+ */
+export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 'avif']) {
+  if (typeof sharp.block !== 'function' || typeof sharp.unblock !== 'function') return false;
+  if (!sharpLoadersBlocked) {
+    sharp.block({ operation: ['VipsForeignLoad'] });
+    sharpLoadersBlocked = true;
+  }
+  const wanted = new Set(['VipsForeignLoadSvg']);
+  for (const format of allowedFormats || []) {
+    const operation = SHARP_LOADERS[String(format).toLowerCase()];
+    if (operation) wanted.add(operation);
+  }
+  const fresh = [...wanted].filter((operation) => !sharpLoadersUnblocked.has(operation));
+  if (fresh.length) {
+    sharp.unblock({ operation: fresh });
+    for (const operation of fresh) sharpLoadersUnblocked.add(operation);
+  }
+  return true;
+}
+
+function bufferView(bytes) {
+  return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
 
 function escapeXml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
@@ -36,7 +78,13 @@ function mapSharpError(err) {
 }
 
 function normalizeProcessingOptions(opts = {}) {
-  const nested = opts.processing && typeof opts.processing === 'object' ? opts.processing : {};
+  if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+    throw new TypeError('Archx image processing: options must be an object');
+  }
+  if (opts.processing != null && (typeof opts.processing !== 'object' || Array.isArray(opts.processing))) {
+    throw new TypeError('Archx image processing: processing must be an object');
+  }
+  const nested = opts.processing || {};
   const pick = (...names) => {
     for (const name of names) {
       if (opts[name] != null) return opts[name];
@@ -45,22 +93,25 @@ function normalizeProcessingOptions(opts = {}) {
     return undefined;
   };
   const integer = (name, value, fallback, min, max) => {
-    const n = value == null ? fallback : Number(value);
-    if (!Number.isFinite(n) || n < min || n > max) {
-      throw new TypeError(`Archx image processing: ${name} must be from ${min} to ${max}`);
+    const n = value == null ? fallback : value;
+    if (!Number.isInteger(n) || n < min || n > max) {
+      throw new TypeError(`Archx image processing: ${name} must be an integer from ${min} to ${max}`);
     }
-    return Math.floor(n);
+    return n;
   };
-  const timeoutRaw = pick('processingTimeoutSec', 'timeoutSec');
-  const timeoutSec = timeoutRaw == null ? 10 : Number(timeoutRaw);
-  if (!Number.isFinite(timeoutSec) || timeoutSec < 1 || timeoutSec > 120) {
+  const timeoutSec = pick('processingTimeoutSec', 'timeoutSec') ?? 10;
+  if (typeof timeoutSec !== 'number' || !Number.isFinite(timeoutSec) || timeoutSec < 1 || timeoutSec > 120) {
     throw new TypeError('Archx image processing: processingTimeoutSec must be from 1 to 120');
   }
   const allowedRaw = pick('allowedInputFormats') ?? ['jpeg', 'png', 'webp', 'avif'];
-  const allowedInputFormats = [...new Set((Array.isArray(allowedRaw) ? allowedRaw : []).map((f) => String(f).toLowerCase()))]
-    .filter((f) => ['jpeg', 'png', 'webp', 'avif', 'gif', 'tiff'].includes(f));
-  if (!allowedInputFormats.length) {
-    throw new TypeError('Archx image processing: allowedInputFormats must contain a supported format');
+  if (!Array.isArray(allowedRaw) || !allowedRaw.length ||
+      allowedRaw.some((f) => !['jpeg', 'png', 'webp', 'avif', 'gif', 'tiff'].includes(String(f).toLowerCase()))) {
+    throw new TypeError('Archx image processing: allowedInputFormats must contain only supported formats');
+  }
+  const allowedInputFormats = [...new Set(allowedRaw.map((f) => String(f).toLowerCase()))];
+  const blockRaw = pick('blockUntrustedSharpLoaders');
+  if (blockRaw !== undefined && typeof blockRaw !== 'boolean') {
+    throw new TypeError('Archx image processing: blockUntrustedSharpLoaders must be boolean');
   }
   return Object.freeze({
     maxInputBytes: integer('maxInputBytes', pick('maxInputBytes'), 50 * 1024 * 1024, 1024, 500 * 1024 * 1024),
@@ -70,6 +121,7 @@ function normalizeProcessingOptions(opts = {}) {
     maxOutputPixels: integer('maxOutputPixels', pick('maxOutputPixels'), 16777216, 10000, 268402689),
     timeoutSec,
     allowedInputFormats: Object.freeze(allowedInputFormats),
+    blockUntrustedSharpLoaders: blockRaw !== false,
   });
 }
 
@@ -77,28 +129,56 @@ function sharpInput(input, limits, extra = {}) {
   return sharp(input, {
     failOn: 'warning',
     limitInputPixels: limits.maxInputPixels,
+    limitInputChannels: 4,
     sequentialRead: true,
     animated: false,
     ...extra,
   }).timeout({ seconds: limits.timeoutSec });
 }
 
-function assertInputWithinLimits(input, limits) {
-  const length = input?.length ?? input?.byteLength ?? 0;
-  if (!length) throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'empty input image');
-  if (length > limits.maxInputBytes) {
-    throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured byte budget');
-  }
+function normalizeInputBytes(input) {
+  // Never accept a string here: Sharp would treat it as a filesystem path,
+  // turning an image-bytes API into an accidental local-file read primitive.
+  if (input instanceof Uint8Array) return bufferView(input);
+  if (input instanceof ArrayBuffer) return Buffer.from(input);
+  if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'input image must be bytes');
 }
 
-function assertMetadataWithinLimits(meta, limits) {
-  if (!meta || !limits.allowedInputFormats.includes(meta.format) || !meta.width || !meta.height) {
+function assertInputWithinLimits(input, limits) {
+  const bytes = normalizeInputBytes(input);
+  if (!bytes.length) throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'empty input image');
+  if (bytes.length > limits.maxInputBytes) {
+    throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured byte budget');
+  }
+  const sniffed = sniffImageInfo(bytes);
+  if (!sniffed || !limits.allowedInputFormats.includes(sniffed.format)) {
+    throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'unsupported input image format');
+  }
+  if (sniffed.width && sniffed.height &&
+      (sniffed.width > limits.maxInputWidth || sniffed.height > limits.maxInputHeight ||
+       sniffed.width * sniffed.height > limits.maxInputPixels)) {
+    throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured dimension budget');
+  }
+  if (limits.blockUntrustedSharpLoaders) configureSharpSecurity(limits.allowedInputFormats);
+  return { bytes, sniffed };
+}
+
+function normalizedSharpFormat(format) {
+  return format === 'heif' ? 'avif' : format;
+}
+
+function assertMetadataWithinLimits(meta, limits, sniffed = null) {
+  const format = normalizedSharpFormat(meta?.format);
+  if (!meta || !limits.allowedInputFormats.includes(format) || !meta.width || !meta.height ||
+      (sniffed && format !== sniffed.format)) {
     throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'unsupported input image format');
   }
   if ((meta.pages || 1) > 1 || (meta.channels || 3) > 4) {
     throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'animated or multi-channel input images are not accepted');
   }
-  if (meta.width > limits.maxInputWidth || meta.height > limits.maxInputHeight ||
+  if (!Number.isSafeInteger(meta.width) || !Number.isSafeInteger(meta.height) ||
+      meta.width > limits.maxInputWidth || meta.height > limits.maxInputHeight ||
       meta.width * meta.height > limits.maxInputPixels) {
     throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured dimension budget');
   }
@@ -118,7 +198,13 @@ function watermarkSvg(w, h, wm) {
   if (!text) return null;
   const color = escapeXml(cfg.color || '#ffffff');
   const fs = Math.max(13, Math.round(Math.min(w, h) / 13));
-  const angle = cfg.angle ?? -24;
+  const numeric = (value, fallback, min, max) => {
+    const n = Number(value ?? fallback);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+  };
+  const angle = numeric(cfg.angle, -24, -360, 360);
+  const opacity = numeric(cfg.opacity, 0.15, 0, 1);
+  const cornerOpacity = numeric(cfg.cornerOpacity, 0.9, 0, 1);
   let body = '';
   if (cfg.tile !== false) {
     const rows = [];
@@ -126,22 +212,30 @@ function watermarkSvg(w, h, wm) {
     for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) {
       rows.push(`<text x="0" y="${y.toFixed(0)}" text-anchor="middle">${text}</text>`);
     }
-    body += `<g transform="translate(${w / 2} ${h / 2}) rotate(${angle})" opacity="${cfg.opacity ?? 0.15}" font-size="${fs}" font-weight="700">${rows.join('')}</g>`;
+    body += `<g transform="translate(${w / 2} ${h / 2}) rotate(${angle})" opacity="${opacity}" font-size="${fs}" font-weight="700">${rows.join('')}</g>`;
   }
   if (cfg.corner !== false) {
     const cfs = Math.max(10, Math.round(Math.min(w, h) / 34));
-    body += `<g opacity="${cfg.cornerOpacity ?? 0.9}" font-size="${cfs}" font-weight="600"><text x="${w - 11}" y="${h - 10}" text-anchor="end" stroke="rgba(0,0,0,0.65)" stroke-width="3" paint-order="stroke">${text}</text></g>`;
+    body += `<g opacity="${cornerOpacity}" font-size="${cfs}" font-weight="600"><text x="${w - 11}" y="${h - 10}" text-anchor="end" stroke="rgba(0,0,0,0.65)" stroke-width="3" paint-order="stroke">${text}</text></g>`;
   }
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><g font-family="Arial, Helvetica, sans-serif" fill="${color}">${body}</g></svg>`);
 }
 
 /** Pad a raw RGBA buffer (w×h) into pw×ph with black. */
 function padRaw(raw, w, h, pw, ph) {
-  if (w === pw && h === ph) return raw;
+  if (raw.length < w * h * 4) throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'decoded image did not produce RGBA pixels');
+  if (w === pw && h === ph) return raw.subarray(0, w * h * 4);
   const out = new Uint8Array(pw * ph * 4);
-  for (let i = 3; i < out.length; i += 4) out[i] = 255; // opaque black pad
+  // Opaque black only in the actual right/bottom padding, not a separate
+  // full-frame alpha pass over pixels that are about to be overwritten.
   for (let y = 0; y < h; y++) {
-    out.set(raw.subarray(y * w * 4, (y + 1) * w * 4), y * pw * 4);
+    const row = y * pw * 4;
+    out.set(raw.subarray(y * w * 4, (y + 1) * w * 4), row);
+    for (let x = w; x < pw; x++) out[row + x * 4 + 3] = 255;
+  }
+  for (let y = h; y < ph; y++) {
+    const row = y * pw * 4;
+    for (let x = 0; x < pw; x++) out[row + x * 4 + 3] = 255;
   }
   return out;
 }
@@ -156,23 +250,41 @@ function padRaw(raw, w, h, pw, ph) {
  */
 export async function scrambleImage(input, opts = {}) {
   const limits = normalizeProcessingOptions(opts);
-  assertInputWithinLimits(input, limits);
+  const { bytes: inputBytes, sniffed } = assertInputWithinLimits(input, limits);
   const grid = opts.grid ?? 8;
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
   const key = opts.key ?? '';
+  if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');
   const maxWidth = opts.maxWidth ?? 1600;
   if (maxWidth !== 0 && (!Number.isInteger(maxWidth) || maxWidth < 64 || maxWidth > 8192)) {
     throw new TypeError('Archx image processing: maxWidth must be 0 or an integer from 64 to 8192');
   }
-  const lossless = !!opts.lossless || opts.quality === 'lossless';
-  const quality = lossless
-    ? 100
-    : Math.max(1, Math.min(100, Number(opts.quality ?? 95) || 95));
+  if (opts.lossless !== undefined && typeof opts.lossless !== 'boolean') {
+    throw new TypeError('Archx image processing: lossless must be boolean');
+  }
+  if (opts.quality !== undefined && opts.quality !== 'lossless' &&
+      (!Number.isInteger(opts.quality) || opts.quality < 1 || opts.quality > 100)) {
+    throw new TypeError('Archx image processing: quality must be lossless or an integer from 1 to 100');
+  }
+  if (opts.format !== undefined && !['webp', 'png', 'jpeg'].includes(opts.format)) {
+    throw new TypeError("Archx image processing: format must be 'webp', 'png', or 'jpeg'");
+  }
+  if (opts.container !== undefined && typeof opts.container !== 'boolean') {
+    throw new TypeError('Archx image processing: container must be boolean');
+  }
+  if (opts.aesKey != null && typeof opts.aesKey !== 'string') {
+    throw new TypeError('Archx image processing: aesKey must be a base64 string');
+  }
+  if (opts.forensicSeed != null && !['string', 'number'].includes(typeof opts.forensicSeed)) {
+    throw new TypeError('Archx image processing: forensicSeed must be a string or number');
+  }
+  const lossless = opts.lossless === true || opts.quality === 'lossless';
+  const quality = lossless ? 100 : (opts.quality ?? 95);
 
   let srcMeta;
-  try { srcMeta = await sharpInput(input, limits).metadata(); }
+  try { srcMeta = await sharpInput(inputBytes, limits).metadata(); }
   catch (err) { throw mapSharpError(err); }
-  assertMetadataWithinLimits(srcMeta, limits);
+  assertMetadataWithinLimits(srcMeta, limits, sniffed);
   const rotated = srcMeta.orientation >= 5 && srcMeta.orientation <= 8;
   const srcW = rotated ? srcMeta.height : srcMeta.width;
   const srcH = rotated ? srcMeta.width : srcMeta.height;
@@ -260,6 +372,10 @@ export async function scrambleImage(input, opts = {}) {
     resolvedStegoFingerprint = stegoFingerprint(stegoPayload);
   }
 
+  const contentFingerprint = opts.contentFingerprint
+    ? computePerceptualFingerprint(rawPixels, w, h)
+    : null;
+
   const { pw, ph } = paddedSize(w, h, grid);
   const padded = padRaw(rawPixels, w, h, pw, ph);
   const plan = buildScramblePlan(grid, key);
@@ -297,29 +413,41 @@ export async function scrambleImage(input, opts = {}) {
   }
   if (opts.container === false) {
     if (header.encrypted) throw new Error('encrypted output requires an .archx container');
-    return { bytes: payload, header, stegoFingerprint: resolvedStegoFingerprint };
+    return { bytes: payload, header, stegoFingerprint: resolvedStegoFingerprint, perceptualFingerprint: contentFingerprint };
   }
   return {
-    bytes: Buffer.from(encodeContainer(header, payload)),
+    bytes: bufferView(encodeContainer(header, payload)),
     header,
     stegoFingerprint: resolvedStegoFingerprint,
+    perceptualFingerprint: contentFingerprint,
   };
 }
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */
 export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, ...processingOpts } = {}) {
+  if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
+  if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');
+  if ((w !== undefined && (!Number.isSafeInteger(w) || w < 1)) ||
+      (h !== undefined && (!Number.isSafeInteger(h) || h < 1)) || ((w == null) !== (h == null))) {
+    throw new TypeError('Archx image processing: w and h must be positive integers');
+  }
   const limits = normalizeProcessingOptions(processingOpts);
-  assertInputWithinLimits(scrambledBytes, limits);
+  const { bytes: inputBytes } = assertInputWithinLimits(scrambledBytes, limits);
   let data, info;
   try {
-    ({ data, info } = await sharpInput(scrambledBytes, limits).ensureAlpha().raw().toBuffer({ resolveWithObject: true }));
+    ({ data, info } = await sharpInput(inputBytes, limits).ensureAlpha().raw().toBuffer({ resolveWithObject: true }));
   } catch (err) { throw mapSharpError(err); }
+  if (!info?.width || !info?.height || info.channels !== 4 || info.width % grid !== 0 || info.height % grid !== 0 ||
+      data.length < info.width * info.height * 4 || (w && (w > info.width || h > info.height))) {
+    throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'scrambled image geometry is invalid');
+  }
   const plan = buildScramblePlan(grid, key);
-  const raw = scramblePixels(new Uint8Array(data), info.width, info.height, plan, 'unscramble');
-  let out = sharp(Buffer.from(raw), { raw: { width: info.width, height: info.height, channels: 4 } })
+  const raw = scramblePixels(data, info.width, info.height, plan, 'unscramble');
+  let out = sharp(bufferView(raw), { raw: { width: info.width, height: info.height, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });
   if (w && h && (w !== info.width || h !== info.height)) {
     out = out.extract({ left: 0, top: 0, width: w, height: h });
   }
-  return out.png().toBuffer();
+  try { return await out.png().toBuffer(); }
+  catch (err) { throw mapSharpError(err); }
 }

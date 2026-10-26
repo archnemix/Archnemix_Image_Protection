@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "type": "module",
@@ -17,11 +17,21 @@
     "./scramble": "./src/scramble.js"
   },
   "files": [
-    "dist",
-    "src",
-    "server",
+    "dist/archx.cjs",
+    "dist/archx.esm.js",
+    "dist/archx.min.js",
+    "dist/*.map",
+    "src/archx.js",
+    "src/browser-global.js",
+    "src/index.js",
+    "src/scramble.js",
+    "server/middleware.js",
+    "server/scramble-image.js",
+    "server/scramble-cli.js",
+    "server/detect-stego-cli.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SECURITY.md"
   ],
   "bin": {
     "archx-protect": "./server/scramble-cli.js",
@@ -46,7 +56,7 @@
     "webgl"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20.9.0"
   },
   "devDependencies": {
     "@sparticuz/chromium": "^138.0.0",
@@ -55,7 +65,7 @@
     "sharp": "^0.35.5"
   },
   "peerDependencies": {
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.5"
   },
   "peerDependenciesMeta": {
     "sharp": {

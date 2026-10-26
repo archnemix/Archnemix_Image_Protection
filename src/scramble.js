@@ -95,9 +95,211 @@ export function tileRect(index, grid, tw, th) {
 
 /** Padded dimensions so both sides divide exactly by `grid`. */
 export function paddedSize(w, h, grid) {
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 ||
+      !Number.isInteger(grid) || grid < 2 || grid > 32) {
+    throw new RangeError('Archx: invalid image/grid dimensions');
+  }
   const tw = Math.ceil(w / grid);
   const th = Math.ceil(h / grid);
   return { tw, th, pw: tw * grid, ph: th * grid };
+}
+
+function asBytes(bytes) {
+  if (bytes instanceof Uint8Array) return bytes;
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
+  if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return new Uint8Array(bytes || []);
+}
+
+const IMAGE_FORMAT_MIME = Object.freeze({
+  jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', avif: 'image/avif',
+  gif: 'image/gif', bmp: 'image/bmp', tiff: 'image/tiff', svg: 'image/svg+xml',
+});
+
+function readU16LE(u8, off) { return u8[off] | (u8[off + 1] << 8); }
+function readU16BE(u8, off) { return (u8[off] << 8) | u8[off + 1]; }
+function readU32LE(u8, off) {
+  return (u8[off] | (u8[off + 1] << 8) | (u8[off + 2] << 16) | (u8[off + 3] << 24)) >>> 0;
+}
+function readU32BE(u8, off) {
+  return ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0;
+}
+function asciiAt(u8, off, text) {
+  if (off < 0 || off + text.length > u8.length) return false;
+  for (let i = 0; i < text.length; i++) if (u8[off + i] !== text.charCodeAt(i)) return false;
+  return true;
+}
+function avifDimensions(u8) {
+  // Bounded ISO-BMFF walk: meta -> iprp -> ipco -> ispe. This is only a
+  // pre-decode budget check; the real decoder remains authoritative.
+  const containers = new Set(['meta', 'iprp', 'ipco']);
+  const walk = (start, end, depth) => {
+    let off = start;
+    while (off + 8 <= end && off + 8 <= u8.length) {
+      let size = readU32BE(u8, off);
+      const type = String.fromCharCode(u8[off + 4], u8[off + 5], u8[off + 6], u8[off + 7]);
+      let header = 8;
+      if (size === 1) {
+        if (off + 16 > u8.length) return null;
+        const big = readU32BE(u8, off + 8) * 4294967296 + readU32BE(u8, off + 12);
+        if (!Number.isSafeInteger(big) || big < 16) return null;
+        size = big; header = 16;
+      } else if (size === 0) size = end - off;
+      if (size < header || off + size > end) return null;
+      const payload = off + header;
+      if (type === 'ispe' && size >= header + 12) {
+        const width = readU32BE(u8, payload + 4);
+        const height = readU32BE(u8, payload + 8);
+        if (width > 0 && height > 0) return { width, height };
+      }
+      if (depth < 5 && containers.has(type)) {
+        const childStart = type === 'meta' ? payload + 4 : payload;
+        const found = walk(childStart, off + size, depth + 1);
+        if (found) return found;
+      }
+      off += size;
+    }
+    return null;
+  };
+  return walk(0, u8.length, 0);
+}
+
+/**
+ * Sniff an encoded image's format and (for the common web formats) its
+ * declared dimensions *before* handing bytes to a native decoder. A tiny
+ * compressed file can declare an enormous pixel grid; checking only after
+ * createImageBitmap()/Sharp has decoded it is too late to bound memory.
+ * Returns `{ format, mime, width, height }`, with dimensions null when the
+ * format is recognised but its header is not cheaply/safely parsed here.
+ */
+export function sniffImageInfo(bytes) {
+  const u8 = asBytes(bytes);
+  const done = (format, width = null, height = null) => Object.freeze({
+    format, mime: IMAGE_FORMAT_MIME[format] || '', width, height,
+  });
+  if (u8.length >= 24 && u8[0] === 0x89 && asciiAt(u8, 1, 'PNG') && u8[4] === 0x0d && u8[5] === 0x0a) {
+    return done('png', readU32BE(u8, 16), readU32BE(u8, 20));
+  }
+  if (u8.length >= 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) {
+    let off = 2;
+    const sof = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    while (off + 4 <= u8.length) {
+      if (u8[off] !== 0xff) { off++; continue; }
+      let markerAt = off + 1;
+      while (markerAt < u8.length && u8[markerAt] === 0xff) markerAt++;
+      if (markerAt >= u8.length) break;
+      const marker = u8[markerAt];
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { off = markerAt + 1; continue; }
+      if (marker === 0xda || markerAt + 3 > u8.length) break;
+      const len = readU16BE(u8, markerAt + 1);
+      if (len < 2) break;
+      if (sof.has(marker) && len >= 7 && markerAt + 8 <= u8.length) {
+        return done('jpeg', readU16BE(u8, markerAt + 6), readU16BE(u8, markerAt + 4));
+      }
+      off = markerAt + 1 + len;
+    }
+    return done('jpeg');
+  }
+  if (u8.length >= 10 && (asciiAt(u8, 0, 'GIF87a') || asciiAt(u8, 0, 'GIF89a'))) {
+    return done('gif', readU16LE(u8, 6), readU16LE(u8, 8));
+  }
+  if (u8.length >= 26 && asciiAt(u8, 0, 'BM')) {
+    const width = readU32LE(u8, 18) | 0;
+    const height = Math.abs(readU32LE(u8, 22) | 0);
+    return done('bmp', width > 0 ? width : null, height > 0 ? height : null);
+  }
+  if (u8.length >= 20 && asciiAt(u8, 0, 'RIFF') && asciiAt(u8, 8, 'WEBP')) {
+    if (asciiAt(u8, 12, 'VP8X') && u8.length >= 30) {
+      return done('webp', 1 + (u8[24] | (u8[25] << 8) | (u8[26] << 16)), 1 + (u8[27] | (u8[28] << 8) | (u8[29] << 16)));
+    }
+    if (asciiAt(u8, 12, 'VP8L') && u8.length >= 25 && u8[20] === 0x2f) {
+      const bits = readU32LE(u8, 21);
+      return done('webp', (bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
+    }
+    if (asciiAt(u8, 12, 'VP8 ') && u8.length >= 30 && u8[23] === 0x9d && u8[24] === 0x01 && u8[25] === 0x2a) {
+      return done('webp', readU16LE(u8, 26) & 0x3fff, readU16LE(u8, 28) & 0x3fff);
+    }
+    return done('webp');
+  }
+  if (u8.length >= 12 && asciiAt(u8, 4, 'ftyp')) {
+    let isAvif = false;
+    for (let off = 8; off + 4 <= Math.min(u8.length, 64); off += 4) {
+      if (asciiAt(u8, off, 'avif') || asciiAt(u8, off, 'avis')) { isAvif = true; break; }
+    }
+    if (isAvif) {
+      const dims = avifDimensions(u8);
+      return done('avif', dims?.width || null, dims?.height || null);
+    }
+  }
+  if ((u8.length >= 4 && u8[0] === 0x49 && u8[1] === 0x49 && u8[2] === 0x2a && u8[3] === 0) ||
+      (u8.length >= 4 && u8[0] === 0x4d && u8[1] === 0x4d && u8[2] === 0 && u8[3] === 0x2a)) {
+    return done('tiff');
+  }
+  const head = new TextDecoder('utf-8', { fatal: false }).decode(u8.subarray(0, Math.min(1024, u8.length))).trimStart().toLowerCase();
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return done('svg');
+  return null;
+}
+
+export function sniffImageFormat(bytes) {
+  return sniffImageInfo(bytes)?.format || null;
+}
+
+/**
+ * Strict, bounded decoder for ordinary uncompressed BMP screenshots.
+ * Supports 24/32-bit BI_RGB files with a BITMAPINFOHEADER-or-later DIB
+ * header; palette, RLE, bitfield, and truncated/oversized files fail closed.
+ * This exists for offline `archx-detect` investigations because Sharp does
+ * not expose a BMP input decoder. It is not a general BMP implementation.
+ */
+export function decodeBmpImage(bytes, { maxPixels = 100000000 } = {}) {
+  if (!Number.isSafeInteger(maxPixels) || maxPixels < 1) {
+    throw new RangeError('Archx: BMP pixel limit is invalid');
+  }
+  const u8 = asBytes(bytes);
+  const fail = (message) => { throw new TypeError(`Archx: invalid BMP image (${message})`); };
+  if (u8.length < 54 || u8[0] !== 0x42 || u8[1] !== 0x4d) fail('missing BM header');
+  const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const fileSize = view.getUint32(2, true);
+  if (fileSize !== 0 && fileSize > u8.length) fail('declared file size exceeds input');
+  const dataOffset = view.getUint32(10, true);
+  const dibSize = view.getUint32(14, true);
+  if (dibSize < 40 || dibSize > 124 || 14 + dibSize > u8.length) fail('unsupported DIB header');
+  if (dataOffset < 14 + dibSize || dataOffset >= u8.length) fail('invalid pixel-data offset');
+  const width = view.getInt32(18, true);
+  const signedHeight = view.getInt32(22, true);
+  const planes = view.getUint16(26, true);
+  const bitsPerPixel = view.getUint16(28, true);
+  const compression = view.getUint32(30, true);
+  const declaredImageSize = view.getUint32(34, true);
+  const height = Math.abs(signedHeight);
+  if (width <= 0 || height <= 0 || planes !== 1) fail('invalid dimensions/planes');
+  if (![24, 32].includes(bitsPerPixel) || compression !== 0) fail('only uncompressed 24/32-bit BI_RGB is supported');
+  const pixels = width * height;
+  if (!Number.isSafeInteger(pixels) || pixels > maxPixels) fail('pixel limit exceeded');
+  const bytesPerPixel = bitsPerPixel / 8;
+  const stride = Math.floor(((bitsPerPixel * width + 31) / 32)) * 4;
+  const pixelBytes = stride * height;
+  if (!Number.isSafeInteger(pixelBytes) || dataOffset + pixelBytes > u8.length) fail('truncated pixel data');
+  if (declaredImageSize !== 0 && declaredImageSize < pixelBytes) fail('declared image size is too small');
+  const data = new Uint8Array(pixels * 4);
+  const topDown = signedHeight < 0;
+  for (let y = 0; y < height; y++) {
+    const sourceY = topDown ? y : height - 1 - y;
+    let source = dataOffset + sourceY * stride;
+    let dest = y * width * 4;
+    for (let x = 0; x < width; x++) {
+      data[dest] = u8[source + 2];
+      data[dest + 1] = u8[source + 1];
+      data[dest + 2] = u8[source];
+      // Many 32-bit BMPs leave the fourth byte reserved/zero rather than
+      // using it as alpha; screenshots are opaque, so preserve nonzero alpha
+      // and normalize the reserved-zero form to opaque.
+      data[dest + 3] = bitsPerPixel === 32 && u8[source + 3] !== 0 ? u8[source + 3] : 255;
+      source += bytesPerPixel;
+      dest += 4;
+    }
+  }
+  return Object.freeze({ data, width, height, channels: 4 });
 }
 
 /* ------------------------------------------------------------------ */
@@ -105,8 +307,8 @@ export function paddedSize(w, h, grid) {
 /* ------------------------------------------------------------------ */
 
 export function bytesToBase64(bytes) {
-  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if (typeof Buffer !== 'undefined') return Buffer.from(u8).toString('base64');
+  const u8 = asBytes(bytes);
+  if (typeof Buffer !== 'undefined') return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64');
   let bin = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < u8.length; i += CHUNK) {
@@ -116,8 +318,18 @@ export function bytesToBase64(bytes) {
 }
 
 export function base64ToBytes(b64) {
-  if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(String(b64), 'base64'));
-  const bin = atob(String(b64));
+  if (typeof b64 !== 'string') throw new TypeError('Archx: base64 value must be a string');
+  let normalized = b64.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
+  if (normalized.includes('=') && normalized.indexOf('=') !== normalized.length - padding) {
+    throw new Error('Archx: invalid base64 value');
+  }
+  if (normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    throw new Error('Archx: invalid base64 value');
+  }
+  if (normalized.length % 4) normalized += '='.repeat(4 - (normalized.length % 4));
+  if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(normalized, 'base64'));
+  const bin = atob(normalized);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
@@ -134,29 +346,77 @@ export function base64ToBytes(b64) {
  * The content-type on the wire is application/octet-stream — DevTools does
  * not classify it as an image at all.
  */
+export const MAX_ARCHX_HEADER_BYTES = 16384;
+const ARCHX_MAGIC_BYTES = Object.freeze([...ARCHX_MAGIC].map((c) => c.charCodeAt(0)));
+const ARCHX_HEADER_FIELDS = new Set([
+  'v', 'w', 'h', 'pw', 'ph', 'grid', 'mime', 'scrambled', 'encrypted', 'iv', 'wm', 'fx', 'sg',
+]);
+const ARCHX_MIME_FORMATS = Object.freeze({
+  'image/webp': 'webp', 'image/png': 'png', 'image/jpeg': 'jpeg', 'image/avif': 'avif',
+});
+
+/** Validate the version-1 .archx header before any payload bytes are decoded. */
+export function validateArchxHeader(header) {
+  const fail = (message) => { throw new Error(`Archx: invalid .archx header (${message})`); };
+  if (!header || typeof header !== 'object' || Array.isArray(header)) fail('not an object');
+  for (const field of Object.keys(header)) if (!ARCHX_HEADER_FIELDS.has(field)) fail(`unknown field ${field}`);
+  if (header.v !== 1) fail('unsupported version');
+  for (const field of ['w', 'h', 'pw', 'ph']) {
+    if (!Number.isSafeInteger(header[field]) || header[field] < 1 || header[field] > 65536) fail(`bad ${field}`);
+  }
+  if (!Number.isInteger(header.grid) || header.grid < 2 || header.grid > 32) fail('bad grid');
+  const padded = paddedSize(header.w, header.h, header.grid);
+  if (header.pw !== padded.pw || header.ph !== padded.ph) fail('padded dimensions do not match');
+  if (!ARCHX_MIME_FORMATS[header.mime]) fail('unsupported MIME type');
+  if (typeof header.scrambled !== 'boolean' || typeof header.encrypted !== 'boolean') fail('bad flags');
+  for (const field of ['wm', 'fx', 'sg']) {
+    if (header[field] !== undefined && header[field] !== 0 && header[field] !== 1 && header[field] !== true && header[field] !== false) {
+      fail(`bad ${field} flag`);
+    }
+  }
+  if (header.encrypted) {
+    if (typeof header.iv !== 'string') fail('missing IV');
+    try { if (base64ToBytes(header.iv).length !== 12) fail('bad IV length'); }
+    catch (err) { if (/invalid \.archx header/.test(err.message)) throw err; fail('bad IV encoding'); }
+  } else if (header.iv !== undefined) fail('unexpected IV');
+  return header;
+}
+
 export function encodeContainer(header, payload) {
+  validateArchxHeader(header);
   const headerBytes = new TextEncoder().encode(JSON.stringify(header));
-  const body = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  if (headerBytes.length > MAX_ARCHX_HEADER_BYTES) throw new Error('Archx: .archx header is too large');
+  const body = asBytes(payload);
+  if (!body.length) throw new Error('Archx: .archx payload is empty');
   const out = new Uint8Array(6 + 4 + headerBytes.length + body.length);
-  out.set(new TextEncoder().encode(ARCHX_MAGIC), 0);
-  new DataView(out.buffer).setUint32(6, headerBytes.length, false);
+  out.set(ARCHX_MAGIC_BYTES, 0);
+  new DataView(out.buffer, out.byteOffset, out.byteLength).setUint32(6, headerBytes.length, false);
   out.set(headerBytes, 10);
   out.set(body, 10 + headerBytes.length);
   return out;
 }
 
 export function isArchxContainer(bytes) {
-  if (!bytes || bytes.length < 10) return false;
-  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  return ARCHX_MAGIC.split('').every((c, i) => u8[i] === c.charCodeAt(0));
+  if (!bytes) return false;
+  const u8 = asBytes(bytes);
+  return u8.length >= 10 && ARCHX_MAGIC_BYTES.every((c, i) => u8[i] === c);
 }
 
 export function decodeContainer(bytes) {
-  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const u8 = asBytes(bytes);
   if (!isArchxContainer(u8)) throw new Error('Archx: not an .archx container');
-  const headerLen = new DataView(u8.buffer, u8.byteOffset).getUint32(6, false);
-  const header = JSON.parse(new TextDecoder().decode(u8.subarray(10, 10 + headerLen)));
+  const headerLen = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(6, false);
+  if (!Number.isSafeInteger(headerLen) || headerLen < 2 || headerLen > MAX_ARCHX_HEADER_BYTES ||
+      10 + headerLen >= u8.length) {
+    throw new Error('Archx: invalid .archx header length');
+  }
+  let header;
+  try {
+    header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(u8.subarray(10, 10 + headerLen)));
+  } catch { throw new Error('Archx: invalid .archx header encoding'); }
+  validateArchxHeader(header);
   const payload = u8.subarray(10 + headerLen);
+  if (!payload.length) throw new Error('Archx: invalid .archx payload');
   return { header, payload };
 }
 
@@ -164,19 +424,29 @@ export function decodeContainer(bytes) {
 /* AES-GCM payload encryption (WebCrypto — available in Node ≥19 too)   */
 /* ------------------------------------------------------------------ */
 
-const keyCache = new Map();
+const keyCache = new Map(); // base64 key -> Promise<CryptoKey>; deliberately small and LRU-bounded
+const AES_KEY_CACHE_MAX = 16;
 
 async function importAesKey(keyBase64) {
-  if (keyCache.has(keyBase64)) return keyCache.get(keyBase64);
-  const raw = base64ToBytes(keyBase64);
-  if (![16, 24, 32].includes(raw.length)) {
-    throw new Error('Archx: AES key must be 16/24/32 bytes (base64)');
+  if (typeof keyBase64 !== 'string' || !keyBase64) throw new TypeError('Archx: AES key must be a base64 string');
+  const cached = keyCache.get(keyBase64);
+  if (cached) {
+    keyCache.delete(keyBase64); keyCache.set(keyBase64, cached);
+    return cached;
   }
-  const key = await globalThis.crypto.subtle.importKey(
-    'raw', raw, { name: 'AES-GCM', length: raw.length * 8 }, false, ['encrypt', 'decrypt'],
-  );
-  keyCache.set(keyBase64, key);
-  return key;
+  const pending = (async () => {
+    const raw = base64ToBytes(keyBase64);
+    if (![16, 24, 32].includes(raw.length)) {
+      throw new Error('Archx: AES key must be 16/24/32 bytes (base64)');
+    }
+    return globalThis.crypto.subtle.importKey(
+      'raw', raw, { name: 'AES-GCM', length: raw.length * 8 }, false, ['encrypt', 'decrypt'],
+    );
+  })();
+  keyCache.set(keyBase64, pending);
+  while (keyCache.size > AES_KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
+  try { return await pending; }
+  catch (err) { if (keyCache.get(keyBase64) === pending) keyCache.delete(keyBase64); throw err; }
 }
 
 /** Generate a fresh 256-bit key, base64-encoded. */
@@ -191,17 +461,19 @@ export async function encryptPayload(plainBytes, keyBase64) {
   const iv = new Uint8Array(12);
   globalThis.crypto.getRandomValues(iv);
   const cipher = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv }, key,
-    plainBytes instanceof Uint8Array ? plainBytes : new Uint8Array(plainBytes),
+    { name: 'AES-GCM', iv }, key, asBytes(plainBytes),
   );
   return { cipher: new Uint8Array(cipher), iv: bytesToBase64(iv) };
 }
 
 export async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
+  const cipher = asBytes(cipherBytes);
+  const iv = base64ToBytes(ivBase64);
+  if (iv.length !== 12) throw new Error('Archx: AES-GCM IV must be 12 bytes');
+  if (cipher.length < 17) throw new Error('Archx: AES-GCM payload is too short');
   const key = await importAesKey(keyBase64);
   const plain = await globalThis.crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: base64ToBytes(ivBase64) }, key,
-    cipherBytes instanceof Uint8Array ? cipherBytes : new Uint8Array(cipherBytes),
+    { name: 'AES-GCM', iv }, key, cipher,
   );
   return new Uint8Array(plain);
 }
@@ -731,31 +1003,186 @@ export function detectStegoFingerprint(rgba, w, h, {
  * @param {'scramble'|'unscramble'} direction
  */
 export function scramblePixels(rgba, pw, ph, plan, direction = 'scramble') {
-  const { grid, count } = plan;
+  if (direction !== 'scramble' && direction !== 'unscramble') {
+    throw new TypeError('Archx: scramble direction is invalid');
+  }
+  const grid = plan?.grid;
+  const count = plan?.count;
+  if (!Number.isSafeInteger(pw) || !Number.isSafeInteger(ph) || pw < 1 || ph < 1 ||
+      !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid ||
+      pw % grid !== 0 || ph % grid !== 0 || !Array.isArray(plan.order) ||
+      !Array.isArray(plan.inverse) || !Array.isArray(plan.flips) ||
+      plan.order.length !== count || plan.inverse.length !== count || plan.flips.length !== count) {
+    throw new RangeError('Archx: invalid scramble geometry');
+  }
   const tw = pw / grid;
   const th = ph / grid;
-  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-  const out = new Uint8Array(src.length);
+  const src = asBytes(rgba);
+  const expected = pw * ph * 4;
+  if (!Number.isSafeInteger(expected) || src.length < expected) {
+    throw new RangeError('Archx: RGBA buffer is smaller than the padded image');
+  }
+  const out = new Uint8Array(expected);
+  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0;
+  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
+  const out32 = useWords ? new Uint32Array(out.buffer) : null;
   for (let dest = 0; dest < count; dest++) {
     // scramble: dest is scrambled pos, source = order[dest]
     // unscramble: dest is original pos, source = inverse[dest]
     const source = direction === 'scramble' ? plan.order[dest] : plan.inverse[dest];
+    if (!Number.isInteger(source) || source < 0 || source >= count) {
+      throw new RangeError('Archx: invalid scramble plan');
+    }
     const flipPos = direction === 'scramble' ? dest : source;
-    const { fx, fy } = plan.flips[flipPos];
+    const flip = plan.flips[flipPos];
+    if (!flip || typeof flip !== 'object') throw new RangeError('Archx: invalid scramble plan');
+    const { fx, fy } = flip;
     const sx = (source % grid) * tw;
     const sy = Math.floor(source / grid) * th;
     const dx = (dest % grid) * tw;
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
       const yy = fy ? th - 1 - y : y;
-      for (let x = 0; x < tw; x++) {
-        const xx = fx ? tw - 1 - x : x;
-        const si = ((sy + yy) * pw + (sx + xx)) * 4;
-        const di = ((dy + y) * pw + (dx + x)) * 4;
-        out[di] = src[si]; out[di + 1] = src[si + 1];
-        out[di + 2] = src[si + 2]; out[di + 3] = src[si + 3];
+      const srcRow = (sy + yy) * pw + sx;
+      const dstRow = (dy + y) * pw + dx;
+      if (useWords && !fx) {
+        out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
+      } else if (useWords) {
+        for (let x = 0; x < tw; x++) out32[dstRow + x] = src32[srcRow + (tw - 1 - x)];
+      } else {
+        for (let x = 0; x < tw; x++) {
+          const xx = fx ? tw - 1 - x : x;
+          const si = (srcRow + xx) * 4;
+          const di = (dstRow + x) * 4;
+          out[di] = src[si]; out[di + 1] = src[si + 1];
+          out[di + 2] = src[si + 2]; out[di + 3] = src[si + 3];
+        }
       }
     }
   }
   return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Perceptual content fingerprint (soft binding)                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Compute a 64-bit DCT perceptual hash of an RGBA image.
+ *
+ * This is a C2PA-style *soft binding*: register it beside an image/order ID,
+ * and a resized/re-encoded/mildly edited suspect copy can often still be
+ * matched after metadata or even a pixel watermark has been stripped. It is
+ * deliberately tiny and dependency-free. It is not cryptographic identity,
+ * not proof of ownership by itself, and modern regeneration/cropping/
+ * adversarial perturbation can move a copy beyond a safe threshold. Treat a
+ * close distance as investigative evidence to corroborate, not a verdict.
+ *
+ * @param {Uint8Array|Buffer} rgba w*h*4 bytes
+ * @returns {string} 16 lowercase hex characters
+ */
+export function perceptualFingerprint(rgba, w, h) {
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) {
+    throw new RangeError('Archx: invalid image dimensions for perceptual fingerprint');
+  }
+  const src = asBytes(rgba);
+  const expected = w * h * 4;
+  if (!Number.isSafeInteger(expected) || src.length < expected) {
+    throw new RangeError('Archx: RGBA buffer is smaller than the image');
+  }
+  const SIZE = 32;
+  const small = new Float64Array(SIZE * SIZE);
+  const weights = new Float64Array(SIZE * SIZE);
+
+  // Area-average to 32×32. Area weighting is slower than nearest-neighbour
+  // sampling but makes the fingerprint materially steadier across the exact
+  // resampling choices of browsers, Sharp, and social-media transcoders.
+  for (let y = 0; y < h; y++) {
+    const y0 = (y * SIZE) / h;
+    const y1 = ((y + 1) * SIZE) / h;
+    const oyStart = Math.floor(y0);
+    const oyEnd = Math.min(SIZE - 1, Math.ceil(y1) - 1);
+    const rowOffset = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const i = rowOffset + x * 4;
+      const alpha = src[i + 3] / 255;
+      const gray = ((src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256) * alpha;
+      const x0 = (x * SIZE) / w;
+      const x1 = ((x + 1) * SIZE) / w;
+      const oxStart = Math.floor(x0);
+      const oxEnd = Math.min(SIZE - 1, Math.ceil(x1) - 1);
+      for (let oy = oyStart; oy <= oyEnd; oy++) {
+        const wy = Math.min(y1, oy + 1) - Math.max(y0, oy);
+        if (wy <= 0) continue;
+        for (let ox = oxStart; ox <= oxEnd; ox++) {
+          const wx = Math.min(x1, ox + 1) - Math.max(x0, ox);
+          if (wx <= 0) continue;
+          const idx = oy * SIZE + ox;
+          const weight = wx * wy;
+          small[idx] += gray * weight;
+          weights[idx] += weight;
+        }
+      }
+    }
+  }
+  for (let i = 0; i < small.length; i++) {
+    small[i] = weights[i] > 0 ? small[i] / weights[i] : 0;
+  }
+
+  const cosines = Array.from({ length: SIZE }, (_, x) =>
+    Array.from({ length: 8 }, (_, u) => Math.cos(((2 * x + 1) * u * Math.PI) / (2 * SIZE))));
+  const rowDct = new Float64Array(SIZE * 8);
+  for (let y = 0; y < SIZE; y++) {
+    for (let u = 0; u < 8; u++) {
+      let sum = 0;
+      for (let x = 0; x < SIZE; x++) sum += small[y * SIZE + x] * cosines[x][u];
+      rowDct[y * 8 + u] = sum;
+    }
+  }
+  const coefficients = new Float64Array(64);
+  for (let v = 0; v < 8; v++) {
+    for (let u = 0; u < 8; u++) {
+      let sum = 0;
+      for (let y = 0; y < SIZE; y++) sum += rowDct[y * 8 + u] * cosines[y][v];
+      coefficients[v * 8 + u] = sum;
+    }
+  }
+  const sorted = [...coefficients.slice(1)].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  let bits = 0n;
+  for (let i = 0; i < 64; i++) {
+    if (coefficients[i] > median) bits |= 1n << BigInt(63 - i);
+  }
+  return bits.toString(16).padStart(16, '0');
+}
+
+export function normalizePerceptualFingerprint(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{16}$/.test(normalized) ? normalized : null;
+}
+
+export function perceptualFingerprintDistance(a, b) {
+  const left = normalizePerceptualFingerprint(a);
+  const right = normalizePerceptualFingerprint(b);
+  if (!left || !right) throw new TypeError('Archx: perceptual fingerprint must be 16 hex characters');
+  let xor = BigInt('0x' + left) ^ BigInt('0x' + right);
+  let distance = 0;
+  while (xor > 0n) {
+    distance += Number(xor & 1n);
+    xor >>= 1n;
+  }
+  return distance;
+}
+
+export function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
+  if (!Number.isInteger(maxDistance) || maxDistance < 0 || maxDistance > 64) {
+    throw new RangeError('Archx: perceptual fingerprint maxDistance must be an integer from 0 to 64');
+  }
+  const distance = perceptualFingerprintDistance(a, b);
+  return Object.freeze({
+    distance,
+    similarity: 1 - distance / 64,
+    match: distance <= maxDistance,
+  });
 }

@@ -39,6 +39,15 @@ map onto this library's design.
   strict, security stores and Sharp work are bounded, and the separate-device
   work is split honestly between browser-feasible temporal degradation and
   hardware systems a web page cannot reproduce.
+  v1.5 removes remaining fail-open/test/debug-style surfaces, treats token
+  endpoints and image bytes as untrusted on both sides of the wire, moves
+  bearer tokens out of payload URLs, adds DPoP-style sender-constrained
+  redemption, hardens clean URLs against shared-cache deception, and adds a
+  perceptual soft binding as a second attribution lookup. It also states the
+  modern stealth-browser conclusion plainly: coherent fingerprint spoofing
+  and CDP/Juggler control can pierce client-side encapsulation, so the
+  security boundary is server authorization + entitled derivative size +
+  quotas/revocation + attribution, not the shadow root.
 
 ---
 
@@ -74,12 +83,19 @@ map onto this library's design.
 | A26 | Defeat temporal/psychovisual defences by screen-recording, averaging many screenshots, or using a long camera exposure | low–medium | multiple presented frames over time |
 | A27 | AI-assisted cleanup: denoise, upscale, inpaint watermarks, or diffusion-regenerate a degraded capture until pixel marks are weakened/removed | low (consumer tools)–medium | any visible copy, however degraded |
 | A28 | Repost a copy while denying its origin / stripping metadata and visible credit | none | ambiguity about which issued view leaked |
+| A29 | Copy a still-valid bearer token from logs, history, a proxy, browser tooling, or a screenshot and redeem it in a different browser | low | a bearer token that is sufficient by itself |
+| A30 | Web-cache deception: persuade a CDN/shared cache to store a private derivative under a clean/static-looking URL and serve it to someone else | low–medium | a cache rule that overrides origin privacy or ignores credential/token variance |
+| A31 | Stealth automation with source-patched browsers, coherent fingerprint spoofing, raw CDP/Juggler, and DOM piercing of closed shadow roots | medium | client-side bot signals or encapsulation being mistaken for a trust boundary |
+| A32 | Fail-open integration mistakes: misspelled security options, ambiguous `authorize()` results, weak/demo secrets, public test/signing hooks, or a debug surface left enabled | none–low | configuration/API ambiguity becoming an accidental bypass |
+| A33 | Hostile upstream/token response or image input: redirects to another origin, oversized streamed bodies, decompression bombs, parser-confusing formats, or local-path strings reaching a native decoder | medium | unbounded trust in JSON, URLs, headers, or image bytes |
 
-The design goal follows directly: **A1–A11, A13, A16–A20 and A24 should yield
-nothing clean or reusable; A12/A14/A15/A21–A23/A25–A27 must be pushed toward at
-most a server-authorized, screen-resolution, visibly/forensically marked copy
-whose production is slow, noisy, and attributable; A28 should leave the owner
-a testable fingerprint trail rather than screenshots and assertions.**
+The design goal follows directly: **A1–A11, A13, A16–A20, A24 and A29–A33
+should yield nothing clean or reusable outside the authorized page/session;
+A12/A14/A15/A21–A23/A25–A27/A31 must be pushed toward at most a
+server-authorized, screen-resolution, visibly/forensically marked copy whose
+production is slow, noisy, rate-limited, revocable, and attributable; A28
+should leave the owner StegoMark and/or soft-binding evidence rather than
+screenshots and assertions.**
 
 ## 2. What production platforms actually do
 
@@ -419,12 +435,14 @@ deny-by-default model OWASP recommends for application authorization:
   POST-only by default with an `X-Archx-Request` header and same-site/fetch-
   metadata gating; exact configured origins remain CORS/CSRF signals. None of
   Origin, Referer, IP, or User-Agent is treated as a credential.
-- One-time use is claimed synchronously after signature/claim/IP/UA checks
-  and before the first redemption `await`. In Node's event-loop model this
-  removes the check/use gap that let twenty parallel copies of one URL race;
-  the regression test now expects exactly one 200 and nineteen 403s. The
-  operational price is explicit: if redemption authorization, quota, or
-  processing later fails, that URL is burned and the client must mint again.
+- One-time use is claimed synchronously after all redemption checks that can
+  legitimately be retried—signature/claims/proof, reauthorization, and
+  viewer/IP/User-Agent/session bindings—with no `await` between checking and
+  claiming the proof ID and nonce. In Node's event-loop model this removes
+  the check/use gap that let twenty parallel copies of one URL race; the
+  regression test expects exactly one 200 and nineteen 403s. A transient
+  authorization denial therefore does not spend the token, while a later
+  quota/processing failure can still burn it and requires a fresh mint.
 - Rate limiting needed a memory bound as much as a request bound. Token,
   payload, quota, nonce, distinct-image, master-cache, dimension-cache, and
   output-cache state now has TTL cleanup plus client/entry/byte ceilings.
@@ -520,21 +538,109 @@ permanent 4xx/aborted fetches, and bounds every server store/queue. Continuous
 CPU/GPU work is deliberately opt-in through temporal/camera patterns;
 `lite`/static galleries should normally leave it off.
 
+### 2.12 v1.5 deep dive: stealth browsers, stolen-token replay, cache deception, and fail-open APIs
+
+The v1.5 pass started by assuming the next attacker is not using the
+right-click menu or a naïve headless browser. Four conclusions changed the
+implementation:
+
+1. **Client encapsulation is not a boundary against the browser operator.**
+   Current stealth stacks patch browser source or speak raw CDP/Juggler,
+   present internally coherent fingerprints, traverse closed shadow trees
+   with DOM piercing, and capture composited frames. Adding more canvas- or
+   navigator-fingerprint heuristics would mostly add privacy cost, false
+   positives, and a false sense of certainty. Archx keeps automation signals
+   as tripwires, but puts the enforceable controls where the operator cannot
+   rewrite them: object-level `authorize()` at mint and redemption, short
+   one-time entitled derivatives, proof-bound redemption, per-viewer/IP/image
+   quotas, distinct-image detection, security events, and marks. A stealth
+   browser with a legitimate paid session must be handled as an authorized
+   viewer whose rate, catalogue breadth, size, and continued access are
+   governed server-side.
+
+2. **A bearer token should not be sufficient when copied elsewhere.**
+   OAuth DPoP (RFC 9449) addresses token exfiltration by binding the token
+   to a client key and requiring a fresh proof for each request. Archx v1.5
+   implements a deliberately narrower DPoP-style protocol instead of a
+   general JWT stack: the browser creates one ephemeral ECDSA P-256 pair per
+   page with the private key non-extractable, sends only the public JWK at
+   mint, and the signed v2 token carries its RFC 7638 thumbprint (`jkt`).
+   Redemption requires a bounded proof over the method, exact payload path,
+   SHA-256 of the access token, issued/expiry times (max two minutes), and a
+   one-time proof ID. The server accepts only on-curve P-256 keys, recomputes
+   the thumbprint, and claims the proof ID in a bounded TTL store. The wire
+   format is intentionally small enough to audit: mint sends
+   `X-Archx-Proof-Key: base64url(JSON.stringify({kty,crv,x,y}))`; redemption
+   sends `X-Archx-Proof: v1.<base64url(JSON proof)>.<base64url(raw P1363
+   signature)>`, where the proof contains exactly `jwk`, `jti`, millisecond
+   `iat`/`exp`, `htm:'GET'`, `htu` (the payload pathname), and
+   `ath: base64url(SHA-256(accessToken))`, and the ECDSA signing input is
+   `v1.<base64url(JSON proof)>`. This makes
+   a token copied from logs/history/proxy tooling useless in another browser
+   that lacks the private key. It does **not** stop same-page XSS, a
+   malicious extension, or the legitimate browser operator from asking the
+   page to sign a proof and display pixels; CSP, session security, and
+   authorization remain separate responsibilities.
+
+3. **Clean token URLs create a cache-deception obligation.**
+   Moving the token from `?t=` into `X-Archx-Token` keeps bearer material out
+   of history, Referer, Resource Timing, and many logs, but makes the payload
+   path look static. PortSwigger-style web-cache deception is therefore part
+   of the threat model. Token and payload responses now send
+   `Cache-Control: private, no-store`, `CDN-Cache-Control: private, no-store`,
+   `Surrogate-Control: no-store`, and a `Vary` list covering Origin (when
+   CORS is enabled), Cookie, Authorization, token/proof headers, and
+   User-Agent. `Vary` is defence in depth, not a rescue: shared-cache support
+   is inconsistent, and a CDN rule that deliberately overrides origin
+   `no-store` remains an operator deployment failure that must be tested.
+
+4. **Ambiguous security APIs are backdoor-shaped even when nobody intended a
+   backdoor.** v1.5 therefore rejects unknown/misspelled server options,
+   ambiguous authorization results, weak secrets without a test bypass, and
+   callbacks that hang past a deadline. Public generic token-signing/
+   verification exports, `handler._test`, and `handler.index` were removed.
+   Client public options are deep-cloned/redacted, duplicate hosts and
+   unavailable shadow roots fail closed, and debug handles remain per-instance
+   opt-in. On the data path, the browser stream-caps and schema-checks token
+   JSON, refuses redirects and non-allowlisted payload origins, sniffs image
+   dimensions before decode where the format permits, and enforces byte/
+   dimension/pixel budgets. The server passes Sharp only byte buffers,
+   pre-sniffs and cross-checks metadata, and can block unneeded libvips
+   loaders process-wide. These are not glamorous features; they close the
+   paths by which a typo, test hook, hostile file, or compromised upstream
+   response becomes a bypass.
+
+5. **Provenance needs a second lookup when pixel marks are attacked.**
+   C2PA separates provenance from access control: metadata and credentials
+   can be stripped, while soft bindings (watermarks or content fingerprints)
+   can rediscover a stored record. Archx now exports a 64-bit DCT perceptual
+   fingerprint and comparison helpers, returns it from `scrambleImage()` only
+   when ingest code opts in, prints it from `archx-protect`, and compares it
+   in `archx-detect`. That gives monitoring a candidate match after resize/
+   re-encode even when StegoMark is absent. Current watermark/fingerprint
+   research also sets the limit: regeneration, compositing, crops, and
+   adversarial perturbations can move fingerprints and remove invisible
+   marks, so a soft-binding hit is investigative evidence to corroborate with
+   the retained master and issuance log—not cryptographic identity and not a
+   substitute for withholding the master.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
 |---|---|---|
 | Casual visitor | save a picture they like | Finds no save path at all (A1/A2 dead-end) |
 | Bookmarklet/extension user | strip a page/gallery in one click | DOM has no images; canvas grabs return decoys |
-| Scraper bot operator (incl. AI training crawlers) | harvest a whole catalogue | No URLs in HTML; needs JS, POST, authorization and a fresh signed token per image; bounded rate/quota/distinct-image controls make sweeps slow and visible; payloads are mosaics/ciphertext |
+| Scraper bot operator (incl. AI training crawlers and stealth browsers) | harvest a whole catalogue | No URLs in HTML; needs JS, POST, authorization and a fresh signed token per image; bounded rate/quota/distinct-image controls make sweeps slow and visible; payloads are mosaics/ciphertext. Client fingerprint signals are not trusted because coherent stealth stacks can spoof them |
 | Script/extension injector | hook web APIs or grab viewer internals wholesale | Captured natives bypass later hooks; audits can fail closed in Fortress; no host expando/public registry/debug handle exposes canvases, bitmaps, or keys |
-| Token thief | replay/share a captured delivery URL or inflate its derivative size | Strict v2 claims + short expiry + synchronous one-time claim; redemption reauthorization and viewer/session checks; optional IP/User-Agent friction; current entitlement can only tighten signed width/quality/format |
+| Token thief | replay/share a captured delivery URL or token, or inflate its derivative size | Strict v2 claims + short expiry + synchronous proof/nonce claims; redemption reauthorization and viewer/session checks; optional IP/User-Agent friction; DPoP-style proof makes a copied token unusable without the page's non-extractable private key; current entitlement can only tighten signed width/quality/format |
 | Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
 | Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic + blind StegoMark IDs; Lens prevents one screenshot from containing the whole sharp image, and the registry can identify the issued view when the mark survives and is geometrically recovered |
 | Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens/patterned-temporal-degraded + dynamically traced |
 | Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, checker/band opponent-colour effects, and Lens reducing resale value; StegoMark phone-photo recovery is unproven without external rectification |
 | AI cleanup / regeneration operator | turn a degraded capture into a polished copy or remove invisible marks | Cannot be ruled out for visible pixels. Archx limits source information and keeps server-side entitlement/issuance evidence; regenerated detail is invented, but the business still needs monitoring/enforcement |
-| Reposter denying origin | circulate a copy stripped of metadata/credit | `archx-detect` can test for the blind StegoMark, search bounded axis-aligned crop geometry, and map a recovered fingerprint to the owner's issuance record; rotation/perspective/AI failures remain possible |
+| Reposter denying origin | circulate a copy stripped of metadata/credit | `archx-detect` can test for the blind StegoMark, search bounded axis-aligned crop geometry, compare a registered perceptual soft binding, and map recovered evidence to the owner's issuance record; rotation/perspective/AI/fingerprint-evasion failures remain possible |
+| Cache-deception attacker / misconfigured CDN | have a shared cache retain and resend one viewer's derivative | Origin responds `private,no-store` through standard, CDN, and surrogate controls with credential/token/proof-sensitive `Vary`; deployment tests must prove no edge rule overrides them |
+| Hostile input/upstream operator | crash or exhaust the decoder, redirect the client, or smuggle an oversized/parser-confusing payload | Byte-only Sharp inputs, pre-decode sniffing/metadata cross-checks, loader and format allowlists, strict token JSON/origin/redirect rules, streamed byte caps, and dimension/pixel/timeouts on both sides fail closed |
 
 Non-goals: hiding that protection exists, DRM-level guarantees, stopping a
 camera pointed at a monitor, proving browser integrity on a machine the
@@ -665,7 +771,7 @@ error — see the README checklist).
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 24 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 30 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -699,18 +805,32 @@ error — see the README checklist).
   quotas and distinct-image denial fire with sanitized security events, and
   corrupt/oversized/format-mismatched masters produce typed Sharp-limit
   errors. Twenty parallel spends of one signed URL produce **one** 200 and
-  nineteen 403s.
-- **Real browser (headless Chromium, 62 checks):** a page with 7 protected
+  nineteen 403s. The v1.5 regressions additionally prove that unknown server
+  options, weak-secret bypass attempts, and ambiguous authorization shapes
+  fail closed; public signing/verification, live-index, and test-hook surfaces
+  are absent; strict sniffing/container/base64 and byte-only Sharp inputs
+  reject hostile payloads before unsafe paths; required mint headers, clean
+  header-token transport, query-token opt-out, callback deadlines, and
+  right-side trusted-hop `X-Forwarded-For` selection behave as configured.
+  A required-proof fixture rejects missing/malformed proof keys, a copied
+  token without a proof, and a proof from the wrong P-256 key; the correct
+  key succeeds, the exact proof cannot replay even with reusable tokens, a
+  fresh proof can, and responses carry CDN/surrogate `no-store` plus
+  proof-sensitive `Vary`. The soft-binding test registers a perceptual
+  fingerprint during `scrambleImage()`, matches a resized/JPEG copy within
+  distance 10, and separates an unrelated synthetic image.
+- **Real browser (headless Chromium, 68 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
   no `__archx` expando, `Archx._instances` is absent, public option/config
   views redact secrets, instances expose no public canvas property, and
   `_debug()` is null without explicit per-instance opt-in. At native element
-  resolution the Shield render measures **9.48 MAD and 0.88 gradient-detail
-  ratio** versus the ordinary `<img>` in the current marked/StegoMark demo
-  configuration (the cover/quality work had moved an earlier failing
-  11.28 / 0.53 measurement to 7.03 / 0.85 before the additional stego layer). `toDataURL`/`toBlob`/
+  resolution the latest Shield render measures **8.05 MAD and 0.87
+  gradient-detail ratio** versus the ordinary `<img>` in the current
+  marked/StegoMark demo configuration (the cover/quality work had moved an
+  earlier failing 11.28 / 0.53 measurement to 7.03 / 0.85 before the
+  additional stego layer). `toDataURL`/`toBlob`/
   `getImageData` all return decoys and fire attempt events; repeated probes
   trigger the configured strike blackout. Replacing `fetch` is both reported
   by `auditIntegrity()` and causes Fortress to fail closed. Trusted pointer
@@ -726,20 +846,28 @@ error — see the README checklist).
   (mean RGB ≈ 0), split mode uses 9 separately poisoned canvases, guards and
   print blackout engage, and network checks confirm a marked mosaic payload,
   one-time replay rejection, and wrong-User-Agent rejection. The production
-  POST-token path is exercised by the actual page loads; v1.4 also renders a
+  POST-token path is exercised by the actual page loads; v1.5 additionally
+  proves duplicate-host/shadow failure, hostile SVG rejection, immutable
+  public option views, clean payload URLs with no bearer token in Resource
+  Timing names, and real Chromium request traffic carrying both the mint
+  proof key and a proof on every payload request. v1.4 also renders a
   `bands` + chroma camera shield continuously in WebGL and a `checker` +
   chroma shield as complementary Canvas2D frames, exposes their normalized
   pattern/chroma only through the debug-gated test hook, scopes their token
   cache, and verifies `Archx.clearCaches()` does not blank already-painted
   instances.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  about **2.9 s** in the deliberately non-lazy headless test with high-quality
-  derivatives and 0 `<img>` tags; browser bundle **61.5 KiB minified / 20.7 KiB
-  gzipped**. The 900 px q95 server pipeline previously measured ~147 ms
-  one-time per cached variant. Static/per-image server outputs remain
-  cacheable; per-token marks/keys and lossless payloads intentionally trade
-  bytes/cache hits for attribution and exactness, while the client spends a
-  delivered payload once and then repaints locally.
+  **3.9 s** in the latest deliberately non-lazy headless test with
+  high-quality derivatives and 0 `<img>` tags; browser bundle **82.9 KiB
+  minified / 27.6 KiB gzipped**. The latest local benchmark measured
+  `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
+  169.9 ms one-time per cached variant (70.8 ms at 480 px and 358.1 ms at
+  1600 px). Static/per-image server outputs remain cacheable; per-token
+  marks/keys and lossless payloads intentionally trade bytes/cache hits for
+  attribution and exactness, while the client spends a delivered payload once
+  and then repaints locally. Proof signing uses one page key and one ECDSA
+  signature per uncached payload; perceptual fingerprinting is opt-in ingest
+  work, not a per-view server cost.
 
 - **StegoMark transform matrix (three 800 px photo masters, strength 6,
   geometry search on):** direct PNG, resize to 560 px + JPEG q70, blur 0.8 +
@@ -849,3 +977,29 @@ error — see the README checklist).
   not merely payload redundancy, dominates screen→camera recovery) —
   https://arxiv.org/html/2409.03487v1
   · https://arxiv.org/pdf/2304.13953
+- IETF RFC 9449, *OAuth 2.0 Demonstrating Proof of Possession (DPoP)*, and
+  RFC 7638, *JSON Web Key (JWK) Thumbprint* (sender-constrained tokens: a
+  copied token without the corresponding private key should not redeem;
+  short proof lifetimes and replay identifiers are part of the design) —
+  https://www.rfc-editor.org/rfc/rfc9449.html
+  · https://www.rfc-editor.org/rfc/rfc7638.html
+- PortSwigger Web Security Academy, *Web cache deception* and *Web cache
+  poisoning* (sensitive dynamic responses need origin `private,no-store`;
+  cache rules/keys must account for credentials and request-header variance,
+  and a CDN override can defeat otherwise correct headers) —
+  https://portswigger.net/web-security/web-cache-deception
+  · https://portswigger.net/web-security/web-cache-poisoning
+- C2PA Specification and FAQ (Content Credentials are provenance, not DRM;
+  durable credentials use soft bindings such as fingerprints/watermarks to
+  rediscover a stored manifest after metadata separation) —
+  https://spec.c2pa.org/specifications/specifications/2.4/specs/C2PA_Specification.html
+  · https://c2pa.org/faqs/
+- OWASP API Security Top 10, *Unrestricted Resource Consumption* and *Unsafe
+  Consumption of APIs* (timeouts, payload/operation budgets, schema/size
+  validation, and treating upstream responses/redirects as untrusted) —
+  https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/
+  · https://owasp.org/API-Security/editions/2023/en/0xaa-unsafe-consumption-of-apis/
+- MDN, `X-Forwarded-For` (the left-most value is spoofable; security-sensitive
+  client-IP selection must count trusted proxies from the right, and the
+  header is untrustworthy when the origin is directly reachable) —
+  https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For

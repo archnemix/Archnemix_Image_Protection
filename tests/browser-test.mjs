@@ -79,6 +79,16 @@ await page.setViewport({ width: 1200, height: 900 });
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push('pageerror: ' + e.message));
 page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('console: ' + m.text()); });
+const proofTraffic = { mintProofKeys: 0, payloadProofs: 0, payloadRequests: 0 };
+page.on('request', (request) => {
+  const url = request.url();
+  const headers = request.headers();
+  if (url.includes('/archx/token/') && headers['x-archx-proof-key']) proofTraffic.mintProofKeys++;
+  if (url.includes('/archx/i/')) {
+    proofTraffic.payloadRequests++;
+    if (headers['x-archx-proof']) proofTraffic.payloadProofs++;
+  }
+});
 
 try {
   await page.goto(BASE + '/test-harness.html', { waitUntil: 'networkidle2', timeout: 60000 });
@@ -485,6 +495,7 @@ try {
         glDelta: dbg.glFrames - before,
         tokenMethod: dbg.tokenMethod,
         cacheScope: dbg.cacheScope,
+        cacheScopeSet: dbg.cacheScopeSet,
       };
       inst.destroy(); host.remove();
       return out;
@@ -505,8 +516,72 @@ try {
     cameraShield.webgl.glContinuous && cameraShield.webgl.glDelta > 2 &&
     cameraShield.canvas.loaded && cameraShield.canvas.pattern === 'checker' && cameraShield.canvas.chroma &&
     cameraShield.canvas.frames2d && cameraShield.webgl.tokenMethod === 'POST' &&
-    cameraShield.canvas.cacheScope === 'camera-test' && cameraShield.vaultStillLoaded,
+    cameraShield.canvas.cacheScope === undefined && cameraShield.canvas.cacheScopeSet === true &&
+    cameraShield.vaultStillLoaded,
     JSON.stringify(cameraShield));
+
+  console.log('\n[7c] v1.5 client fail-closed boundaries');
+  const v15Client = await page.evaluate(async () => {
+    const shield = window.__instances.shield;
+    const view = shield.options;
+    view.guards.contextMenu = false;
+    view.mode = 'lite';
+    view.key = 'attacker-controlled';
+
+    let duplicateError = '';
+    try {
+      window.Archx.load.image(shield.element, '/demo/public-unprotected/neon-portrait.jpg', { lazy: false });
+    } catch (err) { duplicateError = err.message; }
+
+    const shadowHost = document.createElement('div');
+    shadowHost.style.cssText = 'width:200px;height:120px';
+    document.body.appendChild(shadowHost);
+    shadowHost.attachShadow({ mode: 'closed' });
+    let shadowError = '';
+    try {
+      window.Archx.load.image(shadowHost, '/demo/public-unprotected/neon-portrait.jpg', { lazy: false });
+    } catch (err) { shadowError = err.message; }
+    shadowHost.remove();
+
+    const badHost = document.createElement('div');
+    badHost.style.cssText = 'width:200px;height:120px';
+    document.body.appendChild(badHost);
+    const bad = window.Archx.load.image(
+      badHost,
+      new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="9999" height="9999"></svg>'], { type: 'image/svg+xml' }),
+      { lazy: false },
+    );
+    await bad.ready;
+    const badLoaded = bad.loaded;
+    bad.destroy(); badHost.remove();
+
+    const payloadNames = performance.getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .filter((name) => name.includes('/archx/i/'));
+    return {
+      duplicateError,
+      shadowError,
+      badLoaded,
+      optionsStillShield: shield.options.mode,
+      contextMenuStillGuarded: shield.options.guards.contextMenu,
+      keyStillRedacted: shield.options.key || null,
+      payloadCount: payloadNames.length,
+      payloadQueryTokens: payloadNames.filter((name) => name.includes('?t=') || name.includes('&t=')).length,
+    };
+  });
+  check('a second live Archx instance cannot hijack an existing host element',
+    /already hosts a live protected image/.test(v15Client.duplicateError), v15Client.duplicateError);
+  check('an unavailable requested shadow root fails closed instead of falling back to light DOM',
+    /unable to attach the requested shadow root/.test(v15Client.shadowError), v15Client.shadowError);
+  check('unsupported SVG payload is rejected before browser image decode', v15Client.badLoaded === false);
+  check('public options view is a deep clone; mutating it cannot weaken live guards',
+    v15Client.optionsStillShield === 'shield' && v15Client.contextMenuStillGuarded === true);
+  check('browser payload requests use clean URLs with no bearer token in Resource Timing names',
+    v15Client.payloadCount > 0 && v15Client.payloadQueryTokens === 0, JSON.stringify(v15Client));
+  check('browser token traffic is sender-constrained with a page proof key and per-payload proof',
+    proofTraffic.mintProofKeys > 0 && proofTraffic.payloadRequests > 0 &&
+    proofTraffic.payloadProofs === proofTraffic.payloadRequests,
+    JSON.stringify(proofTraffic));
 
   const strike = await page.evaluate(async () => {
     window.__attempts.length = 0;

@@ -19,7 +19,8 @@ import crypto from 'node:crypto';
 import { createArchxMiddleware } from './middleware.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const port = Number(process.env.PORT || 4173);
+const requestedPort = Number(process.env.PORT || 4173);
+const port = Number.isInteger(requestedPort) && requestedPort >= 0 && requestedPort <= 65535 ? requestedPort : 4173;
 
 // First run on a fresh clone: generate the demo gallery/public copies
 // (they're .gitignore'd to keep the repo light) before indexing masters.
@@ -30,8 +31,6 @@ if (galleryCount < 100 || !fs.existsSync(path.join(root, 'demo', 'public-unprote
   try { execFileSync(process.execPath, [path.join(root, 'tools', 'generate-test-images.mjs')], { stdio: 'inherit' }); }
   catch { console.warn('⚠ demo image generation failed — run: npm run demo:images'); }
 }
-
-const stegoRegistry = []; // demo stand-in for your fingerprint -> view database
 
 const demoSecret = process.env.ARCHX_SECRET || crypto.randomBytes(32).toString('hex');
 if (!process.env.ARCHX_SECRET) {
@@ -59,12 +58,8 @@ const archx = createArchxMiddleware({
   // Blind ownership fingerprint in every delivered view. Per-image here so the
   // demo output cache stays effective; production can use perToken + a DB.
   steganography: { perToken: false, strength: 6 },
-  onStegoIssue: async ({ id, fingerprint }) => {
-    if (!stegoRegistry.some((r) => r.id === id && r.fingerprint === fingerprint)) {
-      stegoRegistry.unshift({ id, fingerprint, issuedAt: new Date().toISOString() });
-      stegoRegistry.length = Math.min(stegoRegistry.length, 30);
-    }
-  },
+  // Production hosts persist onStegoIssue fingerprints in their own database.
+  // The demo deliberately exposes no HTTP registry/debug endpoint for them.
   // Determined-attacker hardening (all on for the demo):
   oneTimeTokens: true,                    // a captured signed URL cannot be replayed
   bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it
@@ -148,24 +143,17 @@ function serveStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.url.startsWith('/demo-api/stego-registry')) {
-    const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket?.remoteAddress || '');
-    if (process.env.ARCHX_DEMO_EXPOSE_STEGO_REGISTRY !== '1' || !loopback) {
-      return sendTextError(res, 404, 'not found');
-    }
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    return res.end(JSON.stringify(stegoRegistry, null, 2));
-  }
   if (req.url.startsWith('/archx/')) return archx(req, res);
   return serveStatic(req, res);
 });
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
+server.keepAliveTimeout = 5_000;
+server.timeout = 30_000;
+server.maxRequestsPerSocket = 1000;
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`\n🛡  Archnemix Image Protection demo: http://0.0.0.0:${port}`);
-  console.log(`   Protected images indexed: ${archx.index.size}`);
+  console.log(`   Protected images indexed: ${archx.stats().images}`);
   console.log('   Masters folder is not web-accessible — try /demo-masters/aurora-valley.jpg (404)\n');
 });

@@ -39,10 +39,10 @@
 import {
   buildScramblePlan, tileRect, paddedSize,
   isArchxContainer, decodeContainer, decryptPayload,
-  hashSeed, mulberry32, DEFAULT_GRID,
+  hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
 } from './scramble.js';
 
-export const VERSION = '1.4.0';
+export const VERSION = '1.5.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -169,6 +169,13 @@ const DEFAULTS = {
   aesKey: null,                 // base64 AES key for encrypted .archx payloads
   tokenEndpoint: null,          // e.g. '/archx/token/'  (+ image id)
   tokenMethod: 'POST',          // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
+  tokenTransport: 'header',     // 'header' | 'query' | 'auto' — header keeps bearer tokens out of image URLs/logs
+  proofOfPossession: 'auto',    // 'auto' | 'required' | 'off' — bind tokens to a non-extractable page key when WebCrypto allows
+  allowedTokenOrigins: null,    // exact extra origins allowed for token-returned payload URLs (endpoint origin is always allowed)
+  fetchTimeoutMs: 20000,        // per-request network deadline (mint, payload, and direct sources)
+  maxResponseBytes: 64 * 1024 * 1024,
+  maxDecodedPixels: 40000000,   // pre-decode header budget + post-decode bitmap budget
+  maxDecodedDimension: 16384,
   onExtract: 'black',           // 'black' | 'lowres' | 'scrambled'
   splitCanvases: false,         // shield+: one canvas per tile (hero images)
   splitGrid: 3,
@@ -179,6 +186,8 @@ const DEFAULTS = {
   qualityProfile: 'high',       // 'original' | 'high' | 'balanced' | 'fast' (sets requestQuality + sampling unless overridden)
   requestQuality: null,         // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
   cacheBitmap: true,            // reuse a decoded bitmap for the same source in this page session
+  bitmapCacheMaxEntries: 40,
+  bitmapCacheMaxBytes: 256 * 1024 * 1024, // approximate decoded RGBA bytes in the shared LRU
   cachePayload: true,           // retain the scrambled bytes privately so repaint/strict-memory recovery needs NO network reload
   cacheScope: null,             // set per authenticated viewer/tenant so SPA account switches cannot reuse another viewer's bitmap
   reloadOnResize: 'upscale',    // 'never' | 'upscale' | 'always' — ordinary resizes repaint locally, never remint tokens
@@ -298,8 +307,29 @@ function mergeOptions(opts = {}) {
 
 function sanitizeOptionsView(opts) {
   if (!opts) return opts;
-  const { key, aesKey, ...rest } = opts;
-  return { ...rest, guards: { ...(opts.guards || {}) }, key: key ? '[redacted]' : key, aesKey: aesKey ? '[redacted]' : aesKey };
+  const sensitive = new Set([
+    'key', 'aeskey', 'cachescope', 'sessionid', 'token', 'accesstoken', 'refreshtoken',
+    'secret', 'password', 'authorization', 'cookie',
+  ]);
+  const seen = new WeakMap();
+  const clone = (value, keyName = '') => {
+    if (sensitive.has(String(keyName).toLowerCase())) return value ? '[redacted]' : value;
+    if (!value || typeof value !== 'object') return value; // functions stay host-owned callbacks
+    if (seen.has(value)) return '[circular]';
+    if (Array.isArray(value)) {
+      const out = [];
+      seen.set(value, out);
+      for (const item of value) out.push(clone(item));
+      return out;
+    }
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out = {};
+    seen.set(value, out);
+    for (const [k, v] of Object.entries(value)) out[k] = clone(v, k);
+    return out;
+  };
+  return clone(opts);
 }
 
 /** Named, inspectable parameter bundles. Spread one, then override any key:
@@ -340,14 +370,18 @@ export function preset(name = 'editorial', overrides = {}) {
 
 /* ---------- shared concurrency limiter (hundreds of images, no jank) */
 const limiter = {
-  max: 6, active: 0, queue: [],
+  max: 6, active: 0, queue: [], queueHead: 0,
   run(fn) {
     return new Promise((resolve, reject) => {
       const job = () => {
         this.active++;
         Promise.resolve().then(fn).then(resolve, reject).finally(() => {
           this.active--;
-          const next = this.queue.shift();
+          const next = this.queueHead < this.queue.length ? this.queue[this.queueHead++] : null;
+          if (this.queueHead >= this.queue.length) { this.queue.length = 0; this.queueHead = 0; }
+          else if (this.queueHead > 1024 && this.queueHead * 2 >= this.queue.length) {
+            this.queue.splice(0, this.queueHead); this.queueHead = 0;
+          }
           if (next) next();
         });
       };
@@ -357,29 +391,115 @@ const limiter = {
 };
 
 /* ---------- decoded-bitmap LRU (scrambled pixels only, never clean DOM) */
-const bitmapCache = new Map(); // cacheKey -> Promise<{bitmap,meta}>
-const BITMAP_CACHE_MAX = 40;
-function cachePut(key, promise) {
-  if (bitmapCache.has(key)) bitmapCache.delete(key);
-  bitmapCache.set(key, promise);
-  while (bitmapCache.size > BITMAP_CACHE_MAX) {
+const bitmapCache = new Map(); // digest -> { promise, result, refs, bytes, settled }
+let bitmapCacheBytes = 0;
+
+function bitmapEstimatedBytes(result) {
+  const bitmap = result?.bitmap;
+  const w = bitmap?.width || bitmap?.naturalWidth || result?.meta?.padW || 0;
+  const h = bitmap?.height || bitmap?.naturalHeight || result?.meta?.padH || 0;
+  const bytes = w * h * 4;
+  return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes) : 0;
+}
+
+function closeBitmapQuietly(bitmap) {
+  try { bitmap?.close?.(); } catch {}
+}
+
+function evictBitmapEntry(key, entry) {
+  if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
+  if (entry.settled && entry.bytes) {
+    bitmapCacheBytes = Math.max(0, bitmapCacheBytes - entry.bytes);
+    entry.bytes = 0;
+  }
+  if (entry.refs <= 0 && entry.result?.bitmap) closeBitmapQuietly(entry.result.bitmap);
+}
+
+function trimBitmapCache(maxEntries = DEFAULTS.bitmapCacheMaxEntries, maxBytes = DEFAULTS.bitmapCacheMaxBytes) {
+  const entryLimit = Math.max(0, Math.floor(Number(maxEntries) || 0));
+  const byteLimit = Math.max(0, Math.floor(Number(maxBytes) || 0));
+  while (bitmapCache.size > entryLimit || (byteLimit > 0 && bitmapCacheBytes > byteLimit)) {
     const oldest = bitmapCache.keys().next().value;
-    bitmapCache.delete(oldest); // bitmap itself is closed by owners' refcount-lite
+    if (oldest === undefined) break;
+    evictBitmapEntry(oldest, bitmapCache.get(oldest));
   }
 }
 
+function cachePut(key, promise, opts = {}) {
+  const existing = bitmapCache.get(key);
+  if (existing?.promise === promise) return existing;
+  if (existing) evictBitmapEntry(key, existing);
+  const entry = { key, promise, result: null, refs: 1, bytes: 0, settled: false };
+  bitmapCache.set(key, entry);
+  promise.then((result) => {
+    entry.result = result;
+    entry.settled = true;
+    entry.bytes = bitmapEstimatedBytes(result);
+    if (bitmapCache.get(key) === entry) {
+      bitmapCacheBytes += entry.bytes;
+      trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
+    } else if (entry.refs <= 0) closeBitmapQuietly(result?.bitmap);
+  }, () => {
+    entry.settled = true;
+    entry.refs = 0;
+    if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
+  });
+  trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
+  return entry;
+}
+
+function cacheGetEntry(key, { acquire = false } = {}) {
+  const entry = bitmapCache.get(key);
+  if (!entry) return null;
+  bitmapCache.delete(key); bitmapCache.set(key, entry);
+  if (acquire) entry.refs++;
+  return entry;
+}
+
+function cacheReleaseEntry(entry) {
+  if (!entry) return;
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs <= 0 && bitmapCache.get(entry.key) !== entry && entry.result?.bitmap) {
+    closeBitmapQuietly(entry.result.bitmap);
+  }
+}
+
+function clearBitmapCache() {
+  for (const [key, entry] of [...bitmapCache]) evictBitmapEntry(key, entry);
+  bitmapCache.clear();
+  bitmapCacheBytes = 0;
+}
+
 /* ---------- shared observers */
-let visibilityObserver = null;
-function getVisibilityObserver() {
-  if (!visibilityObserver) {
-    visibilityObserver = new IntersectionObserver((entries) => {
+const visibilityObservers = new Map(); // rootMargin -> IntersectionObserver
+function getVisibilityObserver(rootMargin = '500px') {
+  const margin = typeof rootMargin === 'string' && rootMargin.length <= 64 ? rootMargin : '500px';
+  let observer = visibilityObservers.get(margin);
+  if (!observer) {
+    const callback = (entries) => {
       for (const e of entries) {
         const inst = hostToInstance.get(e.target);
         if (inst) inst._onVisibility(e.isIntersecting);
       }
-    }, { rootMargin: '500px' });
+    };
+    try { observer = new IntersectionObserver(callback, { rootMargin: margin }); }
+    catch { observer = new IntersectionObserver(callback, { rootMargin: '500px' }); }
+    visibilityObservers.set(margin, observer);
   }
-  return visibilityObserver;
+  return observer;
+}
+
+let sharedResizeObserver = null;
+function getResizeObserver() {
+  if (!sharedResizeObserver) {
+    sharedResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const inst = hostToInstance.get(entry.target);
+        if (inst) inst._onResize(entry);
+      }
+    });
+  }
+  return sharedResizeObserver;
 }
 
 /* ---------- one-time global guards (screenshot keys, print, focus) */
@@ -470,29 +590,367 @@ function fitRects(srcW, srcH, dstW, dstH, fit) {
   return { sx: (srcW - sw) / 2, sy: (srcH - sh) / 2, sw, sh, dx: 0, dy: 0, dw: dstW, dh: dstH };
 }
 
-async function fetchWithRetries(url, options, retries) {
+function cyrb53(str, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed;
+  let h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+/* Cache keys are digests, not a second long-lived copy of raw URLs, tenant
+ * scopes, scramble keys, or AES material. Two independent 53-bit hashes make
+ * accidental cross-image collisions negligible for an in-memory page cache. */
+function cacheDigest(parts) {
+  const raw = JSON.stringify(parts);
+  return `v1:${raw.length}:${cyrb53(raw, 1).toString(36)}:${cyrb53(raw, 2).toString(36)}`;
+}
+
+function boundedInteger(value, fallback, min, max) {
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
+function fetchControls(o = {}) {
+  return {
+    maxResponseBytes: boundedInteger(o.maxResponseBytes, DEFAULTS.maxResponseBytes, 1024, 512 * 1024 * 1024),
+    fetchTimeoutMs: boundedInteger(o.fetchTimeoutMs, DEFAULTS.fetchTimeoutMs, 100, 120000),
+    maxDecodedPixels: boundedInteger(o.maxDecodedPixels, DEFAULTS.maxDecodedPixels, 10000, 268402689),
+    maxDecodedDimension: boundedInteger(o.maxDecodedDimension, DEFAULTS.maxDecodedDimension, 64, 65536),
+    retries: boundedInteger(o.retries, 2, 0, 5),
+    credentials: ['omit', 'same-origin', 'include'].includes(o.credentials) ? o.credentials : 'same-origin',
+  };
+}
+
+function nonRetryableError(message, code = 'ARCHX_INVALID_RESPONSE') {
+  const err = new Error(message);
+  err.code = code;
+  err.nonRetryable = true;
+  return err;
+}
+
+function signalWithTimeout(parentSignal, timeoutMs) {
+  const ms = Math.max(0, Math.floor(Number(timeoutMs) || 0));
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' &&
+        typeof AbortSignal.any === 'function') {
+      const signals = [];
+      if (parentSignal) signals.push(parentSignal);
+      if (ms > 0) signals.push(AbortSignal.timeout(ms));
+      return {
+        signal: signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+        cleanup() {},
+      };
+    }
+  } catch { /* fall through to the manual controller */ }
+  const controller = new AbortController();
+  let timer = 0;
+  const onParentAbort = () => {
+    try { controller.abort(parentSignal?.reason); } catch { controller.abort(); }
+  };
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener?.('abort', onParentAbort, { once: true });
+  if (ms > 0) {
+    timer = setTimeout(() => {
+      let reason;
+      try { reason = new DOMException('Archx fetch timed out', 'TimeoutError'); } catch {}
+      try { controller.abort(reason); } catch { controller.abort(); }
+    }, ms);
+  }
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (timer) clearTimeout(timer);
+      parentSignal?.removeEventListener?.('abort', onParentAbort);
+    },
+  };
+}
+
+async function readResponseBytes(response, maxBytes) {
+  const limit = Math.max(1, Math.floor(Number(maxBytes) || 1));
+  const lengthRaw = response.headers?.get?.('content-length');
+  if (lengthRaw != null) {
+    const declared = Number(lengthRaw);
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > limit) {
+      try { await response.body?.cancel?.(); } catch {}
+      throw nonRetryableError('Archx: response exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+    }
+  }
+  if (!response.body?.getReader) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > limit) {
+      throw nonRetryableError('Archx: response exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+    }
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+      total += chunk.length;
+      if (total > limit) {
+        try { await reader.cancel(); } catch {}
+        throw nonRetryableError('Archx: response exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+      }
+      if (chunk.length) chunks.push(chunk);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out;
+}
+
+async function fetchBounded(url, options = {}, controls = {}) {
+  const retries = boundedInteger(controls.retries, 0, 0, 5);
+  const maxBytes = controls.maxBytes ?? DEFAULTS.maxResponseBytes;
+  const timeoutMs = controls.timeoutMs ?? DEFAULTS.fetchTimeoutMs;
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    const timeout = signalWithTimeout(options.signal, timeoutMs);
     try {
-      const res = await nativeFetch(url, options);
-      if (!res.ok) {
-        const err = new Error('Archx fetch failed: HTTP ' + res.status);
-        err.status = res.status;
+      const response = await nativeFetch(url, { ...options, signal: timeout.signal });
+      if (controls.validateResponse) controls.validateResponse(response);
+      if (controls.allowedStatuses?.has(response.status)) {
+        try { await response.body?.cancel?.(); } catch {}
+        return { response, bytes: null };
+      }
+      if (!response.ok) {
+        try { await response.body?.cancel?.(); } catch {}
+        const err = new Error('Archx fetch failed: HTTP ' + response.status);
+        err.status = response.status;
         throw err;
       }
-      return res;
+      const bytes = await readResponseBytes(response, maxBytes);
+      return { response, bytes };
     } catch (err) {
       lastErr = err;
-      // Retrying a permanent 4xx (denied, quota, malformed request) only burns
-      // network/server quota and delays the visible error. Keep retries for
-      // network failures and the small set of transient HTTP statuses.
-      const retryableHttp = err.status == null || err.status >= 500 ||
-        [408, 425, 429].includes(err.status);
-      if (!retryableHttp || err?.name === 'AbortError') throw err;
-      if (attempt < retries) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      if (options.signal?.aborted || err?.nonRetryable) throw err;
+      const retryableHttp = err?.status == null || err.status >= 500 || [408, 425, 429].includes(err.status);
+      if (!retryableHttp || attempt >= retries) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    } finally {
+      timeout.cleanup();
     }
   }
   throw lastErr;
+}
+
+function isPlainClientObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function parseBoundedJson(bytes) {
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { throw nonRetryableError('Archx: token endpoint returned invalid JSON'); }
+  if (!isPlainClientObject(value)) throw nonRetryableError('Archx: token endpoint returned an invalid response');
+  return value;
+}
+
+function resolveHttpUrl(raw, { base, label = 'URL', protocols = ['http:', 'https:'] } = {}) {
+  if (typeof raw !== 'string' || !raw || raw.length > 16384 || /[\u0000-\u0020\u007f]/.test(raw)) {
+    throw nonRetryableError(`Archx: invalid ${label}`);
+  }
+  let url;
+  try {
+    const fallbackBase = typeof document !== 'undefined' ? document.baseURI : undefined;
+    url = new URL(raw, base || fallbackBase);
+  } catch { throw nonRetryableError(`Archx: invalid ${label}`); }
+  if (!protocols.includes(url.protocol) || url.username || url.password) {
+    throw nonRetryableError(`Archx: disallowed ${label}`);
+  }
+  return url;
+}
+
+function exactOriginSet(values, endpointUrl) {
+  const origins = new Set();
+  if (endpointUrl?.origin) origins.add(endpointUrl.origin);
+  const list = values == null ? [] : (Array.isArray(values) ? values : [values]);
+  for (const value of list) {
+    if (typeof value !== 'string' || !value || value.length > 512) {
+      throw nonRetryableError('Archx: allowedTokenOrigins must contain exact origins');
+    }
+    let parsed;
+    try { parsed = new URL(value); } catch { throw nonRetryableError('Archx: allowedTokenOrigins must contain exact origins'); }
+    const trimmed = value.endsWith('/') ? value.slice(0, -1) : value;
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== trimmed) {
+      throw nonRetryableError('Archx: allowedTokenOrigins must contain exact origins');
+    }
+    origins.add(parsed.origin);
+  }
+  return origins;
+}
+
+function assertResponseFinalOrigin(response, origins) {
+  if (!response?.url) return;
+  let finalUrl;
+  try { finalUrl = new URL(response.url); }
+  catch { throw nonRetryableError('Archx: response redirected to an invalid URL'); }
+  if (!['http:', 'https:'].includes(finalUrl.protocol) || !origins.has(finalUrl.origin)) {
+    throw nonRetryableError('Archx: response came from an untrusted origin');
+  }
+}
+
+function validTokenString(value, { min = 1, max = 512, pattern = null } = {}) {
+  return typeof value === 'string' && value.length >= min && value.length <= max &&
+    !/[\u0000-\u001f\u007f]/.test(value) && (!pattern || pattern.test(value));
+}
+
+function bytesToBase64Url(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  let binary = '';
+  const chunkSize = 32768;
+  for (let i = 0; i < view.length; i += chunkSize) {
+    binary += String.fromCharCode(...view.subarray(i, Math.min(view.length, i + chunkSize)));
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+let proofKeyPromise = null;
+
+/**
+ * One ephemeral ECDSA P-256 key pair per page. The private key is created
+ * non-extractable, so ordinary page tooling cannot export it and replay a
+ * copied image token in another browser. This is a token-theft control, not
+ * DRM: script already running in this page, a malicious extension, or the
+ * browser operator can still ask the page to load/display an authorized image.
+ */
+function getProofKey(required = false) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle?.generateKey || !subtle?.exportKey || !subtle?.sign || !subtle?.digest ||
+      !globalThis.crypto?.getRandomValues) {
+    if (required) return Promise.reject(nonRetryableError('Archx: proof-of-possession requires WebCrypto'));
+    return Promise.resolve(null);
+  }
+  if (!proofKeyPromise) {
+    proofKeyPromise = (async () => {
+      const pair = await subtle.generateKey(
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['sign', 'verify'],
+      );
+      const exported = await subtle.exportKey('jwk', pair.publicKey);
+      if (!exported || exported.kty !== 'EC' || exported.crv !== 'P-256' ||
+          typeof exported.x !== 'string' || typeof exported.y !== 'string') {
+        throw new Error('unsupported proof public key');
+      }
+      const jwk = { kty: 'EC', crv: 'P-256', x: exported.x, y: exported.y };
+      const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
+      const thumbprint = bytesToBase64Url(await subtle.digest('SHA-256', new TextEncoder().encode(canonical)));
+      return Object.freeze({
+        privateKey: pair.privateKey,
+        jwk: Object.freeze(jwk),
+        jkt: thumbprint,
+        header: bytesToBase64Url(new TextEncoder().encode(JSON.stringify(jwk))),
+      });
+    })().catch((err) => {
+      proofKeyPromise = null;
+      throw err;
+    });
+  }
+  return proofKeyPromise.catch((err) => {
+    if (required) throw nonRetryableError('Archx: proof-of-possession key generation failed');
+    return null;
+  });
+}
+
+async function createProofHeader(proofKey, accessToken, payloadUrl) {
+  if (!proofKey || !accessToken) return null;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle?.sign || !subtle?.digest) throw nonRetryableError('Archx: proof-of-possession signing is unavailable');
+  const now = Date.now();
+  const random = new Uint8Array(18);
+  globalThis.crypto.getRandomValues(random);
+  const proof = {
+    jwk: proofKey.jwk,
+    jti: bytesToBase64Url(random),
+    iat: now,
+    exp: now + 60000,
+    htm: 'GET',
+    htu: payloadUrl.pathname,
+    ath: bytesToBase64Url(await subtle.digest('SHA-256', new TextEncoder().encode(accessToken))),
+  };
+  const payloadPart = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(proof)));
+  const signingInput = `v1.${payloadPart}`;
+  const signature = await subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    proofKey.privateKey,
+    new TextEncoder().encode(signingInput),
+  );
+  return `${signingInput}.${bytesToBase64Url(signature)}`;
+}
+
+function parseTokenResponse(raw, options, endpointUrl) {
+  if (!isPlainClientObject(raw)) throw nonRetryableError('Archx: token endpoint returned an invalid response');
+  if (!validTokenString(raw.key, { min: 1, max: 512 })) throw nonRetryableError('Archx: token response has an invalid key');
+  if (!Number.isInteger(raw.grid) || raw.grid < 2 || raw.grid > 32) throw nonRetryableError('Archx: token response has an invalid grid');
+  if (raw.aesKey !== undefined && !validTokenString(raw.aesKey, { min: 16, max: 256 })) {
+    throw nonRetryableError('Archx: token response has an invalid AES key');
+  }
+  if (raw.exp !== undefined && (!Number.isSafeInteger(raw.exp) || raw.exp <= Date.now() - 300000)) {
+    throw nonRetryableError('Archx: token response is expired');
+  }
+  const separateToken = raw.token;
+  if (separateToken !== undefined &&
+      !validTokenString(separateToken, { min: 16, max: 8192, pattern: /^[A-Za-z0-9._~-]+$/ })) {
+    throw nonRetryableError('Archx: token response has an invalid token');
+  }
+  const rawUrl = raw.cleanUrl ?? raw.url;
+  const candidate = resolveHttpUrl(rawUrl, { base: endpointUrl.href, label: 'token payload URL' });
+  const allowedOrigins = exactOriginSet(options.allowedTokenOrigins, endpointUrl);
+  if (!allowedOrigins.has(candidate.origin)) {
+    throw nonRetryableError('Archx: token payload URL points to an untrusted origin');
+  }
+  const payloadUrl = new URL(candidate.href);
+  const queryTokens = payloadUrl.searchParams.getAll('t');
+  if (queryTokens.length > 1) throw nonRetryableError('Archx: token payload URL is ambiguous');
+  const requestedTransport = String(options.tokenTransport || 'header').toLowerCase();
+  const transport = ['header', 'query', 'auto'].includes(requestedTransport) ? requestedTransport : 'header';
+  let headerToken = null;
+  let accessToken = separateToken || queryTokens[0] || null;
+  if (transport === 'header' || (transport === 'auto' && separateToken)) {
+    headerToken = separateToken || null;
+    if (queryTokens.length === 1) {
+      if (headerToken && headerToken !== queryTokens[0]) throw nonRetryableError('Archx: token response is ambiguous');
+      headerToken = queryTokens[0];
+      payloadUrl.searchParams.delete('t');
+    }
+    if (!validTokenString(headerToken, { min: 16, max: 8192, pattern: /^[A-Za-z0-9._~-]+$/ })) {
+      throw nonRetryableError('Archx: token response did not include a header token');
+    }
+    accessToken = headerToken;
+  } else {
+    if (separateToken && queryTokens.length === 1 && separateToken !== queryTokens[0]) {
+      throw nonRetryableError('Archx: token response is ambiguous');
+    }
+    if (queryTokens.length === 0) {
+      if (!separateToken) throw nonRetryableError('Archx: token response did not include a payload token');
+      payloadUrl.searchParams.set('t', separateToken);
+    }
+  }
+  const extra = { key: raw.key, grid: raw.grid };
+  if (raw.aesKey !== undefined) extra.aesKey = raw.aesKey;
+  return Object.freeze({ extra: Object.freeze(extra), payloadUrl, headerToken, accessToken, allowedOrigins });
+}
+
+function asByteArray(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw nonRetryableError('Archx: image source must be bytes');
 }
 
 function setSmoothing(ctx, enabled) {
@@ -701,7 +1159,7 @@ export class ProtectedImage {
   #options; #host; #root; #wrap; #canvas; #tilesEl; #shieldEl;
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
   #decoy = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
-  #risk = new Set(); #blackoutTimer = 0; #resizeObs = null; #realCtx = null;
+  #risk = new Set(); #blackoutTimer = 0; #resizeTimer = 0; #visibilityObs = null; #realCtx = null;
   #attemptHandler = null; #loading = false; #visible = false; #unloaded = false;
   #glProg = null; #glLoc = null; #glTex = null; #glMap = null; #glWm = null; #glWmOn = 0;
   #glSource = null; #glMeta = null; #frameCanvas = null; #lensBase = null;
@@ -709,7 +1167,7 @@ export class ProtectedImage {
   #traceEl = null; #traceTimer = 0;
   #strikes = 0; #lockedUntil = 0; #lockTimer = 0; #integrityIssues = [];
   #bitmapReleased = false;
-  #loadedOnce = false; #cachedBytes = null; #cachedExtra = null;
+  #loadedOnce = false; #cachedBytes = null; #cachedExtra = null; #bitmapCacheEntry = null;
   #renderedW = 0; #renderedH = 0; #deviceBox = null;
   #glFrameBudget = 0; #glFrames = 0; #temporalSign = 1;
   #temporalRaf = 0; #temporalFrames = null; #temporalIndex = 0;
@@ -722,9 +1180,11 @@ export class ProtectedImage {
     this.#source = source;
     const host = $(target);
     if (!host) throw new Error('Archx: target element not found: ' + target);
+    if (hostToInstance.has(host)) {
+      throw new Error('Archx: target element already hosts a live protected image; destroy it or use a fresh host');
+    }
     this.#host = host;
     host.classList.add('archx-host');
-    hostToInstance.set(host, this);
     if (this.#options.alt) {
       host.setAttribute('role', 'img');
       host.setAttribute('aria-label', this.#options.alt);
@@ -732,6 +1192,7 @@ export class ProtectedImage {
     this._buildDom();
     this._attachGuards();
     this._startCaptureTrace();
+    hostToInstance.set(host, this);
     instances.add(this);
     installGlobalGuards();
     if (this.#options.guards.devtools) ensureDevtoolsWatcher();
@@ -748,7 +1209,13 @@ export class ProtectedImage {
     } else {
       try {
         root = this.#host.attachShadow({ mode: o.shadow === 'open' ? 'open' : 'closed' });
-      } catch { root = this.#host; }
+      } catch {
+        // Never silently downgrade a requested closed/open shadow root to
+        // light DOM: that would expose exactly the canvases this library is
+        // meant to keep out of the page tree. `shadow:'none'` remains the
+        // explicit opt-out for hosts that truly want light DOM.
+        throw new Error('Archx: unable to attach the requested shadow root; use a fresh host element or shadow:"none" explicitly');
+      }
     }
     this.#root = root;
     const doc = this.#host.ownerDocument;
@@ -972,54 +1439,55 @@ export class ProtectedImage {
     if (this.#gl) visible ? this._startGlLoop(2) : this._stopGlLoop();
   }
 
-  async _init() {
-    // Resize handling (debounced redraw from cached bitmap — no refetch)
-    let resizeTimer = 0;
-    this.#resizeObs = new ResizeObserver((entries) => {
-      const box = entries && entries[0] && entries[0].devicePixelContentBoxSize &&
-        entries[0].devicePixelContentBoxSize[0];
-      if (box && box.inlineSize > 0 && box.blockSize > 0) {
-        this.#deviceBox = { w: box.inlineSize, h: box.blockSize };
+  _onResize(entry) {
+    const box = entry?.devicePixelContentBoxSize?.[0];
+    if (box && box.inlineSize > 0 && box.blockSize > 0) {
+      this.#deviceBox = { w: box.inlineSize, h: box.blockSize };
+    }
+    clearTimeout(this.#resizeTimer);
+    this.#resizeTimer = setTimeout(() => {
+      if (this.#destroyed) return;
+      const previousW = this.#renderedW;
+      const previousH = this.#renderedH;
+      const upgrade = this.#shouldUpgradeDerivative(previousW, previousH);
+      if (this.#gl) {
+        this._startGlLoop(2);
+        if (upgrade) void this._load({ force: true });
+        return;
       }
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        const previousW = this.#renderedW;
-        const previousH = this.#renderedH;
-        const upgrade = this.#shouldUpgradeDerivative(previousW, previousH);
-        if (this.#gl) {
-          this._startGlLoop(2);
-          if (upgrade) void this._load({ force: true });
-          return;
-        }
-        if (this.#bitmap) {
-          this._render();
-          if (upgrade) void this._load({ force: true });
-        } else if (this.#loaded && this.#bitmapReleased && this.#visible) {
-          // Strict memory: ordinary resizes keep the already-painted canvas
-          // (the browser scales it) instead of reminting a one-time token.
-          // A configurable large upscale is the one exception. Token sources
-          // force a fresh, adequately sized derivative; other sources simply
-          // decode the privately cached payload locally.
-          const policy = this.#options.reloadOnResize;
-          if (policy === 'always') void this._load({ force: this.#isTokenSource() });
-          else if (policy === 'upscale' && this.#meta) {
-            const { w, h } = this._backingSize();
-            const f = Math.max(1, this.#options.resizeUpscaleFactor || 1.75);
-            if (w > previousW * f || h > previousH * f) {
-              void this._load({ force: this.#isTokenSource() });
-            }
+      if (this.#bitmap) {
+        this._render();
+        if (upgrade) void this._load({ force: true });
+      } else if (this.#loaded && this.#bitmapReleased && this.#visible) {
+        // Strict memory: ordinary resizes keep the already-painted canvas
+        // (the browser scales it) instead of reminting a one-time token.
+        // A configurable large upscale is the one exception. Token sources
+        // force a fresh, adequately sized derivative; other sources simply
+        // decode the privately cached payload locally.
+        const policy = this.#options.reloadOnResize;
+        if (policy === 'always') void this._load({ force: this.#isTokenSource() });
+        else if (policy === 'upscale' && this.#meta) {
+          const { w, h } = this._backingSize();
+          const f = Math.max(1, this.#options.resizeUpscaleFactor || 1.75);
+          if (w > previousW * f || h > previousH * f) {
+            void this._load({ force: this.#isTokenSource() });
           }
         }
-      }, 90);
-    });
-    try { this.#resizeObs.observe(this.#host, { box: 'device-pixel-content-box' }); }
-    catch { this.#resizeObs.observe(this.#host); }
+      }
+    }, 90);
+  }
+
+  async _init() {
+    const resizeObserver = getResizeObserver();
+    try { resizeObserver.observe(this.#host, { box: 'device-pixel-content-box' }); }
+    catch { resizeObserver.observe(this.#host); }
 
     if (this.#options.lazy && 'IntersectionObserver' in window) {
-      getVisibilityObserver().observe(this.#host);
-      // _load fires from observer; also kick if already on screen pre-observe
+      this.#visibilityObs = getVisibilityObserver(this.#options.rootMargin);
+      this.#visibilityObs.observe(this.#host);
+      // _load fires from observer; also kick if already on screen pre-observe.
       const r = this.#host.getBoundingClientRect();
-      if (r.bottom > -500 && r.top < innerHeight + 500) this._load();
+      if (r.bottom > 0 && r.top < innerHeight) this._load();
     } else {
       this.#visible = true;
       await this._load();
@@ -1078,8 +1546,9 @@ export class ProtectedImage {
 
   async _resolveBytes(force = false) {
     const o = this.#options;
-    let src = this.#source;
-    let extra = {};
+    const src = this.#source;
+    const extra = {};
+    const controls = fetchControls(o);
     const strict = o.memory === 'strict';
     const cacheBitmap = o.cacheBitmap !== false && !strict;
     // Already-loaded images never reload implicitly: decode the privately
@@ -1087,84 +1556,183 @@ export class ProtectedImage {
     if (!force && this.#cachedBytes) {
       return { ...(await this._bytesToBitmap(this.#cachedBytes, this.#cachedExtra || {})), extra: this.#cachedExtra || {} };
     }
-    // Token flow: { id } against the signing server. Kept separate from the
-    // generic URL path so a 403 (expired / one-time-consumed / binding
-    // mismatch after a network hiccup) re-mints a FRESH token instead of
-    // blindly retrying a dead signed URL.
+
+    // Token flow: { id } against the signing server. The token JSON is an
+    // untrusted upstream response: it is byte-bounded, schema-checked, and
+    // only the key/grid/AES fields needed for decoding are retained. Payload
+    // URLs must stay on the endpoint origin (or an exact allowlisted origin),
+    // redirects are refused, and only a payload 401/403 triggers one remint.
     if (src && typeof src === 'object' && !(src instanceof Blob) &&
         !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id) {
-      const endpoint = src.tokenEndpoint || o.tokenEndpoint;
-      if (!endpoint) throw new Error('Archx: tokenEndpoint required for {id} sources');
+      if (typeof src.id !== 'string' || !src.id || src.id.length > 256 || /[\u0000-\u001f\u007f]/.test(src.id)) {
+        throw nonRetryableError('Archx: token image id is invalid');
+      }
+      const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
+      if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
+      const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
+      if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError('Archx: token endpoint must not contain a query or fragment');
       const rect = this.#host.getBoundingClientRect?.();
       const cssWidth = rect?.width || this.#host.clientWidth || 800;
       const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
-      const pixelScale = Math.min(devicePixelRatio || 1, o.dprCap) * Math.max(1, o.sourceOversample || 1);
-      const maxSourceWidth = o.maxSourceWidth || 2560;
+      const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
+      const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+      const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
+      const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
       const boxW = Math.min(maxSourceWidth, Math.ceil(cssWidth * pixelScale));
       const boxH = Math.min(maxSourceWidth, Math.ceil(cssHeight * pixelScale));
-      // Send the display box, not just a width: for cover-fit, the server must
-      // account for the source aspect or a landscape image in a squarer box
-      // gets cropped and then upscaled (a major source of slurry detail).
-      let tokenQuery = `?w=${boxW}&bw=${boxW}&bh=${boxH}&fit=${encodeURIComponent(o.fit || 'cover')}`;
-      if (o.requestQuality != null && o.requestQuality !== '') tokenQuery += `&q=${encodeURIComponent(o.requestQuality)}`;
-      const tokenCacheKey = `token|${o.cacheScope || ''}|${endpoint}|${src.id}|${boxW}x${boxH}|${o.fit}|${o.requestQuality ?? ''}|${o.key || ''}|${o.aesKey ? 'aes' : ''}`;
-      if (!force && cacheBitmap && bitmapCache.has(tokenCacheKey)) {
-        const hit = await bitmapCache.get(tokenCacheKey);
-        return { ...hit, extra: hit.extra || {} };
-      }
-      const tokenPromise = (async () => {
-        let lastErr;
-        for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
-          try {
-            const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
-            const res = await fetchWithRetries(endpoint + encodeURIComponent(src.id) + tokenQuery, {
-              method: tokenMethod,
-              credentials: o.credentials,
-              cache: 'no-store',
-              headers: { 'X-Archx-Request': 'token' },
-              signal: this.#abort.signal,
-            }, o.retries);
-            const token = await res.json();
-            const imgRes = await nativeFetch(token.url, {
-              credentials: o.credentials, cache: 'no-store', signal: this.#abort.signal,
-            });
-            if ((imgRes.status === 401 || imgRes.status === 403) && tokenAttempt === 0) continue;
-            if (!imgRes.ok) throw new Error('Archx fetch failed: HTTP ' + imgRes.status);
-            const buf = new Uint8Array(await imgRes.arrayBuffer());
-            if (o.cachePayload !== false) { this.#cachedBytes = buf; this.#cachedExtra = token; }
-            return { ...(await this._bytesToBitmap(buf, token)), extra: token };
-          } catch (err) {
-            lastErr = err;
-            if (tokenAttempt === 1) throw err;
-          }
+      const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
+      const requestQuality = o.requestQuality === 'lossless' ||
+        (Number.isInteger(o.requestQuality) && o.requestQuality >= 1 && o.requestQuality <= 100)
+        ? o.requestQuality : null;
+      const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
+      const tokenTransport = ['header', 'query', 'auto'].includes(String(o.tokenTransport || 'header').toLowerCase())
+        ? String(o.tokenTransport || 'header').toLowerCase() : 'header';
+      const proofSetting = o.proofOfPossession;
+      const proofMode = proofSetting === false || proofSetting === 'off' ? 'off'
+        : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
+      const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
+      const mintUrl = new URL(endpointUrl.href);
+      mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(src.id)}`;
+      mintUrl.searchParams.set('w', String(boxW));
+      mintUrl.searchParams.set('bw', String(boxW));
+      mintUrl.searchParams.set('bh', String(boxH));
+      mintUrl.searchParams.set('fit', fit);
+      if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
+
+      const tokenCacheKey = cacheDigest([
+        'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, src.id,
+        boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
+        o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
+        controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
+      ]);
+      if (!force && cacheBitmap) {
+        const hitEntry = cacheGetEntry(tokenCacheKey, { acquire: true });
+        if (hitEntry) {
+          const hit = await hitEntry.promise;
+          return { ...hit, extra: hit.extra || {}, cacheEntry: hitEntry };
         }
-        throw lastErr;
+      }
+
+      const tokenPromise = (async () => {
+        for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
+          const mint = await fetchBounded(mintUrl.href, {
+            method: tokenMethod,
+            credentials: controls.credentials,
+            cache: 'no-store',
+            redirect: 'error',
+            headers: proofKey
+              ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': proofKey.header }
+              : { 'X-Archx-Request': 'token' },
+            signal: this.#abort.signal,
+          }, {
+            retries: controls.retries,
+            maxBytes: 65536,
+            timeoutMs: controls.fetchTimeoutMs,
+            validateResponse: (res) => assertResponseFinalOrigin(res, new Set([endpointUrl.origin])),
+          });
+          const parsed = parseTokenResponse(parseBoundedJson(mint.bytes), o, mintUrl);
+          const payloadHeaders = parsed.headerToken ? { 'X-Archx-Token': parsed.headerToken } : {};
+          if (proofKey) {
+            const proof = await createProofHeader(proofKey, parsed.accessToken, parsed.payloadUrl);
+            if (!proof) throw nonRetryableError('Archx: proof-of-possession could not be created');
+            payloadHeaders['X-Archx-Proof'] = proof;
+          }
+          const payload = await fetchBounded(parsed.payloadUrl.href, {
+            method: 'GET',
+            credentials: controls.credentials,
+            cache: 'no-store',
+            redirect: 'error',
+            headers: payloadHeaders,
+            signal: this.#abort.signal,
+          }, {
+            retries: 0,
+            maxBytes: controls.maxResponseBytes,
+            timeoutMs: controls.fetchTimeoutMs,
+            allowedStatuses: new Set([401, 403]),
+            validateResponse: (res) => assertResponseFinalOrigin(res, parsed.allowedOrigins),
+          });
+          if (payload.bytes == null) {
+            if (tokenAttempt === 0) continue; // exactly one fresh mint for a rejected payload token
+            const err = new Error('Archx fetch failed: HTTP ' + payload.response.status);
+            err.status = payload.response.status;
+            throw err;
+          }
+          const buf = payload.bytes;
+          if (o.cachePayload !== false) { this.#cachedBytes = buf; this.#cachedExtra = parsed.extra; }
+          return { ...(await this._bytesToBitmap(buf, parsed.extra)), extra: parsed.extra };
+        }
+        throw new Error('Archx: token request failed');
       })();
-      if (cacheBitmap) cachePut(tokenCacheKey, tokenPromise);
-      return tokenPromise;
+      const cacheEntry = cacheBitmap ? cachePut(tokenCacheKey, tokenPromise, o) : null;
+      const result = await tokenPromise;
+      return { ...result, cacheEntry };
     }
+
     if (typeof src === 'string') {
-      const cacheKey = `${o.cacheScope || ''}|${src}|${extra.key || o.key || ''}`;
-      if (!force && cacheBitmap && bitmapCache.has(cacheKey)) return { ...(await bitmapCache.get(cacheKey)), extra };
+      let sourceUrl;
+      try {
+        if (!src || /[\u0000-\u001f\u007f]/.test(src) ||
+            (!src.startsWith('data:') && src.length > 16384) ||
+            (src.startsWith('data:') && src.length > controls.maxResponseBytes * 2 + 1024)) {
+          throw new Error('invalid source URL');
+        }
+        sourceUrl = new URL(src, typeof document !== 'undefined' ? document.baseURI : undefined);
+        if (!['http:', 'https:', 'blob:', 'data:'].includes(sourceUrl.protocol) || sourceUrl.username || sourceUrl.password) {
+          throw new Error('disallowed source URL');
+        }
+      } catch { throw nonRetryableError('Archx: image source URL is invalid'); }
+      const cacheKey = cacheDigest([
+        'url', 1, o.cacheScope || '', sourceUrl.href, controls.credentials,
+        o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
+        controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
+      ]);
+      if (!force && cacheBitmap) {
+        const hitEntry = cacheGetEntry(cacheKey, { acquire: true });
+        if (hitEntry) {
+          const hit = await hitEntry.promise;
+          return { ...hit, extra: hit.extra || extra, cacheEntry: hitEntry };
+        }
+      }
       const promise = (async () => {
-        const res = await fetchWithRetries(src,
-          { credentials: o.credentials, cache: 'no-store', signal: this.#abort.signal }, o.retries);
-        const buf = new Uint8Array(await res.arrayBuffer());
+        const { bytes: buf } = await fetchBounded(sourceUrl.href, {
+          credentials: controls.credentials,
+          cache: 'no-store',
+          signal: this.#abort.signal,
+        }, {
+          retries: controls.retries,
+          maxBytes: controls.maxResponseBytes,
+          timeoutMs: controls.fetchTimeoutMs,
+          validateResponse: (res) => {
+            if (!res.url) return;
+            let finalUrl;
+            try { finalUrl = new URL(res.url); } catch { throw nonRetryableError('Archx: image response URL is invalid'); }
+            if (!['http:', 'https:', 'blob:', 'data:'].includes(finalUrl.protocol)) {
+              throw nonRetryableError('Archx: image response URL is disallowed');
+            }
+          },
+        });
         if (o.cachePayload !== false) { this.#cachedBytes = buf; this.#cachedExtra = extra; }
         return this._bytesToBitmap(buf, extra);
       })();
-      if (cacheBitmap) cachePut(cacheKey, promise);
-      return { ...(await promise), extra };
+      const cacheEntry = cacheBitmap ? cachePut(cacheKey, promise, o) : null;
+      const result = await promise;
+      return { ...result, extra, cacheEntry };
     }
+
     if (src instanceof Blob) {
-      const buf = new Uint8Array(await src.arrayBuffer());
+      if (!Number.isSafeInteger(src.size) || src.size < 1 || src.size > controls.maxResponseBytes) {
+        throw nonRetryableError('Archx: Blob source exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+      }
+      const buf = asByteArray(await src.arrayBuffer());
+      if (buf.length > controls.maxResponseBytes) throw nonRetryableError('Archx: Blob source exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
       if (o.cachePayload !== false) { this.#cachedBytes = buf; this.#cachedExtra = extra; }
       return { ...(await this._bytesToBitmap(buf, extra)), extra };
     }
     if (src instanceof ArrayBuffer || ArrayBuffer.isView(src)) {
-      const bytes = ArrayBuffer.isView(src)
-        ? new Uint8Array(src.buffer, src.byteOffset, src.byteLength)
-        : new Uint8Array(src);
+      const bytes = asByteArray(src);
+      if (!bytes.length || bytes.length > controls.maxResponseBytes) {
+        throw nonRetryableError('Archx: byte source exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+      }
       if (o.cachePayload !== false) { this.#cachedBytes = bytes; this.#cachedExtra = extra; }
       return { ...(await this._bytesToBitmap(bytes, extra)), extra };
     }
@@ -1173,46 +1741,124 @@ export class ProtectedImage {
 
   async _bytesToBitmap(buf, extra = {}) {
     const o = this.#options;
+    const controls = fetchControls(o);
+    const bytes = asByteArray(buf);
+    if (!bytes.length || bytes.length > controls.maxResponseBytes) {
+      throw nonRetryableError('Archx: image payload exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+    }
     let header = null;
-    let payload = buf;
-    if (isArchxContainer(buf)) {
-      const decoded = decodeContainer(buf);
+    let payload = bytes;
+    if (isArchxContainer(bytes)) {
+      const decoded = decodeContainer(bytes); // strict v1 schema and padded geometry
       header = decoded.header;
+      if (header.pw > controls.maxDecodedDimension || header.ph > controls.maxDecodedDimension ||
+          header.pw * header.ph > controls.maxDecodedPixels) {
+        throw nonRetryableError('Archx: image dimensions exceed the configured decode budget', 'ARCHX_RESPONSE_TOO_LARGE');
+      }
       payload = decoded.payload;
       if (header.encrypted) {
         const aesKey = extra.aesKey || o.aesKey;
-        if (!aesKey) throw new Error('Archx: encrypted .archx payload needs aesKey');
-        payload = await decryptPayload(payload, aesKey, header.iv);
+        if (typeof aesKey !== 'string' || !aesKey) throw new Error('Archx: encrypted .archx payload needs aesKey');
+        payload = asByteArray(await decryptPayload(payload, aesKey, header.iv));
+        if (!payload.length || payload.length > controls.maxResponseBytes) {
+          throw nonRetryableError('Archx: decrypted image exceeds the configured byte limit', 'ARCHX_RESPONSE_TOO_LARGE');
+        }
       }
     }
-    const scrambled = header ? !!header.scrambled : !!o.scrambled;
-    const grid = header?.grid || extra.grid || o.grid;
-    const key = extra.key || o.key || '';
-    const blob = new Blob([payload], { type: header?.mime || 'image/webp' });
+
+    // Format/dimension sniffing happens BEFORE the browser decoder is asked
+    // to allocate a bitmap. Decompression-bomb headers and MIME/container
+    // mismatches fail here; the decoded bitmap is checked again below.
+    const sniffed = sniffImageInfo(payload);
+    const browserRasterFormats = new Set(['png', 'jpeg', 'webp', 'avif', 'gif', 'bmp']);
+    if (!sniffed || !browserRasterFormats.has(sniffed.format)) {
+      throw nonRetryableError('Archx: unsupported or unrecognized image payload');
+    }
+    if (header && sniffed.mime !== header.mime) {
+      throw nonRetryableError('Archx: .archx payload format does not match its header');
+    }
+    if (sniffed.width && sniffed.height) {
+      if (sniffed.width > controls.maxDecodedDimension || sniffed.height > controls.maxDecodedDimension ||
+          sniffed.width * sniffed.height > controls.maxDecodedPixels) {
+        throw nonRetryableError('Archx: image dimensions exceed the configured decode budget', 'ARCHX_RESPONSE_TOO_LARGE');
+      }
+      if (header && !((sniffed.width === header.pw && sniffed.height === header.ph) ||
+          (sniffed.width === header.ph && sniffed.height === header.pw))) {
+        throw nonRetryableError('Archx: .archx payload dimensions do not match its header');
+      }
+    }
+
+    const scrambled = header ? header.scrambled : o.scrambled === true;
+    const grid = header?.grid ?? extra.grid ?? o.grid;
+    if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw nonRetryableError('Archx: invalid scramble grid');
+    const keyValue = extra.key ?? o.key ?? '';
+    if (!['string', 'number', 'bigint'].includes(typeof keyValue)) throw nonRetryableError('Archx: invalid scramble key');
+    const key = String(keyValue);
+    const blob = new Blob([payload], { type: header?.mime || sniffed.mime });
     let bitmap;
     try {
       bitmap = await nativeCreateImageBitmap(blob);
-    } catch {
-      bitmap = await this._bitmapViaImage(blob); // Safari-older fallback
+    } catch (err) {
+      if (this.#destroyed || this.#abort.signal.aborted) throw err;
+      bitmap = await this._bitmapViaImage(blob, controls.fetchTimeoutMs); // Safari-older fallback
     }
+    const bitmapW = bitmap?.width || bitmap?.naturalWidth || 0;
+    const bitmapH = bitmap?.height || bitmap?.naturalHeight || 0;
+    if (!Number.isSafeInteger(bitmapW) || !Number.isSafeInteger(bitmapH) || bitmapW < 1 || bitmapH < 1 ||
+        bitmapW > controls.maxDecodedDimension || bitmapH > controls.maxDecodedDimension ||
+        bitmapW * bitmapH > controls.maxDecodedPixels) {
+      closeBitmapQuietly(bitmap);
+      throw nonRetryableError('Archx: decoded image exceeds the configured dimension budget', 'ARCHX_RESPONSE_TOO_LARGE');
+    }
+
     let meta;
     if (scrambled) {
-      const origW = header?.w || bitmap.width;
-      const origH = header?.h || bitmap.height;
-      const { pw, ph } = header?.pw ? { pw: header.pw, ph: header.ph } : paddedSize(origW, origH, grid);
-      meta = { plan: buildScramblePlan(grid, key), origW, origH, padW: pw, padH: ph };
+      let origW; let origH; let padW; let padH;
+      if (header) {
+        if (bitmapW === header.pw && bitmapH === header.ph) {
+          ({ w: origW, h: origH, pw: padW, ph: padH } = header);
+        } else if (bitmapW === header.ph && bitmapH === header.pw && header.pw !== header.ph) {
+          // Tolerate a decoder-applied quarter-turn orientation swap without
+          // accepting arbitrary geometry.
+          origW = header.h; origH = header.w; padW = bitmapW; padH = bitmapH;
+        } else {
+          closeBitmapQuietly(bitmap);
+          throw nonRetryableError('Archx: decoded image dimensions do not match its .archx header');
+        }
+      } else {
+        if (bitmapW % grid !== 0 || bitmapH % grid !== 0) {
+          closeBitmapQuietly(bitmap);
+          throw nonRetryableError('Archx: scrambled image dimensions are not divisible by the grid');
+        }
+        origW = bitmapW; origH = bitmapH; padW = bitmapW; padH = bitmapH;
+      }
+      meta = { plan: buildScramblePlan(grid, key), origW, origH, padW, padH };
     } else {
-      meta = { plan: null, origW: bitmap.width, origH: bitmap.height, padW: bitmap.width, padH: bitmap.height };
+      meta = { plan: null, origW: bitmapW, origH: bitmapH, padW: bitmapW, padH: bitmapH };
     }
     return { bitmap, meta, header };
   }
 
-  _bitmapViaImage(blob) {
+  _bitmapViaImage(blob, timeoutMs = DEFAULTS.fetchTimeoutMs) {
     return new Promise((resolve, reject) => {
       const url = NATIVES.createObjectURL ? NATIVES.createObjectURL.call(URL, blob) : URL.createObjectURL(blob);
       const img = new (NATIVES.ImageCtor || Image)(); // detached, never inserted into the document
-      img.onload = () => { (NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url)); resolve(img); };
-      img.onerror = (e) => { (NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url)); reject(e); };
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        img.onload = null;
+        img.onerror = null;
+        (NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url));
+        fn(value);
+      };
+      const timer = setTimeout(() => {
+        try { img.src = ''; } catch {}
+        finish(reject, new Error('Archx: image decode timed out'));
+      }, Math.max(100, Math.floor(Number(timeoutMs) || DEFAULTS.fetchTimeoutMs)));
+      img.onload = () => finish(resolve, img);
+      img.onerror = () => finish(reject, new Error('Archx: image decode failed'));
       img.src = url;
     });
   }
@@ -1261,8 +1907,24 @@ export class ProtectedImage {
     try {
       if (!this.#loadedOnce) await this.#waitForStableSize();
       if (this.#destroyed) return;
-      const { bitmap, meta } = await limiter.run(() => this._resolveBytes(force));
-      if (this.#destroyed) return;
+      const result = await limiter.run(() => this._resolveBytes(force));
+      if (this.#destroyed) {
+        if (result?.cacheEntry) cacheReleaseEntry(result.cacheEntry);
+        else closeBitmapQuietly(result?.bitmap);
+        return;
+      }
+      const { bitmap, meta, cacheEntry = null } = result;
+      const previousEntry = this.#bitmapCacheEntry;
+      const previousBitmap = this.#bitmap;
+      if (cacheEntry && cacheEntry === previousEntry) {
+        // A cache hit acquired one ref for this load; the instance already
+        // owned one for the same entry, so drop only the duplicate.
+        cacheReleaseEntry(cacheEntry);
+      } else {
+        this.#bitmapCacheEntry = cacheEntry;
+        if (previousEntry) cacheReleaseEntry(previousEntry);
+        else if (previousBitmap && previousBitmap !== bitmap) closeBitmapQuietly(previousBitmap);
+      }
       this.#bitmap = bitmap;
       this.#meta = meta;
       this.#loadedOnce = true;
@@ -1291,15 +1953,28 @@ export class ProtectedImage {
   }
 
   _unloadPixels() {
-    // Free backing stores for off-screen gallery items; bytes stay cached.
+    // Free backing stores for off-screen gallery items. When this instance
+    // retained the compressed/scrambled payload, also release the decoded
+    // bitmap: repaint can decode locally with no network/token reload. If
+    // there is no local recovery path, keep the shared bitmap rather than
+    // turning an ordinary scroll into a fresh one-time-token mint.
     if (this.#canvas) { this.#canvas.width = 0; this.#canvas.height = 0; }
+    if (this.#bitmap && this.#cachedBytes) {
+      if (this.#bitmapCacheEntry) cacheReleaseEntry(this.#bitmapCacheEntry);
+      else closeBitmapQuietly(this.#bitmap);
+      this.#bitmapCacheEntry = null;
+      this.#bitmap = null;
+      this.#bitmapReleased = true;
+    }
     this.#unloaded = true;
   }
 
   /** Strict-memory mode: drop the decoded source as soon as pixels are painted. */
   #releaseSourceBitmap() {
     if (this.#options.memory !== 'strict' || !this.#bitmap) return;
-    try { this.#bitmap.close && this.#bitmap.close(); } catch {}
+    if (this.#bitmapCacheEntry) cacheReleaseEntry(this.#bitmapCacheEntry);
+    else closeBitmapQuietly(this.#bitmap);
+    this.#bitmapCacheEntry = null;
     this.#bitmap = null;
     this.#bitmapReleased = true;
   }
@@ -2219,7 +2894,9 @@ export class ProtectedImage {
       temporalChroma: !!temporal?.chroma,
       temporalFrames2d: !!this.#temporalFrames,
       tokenMethod: this.#options.tokenMethod,
-      cacheScope: this.#options.cacheScope || null,
+      tokenTransport: this.#options.tokenTransport,
+      proofOfPossession: this.#options.proofOfPossession,
+      cacheScopeSet: !!this.#options.cacheScope,
     };
   }
   async reload(newSource) {
@@ -2249,8 +2926,11 @@ export class ProtectedImage {
       glContextsInUse = Math.max(0, glContextsInUse - 1);
       this.#gl = null;
     }
-    if (this.#resizeObs) this.#resizeObs.disconnect();
-    if (visibilityObserver) visibilityObserver.unobserve(this.#host);
+    clearTimeout(this.#resizeTimer);
+    this.#resizeTimer = 0;
+    try { sharedResizeObserver?.unobserve(this.#host); } catch {}
+    try { this.#visibilityObs?.unobserve(this.#host); } catch {}
+    this.#visibilityObs = null;
     if (this.#canvas) { this.#canvas.width = 0; this.#canvas.height = 0; }
     if (this.#decoy) { this.#decoy.width = 0; this.#decoy = null; }
     if (this.#frameCanvas) { this.#frameCanvas.width = 0; this.#frameCanvas.height = 0; this.#frameCanvas = null; }
@@ -2259,14 +2939,14 @@ export class ProtectedImage {
     if (this.#traceTimer) clearInterval(this.#traceTimer);
     this.#traceTimer = 0;
     clearTimeout(this.#lockTimer);
-    // Only strict (uncached) bitmaps are exclusively ours to close; a
-    // standard-mode bitmap may be shared from the LRU by other instances.
-    if (this.#options.memory === 'strict') {
-      try { this.#bitmap?.close && this.#bitmap.close(); } catch {}
-    }
+    // Refcounted LRU bitmaps stay alive for other owners / later reuse;
+    // an uncached bitmap is exclusively ours and is closed immediately.
+    if (this.#bitmapCacheEntry) cacheReleaseEntry(this.#bitmapCacheEntry);
+    else closeBitmapQuietly(this.#bitmap);
+    this.#bitmapCacheEntry = null;
     this.#bitmap = null;
     this.#root.replaceChildren?.();
-    hostToInstance.delete(this.#host);
+    if (hostToInstance.get(this.#host) === this) hostToInstance.delete(this.#host);
   }
 }
 
@@ -2320,7 +3000,7 @@ function defineElement() {
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'cache-scope']; }
+    static get observedAttributes() { return ['src', 'image-id', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'proof-of-possession', 'cache-scope']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -2354,6 +3034,8 @@ function defineElement() {
         onExtract: this.getAttribute('on-extract') || presetOptions.onExtract,
         tokenEndpoint: this.getAttribute('token-endpoint') || undefined,
         tokenMethod: this.getAttribute('token-method') || undefined,
+        tokenTransport: this.getAttribute('token-transport') || undefined,
+        proofOfPossession: this.getAttribute('proof-of-possession') || undefined,
         cacheScope: this.getAttribute('cache-scope') || undefined,
       });
       elementInstances.set(this, inst);
@@ -2396,7 +3078,7 @@ const Archx = {
   /** Number of live protected images (the registry itself stays private). */
   get instanceCount() { return instances.size; },
   /** Prevent future reuse of shared decoded bitmaps (call on logout/account switch). */
-  clearCaches() { bitmapCache.clear(); pageSessionId = null; },
+  clearCaches() { clearBitmapCache(); pageSessionId = null; },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,
   /** Cheap headless/automation signals present in this browser. */
