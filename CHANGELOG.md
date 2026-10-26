@@ -19,6 +19,15 @@ here. The project follows semantic versioning once a version is released.
 - Strict BMP screenshot decoding in the `archx-detect` investigation path.
 - Security policy, Dependabot configuration, Node 20/22 CI, and a dedicated
   reviewer guide.
+- Pluggable state-store interface for atomic one-time claims, rate windows,
+  quotas, distinct-image tracking, and an optional shared derivative cache;
+  declared multi-instance deployments fail startup without shared state.
+- Versioned signing-key rotation with token `kid`, an active/previous
+  keyring, and issuing-key derivations during rollover.
+- Versioned structured security-event fields for SIEM forwarding while
+  retaining the existing event types and top-level compatibility fields.
+- Operations, compliance-readiness, compatibility, and plain-language
+  IP-holder guides, plus a bounded mint+redeem load-test tool.
 
 ### Changed
 

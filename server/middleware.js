@@ -29,6 +29,7 @@ import {
 } from '../src/scramble.js';
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const SECRET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TOKEN_AUDIENCE = 'archx:image';
 const TOKEN_SCOPE = 'image:view';
 const FORMAT_EXTENSIONS = Object.freeze({
@@ -259,6 +260,174 @@ class DistinctAccessTracker {
   }
 }
 
+/**
+ * Create the built-in process-local state store.
+ *
+ * The middleware uses this object shape for both the default memory store
+ * and a host-supplied distributed store:
+ *
+ *   claimOnce(key, ttlMs)                         -> Promise<boolean>
+ *   hitWindow(key, { limit, windowMs, now })      -> Promise<{limited,retryAfterSec,count}>
+ *   trackDistinct(key, member, { windowMs, ... }) -> Promise<{distinct,isNew}>
+ *   getCache(key)                                 -> Promise<Buffer|Uint8Array|null> (optional)
+ *   setCache(key, bytes, { ttlMs })               -> Promise<*> (optional)
+ *   stats() / close()                             -> optional
+ *
+ * `claimOnce`, `hitWindow`, and `trackDistinct` must be atomic in a shared
+ * implementation. A read-then-write Redis/Dynamo implementation is not
+ * sufficient: use `SET ... NX PX`, Lua/transactions, conditional writes, or
+ * the equivalent atomic primitive in the selected backend.
+ *
+ * Passing one memory-store instance to several middleware handlers in the
+ * same process makes them share state for tests, but it is not a substitute
+ * for Redis/Dynamo/etc. across processes or machines.
+ */
+export function createMemoryStateStore({
+  maxClients = 10000,
+  maxEntries = 100000,
+  maxCacheEntries = 100,
+  maxCacheBytes = 64 * 1024 * 1024,
+  cleanupIntervalMs = 60000,
+} = {}) {
+  const claimSets = new Map();
+  const windowLimiters = new Map();
+  const distinctTrackers = new Map();
+  const cache = new Map();
+  let cacheBytes = 0;
+
+  const namespaceOf = (key) => String(key || '').split(':', 1)[0] || 'default';
+  const claimSetFor = (namespace) => {
+    let set = claimSets.get(namespace);
+    if (!set) {
+      if (claimSets.size >= 16) throw new Error('too many state-store claim namespaces');
+      set = new BoundedTtlSet({ maxEntries, cleanupIntervalMs });
+      claimSets.set(namespace, set);
+    }
+    return set;
+  };
+  const windowLimiterFor = (namespace, windowMs) => {
+    const key = `${namespace}:${windowMs}`;
+    let limiter = windowLimiters.get(key);
+    if (!limiter) {
+      if (windowLimiters.size >= 32) throw new Error('too many state-store window configurations');
+      limiter = new SlidingWindowLimiter({ windowMs, maxClients, cleanupIntervalMs });
+      windowLimiters.set(key, limiter);
+    }
+    return limiter;
+  };
+  const distinctTrackerFor = (windowMs, maxMembers) => {
+    const key = `${windowMs}:${maxMembers}`;
+    let tracker = distinctTrackers.get(key);
+    if (!tracker) {
+      if (distinctTrackers.size >= 16) throw new Error('too many state-store distinct configurations');
+      tracker = new DistinctAccessTracker({ windowMs, maxClients, maxIdsPerClient: maxMembers });
+      distinctTrackers.set(key, tracker);
+    }
+    return tracker;
+  };
+  const cleanupCache = (now = Date.now()) => {
+    for (const [key, entry] of cache) {
+      if (entry.exp <= now) {
+        cacheBytes -= entry.bytes.length;
+        cache.delete(key);
+      }
+    }
+  };
+
+  return Object.freeze({
+    kind: 'memory',
+
+    async claimOnce(key, ttlMs, now = Date.now()) {
+      if (typeof key !== 'string' || !key || !Number.isFinite(ttlMs) || ttlMs <= 0) return false;
+      return claimSetFor(namespaceOf(key)).claim(key, now + ttlMs, now);
+    },
+
+    async hitWindow(key, { limit, windowMs = 60000, now = Date.now() } = {}) {
+      if (!limit || limit <= 0) return { limited: false, retryAfterSec: 0, count: 0 };
+      const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60000;
+      return windowLimiterFor(namespaceOf(key), safeWindowMs).hit(String(key), limit, now);
+    },
+
+    async trackDistinct(key, member, {
+      windowMs = 600000,
+      maxMembers = 251,
+      now = Date.now(),
+    } = {}) {
+      const safeWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 600000;
+      const safeMaxMembers = Number.isInteger(maxMembers) && maxMembers > 0 ? maxMembers : 251;
+      return distinctTrackerFor(safeWindowMs, safeMaxMembers).hit(String(key), String(member), now);
+    },
+
+    async getCache(key, now = Date.now()) {
+      const entry = cache.get(String(key));
+      if (!entry) return null;
+      if (entry.exp <= now) {
+        cacheBytes -= entry.bytes.length;
+        cache.delete(String(key));
+        return null;
+      }
+      cache.delete(String(key));
+      cache.set(String(key), entry);
+      return entry.bytes;
+    },
+
+    async setCache(key, bytes, { ttlMs = 0, now = Date.now() } = {}) {
+      if (!maxCacheEntries || !maxCacheBytes || !bytes || typeof bytes.length !== 'number') return false;
+      const value = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      if (!value.length || value.length > maxCacheBytes) return false;
+      cleanupCache(now);
+      const cacheKey = String(key);
+      const previous = cache.get(cacheKey);
+      if (previous) {
+        cacheBytes -= previous.bytes.length;
+        cache.delete(cacheKey);
+      }
+      cache.set(cacheKey, {
+        bytes: value,
+        exp: Number.isFinite(ttlMs) && ttlMs > 0 ? now + ttlMs : Number.POSITIVE_INFINITY,
+      });
+      cacheBytes += value.length;
+      while (cache.size > maxCacheEntries || cacheBytes > maxCacheBytes) {
+        const oldestKey = cache.keys().next().value;
+        if (oldestKey === undefined) break;
+        cacheBytes -= cache.get(oldestKey).bytes.length;
+        cache.delete(oldestKey);
+        if (oldestKey === cacheKey) break;
+      }
+      return cache.has(cacheKey);
+    },
+
+    stats() {
+      cleanupCache();
+      const sumWindowClients = (prefix) => {
+        let total = 0;
+        for (const [key, limiter] of windowLimiters) if (key.startsWith(prefix + ':')) total += limiter.size;
+        return total;
+      };
+      return Object.freeze({
+        kind: 'memory',
+        consumedTokens: claimSets.get('nonce')?.size || 0,
+        consumedProofs: claimSets.get('proof')?.size || 0,
+        rateLimitClients: sumWindowClients('rate'),
+        quotaClients: sumWindowClients('quota'),
+        sharedCacheEntries: cache.size,
+        sharedCacheBytes: cacheBytes,
+      });
+    },
+
+    close() {
+      for (const set of claimSets.values()) set.close();
+      for (const limiter of windowLimiters.values()) limiter.close();
+      for (const tracker of distinctTrackers.values()) tracker.close();
+      claimSets.clear();
+      windowLimiters.clear();
+      distinctTrackers.clear();
+      cache.clear();
+      cacheBytes = 0;
+    },
+  });
+}
+
 
 function b64url(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -268,21 +437,49 @@ function signToken(payload, secret) {
   const mac = crypto.createHmac('sha256', secret).update(body).digest();
   return body + '.' + b64url(mac);
 }
-function verifyToken(token, secret) {
+function verifyToken(token, secretOrKeyring) {
   if (!token || typeof token !== 'string' || token.length > 8192) return null;
   const parts = token.split('.');
   if (parts.length !== 2) return null;
   const [body, mac] = parts;
   if (!/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]+$/.test(mac)) return null;
-  const expected = crypto.createHmac('sha256', secret).update(body).digest();
-  const given = Buffer.from(mac, 'base64url');
-  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+  let payload;
   try {
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
-    if (!Number.isFinite(payload.exp) || Date.now() > payload.exp) return null;
-    return payload;
+    payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
   } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+
+  const isKeyring = secretOrKeyring instanceof Map ||
+    (secretOrKeyring && typeof secretOrKeyring === 'object' && !Buffer.isBuffer(secretOrKeyring) &&
+      !(secretOrKeyring instanceof Uint8Array));
+  const candidates = [];
+  if (isKeyring) {
+    const entries = secretOrKeyring instanceof Map
+      ? [...secretOrKeyring.entries()]
+      : Object.entries(secretOrKeyring);
+    if (typeof payload.kid === 'string' && SECRET_ID_RE.test(payload.kid)) {
+      const selected = entries.find(([keyId]) => keyId === payload.kid);
+      if (selected) candidates.push(selected);
+    } else if (payload.kid === undefined) {
+      // Short rolling-upgrade compatibility for tokens minted immediately
+      // before `kid` was introduced. They still expire within the normal TTL.
+      candidates.push(...entries.slice(0, 16));
+    }
+  } else if (typeof secretOrKeyring === 'string' || secretOrKeyring instanceof Uint8Array) {
+    candidates.push([typeof payload.kid === 'string' ? payload.kid : 'primary', secretOrKeyring]);
+  }
+  if (!candidates.length) return null;
+
+  const given = Buffer.from(mac, 'base64url');
+  for (const [keyId, candidateSecret] of candidates) {
+    if (typeof candidateSecret !== 'string' && !(candidateSecret instanceof Uint8Array)) continue;
+    const expected = crypto.createHmac('sha256', candidateSecret).update(body).digest();
+    if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) continue;
+    if (!Number.isFinite(payload.exp) || Date.now() > payload.exp) return null;
+    payload.kid = keyId;
+    return payload;
+  }
+  return null;
 }
 
 const WATERMARK_FIELDS = new Set(['text', 'color', 'opacity', 'cornerOpacity', 'tile', 'corner', 'angle']);
@@ -314,7 +511,7 @@ function isPlainObject(value) {
 }
 
 const TOKEN_CLAIM_FIELDS = new Set([
-  'v', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'wm',
+  'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'wm',
   'sg', 'sgp', 'sgs', 'sge', 'sgx', 'sgy', 'nsg', 'b', 'jkt',
 ]);
 
@@ -333,6 +530,7 @@ export function validateTokenClaims(payload, {
     if (!isPlainObject(payload)) return false;
     if (Object.keys(payload).some((field) => !TOKEN_CLAIM_FIELDS.has(field))) return false;
     if (payload.v !== 2 || payload.aud !== TOKEN_AUDIENCE || payload.scope !== TOKEN_SCOPE) return false;
+    if (payload.kid !== undefined && (typeof payload.kid !== 'string' || !SECRET_ID_RE.test(payload.kid))) return false;
     if (!validateImageId(payload.id) || (id && payload.id !== id)) return false;
     if (!Number.isSafeInteger(payload.w) || payload.w < 64 || payload.w > maxWidthCap) return false;
     if (!Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)) return false;
@@ -540,10 +738,10 @@ function inspectServerConfig(options = {}) {
   }
 
   const knownTopLevelOptions = new Set([
-    'abuseDetection', 'allowAnonymous', 'allowClientQuality', 'allowQueryTokens',
+    'abuseDetection', 'activeSecretId', 'allowAnonymous', 'allowClientQuality', 'allowQueryTokens',
     'allowedInputFormats', 'allowedOrigins', 'authorize', 'authorizeTimeoutMs',
     'basePath', 'bindTokenTo', 'blockUntrustedSharpLoaders', 'cacheMasters',
-    'callbackTimeoutMs', 'encrypt', 'forensic', 'forensicPerToken', 'format', 'grid',
+    'callbackTimeoutMs', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken', 'format', 'grid',
     'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
     'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'onAbuse',
@@ -552,7 +750,8 @@ function inspectServerConfig(options = {}) {
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
     'rateLimitPerMinute', 'requireSameSiteTokenRequests', 'requireTokenRequestHeader',
-    'scrambleKeyMode', 'secret', 'serverWatermark', 'steganography',
+    'scrambleKeyMode', 'secret', 'secretId', 'secrets', 'serverWatermark', 'sharedCacheTtlMs',
+    'stateStore', 'stateStoreTimeoutMs', 'steganography',
     'stegoRegistryFailure', 'timeoutSec', 'tokenMethods', 'tokenRateLimitPerMinute',
     'trustProxy', 'trustedProxyHops', 'ttlSec',
   ]);
@@ -560,21 +759,111 @@ function inspectServerConfig(options = {}) {
     if (!knownTopLevelOptions.has(field)) fail(`unknown option ${field} (refusing to silently ignore a possible security-setting typo)`);
   }
 
-  let secret = options.secret ?? process.env.ARCHX_SECRET;
-  const secretTypeValid = typeof secret === 'string' || secret instanceof Uint8Array;
-  if (secret != null && secret !== '' && !secretTypeValid) fail('secret must be a string or byte array');
-  if (secret instanceof Uint8Array && !Buffer.isBuffer(secret)) {
-    secret = Buffer.from(secret.buffer, secret.byteOffset, secret.byteLength);
+  const normalizeSecretValue = (value) => {
+    if (typeof value === 'string') return value;
+    if (value instanceof Uint8Array) {
+      return Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return null;
+  };
+  const signingKeys = new Map();
+  const directSecretId = options.secretId == null || options.secretId === ''
+    ? (process.env.ARCHX_SECRET_ID || 'primary')
+    : String(options.secretId);
+  if (!SECRET_ID_RE.test(directSecretId)) fail('secretId must contain 1-64 letters, digits, dot, underscore, or hyphen characters and start with a letter or digit');
+  // An explicit `secrets` keyring is authoritative: do not silently add an
+  // ambient ARCHX_SECRET (and potentially make it active) alongside it. The
+  // environment remains the fallback for the original single-secret form.
+  const directSecretRaw = options.secret ??
+    (options.secrets === undefined ? process.env.ARCHX_SECRET : undefined);
+  if (directSecretRaw != null && directSecretRaw !== '') {
+    const directSecret = normalizeSecretValue(directSecretRaw);
+    if (directSecret == null) fail('secret must be a string or byte array');
+    else signingKeys.set(directSecretId, directSecret);
   }
-  const secretBytes = Buffer.isBuffer(secret) ? secret.length : Buffer.byteLength(String(secret || ''), 'utf8');
-  const secretText = typeof secret === 'string' ? secret.toLowerCase() : '';
-  if (!secret) fail('secret is required (options.secret or ARCHX_SECRET)');
-  else if (secretTypeValid && (secretBytes < 32 || KNOWN_WEAK_SECRETS.has(secretText))) {
-    fail('secret must be at least 32 bytes and not a known demo/test value');
+  if (options.secrets !== undefined) {
+    let entries = null;
+    if (options.secrets instanceof Map) entries = [...options.secrets.entries()];
+    else if (isPlainObject(options.secrets)) entries = Object.entries(options.secrets);
+    if (!entries) fail('secrets must be an object or Map mapping key IDs to secret strings/byte arrays');
+    else {
+      for (const [keyIdRaw, valueRaw] of entries) {
+        const keyId = String(keyIdRaw);
+        if (!SECRET_ID_RE.test(keyId)) {
+          fail(`secrets key "${keyId}" has an invalid key ID`);
+          continue;
+        }
+        const value = normalizeSecretValue(valueRaw);
+        if (value == null || (typeof value === 'string' && !value) || (Buffer.isBuffer(value) && !value.length)) {
+          fail(`secrets["${keyId}"] must be a non-empty string or byte array`);
+          continue;
+        }
+        if (signingKeys.has(keyId)) {
+          const existing = signingKeys.get(keyId);
+          const same = Buffer.isBuffer(existing) && Buffer.isBuffer(value)
+            ? existing.equals(value)
+            : String(existing) === String(value);
+          if (!same) fail(`secrets["${keyId}"] conflicts with secret/secretId`);
+          continue;
+        }
+        signingKeys.set(keyId, value);
+      }
+    }
   }
-  if (secretTypeValid && secretBytes >= 32) {
-    const rawSecret = Buffer.isBuffer(secret) ? secret : Buffer.from(secret, 'utf8');
-    if (new Set(rawSecret).size < 8) warn('secret has very low byte diversity; use at least 32 random bytes from a CSPRNG');
+  if (signingKeys.size > 16) fail('the signing keyring may contain at most 16 keys');
+  let activeSecretId = options.activeSecretId == null || options.activeSecretId === ''
+    ? null
+    : String(options.activeSecretId);
+  if (activeSecretId && !SECRET_ID_RE.test(activeSecretId)) fail('activeSecretId has an invalid key ID');
+  if (!activeSecretId) {
+    if (signingKeys.has(directSecretId)) activeSecretId = directSecretId;
+    else if (signingKeys.size === 1) activeSecretId = signingKeys.keys().next().value;
+  }
+  if (!signingKeys.size) fail('secret is required (options.secret, options.secrets + activeSecretId, or ARCHX_SECRET)');
+  else if (!activeSecretId || !signingKeys.has(activeSecretId)) fail('activeSecretId must identify the key used to sign new tokens');
+  const secretDigests = new Set();
+  for (const [keyId, value] of signingKeys) {
+    const rawSecret = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+    const digest = crypto.createHash('sha256').update(rawSecret).digest('hex');
+    if (secretDigests.has(digest)) fail('signing-key IDs must not reuse the same secret value');
+    secretDigests.add(digest);
+    const secretText = typeof value === 'string' ? value.toLowerCase() : '';
+    if (rawSecret.length < 32 || KNOWN_WEAK_SECRETS.has(secretText)) {
+      fail(`secret for signing key "${keyId}" must be at least 32 bytes and not a known demo/test value`);
+    } else if (new Set(rawSecret).size < 8) {
+      warn(`signing key "${keyId}" has very low byte diversity; use at least 32 random bytes from a CSPRNG`);
+    }
+  }
+  const secret = activeSecretId ? signingKeys.get(activeSecretId) : undefined;
+
+  const deploymentMode = options.deploymentMode ?? 'single-instance';
+  if (!['single-instance', 'multi-instance'].includes(deploymentMode)) {
+    fail("deploymentMode must be 'single-instance' or 'multi-instance'");
+  }
+  const suppliedStateStore = options.stateStore ?? null;
+  if (options.stateStore !== undefined && options.stateStore !== null) {
+    const requiredMethods = ['claimOnce', 'hitWindow', 'trackDistinct'];
+    if (typeof suppliedStateStore !== 'object' || requiredMethods.some((method) => typeof suppliedStateStore[method] !== 'function')) {
+      fail('stateStore must implement claimOnce(key, ttlMs), hitWindow(key, options), and trackDistinct(key, member, options)');
+    }
+    for (const method of ['getCache', 'setCache', 'stats', 'close']) {
+      if (suppliedStateStore?.[method] !== undefined && typeof suppliedStateStore[method] !== 'function') {
+        fail(`stateStore.${method} must be a function when present`);
+      }
+    }
+  } else if (options.stateStore === null && deploymentMode === 'multi-instance') {
+    fail('stateStore is required in multi-instance deployments');
+  }
+  if (deploymentMode === 'multi-instance' && !suppliedStateStore) {
+    fail('deploymentMode "multi-instance" requires a shared, atomic stateStore; the built-in memory store is process-local');
+  }
+  if (deploymentMode === 'multi-instance' && suppliedStateStore?.kind === 'memory') {
+    fail('the built-in memory stateStore cannot coordinate multiple processes; supply a shared atomic store');
+  }
+  if (!suppliedStateStore) {
+    warn('stateStore defaults to process-local memory: run one middleware process or supply a shared atomic stateStore before scaling horizontally');
   }
 
   const authorize = options.authorize ?? null;
@@ -648,6 +937,8 @@ function inspectServerConfig(options = {}) {
   checkInt('rateLimitMaxClients', options.rateLimitMaxClients, 10, 1000000);
   checkInt('maxTrackedClients', options.maxTrackedClients, 10, 1000000);
   checkInt('oneTimeTokenMaxEntries', options.oneTimeTokenMaxEntries, 100, 5000000);
+  checkInt('stateStoreTimeoutMs', options.stateStoreTimeoutMs, 1, 10000);
+  checkInt('sharedCacheTtlMs', options.sharedCacheTtlMs, 0, 31 * 24 * 3600 * 1000);
 
   const tokenMethodsRaw = options.tokenMethods ?? ['POST'];
   if (!Array.isArray(tokenMethodsRaw) || !tokenMethodsRaw.length ||
@@ -755,6 +1046,12 @@ function inspectServerConfig(options = {}) {
   const availableParallelism = typeof os.availableParallelism === 'function' ? os.availableParallelism() : (os.cpus()?.length || 2);
   const config = Object.freeze({
     secret,
+    signingKeys: Object.freeze(Object.fromEntries(signingKeys)),
+    activeSecretId,
+    deploymentMode,
+    stateStore: suppliedStateStore,
+    stateStoreTimeoutMs: options.stateStoreTimeoutMs ?? 250,
+    sharedCacheTtlMs: options.sharedCacheTtlMs ?? 3600000,
     authorize,
     allowAnonymous,
     basePath: String(basePathRaw).replace(/\/$/, '') || '/archx',
@@ -832,6 +1129,10 @@ export function auditArchxServerConfig(options = {}) {
     summary: config ? Object.freeze({
       basePath: config.basePath,
       authorization: config.authorize ? 'authorize-callback' : 'explicit-anonymous',
+      deploymentMode: config.deploymentMode,
+      stateStore: config.stateStore ? (config.stateStore.kind || 'custom') : 'memory',
+      activeSecretId: config.activeSecretId,
+      signingKeyCount: Object.keys(config.signingKeys).length,
       tokenMethods: config.tokenMethods,
       oneTimeTokens: config.oneTimeTokens,
       maxWidthCap: config.maxWidthCap,
@@ -874,7 +1175,10 @@ export function deriveStegoKey(id, secret) {
 
 export function createArchxMiddleware(options = {}) {
   const cfg = normalizeServerConfig(options);
-  const secret = cfg.secret;
+  const signingKeys = cfg.signingKeys;
+  const activeSecretId = cfg.activeSecretId;
+  const secret = signingKeys[activeSecretId];
+  const secretForToken = (payload) => payload?.kid ? signingKeys[payload.kid] : null;
   const basePath = cfg.basePath;
   const ttlMs = cfg.ttlMs;
   const grid = cfg.grid;
@@ -972,12 +1276,12 @@ export function createArchxMiddleware(options = {}) {
   }
 
   // per-image scramble key + aes key derivation (stable => output cacheable)
-  const deriveScrambleKey = (id, nonce) =>
+  const deriveScrambleKey = (id, nonce, keySecret = secret) =>
     scrambleKeyMode === 'per-token'
       ? nonce
-      : crypto.createHmac('sha256', secret).update('scramble:' + id).digest('hex').slice(0, 32);
-  const deriveAesKey = (id, nonce) =>
-    crypto.createHmac('sha256', secret)
+      : crypto.createHmac('sha256', keySecret).update('scramble:' + id).digest('hex').slice(0, 32);
+  const deriveAesKey = (id, nonce, keySecret = secret) =>
+    crypto.createHmac('sha256', keySecret)
       .update('aes:' + id + ':' + (scrambleKeyMode === 'per-token' ? nonce : 'static'))
       .digest().toString('base64');
 
@@ -986,21 +1290,97 @@ export function createArchxMiddleware(options = {}) {
   const dimensionCache = new Map(); // id -> {mtimeMs,size,width,height}
   const outputCache = new Map(); // cacheKey -> Buffer; entry- and byte-bounded LRU
   let outputCacheBytes = 0;
-  const rateLimiter = new SlidingWindowLimiter({
-    windowMs: 60000,
+  const ownsStateStore = !cfg.stateStore;
+  const stateStore = cfg.stateStore || createMemoryStateStore({
     maxClients: cfg.rateLimitMaxClients,
+    maxEntries: cfg.oneTimeTokenMaxEntries,
+    maxCacheEntries: cfg.outputCacheMax,
+    maxCacheBytes: cfg.outputCacheMaxBytes,
   });
-  const quotaLimiter = new SlidingWindowLimiter({
-    windowMs: cfg.quotas.windowMs,
-    maxClients: cfg.rateLimitMaxClients,
-  });
-  const consumedNonces = new BoundedTtlSet({ maxEntries: cfg.oneTimeTokenMaxEntries });
-  const consumedProofs = new BoundedTtlSet({ maxEntries: cfg.oneTimeTokenMaxEntries });
-  const distinctTracker = new DistinctAccessTracker({
-    windowMs: cfg.abuseDetection.windowMs,
-    maxClients: cfg.rateLimitMaxClients,
-    maxIdsPerClient: Math.min(10001, cfg.abuseDetection.distinctImages + 1),
-  });
+  const stateStoreUnavailable = (cause) => {
+    const err = new Error('Archx state store unavailable');
+    err.code = 'ARCHX_STATE_STORE_UNAVAILABLE';
+    err.cause = cause;
+    return err;
+  };
+  async function callStateStore(method, ...args) {
+    let timer = null;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => stateStore[method](...args)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${method} timed out`)), cfg.stateStoreTimeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      throw stateStoreUnavailable(err);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  async function stateHitWindow(key, limit, windowMs) {
+    const result = await callStateStore('hitWindow', key, { limit, windowMs, now: Date.now() });
+    if (!result || typeof result !== 'object' || typeof result.limited !== 'boolean' ||
+        !Number.isFinite(Number(result.retryAfterSec ?? 0)) || !Number.isFinite(Number(result.count ?? 0))) {
+      throw stateStoreUnavailable(new Error('invalid hitWindow result'));
+    }
+    return {
+      limited: result.limited,
+      retryAfterSec: Math.max(0, Math.ceil(Number(result.retryAfterSec ?? 0))),
+      count: Math.max(0, Math.floor(Number(result.count ?? 0))),
+    };
+  }
+  async function stateClaimOnce(key, ttlMs) {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) return false;
+    const result = await callStateStore('claimOnce', key, Math.ceil(ttlMs));
+    if (typeof result !== 'boolean') throw stateStoreUnavailable(new Error('invalid claimOnce result'));
+    return result;
+  }
+  async function stateTrackDistinct(key, member) {
+    const result = await callStateStore('trackDistinct', key, member, {
+      windowMs: cfg.abuseDetection.windowMs,
+      maxMembers: Math.min(10001, cfg.abuseDetection.distinctImages + 1),
+      now: Date.now(),
+    });
+    if (!result || typeof result !== 'object' || !Number.isFinite(Number(result.distinct)) ||
+        typeof result.isNew !== 'boolean') {
+      throw stateStoreUnavailable(new Error('invalid trackDistinct result'));
+    }
+    return {
+      distinct: Math.max(0, Math.floor(Number(result.distinct))),
+      isNew: result.isNew,
+    };
+  }
+  const sharedOutputCacheEnabled = !ownsStateStore && cfg.sharedCacheTtlMs > 0 &&
+    typeof stateStore.getCache === 'function' && typeof stateStore.setCache === 'function';
+  async function getSharedOutputCache(key) {
+    if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes) return null;
+    try {
+      const value = await callStateStore('getCache', key);
+      if (Buffer.isBuffer(value)) return value.length >= 1 && value.length <= cfg.outputCacheMaxBytes ? value : null;
+      if (value instanceof Uint8Array) {
+        return value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes
+          ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+          : null;
+      }
+      if (value instanceof ArrayBuffer) {
+        return value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes ? Buffer.from(value) : null;
+      }
+      return null;
+    } catch {
+      // The derivative cache is an optimization, unlike replay/quota state:
+      // a cache-read failure safely falls back to authorized reprocessing.
+      return null;
+    }
+  }
+  async function setSharedOutputCache(key, bytes) {
+    if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes ||
+        !bytes?.length || bytes.length > cfg.outputCacheMaxBytes) return;
+    try {
+      await callStateStore('setCache', key, bytes, { ttlMs: cfg.sharedCacheTtlMs });
+    } catch { /* cache write failures do not change authorization */ }
+  }
   const processingSemaphore = new AsyncSemaphore({
     maxConcurrent: cfg.processingConcurrency,
     maxQueue: cfg.processingQueueMax,
@@ -1098,8 +1478,8 @@ export function createArchxMiddleware(options = {}) {
     }
     return 'unknown';
   };
-  const hmacShort = (label, value, len = 24) =>
-    crypto.createHmac('sha256', secret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
+  const hmacShort = (label, value, len = 24, keySecret = secret) =>
+    crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
   const safeEqual = (a, b) => {
     const ba = Buffer.from(String(a)); const bb = Buffer.from(String(b));
     return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
@@ -1107,14 +1487,44 @@ export function createArchxMiddleware(options = {}) {
 
   function emitSecurityEvent(type, req, details = {}) {
     if (!onSecurityEvent) return;
+    const status = Number.isInteger(details.status) ? details.status : null;
+    const phase = details.phase || null;
+    const viewerId = details.viewerId || null;
+    const severity = type === 'archx.suspicious_scraping'
+      ? 'warning'
+      : (status != null && status >= 500) || type.includes('error') || type.includes('failed')
+        ? 'error'
+        : 'notice';
+    const outcome = type === 'archx.suspicious_scraping'
+      ? 'detected'
+      : severity === 'error'
+        ? 'error'
+        : 'denied';
     const event = Object.freeze({
+      // Versioned, SIEM-friendly fields. The original top-level fields remain
+      // for backwards compatibility; `actor`/`request` are the structured
+      // form documented in docs/OPERATIONS.md.
+      schemaVersion: 1,
+      eventId: crypto.randomUUID(),
+      service: 'archx',
+      severity,
+      outcome,
       type,
       at: new Date().toISOString(),
       id: details.id || null,
-      phase: details.phase || null,
-      status: details.status || null,
+      imageId: details.id || null,
+      phase,
+      status,
       ip: req ? requestIp(req) : null,
-      viewerId: details.viewerId || null,
+      viewerId,
+      actor: Object.freeze({
+        ip: req ? requestIp(req) : null,
+        viewerHash: viewerId ? hmacShort('event-viewer', viewerId, 24) : null,
+      }),
+      request: Object.freeze({
+        method: req?.method ? String(req.method).toUpperCase() : null,
+        route: phase ? `${basePath}/${phase === 'token' ? 'token' : 'i'}/:id` : null,
+      }),
       reason: details.reason || null,
     });
     try {
@@ -1262,27 +1672,30 @@ export function createArchxMiddleware(options = {}) {
     };
   }
 
-  function quotaExceeded(req, id, viewerId, phase) {
+  async function quotaExceeded(req, id, viewerId, phase, keySecret = secret) {
     const ip = requestIp(req);
     const checks = [];
     if (phase === 'token') {
-      checks.push([`ip:${ip}`, cfg.quotas.perIp, 'perIp']);
-      checks.push([`ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+      checks.push([`quota:ip:${ip}`, cfg.quotas.perIp, 'perIp']);
+      checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
       if (viewerId) {
-        checks.push([`viewer:${hmacShort('quota-viewer', viewerId, 24)}`, cfg.quotas.perViewer, 'perViewer']);
-        checks.push([`viewer-image:${hmacShort('quota-viewer', viewerId, 24)}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
+        const viewerHash = hmacShort('quota-viewer', viewerId, 24, keySecret);
+        checks.push([`quota:viewer:${viewerHash}`, cfg.quotas.perViewer, 'perViewer']);
+        checks.push([`quota:viewer-image:${viewerHash}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
       }
     } else if (!oneTimeTokens) {
       // With replayable tokens, count redemptions too. With one-time tokens
       // the token-phase quota already corresponds to at most one download.
-      checks.push([`redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
-      if (viewerId) checks.push([`redeem-viewer-image:${hmacShort('quota-viewer', viewerId, 24)}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
+      checks.push([`quota:redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+      if (viewerId) {
+        checks.push([`quota:redeem-viewer-image:${hmacShort('quota-viewer', viewerId, 24, keySecret)}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
+      }
     }
     let retryAfterSec = 0;
     let exceeded = null;
     for (const [key, max, name] of checks) {
       if (!max) continue;
-      const result = quotaLimiter.hit(key, max);
+      const result = await stateHitWindow(key, max, cfg.quotas.windowMs);
       if (result.limited) {
         exceeded = name;
         retryAfterSec = Math.max(retryAfterSec, result.retryAfterSec);
@@ -1291,15 +1704,15 @@ export function createArchxMiddleware(options = {}) {
     return exceeded ? { name: exceeded, retryAfterSec } : null;
   }
 
-  function abusePattern(req, id, viewerId) {
+  async function abusePattern(req, id, viewerId) {
     const threshold = cfg.abuseDetection.distinctImages;
     if (!threshold) return { suspicious: false, distinct: 0 };
-    const keys = [`ip:${requestIp(req)}`];
-    if (viewerId) keys.push(`viewer:${hmacShort('quota-viewer', viewerId, 24)}`);
+    const keys = [`distinct:ip:${requestIp(req)}`];
+    if (viewerId) keys.push(`distinct:viewer:${hmacShort('quota-viewer', viewerId, 24)}`);
     let distinct = 0;
     let crossed = false;
     for (const key of keys) {
-      const result = distinctTracker.hit(key, id);
+      const result = await stateTrackDistinct(key, id);
       distinct = Math.max(distinct, result.distinct);
       // Emit once at the crossing edge; a deny policy continues to deny above it.
       if (result.isNew && result.distinct === threshold + 1) crossed = true;
@@ -1354,7 +1767,7 @@ export function createArchxMiddleware(options = {}) {
 
   function rateLimited(req, kind = 'i') {
     const max = kind === 'token' ? tokenRateMax : rateMax;
-    return rateLimiter.hit(kind + ':' + requestIp(req), max);
+    return stateHitWindow(`rate:${kind}:${requestIp(req)}`, max, 60000);
   }
 
   function protectedHeaders(req, extra = {}) {
@@ -1411,7 +1824,7 @@ export function createArchxMiddleware(options = {}) {
       // never naming a real image. CORS preflight is the one exemption: it
       // carries no entitlement and is followed by the rate-limited token call.
       if (req.method !== 'OPTIONS') {
-        const rate = rateLimited(req, kind);
+        const rate = await rateLimited(req, kind);
         if (rate.limited) {
           return deny(req, res, 429, 'too many requests', {
             phase, reason: 'rate-limit', headers: { 'Retry-After': String(rate.retryAfterSec || 60) },
@@ -1485,14 +1898,14 @@ export function createArchxMiddleware(options = {}) {
         const entitlement = await authorizeRequest(req, id, 'token');
         if (!entitlement) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'authorization' });
         const viewerId = authorizationViewerId(entitlement);
-        const quota = quotaExceeded(req, id, viewerId, 'token');
+        const quota = await quotaExceeded(req, id, viewerId, 'token');
         if (quota) {
           return deny(req, res, 429, 'quota exceeded', {
             id, phase, viewerId, reason: `quota:${quota.name}`,
             headers: { 'Retry-After': String(quota.retryAfterSec || 60) },
           });
         }
-        const abuse = abusePattern(req, id, viewerId);
+        const abuse = await abusePattern(req, id, viewerId);
         if (abuse.crossed) {
           emitSecurityEvent('archx.suspicious_scraping', req, {
             id, phase, viewerId, status: 200, reason: `distinct-images:${abuse.distinct}`,
@@ -1548,6 +1961,7 @@ export function createArchxMiddleware(options = {}) {
         );
         const tokenPayload = {
           v: 2,
+          kid: activeSecretId,
           aud: TOKEN_AUDIENCE,
           scope: TOKEN_SCOPE,
           id, w, iat, exp, n: nonce,
@@ -1597,7 +2011,9 @@ export function createArchxMiddleware(options = {}) {
           if (stegoGridY != null) tokenPayload.sgy = stegoGridY;
           if (onStegoIssue) {
             try {
-              await withCallbackTimeout(onStegoIssue, [{ req, id, viewerId, nonce, exp, fingerprint: issuedFingerprint }], 'onStegoIssue callback');
+              await withCallbackTimeout(onStegoIssue, [{
+                req, id, viewerId, nonce, exp, fingerprint: issuedFingerprint, keyId: activeSecretId,
+              }], 'onStegoIssue callback');
             } catch {
               emitSecurityEvent('archx.stego_registry_failed', req, { id, phase, viewerId, status: 503 });
               if (cfg.stegoRegistryFailure !== 'allow') {
@@ -1650,8 +2066,9 @@ export function createArchxMiddleware(options = {}) {
             typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192) {
           return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-count' });
         }
-        const payload = verifyToken(tokenValues[0], secret);
-        if (!validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: ttlMs })) {
+        const payload = verifyToken(tokenValues[0], signingKeys);
+        const issuingSecret = secretForToken(payload);
+        if (!issuingSecret || !validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: ttlMs })) {
           return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-claims' });
         }
 
@@ -1682,7 +2099,7 @@ export function createArchxMiddleware(options = {}) {
         if (!entitlement) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'authorization' });
         const currentViewerId = authorizationViewerId(entitlement);
         if (payload.vh) {
-          const currentViewerHash = currentViewerId ? hmacShort('viewer', currentViewerId, 20) : '';
+          const currentViewerHash = currentViewerId ? hmacShort('viewer', currentViewerId, 20, issuingSecret) : '';
           if (!currentViewerHash || !safeEqual(payload.vh, currentViewerHash)) {
             return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'viewer-binding' });
           }
@@ -1698,29 +2115,30 @@ export function createArchxMiddleware(options = {}) {
               if (!payload.b[field]) continue;
               if (!setting) throw new Error(reason);
               const value = await resolveBindingValue(setting, req, fallback);
-              const expected = value == null ? '' : hmacShort(label, value, 16);
+              const expected = value == null ? '' : hmacShort(label, value, 16, issuingSecret);
               if (!expected || !safeEqual(payload.b[field], expected)) throw new Error(reason);
             }
           } catch (err) {
             return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: err?.message || 'binding' });
           }
         }
-        // Claim synchronously after all pre-claim awaits. BoundedTtlSet.claim
-        // has no await between check and set, so parallel requests carrying
-        // the same token cannot both pass even though authorization is async.
+        // Claims are atomic state-store operations. The built-in memory store
+        // is atomic within this process; a shared store must provide the same
+        // guarantee across every process/instance (SET NX, conditional write,
+        // transaction, or equivalent). A store timeout/error fails closed.
         if (verifiedProof) {
-          const proofHash = hmacShort('proof', verifiedProof.jkt + ':' + verifiedProof.jti, 32);
-          if (!consumedProofs.claim(proofHash, verifiedProof.exp)) {
+          const proofHash = hmacShort('proof', verifiedProof.jkt + ':' + verifiedProof.jti, 32, issuingSecret);
+          if (!await stateClaimOnce(`proof:${proofHash}`, verifiedProof.exp - Date.now())) {
             return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'proof-replay' });
           }
         }
         if (oneTimeTokens) {
-          const nonceHash = hmacShort('once', id + ':' + payload.n, 32);
-          if (!consumedNonces.claim(nonceHash, payload.exp)) {
+          const nonceHash = hmacShort('once', id + ':' + payload.n, 32, issuingSecret);
+          if (!await stateClaimOnce(`nonce:${nonceHash}`, payload.exp - Date.now())) {
             return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-replay' });
           }
         }
-        const imageQuota = quotaExceeded(req, id, currentViewerId, 'image');
+        const imageQuota = await quotaExceeded(req, id, currentViewerId, 'image', issuingSecret);
         if (imageQuota) {
           return deny(req, res, 429, 'quota exceeded', {
             id, phase, viewerId: currentViewerId, reason: `quota:${imageQuota.name}`,
@@ -1760,11 +2178,11 @@ export function createArchxMiddleware(options = {}) {
           effectiveFormat = entitlement.format;
         }
 
-        const scrambleKey = deriveScrambleKey(id, payload.n);
+        const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret);
         const forensicSeed = forensic
           ? hmacShort('forensic', forensicPerToken
               ? `${id}:${payload.n}:${payload.vh || ''}`
-              : `${id}:static:${payload.vh || ''}`, 32)
+              : `${id}:static:${payload.vh || ''}`, 32, issuingSecret)
           : null;
         const deliveryQuality = effectiveQuality;
         const deliveryLossless = effectiveLossless;
@@ -1789,26 +2207,31 @@ export function createArchxMiddleware(options = {}) {
               id,
               nonce: payload.n,
               viewerHash: payload.vh || '',
-              secret,
+              secret: issuingSecret,
               perToken: payload.sgp !== 0,
             }))
           : null;
         const effectiveStegoStrength = payload.sgs ?? stegoGlobalCfg.strength ?? 6;
         const effectiveStegoGridX = payload.sgx ?? stegoGlobalCfg.gridX;
         const effectiveStegoGridY = payload.sgy ?? stegoGlobalCfg.gridY;
-        const wmCachePart = payload.wm ? hmacShort('wm', JSON.stringify(payload.wm), 12) : 'nowm';
+        const wmCachePart = payload.wm ? hmacShort('wm', JSON.stringify(payload.wm), 12, issuingSecret) : 'nowm';
         const stegoCachePart = stegoPayload
-          ? `${hmacShort('sg', stegoPayload, 12)}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? 24}:y${effectiveStegoGridY ?? 16}`
+          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? 24}:y${effectiveStegoGridY ?? 16}`
           : 'nosg';
         const cacheKey = [
-          id, masterVersion, effectiveWidth,
+          id, masterVersion, `kid:${payload.kid}`, effectiveWidth,
           scrambleKeyMode === 'per-token' ? payload.n : 's',
           encrypt ? 'e' : 'p', wmCachePart,
           forensicSeed ? (forensicPerToken ? payload.n : 'fx') : 'nofx',
           payload.vh || '',
           `q${deliveryQuality}`, deliveryLossless ? 'ls' : 'lq', deliveryFormat, stegoCachePart,
         ].join('|');
+        const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
         let bytes = getOutputCache(cacheKey);
+        if (!bytes) {
+          bytes = await getSharedOutputCache(sharedCacheKey);
+          if (bytes) setOutputCache(cacheKey, bytes);
+        }
         if (!bytes) {
           let pending = outputInFlight.get(cacheKey);
           if (!pending) {
@@ -1856,12 +2279,12 @@ export function createArchxMiddleware(options = {}) {
                   quality: deliveryQuality,
                   lossless: deliveryLossless,
                   format: deliveryFormat,
-                  aesKey: encrypt ? deriveAesKey(id, payload.n) : null,
+                  aesKey: encrypt ? deriveAesKey(id, payload.n, issuingSecret) : null,
                   watermark: payload.wm || null,
                   forensicSeed,
                   forensic: typeof forensic === 'object' ? forensic : {},
                   stegoPayload,
-                  stegoKey: stegoPayload ? deriveStegoKey(id, secret) : null,
+                  stegoKey: stegoPayload ? deriveStegoKey(id, issuingSecret) : null,
                   stegoStrength: effectiveStegoStrength,
                   steganography: stegoPayload ? {
                     ...stegoGlobalCfg,
@@ -1878,7 +2301,10 @@ export function createArchxMiddleware(options = {}) {
                   allowedInputFormats: cfg.processing.allowedInputFormats,
                   blockUntrustedSharpLoaders: cfg.processing.blockUntrustedSharpLoaders,
                 }));
-                if (master.current) setOutputCache(cacheKey, result.bytes);
+                if (master.current) {
+                  setOutputCache(cacheKey, result.bytes);
+                  await setSharedOutputCache(sharedCacheKey, result.bytes);
+                }
                 return result.bytes;
               } finally {
                 if (outputInFlight.get(cacheKey) === pending) outputInFlight.delete(cacheKey);
@@ -1917,6 +2343,11 @@ export function createArchxMiddleware(options = {}) {
         if (err?.code === 'ARCHX_PROCESSING_TIMEOUT') {
           return deny(req, res, 503, 'service unavailable', { id: routeId, phase, reason: 'processing-timeout' });
         }
+        if (err?.code === 'ARCHX_STATE_STORE_UNAVAILABLE') {
+          return deny(req, res, 503, 'service unavailable', {
+            id: routeId, phase, reason: 'state-store-unavailable', headers: { 'Retry-After': '1' },
+          });
+        }
         emitSecurityEvent('archx.processing_error', req, { id: routeId, phase, status: 500, reason: err?.code || 'internal' });
         return sendJson(req, res, 500, { error: 'image processing failed' });
       }
@@ -1926,28 +2357,45 @@ export function createArchxMiddleware(options = {}) {
   }
 
   handler.configAudit = auditArchxServerConfig(options);
-  handler.stats = () => Object.freeze({
-    images: index.size,
-    rateLimitClients: rateLimiter.size,
-    quotaClients: quotaLimiter.size,
-    consumedTokens: consumedNonces.size,
-    consumedProofs: consumedProofs.size,
-    outputCacheEntries: outputCache.size,
-    outputCacheBytes,
-    masterCacheEntries: masterCache.size,
-    masterCacheBytes,
-    processingActive: processingSemaphore.active,
-    processingQueued: processingSemaphore.queued,
-    outputInFlight: outputInFlight.size,
-    dimensionInFlight: dimensionInFlight.size,
-    masterInFlight: masterInFlight.size,
-  });
+  handler.stats = () => {
+    let storeStats = {};
+    try {
+      const maybeStats = typeof stateStore.stats === 'function' ? stateStore.stats() : null;
+      if (maybeStats && typeof maybeStats === 'object' && typeof maybeStats.then !== 'function') {
+        storeStats = maybeStats;
+      }
+    } catch { /* stats are diagnostic only */ }
+    const statNumber = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+    return Object.freeze({
+      images: index.size,
+      deploymentMode: cfg.deploymentMode,
+      stateStore: storeStats.kind || stateStore.kind || (ownsStateStore ? 'memory' : 'custom'),
+      stateStoreShared: !ownsStateStore,
+      activeSecretId,
+      signingKeyCount: Object.keys(signingKeys).length,
+      rateLimitClients: statNumber(storeStats.rateLimitClients),
+      quotaClients: statNumber(storeStats.quotaClients),
+      consumedTokens: statNumber(storeStats.consumedTokens),
+      consumedProofs: statNumber(storeStats.consumedProofs),
+      sharedCacheEntries: statNumber(storeStats.sharedCacheEntries),
+      sharedCacheBytes: statNumber(storeStats.sharedCacheBytes),
+      outputCacheEntries: outputCache.size,
+      outputCacheBytes,
+      masterCacheEntries: masterCache.size,
+      masterCacheBytes,
+      processingActive: processingSemaphore.active,
+      processingQueued: processingSemaphore.queued,
+      outputInFlight: outputInFlight.size,
+      dimensionInFlight: dimensionInFlight.size,
+      masterInFlight: masterInFlight.size,
+    });
+  };
   handler.close = () => {
-    rateLimiter.close();
-    quotaLimiter.close();
-    consumedNonces.close();
-    consumedProofs.close();
-    distinctTracker.close();
+    // A host-supplied store may be shared by several handlers/processes and
+    // remains host-owned; only the internally created memory store is closed.
+    if (ownsStateStore) {
+      try { stateStore.close?.(); } catch { /* shutdown best effort */ }
+    }
     masterCache.clear(); masterCacheBytes = 0;
     outputCache.clear(); outputCacheBytes = 0;
     dimensionCache.clear();

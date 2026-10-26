@@ -19,7 +19,7 @@ import {
 import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
 import { TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace } from '../src/archx.js';
 import {
-  createArchxMiddleware, deriveStegoKey,
+  createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
   auditArchxServerConfig, validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
@@ -1172,4 +1172,159 @@ test('temporal interlace profiles are 60 Hz-safe by default and remain directly 
   const blocks = normalizeTemporalInterlace({ layout: 'blocks', engine: 'canvas' });
   assert.equal(blocks.engine, 'frames');
   assert.equal(blocks.cellSize, 8);
+});
+
+function tokenPayloadForTest(token) {
+  return JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+}
+
+async function listenForTest(t, handler) {
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    handler.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+test('shared state store blocks cross-instance replay and quota bypass', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-shared-state-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const inner = createMemoryStateStore();
+  // This wrapper gives two handlers one in-process store so the test can
+  // prove the middleware contract without requiring Redis in CI. Production
+  // multi-instance mode deliberately rejects kind:'memory' itself.
+  const sharedStore = Object.freeze({
+    kind: 'shared-test',
+    claimOnce: (...args) => inner.claimOnce(...args),
+    hitWindow: (...args) => inner.hitWindow(...args),
+    trackDistinct: (...args) => inner.trackDistinct(...args),
+    getCache: (...args) => inner.getCache(...args),
+    setCache: (...args) => inner.setCache(...args),
+    stats: () => inner.stats(),
+    close: () => inner.close(),
+  });
+  t.after(() => sharedStore.close());
+  const events = [];
+  const makeHandler = () => createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    deploymentMode: 'multi-instance',
+    stateStore: sharedStore,
+    quotas: { perIp: 2, windowMs: 60000 },
+    onSecurityEvent: (event) => events.push(event),
+  });
+  const handlerA = makeHandler();
+  const handlerB = makeHandler();
+  const baseA = await listenForTest(t, handlerA);
+  const baseB = await listenForTest(t, handlerB);
+
+  const token = await (await postToken(baseA + '/archx/token/cat?w=160')).json();
+  assert.equal(tokenPayloadForTest(token.token).kid, 'primary');
+  assert.equal((await fetch(baseB + token.url)).status, 200, 'instance B may redeem a token minted by A');
+  assert.equal((await fetch(baseA + token.url)).status, 403, 'the shared nonce claim blocks replay back on A');
+
+  assert.equal((await postToken(baseB + '/archx/token/cat?w=160')).status, 200);
+  assert.equal((await postToken(baseA + '/archx/token/cat?w=160')).status, 429,
+    'the per-IP quota is shared rather than reset per process');
+
+  const replayEvent = events.find((event) => event.reason === 'token-replay');
+  assert.equal(replayEvent.schemaVersion, 1);
+  assert.equal(replayEvent.service, 'archx');
+  assert.equal(replayEvent.imageId, 'cat');
+  assert.equal(replayEvent.actor.ip, '127.0.0.1');
+  assert.equal(replayEvent.request.route, '/archx/i/:id');
+  assert.match(replayEvent.eventId, /^[0-9a-f-]{36}$/);
+  assert.equal(handlerA.stats().stateStoreShared, true);
+  assert.ok(handlerB.stats().consumedTokens >= 1);
+});
+
+test('signing-key rotation verifies old tokens with their issuing key and signs new tokens with the active key', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-key-rotation-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const oldSecret = 'old-rotation-secret-with-32-plus-bytes';
+  const newSecret = 'new-rotation-secret-with-32-plus-bytes';
+  const authorize = async () => ({ viewerId: 'rotation-viewer' });
+  const oldHandler = createArchxMiddleware({
+    secret: oldSecret, secretId: '2026-01', imagesDir: dir, authorize,
+  });
+  const rotatedHandler = createArchxMiddleware({
+    secrets: { '2026-01': oldSecret, '2026-02': newSecret },
+    activeSecretId: '2026-02', imagesDir: dir, authorize,
+  });
+  const retiredHandler = createArchxMiddleware({
+    secret: newSecret, secretId: '2026-02', imagesDir: dir, authorize,
+  });
+  const oldBase = await listenForTest(t, oldHandler);
+  const rotatedBase = await listenForTest(t, rotatedHandler);
+  const retiredBase = await listenForTest(t, retiredHandler);
+
+  const oldToken = await (await postToken(oldBase + '/archx/token/cat?w=160')).json();
+  assert.equal(tokenPayloadForTest(oldToken.token).kid, '2026-01');
+  const oldResponse = await fetch(rotatedBase + oldToken.url);
+  assert.equal(oldResponse.status, 200, 'rollover keyring still verifies the previous key');
+  const oldBytes = new Uint8Array(await oldResponse.arrayBuffer());
+  const oldDecoded = decodeContainer(oldBytes);
+  const restored = await unscrambleImage(Buffer.from(oldDecoded.payload), {
+    grid: oldDecoded.header.grid, key: oldToken.key, w: oldDecoded.header.w, h: oldDecoded.header.h,
+  });
+  assert.ok((await meanAbsDiff(fs.readFileSync(path.join(dir, 'cat.jpg')), restored, 80, 60)) < 22,
+    'redemption derivations use the issuing secret received by the client at mint time');
+
+  const newToken = await (await postToken(rotatedBase + '/archx/token/cat?w=160')).json();
+  assert.equal(tokenPayloadForTest(newToken.token).kid, '2026-02');
+  assert.equal((await fetch(retiredBase + newToken.url)).status, 200);
+
+  const retiredOldToken = await (await postToken(oldBase + '/archx/token/cat?w=160')).json();
+  assert.equal((await fetch(retiredBase + retiredOldToken.url)).status, 403,
+    'removing the old key completes retirement after the rollover window');
+  assert.equal(rotatedHandler.configAudit.summary.activeSecretId, '2026-02');
+  assert.equal(rotatedHandler.configAudit.summary.signingKeyCount, 2);
+  assert.equal(JSON.stringify(rotatedHandler.configAudit).includes(oldSecret), false);
+  assert.equal(JSON.stringify(rotatedHandler.configAudit).includes(newSecret), false);
+});
+
+test('multi-instance configuration and state-store failures fail closed with structured events', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-state-failure-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+
+  const missingStore = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true, deploymentMode: 'multi-instance',
+  });
+  assert.equal(missingStore.ok, false);
+  assert.ok(missingStore.issues.some((issue) => /stateStore/i.test(issue)));
+
+  const memoryStore = createMemoryStateStore();
+  const memoryAudit = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    deploymentMode: 'multi-instance', stateStore: memoryStore,
+  });
+  assert.equal(memoryAudit.ok, false, 'a process-local store must not masquerade as shared infrastructure');
+  memoryStore.close();
+
+  const events = [];
+  const failingStore = Object.freeze({
+    kind: 'failing-test-store',
+    claimOnce: async () => { throw new Error('backend down'); },
+    hitWindow: async () => { throw new Error('backend down'); },
+    trackDistinct: async () => { throw new Error('backend down'); },
+  });
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    deploymentMode: 'multi-instance',
+    stateStore: failingStore,
+    stateStoreTimeoutMs: 25,
+    onSecurityEvent: (event) => events.push(event),
+  });
+  const base = await listenForTest(t, handler);
+  assert.equal((await postToken(base + '/archx/token/cat?w=160')).status, 503);
+  const failure = events.find((event) => event.reason === 'state-store-unavailable');
+  assert.equal(failure.schemaVersion, 1);
+  assert.equal(failure.severity, 'error');
+  assert.equal(failure.outcome, 'error');
+  assert.equal(failure.request.method, 'POST');
 });

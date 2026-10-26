@@ -17,13 +17,13 @@ No `<img>` is ever created. There is no image URL in your HTML to copy, no file 
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
 - 🧩 Four preset modes — **lite** (galleries), **shield** (default), **vault** (WebGL), and **fortress** (Vault + anti-hook lock, strike lockouts, strict memory wiping, dynamic capture trace, temporal anti-single-frame shield, and optional pointer lens) — plus `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so you are never locked into a preset
 - 🌓 Optional **temporal interlace**: assign pixel/checker/strip/block subsets to 2–4 phases so one presented frame is deliberately incomplete. Four 60 Hz-first profiles, GPU-shader or pre-rendered-frame engines, refresh-rate phase optimization, and reduced-motion respect. It is explicit opt-in because two-phase viewing on a 60 Hz monitor still flickers at 30 Hz per subset
-- 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens, header-carried payload tokens by default, race-safe one-time claims, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling
+- 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens with versioned signing-key IDs, header-carried payload tokens by default, atomic one-time claims through a local or shared state store, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling
 - 🧬 Attribution fallback: an optional 64-bit perceptual **soft-binding fingerprint** can be registered at ingest and compared with a suspect copy after metadata or a pixel mark has been stripped (evidence, not access control or cryptographic proof)
 - 🕵️ Hardened internals: private fields, no public instance registry or host expando, secret-redacted option views, captured native APIs, and hooked-API / automation policies
 
 > **Honest up front:** no web technology can stop someone photographing their screen, pressing PrintScreen before page JS can react, or fully controlling their own browser — and no pixel watermark is immune to a determined AI-regeneration attack. What Archx is designed to ensure in the recommended server setup is that the **master file is never sent**, one-click theft stops working, bulk collection becomes slow/visible/rate-limited, replayed delivery URLs can be made useless, single-frame captures can be degraded, and anything that leaks is capped at the resolution/quality your server authorized and can carry visible, forensic, and blind-decoding attribution marks. Browser-delivered scrambling/encryption keys are obfuscation and transport friction—not DRM—because an authorized recipient controls the receiving browser. Full reasoning: [docs/RESEARCH.md](docs/RESEARCH.md).
 
-> **Reviewing the code?** Start with [docs/REVIEW_GUIDE.md](docs/REVIEW_GUIDE.md) for a fresh-clone verification path, repository map, suggested review order, and the security properties that matter most. Release changes are summarized in [CHANGELOG.md](CHANGELOG.md).
+> **Reviewing the code?** Start with [docs/REVIEW_GUIDE.md](docs/REVIEW_GUIDE.md) for a fresh-clone verification path, repository map, suggested review order, and the security properties that matter most. Production operators should also read [docs/OPERATIONS.md](docs/OPERATIONS.md); assurance reviewers can use [docs/COMPLIANCE.md](docs/COMPLIANCE.md) and [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Release changes are summarized in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -171,6 +171,36 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, {
 });
 ```
 
+#### Horizontal scaling and signing-key rotation
+
+The default state store is process-local memory. That is correct for one
+Node.js process, but **not** for several processes behind a load balancer:
+one-time nonce/proof claims, rate windows, quotas, and distinct-image abuse
+tracking would otherwise reset per instance. Declare the deployment and
+supply one shared, atomic adapter:
+
+```js
+createArchxMiddleware({
+  deploymentMode: 'multi-instance', // startup rejects a missing/memory store
+  stateStore: myRedisArchxStore,    // claimOnce + hitWindow + trackDistinct
+  stateStoreTimeoutMs: 250,         // security-state failures return 503
+  secrets: {
+    '2026-01': process.env.ARCHX_SECRET_2026_01,
+    '2026-02': process.env.ARCHX_SECRET_2026_02,
+  },
+  activeSecretId: '2026-02',        // new tokens carry kid:'2026-02'
+  // imagesDir, authorize, quotas, ...
+});
+```
+
+Tokens issued under `2026-01` continue to verify—and derive their scramble,
+AES, viewer-binding, forensic, and StegoMark material—with the issuing key
+until that key is retired after the rollover window. The store contract,
+Redis/Dynamo atomicity notes, CloudFront/Cloudflare reference settings,
+structured-event schema, failover rules, and load-test procedure are in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md). Archx deliberately does not fall
+back to local replay/quota state when a shared store times out or errors.
+
 ### 5 · No server code allowed? Pre-scramble assets with the CLI
 
 ```bash
@@ -221,7 +251,7 @@ The perceptual soft binding is a separate 64-bit DCT fingerprint of image struct
 | Drag to desktop / new tab, iOS long-press save | `dragstart` blocked, `-webkit-user-drag:none`, `-webkit-touch-callout:none`, long-press blackout | Nothing |
 | DevTools → Elements | Closed shadow DOM; the source URL lives in JS closures/private fields, never in attributes. This blocks ordinary page JS, but browser/CDP tooling can pierce closed roots, so it is not a security boundary against the browser operator | An empty-looking element to page scripts; a CDP owner can still inspect/capture the authorized derivative |
 | DevTools → Network → Img | Bytes arrive via `fetch()` + `createImageBitmap()` as `application/octet-stream` — never as an image load | An opaque `data.bin` |
-| Copy / share / replay the image URL or token | Strict v2 HMAC claims bind audience/scope/image/width/quality/issued-at/expiry and, when presented, an RFC 7638 P-256 key thumbprint. Redemption verifies a short-lived proof of possession, re-runs `authorize()`, checks viewer/session + optional IP/User-Agent bindings, then—after all asynchronous checks—synchronously claims the proof ID and one-time nonce with no intervening `await` | `403 invalid or expired token`; a token copied to another browser also lacks the non-extractable private key |
+| Copy / share / replay the image URL or token | Strict v2 HMAC claims bind audience/scope/image/width/quality/issued-at/expiry and, when presented, an RFC 7638 P-256 key thumbprint. Redemption verifies a short-lived proof of possession, re-runs `authorize()`, checks viewer/session + optional IP/User-Agent bindings, then—after all asynchronous checks—atomically claims the proof ID and one-time nonce through the configured local/shared state store | `403 invalid or expired token`; a token copied to another browser also lacks the non-extractable private key |
 | Ask for a bigger file than allowed | The browser may request a width, but middleware `maxWidthCap` and per-request `authorize()` entitlements cap it server-side | Only the resolution that viewer was entitled to receive |
 | Guess the master path | Masters live outside every static route; IDs are allowlisted, files/symlinks are realpath-contained and revalidated at redemption, configured master/public overlaps fail startup, and the middleware never returns originals | `404` |
 | Decode the captured payload | Pixels are cut into an 8×8 grid, shuffled & mirrored under a key (optional AES-GCM transport/obfuscation layer) inside an `.archx` container | A meaningless mosaic / ciphertext |
@@ -416,7 +446,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 4. **Lens + capture trace + temporal/camera shields/interlace are friction, not screenshot-proofing.** They prevent a single ordinary screenshot/photo from containing the whole sharp, unmarked frame and make scripted sweeps harder/noisier, but a patient person can move a real pointer and stitch discs, record/average temporal frames, capture and recombine every interlace phase, or use a camera. Likewise, page JavaScript cannot veto the OS compositor, a screenshot extension's privileged visible-tab capture, DevTools/CDP capture, or another device's camera; shortcut/blur reactions only help when the browser exposes a signal in time. Expect attribution and delay—not impossibility.
 5. **AI regeneration and invisible-mark removal are real attacks.** Research on diffusion-based regeneration shows many pixel-level invisible watermarks can be weakened/removed while preserving the scene's semantics; perceptual fingerprints can also drift or be adversarially evaded, and an upscaler can invent plausible detail from a degraded capture. StegoMark, forensic blocks, C2PA-style provenance, and soft bindings are therefore evidence/discovery layers—not DRM. Your durable controls are not shipping the master, server authorization/entitlement, visible marks where appropriate, issuance logs, monitoring, and enforcement.
 6. **Authorization headers are not identity.** Origin/Referer help with CORS/CSRF context; IP and User-Agent are spoofable/changeable and can cause false rejects behind NAT, VPNs, mobile network changes, or browser updates. Your authenticated session and object-level `authorize()` decision are the security boundary, and Archx checks that boundary again at redemption.
-7. **One-time means a late failure can burn a token.** To close the parallel-replay race without letting a transient authorization failure spend a valid token, Archx verifies the signature/claims/proof, re-runs redemption authorization and binding checks, and only then synchronously claims the proof ID and nonce with no intervening `await`. A later quota/processing failure can still burn that token; mint a fresh one instead of retrying it. The bundled client re-mints once after a 401/403 payload response.
+7. **One-time means a late failure can burn a token.** To close the parallel-replay race without letting a transient authorization failure spend a valid token, Archx verifies the signature/claims/proof, re-runs redemption authorization and binding checks, and only then atomically claims the proof ID and nonce through the configured state store. In a multi-instance deployment that store must be shared and atomic across every process. A later quota/processing failure can still burn that token; mint a fresh one instead of retrying it. The bundled client re-mints once after a 401/403 payload response.
 8. **Client-only mode is only as strong as the URL you feed it.** If the same full-resolution file is also sitting at a guessable public URL, protect the door, not the window: move masters behind the token server (or at least only ever publish down-scaled derivatives). Local scrambling before GPU upload protects the texture path, not the public network file.
 9. **SEO / sharing trade-off:** protected images have no indexable `<img src>` (that's the point). Keep SEO-critical thumbnails as normal images and protect the valuable full views; use `alt` for accessibility.
 
@@ -424,6 +454,8 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 - [ ] Masters in a folder that is **not** statically served (test the direct URL → 404)
 - [ ] `ARCHX_SECRET` random and **≥32 bytes**, from the environment; run `auditArchxServerConfig()` in deployment tests and compare `handler.configAudit`/stats in staging vs production (without logging secrets)
+- [ ] For more than one server process, set `deploymentMode:'multi-instance'` with a shared atomic `stateStore`; test mint-on-A/redeem-on-B/replay-on-A and confirm a store outage returns 503 rather than falling back locally
+- [ ] Rotate signing keys through the `secrets` keyring + `activeSecretId`, keep the previous key only through the token rollover window, and persist StegoMark `keyId` values for later investigations
 - [ ] HTTPS everywhere (tokens/keys ride along), short `ttlSec` (60–180 s), POST token minting, `oneTimeTokens:true`, and object-level `authorize(req,id,{phase})` tests for horizontal/vertical access (another user's image, revoked user, downgraded plan)
 - [ ] Prefer `allowQueryTokens:false` and pair server `proofOfPossession:'required'` with client `proofOfPossession:'required'` once every supported client implements the proof protocol
 - [ ] Verify every CDN/WAF/reverse-proxy rule honors origin `private,no-store`/`CDN-Cache-Control`/`Surrogate-Control`; never add a cache rule for token or payload paths based only on a static-looking URL
@@ -439,17 +471,21 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 ## Tests
 
 ```bash
-npm test            # 31 unit/integration tests (scramble/crypto, delivery quality,
+npm test            # 34 unit/integration tests (scramble/crypto, delivery quality,
                     # cover-aware sizing, server marks, StegoMark survival + crop geometry,
                     # perceptual soft bindings, strict config/claims, malformed HTTP, replay races,
                     # reauthorization, sender-constrained proofs, bounded stores/quotas/abuse,
-                    # trusted-hop proxy parsing, Sharp processing limits, and 60 Hz interlace normalization)
+                    # trusted-hop proxy parsing, Sharp processing limits, 60 Hz interlace normalization,
+                    # cross-instance shared state, signing-key rotation, and fail-closed store errors)
 npm run test:browser  # 72 checks in real headless Chromium (encapsulation, decoys,
                       # native detail retention, WebGL black read-back,
                       # Fortress Lens/camera + shader/frames temporal-interlace patterns/capture trace/strikes/integrity,
                       # POST + clean-header + proof-bound token flow, cache scopes, no-reload lifecycle,
                       # draw-on-demand GPU, token replay, guards, print, 100-image gallery…)
 npm run test:all
+npm run load-test -- --requests=500 --concurrency=50 --width=1200
+                    # bounded local mint+redeem regression load; see docs/OPERATIONS.md
+                    # before treating any staging number as a capacity result
 ```
 
 ## Repository layout
@@ -460,10 +496,11 @@ dist/        committed built bundles (ESM / CJS / minified browser-global; regen
 server/      token+scramble middleware, image scrambler, archx-protect + archx-detect CLIs, demo server
 demo/        interactive demo + attack simulator, automated-test harness
 demo-masters/  three tracked demo originals — deliberately NOT web-accessible; generated gallery is ignored
-docs/        REVIEW_GUIDE.md for reviewers + RESEARCH.md threat/design research
+docs/        reviewer guide, research, operations, compliance readiness,
+             compatibility matrix, and plain-language IP-holder guide
 examples/    copy-and-run protection ladder and custom-flags showcase
 tests/       unit + real-browser test suites
-tools/       build, demo-image generator, benchmarks
+tools/       build, demo-image generator, benchmarks, bounded load test
 ```
 
 ## License

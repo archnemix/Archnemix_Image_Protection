@@ -22,6 +22,10 @@ repository when available. Include:
 Do not include production secrets, real bearer tokens, private master images,
 or third-party user data in a report.
 
+There is currently no funded public bug-bounty program. Private reporting
+through the process above is the supported disclosure path. Do not test a
+third party's Archx deployment without that operator's written authorization.
+
 ## Security model and limits
 
 Archx is a layered theft-friction and attribution system, not DRM. The
@@ -33,3 +37,10 @@ screenshotted or photographed. Treat screenshots, external cameras, complete
 authorized-derivative reconstruction, and AI regeneration as residual risks;
 use resolution caps, visible/forensic marks, quotas, monitoring, and your
 normal legal/commercial enforcement process alongside Archx.
+
+For more than one middleware process, use `deploymentMode:'multi-instance'`
+with a shared, atomic `stateStore`; process-local replay/quota state behind a
+load balancer is outside the supported security model. Rotate signing keys
+with the versioned keyring described in `docs/OPERATIONS.md`, verify that the
+CDN bypasses shared caching for token/payload routes, and treat a state-store
+outage as a fail-closed `503` rather than weakening replay controls.

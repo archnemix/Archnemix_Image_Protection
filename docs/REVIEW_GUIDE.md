@@ -48,8 +48,10 @@ npm pack --dry-run
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
 and then runs the real-Chromium browser suite. At the v1.5 review point the
-expected results are 31/31 Node tests and 72/72 Chromium checks, including a
-100-image protected gallery with no protected `<img>` elements.
+expected results are 34/34 Node tests and 72/72 Chromium checks, including a
+100-image protected gallery with no protected `<img>` elements. The Node
+suite includes a two-handler shared-state replay/quota test and a
+signing-key-rotation test.
 
 To inspect the product manually:
 
@@ -79,7 +81,11 @@ at the top of that file.
 | `tests/browser-test.mjs` | Real Chromium behavior, visual, lifecycle, and gallery tests | High |
 | `demo/` | Interactive demo and automated-test harness | Medium |
 | `examples/archx-showcase.html` | Copy-and-run protection ladder/custom-flags showcase | Low/medium |
-| `tools/` | Build, benchmark, and demo-image generation | Low/medium |
+| `docs/OPERATIONS.md` | Shared state, key rotation, CDN, SIEM, failover, load testing | Critical for production review |
+| `docs/COMPLIANCE.md` | ASVS/SOC 2 self-assessment, audit readiness, supply-chain process | High for enterprise review |
+| `docs/COMPATIBILITY.md` | Browser/OS support tiers and fallbacks | Medium |
+| `docs/IP_HOLDER_GUIDE.md` | Plain-language owner guidance and claim limits | Medium |
+| `tools/` | Build, benchmark, demo-image generation, and bounded load test | Low/medium |
 | `dist/` | Committed ESM/CJS/minified bundles for direct download and script-tag use | Verify it matches a fresh build; do not hand-edit |
 
 The three JPEGs in `demo-masters/` are intentional demo fixtures. The
@@ -98,7 +104,10 @@ Inspect `createArchxMiddleware()` and follow one request through:
 - `authorize()` at both mint and redemption;
 - callback deadlines and ambiguous-result handling;
 - v2 claim validation and entitlement tightening;
-- one-time nonce and proof replay state;
+- one-time nonce and proof replay state, including whether a declared
+  multi-instance deployment uses one shared atomic store;
+- `kid` selection, active/previous signing keys, and issuing-key derivations
+  during rollover and retirement;
 - proof-of-possession key binding and signature inputs;
 - trusted-proxy/IP selection;
 - rate limits, quotas, processing queues, and bounded stores;
@@ -159,6 +168,25 @@ fingerprint registration through `onStegoIssue`, detector false-positive
 controls, geometry search limits, and the measured transform matrix in the
 README/research notes. The perceptual soft binding is a second discovery
 signal; neither mark is represented as AI-regeneration-proof.
+
+### 6. Operations and assurance claims
+
+Review `docs/OPERATIONS.md` against an actual staging deployment rather than
+accepting diagrams or configuration prose:
+
+- mint on instance A, redeem on B, and replay on A;
+- exhaust a quota across A and B;
+- stop or delay the shared store and confirm `503`, not a local fallback;
+- rotate and then retire a signing key during the rollover window;
+- repeat the replay and cross-viewer tests through the public CDN hostname;
+- forward security events to the intended SIEM and trigger test alerts;
+- run the load tool against staging with production-like images, auth, and
+  state-store placement;
+- exercise regional failover with unexpired tokens.
+
+`docs/COMPLIANCE.md` is a self-assessment. Do not report Archx as
+independently audited, ASVS-certified, SOC 2 compliant, or covered by a
+funded bug bounty unless separate evidence exists outside this repository.
 
 ## Manual checks worth performing
 

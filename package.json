@@ -59,6 +59,7 @@
     "test:browser": "node tests/browser-test.mjs",
     "test:all": "npm run build && npm test && npm run test:browser",
     "bench": "node tools/benchmark.mjs",
+    "load-test": "node tools/load-test.mjs",
     "verify": "npm run build && npm test && npm run test:browser && npm audit --audit-level=high"
   },
   "keywords": [
