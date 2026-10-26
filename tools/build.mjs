@@ -26,4 +26,5 @@ await build({
   outfile: 'dist/archx.min.js',
 });
 const size = fs.statSync('dist/archx.min.js').size;
-console.log(`\n✔ dist/archx.min.js  ${(size / 1024).toFixed(1)} kB minified`);
+// Keep stdout clean so lifecycle consumers such as `npm pack --json` remain machine-readable.
+console.error(`\n✔ dist/archx.min.js  ${(size / 1024).toFixed(1)} kB minified`);

@@ -23,12 +23,14 @@ No `<img>` is ever created. There is no image URL in your HTML to copy, no file 
 
 > **Honest up front:** no web technology can stop someone photographing their screen, pressing PrintScreen before page JS can react, or fully controlling their own browser — and no pixel watermark is immune to a determined AI-regeneration attack. What Archx is designed to ensure in the recommended server setup is that the **master file is never sent**, one-click theft stops working, bulk collection becomes slow/visible/rate-limited, replayed delivery URLs can be made useless, single-frame captures can be degraded, and anything that leaks is capped at the resolution/quality your server authorized and can carry visible, forensic, and blind-decoding attribution marks. Browser-delivered scrambling/encryption keys are obfuscation and transport friction—not DRM—because an authorized recipient controls the receiving browser. Full reasoning: [docs/RESEARCH.md](docs/RESEARCH.md).
 
+> **Reviewing the code?** Start with [docs/REVIEW_GUIDE.md](docs/REVIEW_GUIDE.md) for a fresh-clone verification path, repository map, suggested review order, and the security properties that matter most. Release changes are summarized in [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## Try to steal it (live demo)
 
 ```bash
-npm install
+npm ci
 npm run demo:images   # generates the 100-image demo gallery
 npm run build
 npm run demo          # http://localhost:4173
@@ -402,7 +404,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Server pixel scramble measured **170–224 MP/s** in the latest local run (1.9 ms at 800×536, 10.1 ms at 1600×1072, 9.4 ms at 1920×1080); full down-scale + scramble + q95 WebP took **169.9 ms at 900 px** as a one-time cached cost per distinct output variant, with AES-GCM in run-to-run noise at that size. Optional perceptual-fingerprint computation is off in the request path and intended for ingest/CLI use
 - Quality: on the detailed 800 px watch benchmark, q95 reconstruction measured **41.0 dB PSNR / 1.43 MAD** versus 36.6 dB / 2.56 MAD at the old q82. `lossless:true` is exact at the delivered size (800 px test payload ~360 kB lossless WebP vs ~128 kB q95), so use it selectively for hero/product detail.
-- Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; permanent 4xx/aborted fetches are not retried. Temporal work is the deliberate exception: shader interlace evaluates a small phase mask per fragment (plus one extra sample for inactive `lowres` fragments), while the frames engine spends one clamped-array pixel pass and one extra backing store per phase at setup, then only `drawImage`s. Either way, an interlaced image must present continuously while visible, so reserve it for selected hero/paid views rather than hundreds of thumbnails. In the Chromium interlace fixture, screenshots from opposite black-fill strip phases differed by **96.4 mean absolute channel value**, confirming that the compositor was actually presenting materially different incomplete frames
+- Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; permanent 4xx/aborted fetches are not retried. Temporal work is the deliberate exception: shader interlace evaluates a small phase mask per fragment (plus one extra sample for inactive `lowres` fragments), while the frames engine spends one clamped-array pixel pass and one extra backing store per phase at setup, then only `drawImage`s. Either way, an interlaced image must present continuously while visible, so reserve it for selected hero/paid views rather than hundreds of thumbnails. In the Chromium interlace fixture, screenshots from opposite black-fill strip phases differed by **about 96 mean absolute channel value** in recent runs, confirming that the compositor was actually presenting materially different incomplete frames
 - Server caches and security stores are entry- **and byte-bounded**, limiter clients expire, nonce claims fail closed when saturated, and image jobs pass through a bounded semaphore/queue. Trade-offs remain: per-token server watermarks/forensics/StegoMarks and `scrambleKeyMode:'per-token'` intentionally defeat cross-viewer output-cache reuse; Fortress strict memory bypasses the shared bitmap cache, but with default `cachePayload:true` it can decode privately retained scrambled bytes locally instead of reminting. Use the strongest per-viewer settings on valuable items, not every thumbnail.
 - Scrambled pixels compress worse than natural images (tile edges), so payloads run larger than an equivalent plain WebP. Lower `grid` (e.g. 6) if bytes matter more than shuffle strength.
 
@@ -454,11 +456,12 @@ npm run test:all
 
 ```
 src/         browser library (archx.js) + shared scramble/crypto core (scramble.js)
-dist/        built bundles (esm / cjs / minified browser-global)
+dist/        committed built bundles (ESM / CJS / minified browser-global; regenerate, do not hand-edit)
 server/      token+scramble middleware, image scrambler, archx-protect + archx-detect CLIs, demo server
 demo/        interactive demo + attack simulator, automated-test harness
-demo-masters/  demo originals — deliberately NOT web-accessible
-docs/        RESEARCH.md — how image theft works, what the big platforms do, threat model
+demo-masters/  three tracked demo originals — deliberately NOT web-accessible; generated gallery is ignored
+docs/        REVIEW_GUIDE.md for reviewers + RESEARCH.md threat/design research
+examples/    copy-and-run protection ladder and custom-flags showcase
 tests/       unit + real-browser test suites
 tools/       build, demo-image generator, benchmarks
 ```

@@ -880,12 +880,13 @@ error — see the README checklist).
   instances. Temporal-interlace checks render pixel subsets through the
   shader engine, two-phase strips and three-phase randomized blocks through
   pre-rendered Canvas2D frames, and Lens through both engines. In a retained
-  black-fill strip fixture, four real Puppeteer element screenshots produced
-  a maximum opposite-phase MAD of **96.4/255**, while the debug phase index
-  advanced between captures—evidence that the compositor presented different
-  incomplete phases, not merely that configuration state changed.
+  black-fill strip fixture, successive real Puppeteer element screenshots
+  produced a maximum opposite-phase MAD of **about 96/255** in recent runs,
+  while the debug phase index advanced between captures—evidence that the
+  compositor presented different incomplete phases, not merely that
+  configuration state changed.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  **3.9 s** in the latest deliberately non-lazy headless test with
+  **about 3.7–3.9 s** in recent deliberately non-lazy headless tests with
   high-quality derivatives and 0 `<img>` tags; browser bundle **94.3 KiB
   minified / 30.9 KiB gzipped**. The latest local benchmark measured
   `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
