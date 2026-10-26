@@ -886,7 +886,7 @@ error — see the README checklist).
   compositor presented different incomplete phases, not merely that
   configuration state changed.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  **about 3.7–3.9 s** in recent deliberately non-lazy headless tests with
+  **about 3.7–4.0 s** in recent deliberately non-lazy headless tests with
   high-quality derivatives and 0 `<img>` tags; browser bundle **94.3 KiB
   minified / 30.9 KiB gzipped**. The latest local benchmark measured
   `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
