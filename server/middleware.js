@@ -3032,9 +3032,9 @@ export function createArchxMiddleware(options = {}) {
         // validateTokenClaims() below, which run before any sensitive
         // action; a request that passes this shape check still cannot
         // proceed without a valid signature from a known key.
-        // codeql[js/user-controlled-bypass] Pre-authentication shape check; authorization is the HMAC verification immediately below.
+        // codeql[js/user-controlled-bypass]
         if ((!cfg.allowQueryTokens && queryTokens.length > 0) || tokenValues.length !== 1 ||
-            // codeql[js/user-controlled-bypass] Pre-authentication shape check; authorization is the HMAC verification immediately below.
+            // codeql[js/user-controlled-bypass]
             typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192) {
           return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-count' });
         }
