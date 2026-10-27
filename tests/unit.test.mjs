@@ -98,13 +98,17 @@ test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
 });
 
 test('fused pad+scramble is byte-identical to pad-then-scramble (incl. awkward sizes)', () => {
+  // Padding replicates edge pixels (never black): a pure-black strip would
+  // tell a keyless solver exactly which tiles are edge tiles and how they
+  // are flipped. The manual pad below mirrors that contract.
   const manualPad = (raw, w, h, pw, ph) => {
     const out = new Uint8Array(pw * ph * 4);
     for (let y = 0; y < ph; y++) {
       for (let x = 0; x < pw; x++) {
         const di = (y * pw + x) * 4;
-        if (x < w && y < h) out.set(raw.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), di);
-        else out[di + 3] = 255;
+        const sx = Math.min(x, w - 1);
+        const sy = Math.min(y, h - 1);
+        out.set(raw.subarray((sy * w + sx) * 4, (sy * w + sx) * 4 + 4), di);
       }
     }
     return out;
@@ -2343,4 +2347,243 @@ test('AVIF derivatives round-trip, carry the avif MIME, and beat WebP bytes at c
     'AVIF derivative unscrambles back near the master');
   assert.ok(avif.bytes.length < webp.bytes.length,
     `expected AVIF (${avif.bytes.length}) to be smaller than WebP q88 (${webp.bytes.length}) for photographic content`);
+});
+
+/* ---------- v1.11 external-review fixes ---------- */
+
+test('embedding a StegoMark requires an explicit stegoKey distinct from the scramble key', async () => {
+  const master = await syntheticMaster(640, 420);
+  await assert.rejects(
+    scrambleImage(master, { key: 'test-key', stegoPayload: 'buyer-1' }),
+    /stegoKey is required/,
+    'silent fallback to the (public) scramble key must never happen again',
+  );
+  await assert.rejects(
+    scrambleImage(master, { key: 'test-key', stegoPayload: 'buyer-1', stegoKey: 'test-key' }),
+    /stegoKey/,
+  );
+  const ok = await scrambleImage(master, {
+    key: 'test-key', stegoPayload: 'buyer-1', stegoKey: 'a-private-stego-key',
+  });
+  assert.equal(ok.header.sg, 1);
+  // The builder must fail closed the same way instead of embedding with the
+  // public manifest key.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-stego-key-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), master);
+  await assert.rejects(buildArchxAssets({
+    inputDir: mastersDir,
+    outputDir: path.join(root, 'out'),
+    key: 'public-manifest-key',
+    stegoPayload: 'buyer-shared',
+  }), /explicit dedicated secret/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('scramble padding replicates edge pixels (no black-strip position oracle)', () => {
+  const w = 103, h = 61, grid = 8;
+  const src = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    src[i * 4] = 200; src[i * 4 + 1] = 180; src[i * 4 + 2] = 160; src[i * 4 + 3] = 255;
+  }
+  const { pw, ph } = paddedSize(w, h, grid);
+  assert.ok(pw > w && ph > h, 'test geometry must actually need padding');
+  const scrambled = scramblePixelsPadded(src, w, h, buildScramblePlan(grid, 'pad-oracle'));
+  assert.equal(scrambled.length, pw * ph * 4);
+  // A uniform source must stay uniform: any black pixel would mark its tile
+  // as a boundary tile and reveal position/flip to a keyless solver.
+  for (let i = 0; i < pw * ph; i++) {
+    assert.deepEqual(
+      [scrambled[i * 4], scrambled[i * 4 + 1], scrambled[i * 4 + 2]],
+      [200, 180, 160],
+      `padded pixel ${i} must be the replicated edge color, never black`,
+    );
+  }
+});
+
+test('stego confidence is capped below 0.5 whenever nothing is found', () => {
+  // Attribution tooling must never print {found:false, confidence:0.99}:
+  // a high number next to a negative verdict reads as evidence.
+  const w = 360, h = 240;
+  const noise = new Uint8Array(w * h * 4);
+  let s = 1234567;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  for (let i = 0; i < noise.length; i++) noise[i] = Math.floor(rnd() * 256);
+  for (let i = 3; i < noise.length; i += 4) noise[i] = 255;
+  for (const profile of ['standard', 'robust', 'auto']) {
+    const r = detectStegoFingerprint(noise, w, h, { key: 'conf-cap', profile });
+    if (!r.found) assert.ok(r.confidence <= 0.49, `${profile}: confidence ${r.confidence} must stay <= 0.49 when !found`);
+  }
+});
+
+test('mirrored (flopped) suspects are recovered and flagged', () => {
+  const w = 360, h = 240;
+  const src = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    src[i] = (x * 255 / w) | 0; src[i + 1] = (y * 255 / h) | 0; src[i + 2] = ((x + y) * 255 / (w + h)) | 0; src[i + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(src, w, h, 'mirror-probe', { key: 'mk', profile: 'robust', strength: 6 });
+  const flipped = new Uint8Array(marked.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    flipped.set(marked.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (y * w + (w - 1 - x)) * 4);
+  }
+  const direct = detectStegoFingerprint(flipped, w, h, { key: 'mk', profile: 'robust' });
+  assert.equal(direct.found, false, 'a flopped grid must not decode unmirrored');
+  const r = detectStegoFingerprint(flipped, w, h, { key: 'mk', profile: 'auto', searchGeometry: true });
+  assert.equal(r.found, true);
+  assert.equal(r.mirrored, true);
+  assert.equal(r.fingerprint, stegoFingerprint('mirror-probe'));
+});
+
+test('Redis cache values survive a string-returning (default node-redis v4) client', async () => {
+  const store = new Map();
+  // Simulates node-redis v4 WITHOUT returnBuffers: GET yields a UTF-8 string.
+  const stringyClient = {
+    async get(key) {
+      const v = store.get(key);
+      if (v == null) return null;
+      return Buffer.isBuffer(v) ? v.toString('utf8') : v;
+    },
+    async set(key, value) { store.set(key, value); return 'OK'; },
+    async eval() { throw new Error('not used in this test'); },
+  };
+  const redis = createRedisStateStore({ client: stringyClient, prefix: 'test111' });
+  const binary = Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256));
+  await redis.setCache('k1', binary, { ttlMs: 60000 });
+  const back = await redis.getCache('k1');
+  assert.ok(Buffer.isBuffer(back), 'getCache must return a Buffer');
+  assert.deepEqual(back, binary, 'every byte >= 0x80 must survive the string round-trip');
+});
+
+test('malformed token requests do not burn quota; per-IP quota still binds valid ones', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-quota-order-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'quota-order-secret-for-unit-tests-32ch',
+    imagesDir: root,
+    authorize: async () => true,
+    quotas: { windowMs: 60000, perIp: 2 },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (let i = 0; i < 5; i++) {
+    const bad = await postToken(`${base}/archx/token/cat?w=abc`);
+    assert.equal(bad.status, 400, 'malformed width rejected');
+  }
+  for (let i = 0; i < 2; i++) {
+    const ok = await postToken(`${base}/archx/token/cat?w=320`);
+    assert.equal(ok.status, 200, `valid mint ${i + 1} must not be starved by earlier 400s`);
+  }
+  const limited = await postToken(`${base}/archx/token/cat?w=320`);
+  assert.equal(limited.status, 429, 'third valid mint hits the per-IP quota');
+});
+
+test('distinct-image abuse alert latches: one suspicious event, continued enforcement', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-siem-latch-'));
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `img${i}.jpg`), await syntheticMaster(320, 240));
+  let suspicious = 0;
+  const handler = createArchxMiddleware({
+    secret: 'siem-latch-secret-for-unit-tests-32chr',
+    imagesDir: root,
+    authorize: async () => true,
+    abuseDetection: { distinctImages: 2, windowMs: 60000, action: 'deny' },
+    onSecurityEvent: (event) => { if (event.type === 'archx.suspicious_scraping') suspicious++; },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const statuses = [];
+  for (let i = 0; i < 8; i++) statuses.push((await postToken(`${base}/archx/token/img${i}?w=320`)).status);
+  assert.equal(suspicious, 1, 'suspicious alert fires once per threshold crossing, not per request');
+  assert.ok(statuses.slice(-3).every((s) => s === 429), 'deny action keeps enforcing after the latched alert');
+});
+
+test('per-token stego derivatives are not written to the shared output cache', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-pertoken-cache-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(480, 320));
+  const handler = createArchxMiddleware({
+    secret: 'pertoken-cache-secret-for-tests-32chr!',
+    imagesDir: root,
+    authorize: async () => true,
+    steganography: { perToken: true, scope: 'viewer' },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (let i = 0; i < 2; i++) {
+    const token = await (await postToken(`${base}/archx/token/cat?w=320`, { headers: { 'x-viewer': 'v1' } })).json();
+    const res = await redeemToken(base, token);
+    assert.equal(res.status, 200);
+    await res.arrayBuffer();
+  }
+  assert.equal(handler.stats().outputCacheEntries, 0,
+    'unique per-token derivatives must not pollute the RAM output cache');
+});
+
+test('IPv6 limiter keys group by /64 (rotation inside the prefix shares one quota)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-ipv6-quota-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'ipv6-quota-secret-for-unit-tests-32chr',
+    imagesDir: root,
+    authorize: async () => true,
+    trustProxy: true,
+    trustedProxyHops: 1,
+    quotas: { windowMs: 60000, perIp: 2 },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const mint = (ip) => postToken(`${base}/archx/token/cat?w=320`, { headers: { 'x-forwarded-for': ip } });
+  assert.equal((await mint('2001:db8:85a3:8d3:1:2:3:4')).status, 200);
+  assert.equal((await mint('2001:db8:85a3:8d3:9:9:9:9')).status, 200, 'same /64, second mint');
+  assert.equal((await mint('2001:db8:85a3:8d3:ffff::1')).status, 429, 'same /64 rotated IID shares the exhausted quota');
+  assert.equal((await mint('2001:db8:85a3:9999::1')).status, 200, 'different /64 has its own quota');
+});
+
+test('stego keyScope viewer diversifies layout keys per viewer (anti-collusion alignment)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-keyscope-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(480, 320));
+  const registry = [];
+  const handler = createArchxMiddleware({
+    secret: 'keyscope-secret-for-unit-tests-32chrs',
+    imagesDir: root,
+    authorize: async (req) => ({ viewerId: req.headers['x-viewer'] || 'anon' }),
+    steganography: { perToken: false, scope: 'viewer', keyScope: 'viewer' },
+    onStegoIssue: (record) => registry.push(record),
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const fetchDerivative = async (viewer) => {
+    const token = await (await postToken(`${base}/archx/token/cat?w=320`, { headers: { 'x-viewer': viewer } })).json();
+    const res = await redeemToken(base, token, { headers: { 'x-viewer': viewer } });
+    assert.equal(res.status, 200);
+    return new Uint8Array(await res.arrayBuffer());
+  };
+  const alice1 = await fetchDerivative('alice');
+  const alice2 = await fetchDerivative('alice');
+  const bob = await fetchDerivative('bob');
+  assert.deepEqual(alice1, alice2, 'same viewer reuses the same keyed derivative');
+  assert.notDeepEqual(alice1, bob, 'different viewers get different layout keys => different marked pixels');
+  assert.ok(registry.length >= 3 && registry.every((r) => r.keyScope === 'viewer'),
+    'issuance registry records the key scope needed to reproduce detection keys');
+});
+
+test('hardened defaults now encrypt; config audit warns on unencrypted or v1-plan deployments', () => {
+  const hardened = withHardenedProductionDefaults({ secret: 'x'.repeat(40), authorize: () => true, images: [] });
+  assert.equal(hardened.encrypt, true);
+  const audit = auditArchxServerConfig({
+    secret: 'x'.repeat(40), authorize: () => true, images: [],
+  });
+  assert.ok(audit.warnings.some((w) => /encrypt is off/.test(w)), 'audit must call out jigsaw-solvable unencrypted payloads');
+  assert.ok(audit.warnings.some((w) => /scramblePlanVersion 1/.test(w)), 'audit must call out the 32-bit plan seed');
 });

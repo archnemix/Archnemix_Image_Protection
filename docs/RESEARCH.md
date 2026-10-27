@@ -928,6 +928,115 @@ closing the gaps it exposed:
   byte-identical against the released implementation), timings within
   noise, bundle +0.4 kB gzip.
 
+### 2.19 External adversarial review — verification and response (v1.11)
+
+An outside reviewer penetration-tested v1.10 and published a detailed
+problem list (overall 6.8/10). Every claim was re-verified against the
+code before acting; this section records what held up, what did not, and
+what changed. Measured on this repo's fixtures (`neon-portrait.jpg`,
+synthetic masters), Node 22 sandbox.
+
+**Confirmed real bugs — fixed.**
+
+- *Public StegoMark key.* `scramble-image`/`build-assets`/CLIs defaulted
+  `stegoKey` to the scramble `key`, which static builds print in the
+  manifest: anyone could detect/subtract/forge marks. Now a hard error
+  (breaking; see CHANGELOG). The middleware fleet path was already safe
+  (per-image key derived from the server secret).
+- *Redis binary corruption.* `getCache` re-encoded node-redis v4's
+  default UTF-8 string replies, mangling every byte ≥ 0x80. Values are
+  now base64-armored (+33% at rest; ≈ ×1.37 with the HMAC tag).
+- *Quota burn + counter smearing.* Minting incremented quotas before
+  request-shape validation, and all dimensions unconditionally. Now
+  shape-first, narrow→wide, early-exit. Related: the scrape alert
+  re-fired per request (distinct-count caps at threshold+1 by design) —
+  it now latches once per client per window; enforcement unchanged.
+- *IPv6 /64 rotation.* Limiter/quota/distinct keys now group IPv6 by
+  /64; token IP binding intentionally still uses the exact address.
+- *Per-token cache pollution.* Unique-per-token derivatives previously
+  filled RAM/disk/Redis caches they could never hit; reads and writes
+  are now skipped for those derivatives.
+- *Black padding oracle.* True and worse than framed: pad tiles were
+  identifiable *with flip state* from the black strip alone (8/8 in the
+  review). Padding now replicates edge pixels (server + client);
+  displayed (cropped) pixels are byte-identical.
+- *Confidence on negative verdicts.* `confidence` is capped at 0.49
+  when `found:false`.
+- *fortress60 median algebra.* The fixed temporal cycle made a 6-frame
+  multiset `{c, c+d, c−d}×2` — median exactly `c`. The shader now
+  re-seeds noise per presented frame, jitters amplitude, and randomizes
+  sign/phase order (shuffle bag, balance-corrected). Long recordings
+  still average out; the exact short-window shortcut is gone.
+- *Lens center-cell accounting.* Stitching detection counted only the
+  cell under the disc center. It now counts the disc's full cell union
+  (8×8 grid), threshold recalibrated to the same ~72% coverage intent.
+- *Unmonitored hooks.* `JSON.parse`, `attachShadow`,
+  `ReadableStream.getReader` are captured, audited, and used on
+  sensitive paths; the vault verifies `preserveDrawingBuffer:false`
+  actually took effect. A pre-load `Proxy`/`toString` forgery still
+  evades this (it always could) — the point is removing free wins.
+- *Mirrored suspects.* StegoMark detection now tries the horizontally
+  flipped candidate (`mirrored:true`; verified both profiles).
+
+**Confirmed weaknesses — mitigated or consciously traded.**
+
+- *Keyless jigsaw reassembly of unencrypted payloads* (review: 94.6%
+  top-1 plain, 96.4% with the pad oracle, 0% encrypted). Agreed: a
+  permutation is obfuscation and tile-edge continuity is public
+  information. Mitigations: pad oracle removed; the hardened preset now
+  defaults `encrypt:true`; config audit warns on unencrypted/v1
+  deployments. Unencrypted mode remains available for public-catalog
+  friction, labelled as such.
+- *Collusion.* Averaging ≥2 copies erases the mark (any LSB/spatial
+  mark), and with a shared layout key, majority voting + CRC repair can
+  synthesize a phantom fingerprint. Our reproduction: 3-buyer average
+  on `neon-portrait` robust → `found:false` (7 corrections, rejected by
+  the v1.10 gates), but the mechanism is real and image-dependent.
+  `keyScope:'viewer'` now breaks cell-by-cell alignment between
+  buyers; `archx-detect` flags repaired decodes as
+  corroboration-required. True anti-collusion codes (Tardos/Boneh–Shaw)
+  are future work.
+- *Geometric fragility.* Rotation (≥ ~1°), warp, and heavy asymmetric
+  crops break the fixed-grid mark. Search widened (quarter origins,
+  fine-scale ±3.5%, ±4-cell offset roam) and mirror handled, but our
+  own 82% asymmetric-crop probe still fails on busy texture —
+  signal/boundary-limited, not search-limited. This mark class does not
+  survive arbitrary geometry; a feature/Fourier-Mellin-synchronized or
+  learned mark (TrustMark/WAM-class) is the honest path and is **not**
+  bundled: it would be a model dependency with its own removal/transfer
+  attacks, evaluated separately rather than smuggled in.
+- *Mark visibility.* Measured PSNR at strength 6: 33.4 dB (standard),
+  30.4 dB (robust) — the review's ~30.7 dB is accurate; strength 3
+  measures 39.4/35.9 dB with weaker survival. Default unchanged
+  (changing it would silently alter every issued mark); choose per
+  content with eyes open (SECURITY.md table).
+- *Same-origin untainted shield/lite.* True by platform rules; the
+  client now emits `archx-taint-unavailable` so the state is visible
+  instead of silent. Cross-origin API/CDN deploys get full taint.
+- *Cold-view latency (their 339 ms).* Not independently reproduced at
+  that size on this sandbox, but the shape is right: an uncached view
+  costs a full Sharp transform. The answer remains architectural
+  (precomputed catalogs, width buckets, warm caches) plus this round's
+  stat/KeyObject caching — worker-thread offload of the JS stages and
+  A/B two-variant tile streaming were evaluated and deferred: both are
+  protocol/client rewrites whose benefit concentrates at >1080p
+  uncached traffic, and neither changes the security story.
+
+**Refuted on this codebase.**
+
+- *"41 MB of Float64 integral tables in embedStegoFingerprint."* No
+  such tables exist; the embed allocates the output frame plus small
+  per-code arrays. Measured embed: 18 ms @1.15 MP, 65–86 ms @4.59 MP
+  (their ~68 ms/2.58 MP timing is in range; the memory claim is not).
+- *"Uncapped per-image WebGL contexts."* A global budget of 8 contexts
+  with 2D fallback already existed; this round adds the
+  `archx-webgl-budget` event so the fallback is observable.
+
+**Held up under their testing** (unchanged): no `<img>` elements,
+closed shadow roots, decoy `toDataURL`, cross-origin taint, black
+vault readback, naive-hook detection, path traversal / Fetch Metadata /
+DPoP replay / width-clamp / race handling.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

@@ -140,7 +140,8 @@ for (const width of [640, 960, 1600]) {
   server[`cold_catalog_${width}`] = await coldBench(inputs, `catalog q88 → ${width}px`, { maxWidth: width, quality: 88, processing: catalogProcessing });
 }
 server.cold_fullmarks_960 = await coldBench(inputs, 'q95 + watermark + forensic + stego → 960px', {
-  maxWidth: 960, quality: 95, watermark: '© ARCHX', forensicSeed: 'bench-session', steganography: true,
+  maxWidth: 960, quality: 95, watermark: '© ARCHX', forensicSeed: 'bench-session',
+  steganography: true, stegoKey: 'bench-only-stego-key',
 });
 server.cold_aes_catalog_960 = await coldBench(inputs, 'catalog q88 + AES-GCM → 960px', {
   maxWidth: 960, quality: 88, processing: catalogProcessing, aesKey: generateKeyBase64(),

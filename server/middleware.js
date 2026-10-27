@@ -559,7 +559,7 @@ function isPlainObject(value) {
 
 const TOKEN_CLAIM_FIELDS = new Set([
   'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm',
-  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'nsg', 'b', 'jkt',
+  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'b', 'jkt',
 ]);
 
 /** Strict server-side claim validation for v2 Archx image tokens. Signature
@@ -592,6 +592,7 @@ export function validateTokenClaims(payload, {
     if (payload.sgv !== undefined && payload.sgv !== 2) return false;
     if (payload.sge !== undefined && payload.sge !== 0 && payload.sge !== 1) return false;
     if (payload.sgi !== undefined && payload.sgi !== 1) return false;
+    if (payload.sgk !== undefined && payload.sgk !== 1) return false;
     if (payload.nsg !== undefined && payload.nsg !== 1) return false;
     if (payload.sgs !== undefined && (typeof payload.sgs !== 'number' || !Number.isFinite(payload.sgs) || payload.sgs < 1 || payload.sgs > 16)) return false;
     if (payload.sgx !== undefined && (!Number.isInteger(payload.sgx) || payload.sgx < 4 || payload.sgx > 64)) return false;
@@ -667,6 +668,8 @@ function parseProofPublicKeyHeader(value) {
  * non-extractable private key; it does not stop script running in the
  * legitimate page or the browser operator from requesting a proof.
  */
+const proofKeyCache = new Map(); // jkt -> KeyObject (bounded, process-local)
+
 function verifyProofOfPossession({ header, token, expectedJkt, method, target, now = Date.now() }) {
   try {
     if (typeof header !== 'string' || !header || header.length > 4096 ||
@@ -690,7 +693,15 @@ function verifyProofOfPossession({ header, token, expectedJkt, method, target, n
     const expectedAth = crypto.createHash('sha256').update(token, 'utf8').digest();
     const givenAth = decodeBase64UrlStrict(proof.ath, { minBytes: 32, maxBytes: 32 });
     if (!givenAth || !crypto.timingSafeEqual(givenAth, expectedAth)) return null;
-    const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    // KeyObject construction (JWK parse + curve validation) dominates the
+    // non-signature cost of proof verification; cache by RFC 7638
+    // thumbprint, which was just proven to identify this exact JWK.
+    let publicKey = proofKeyCache.get(expectedJkt);
+    if (!publicKey) {
+      publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+      if (proofKeyCache.size >= 512) proofKeyCache.clear();
+      proofKeyCache.set(expectedJkt, publicKey);
+    }
     const ok = crypto.verify(
       'sha256',
       Buffer.from(`v1.${parts[1]}`, 'utf8'),
@@ -705,10 +716,11 @@ function validateStegoConfig(value) {
   try {
     if (typeof value === 'boolean') return true;
     if (!isPlainObject(value)) return false;
-    const fields = new Set(['perToken', 'scope', 'profile', 'strength', 'gridX', 'gridY']);
+    const fields = new Set(['perToken', 'scope', 'keyScope', 'profile', 'strength', 'gridX', 'gridY']);
     if (Object.keys(value).some((field) => !fields.has(field))) return false;
     if (value.perToken !== undefined && typeof value.perToken !== 'boolean') return false;
     if (value.scope !== undefined && !['viewer', 'image'].includes(value.scope)) return false;
+    if (value.keyScope !== undefined && !['image', 'viewer'].includes(value.keyScope)) return false;
     if (value.profile !== undefined && !['standard', 'robust'].includes(value.profile)) return false;
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
@@ -1113,7 +1125,7 @@ function inspectServerConfig(options = {}) {
     }
   }
   if (options.steganography !== undefined && !validateStegoConfig(options.steganography)) {
-    fail('steganography must be boolean or a bounded { perToken, profile, strength, gridX, gridY } object');
+    fail('steganography must be boolean or a bounded { perToken, scope, keyScope, profile, strength, gridX, gridY } object');
   }
   if (options.bindTokenTo !== undefined) {
     if (!isPlainObject(options.bindTokenTo)) fail('bindTokenTo must be an object');
@@ -1253,6 +1265,8 @@ function inspectServerConfig(options = {}) {
   if (!config.widthBuckets?.length) warn('widthBuckets is not configured: every viewport/DPR combination can create a distinct derivative and fragment the output cache; image-heavy sites should use canonical widths');
   if (!config.outputCacheDir && !suppliedStateStore) warn('no persistent outputCacheDir or shared state-store cache is configured: derivative reuse is limited to this process memory and is lost on restart');
   if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
+  if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only and can be reassembled keylessly by tile-edge continuity (jigsaw) solvers — enable encrypt:true for payload secrecy');
+  if ((options.scramblePlanVersion ?? 1) !== 2) warn('scramblePlanVersion 1 uses a 32-bit plan seed (brute-forceable permutation); deploy pv-aware clients and switch to scramblePlanVersion:2');
   if (options.forensic && config.forensicScope !== 'image') warn('viewer-scoped forensic marks make derivatives viewer-specific and reduce output-cache sharing; use forensicScope image for reusable catalog derivatives');
   const stegoCfgForWarning = typeof options.steganography === 'object' && options.steganography ? options.steganography : {};
   if (options.steganography && stegoCfgForWarning.scope !== 'image') warn('viewer/token-scoped StegoMark makes derivatives hard to share across viewers; use steganography { scope: "image", perToken: false } for reusable catalog derivatives');
@@ -1325,6 +1339,10 @@ export function withHardenedProductionDefaults(options = {}) {
     ttlSec: 120,
     callbackTimeoutMs: 10000,
     scramblePlanVersion: 2, // 128-bit permutation seed (see buildScramblePlan)
+    // Scrambling alone is obfuscation: tile-edge continuity solvers can
+    // reassemble unencrypted payloads without any key. AES-256-GCM is the
+    // actual secrecy layer, so the hardened preset turns it on.
+    encrypt: true,
     stegoRegistryFailure: 'deny',
     provenanceFailure: 'deny',
     ...options,
@@ -1588,15 +1606,25 @@ export function createArchxMiddleware(options = {}) {
     outputCacheDir = realDir;
   }
 
+  // realpath+stat on every request is two synchronous syscalls in the hot
+  // path. Cache the resolution for a second: containment is re-verified on
+  // every cache fill, and masterVersion (mtime+size) refreshes within the
+  // same bound, so a swapped master takes effect ≤1s later.
+  const indexedFileCache = new Map(); // id -> { at, filePath, stat }
   function resolveIndexedFile(id) {
     const entry = index.get(id);
     if (!entry) return null;
+    const now = Date.now();
+    const cached = indexedFileCache.get(id);
+    if (cached && now - cached.at < 1000) return { filePath: cached.filePath, stat: cached.stat };
     let real;
-    try { real = fs.realpathSync(entry.filePath); } catch { return null; }
-    if (entry.root && !isPathInside(entry.root, real)) return null;
+    try { real = fs.realpathSync(entry.filePath); } catch { indexedFileCache.delete(id); return null; }
+    if (entry.root && !isPathInside(entry.root, real)) { indexedFileCache.delete(id); return null; }
     let stat;
-    try { stat = fs.statSync(real); } catch { return null; }
-    if (!stat.isFile()) return null;
+    try { stat = fs.statSync(real); } catch { indexedFileCache.delete(id); return null; }
+    if (!stat.isFile()) { indexedFileCache.delete(id); return null; }
+    if (indexedFileCache.size > 10000) indexedFileCache.clear();
+    indexedFileCache.set(id, { at: now, filePath: real, stat });
     return { filePath: real, stat };
   }
 
@@ -1993,6 +2021,35 @@ export function createArchxMiddleware(options = {}) {
     }
     return 'unknown';
   };
+  // Rate/quota/abuse keys group IPv6 clients by /64 prefix: a single host
+  // typically controls a whole /64 (privacy extensions rotate interface
+  // IDs freely), so per-address limits are trivially evaded by rotation
+  // and the rotation also floods bounded limiter maps until blocked
+  // clients are evicted. Token IP BINDING deliberately keeps the exact
+  // address (requestIp) — only volumetric accounting groups.
+  const limiterIp = (req) => {
+    const ip = requestIp(req);
+    if (isIP(ip) !== 6) return ip;
+    try {
+      let addr = ip.toLowerCase();
+      const v4Tail = addr.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+      if (v4Tail) {
+        const hi = ((Number(v4Tail[1]) << 8) | Number(v4Tail[2])).toString(16);
+        const lo = ((Number(v4Tail[3]) << 8) | Number(v4Tail[4])).toString(16);
+        addr = addr.slice(0, addr.length - v4Tail[0].length) + hi + ':' + lo;
+      }
+      const halves = addr.split('::');
+      if (halves.length > 2) return ip;
+      const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
+      const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+      const missing = 8 - head.length - tail.length;
+      if (missing < 0) return ip;
+      const groups = [...head, ...Array(missing).fill('0'), ...tail]
+        .map((g) => (parseInt(g, 16) || 0).toString(16));
+      if (groups.length !== 8) return ip;
+      return groups.slice(0, 4).join(':') + '::/64';
+    } catch { return ip; }
+  };
   const hmacShort = (label, value, len = 24, keySecret = secret) =>
     crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
   const safeEqual = (a, b) => {
@@ -2232,49 +2289,59 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function quotaExceeded(req, id, viewerId, phase, keySecret = secret) {
-    const ip = requestIp(req);
+    const ip = limiterIp(req);
     const checks = [];
+    // NARROWEST scope first, and stop at the first limiting check:
+    // hitWindow both tests and increments, so evaluating wide global
+    // counters before a per-image rejection would burn global quota on
+    // requests that were never going to be served.
     if (phase === 'token') {
-      checks.push([`quota:ip:${ip}`, cfg.quotas.perIp, 'perIp']);
-      checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
       if (viewerId) {
         const viewerHash = hmacShort('quota-viewer', viewerId, 24, keySecret);
-        checks.push([`quota:viewer:${viewerHash}`, cfg.quotas.perViewer, 'perViewer']);
         checks.push([`quota:viewer-image:${viewerHash}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
+        checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+        checks.push([`quota:viewer:${viewerHash}`, cfg.quotas.perViewer, 'perViewer']);
+      } else {
+        checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
       }
+      checks.push([`quota:ip:${ip}`, cfg.quotas.perIp, 'perIp']);
     } else if (!oneTimeTokens) {
       // With replayable tokens, count redemptions too. With one-time tokens
       // the token-phase quota already corresponds to at most one download.
-      checks.push([`quota:redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
       if (viewerId) {
         checks.push([`quota:redeem-viewer-image:${hmacShort('quota-viewer', viewerId, 24, keySecret)}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
       }
+      checks.push([`quota:redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
     }
-    let retryAfterSec = 0;
-    let exceeded = null;
     for (const [key, max, name] of checks) {
       if (!max) continue;
       const result = await stateHitWindow(key, max, cfg.quotas.windowMs);
-      if (result.limited) {
-        exceeded = name;
-        retryAfterSec = Math.max(retryAfterSec, result.retryAfterSec);
-      }
+      if (result.limited) return { name, retryAfterSec: result.retryAfterSec };
     }
-    return exceeded ? { name: exceeded, retryAfterSec } : null;
+    return null;
   }
 
+  const abuseAlertLatch = new BoundedTtlSet({ maxEntries: 100000 });
   async function abusePattern(req, id, viewerId) {
     const threshold = cfg.abuseDetection.distinctImages;
     if (!threshold) return { suspicious: false, distinct: 0 };
-    const keys = [`distinct:ip:${requestIp(req)}`];
+    const keys = [`distinct:ip:${limiterIp(req)}`];
     if (viewerId) keys.push(`distinct:viewer:${hmacShort('quota-viewer', viewerId, 24)}`);
     let distinct = 0;
     let crossed = false;
     for (const key of keys) {
       const result = await stateTrackDistinct(key, id);
       distinct = Math.max(distinct, result.distinct);
-      // Emit once at the crossing edge; a deny policy continues to deny above it.
-      if (result.isNew && result.distinct === threshold + 1) crossed = true;
+      // Fire the alert at most ONCE per client per window. The tracker's
+      // bounded member set caps `distinct` at threshold+1, so the naive
+      // "distinct === threshold+1" edge re-triggers on every subsequent
+      // new image (an unbounded SIEM alert storm). The latch remembers
+      // the crossing until the window passes; a deny policy still denies
+      // on `suspicious` regardless of the latch.
+      if (result.distinct > threshold &&
+          abuseAlertLatch.claim(key, Date.now() + cfg.abuseDetection.windowMs)) {
+        crossed = true;
+      }
     }
     return { suspicious: distinct > threshold, crossed, distinct };
   }
@@ -2332,7 +2399,7 @@ export function createArchxMiddleware(options = {}) {
 
   function rateLimited(req, kind = 'i') {
     const max = kind === 'token' ? tokenRateMax : rateMax;
-    return stateHitWindow(`rate:${kind}:${requestIp(req)}`, max, 60000);
+    return stateHitWindow(`rate:${kind}:${limiterIp(req)}`, max, 60000);
   }
 
   function protectedHeaders(req, extra = {}) {
@@ -2383,6 +2450,28 @@ export function createArchxMiddleware(options = {}) {
     if (!entitlement) throw new MintDenied(403, 'forbidden', { id, phase: 'token', reason: 'authorization' });
     const viewerId = authorizationViewerId(entitlement);
     const trace = authorizationTrace(entitlement, viewerId);
+    // Request-SHAPE validation runs BEFORE any quota counter moves: a
+    // malformed request (bad ?w=, bad fit) or a broken entitlement must
+    // not burn the viewer's/IP's quota, or garbage requests could lock
+    // out legitimate users (worst case: a whole shared-NAT office).
+    const entitlementWidth = entitlement.maxWidth == null ? maxWidthCap : Number(entitlement.maxWidth);
+    if (!Number.isFinite(entitlementWidth) || entitlementWidth < 64) {
+      throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'invalid-entitlement-width' });
+    }
+    // The BROWSER asks for a width; the SERVER's entitlement caps it.
+    // A tampered client can no longer "just ask for 1920px" beyond policy.
+    const widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
+    const rawRequested = paramValue('w') || paramValue('bw') || '1200';
+    let requestedW = parseStrictInt(rawRequested);
+    const boxW = hasParam('bw') ? parseStrictInt(paramValue('bw')) : null;
+    const boxH = hasParam('bh') ? parseStrictInt(paramValue('bh')) : null;
+    const rawFit = String(paramValue('fit') || 'cover').toLowerCase();
+    if (requestedW == null || requestedW < 1 || requestedW > 100000 ||
+        (hasParam('bw') && (boxW == null || boxW < 1 || boxW > 100000)) ||
+        (hasParam('bh') && (boxH == null || boxH < 1 || boxH > 100000)) ||
+        !['cover', 'contain', 'fill'].includes(rawFit)) {
+      throw new MintDenied(400, 'bad request', { id, phase: 'token', viewerId, reason: 'bad-sizing' });
+    }
     const quota = await quotaExceeded(req, id, viewerId, 'token');
     if (quota) {
       throw new MintDenied(429, 'quota exceeded', {
@@ -2400,24 +2489,6 @@ export function createArchxMiddleware(options = {}) {
       throw new MintDenied(429, 'too many requests', {
         id, phase: 'token', viewerId, reason: 'distinct-image-abuse', headers: { 'Retry-After': '600' },
       });
-    }
-    // The BROWSER asks for a width; the SERVER's entitlement caps it.
-    // A tampered client can no longer "just ask for 1920px" beyond policy.
-    const entitlementWidth = entitlement.maxWidth == null ? maxWidthCap : Number(entitlement.maxWidth);
-    if (!Number.isFinite(entitlementWidth) || entitlementWidth < 64) {
-      throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'invalid-entitlement-width' });
-    }
-    const widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
-    const rawRequested = paramValue('w') || paramValue('bw') || '1200';
-    let requestedW = parseStrictInt(rawRequested);
-    const boxW = hasParam('bw') ? parseStrictInt(paramValue('bw')) : null;
-    const boxH = hasParam('bh') ? parseStrictInt(paramValue('bh')) : null;
-    const rawFit = String(paramValue('fit') || 'cover').toLowerCase();
-    if (requestedW == null || requestedW < 1 || requestedW > 100000 ||
-        (hasParam('bw') && (boxW == null || boxW < 1 || boxW > 100000)) ||
-        (hasParam('bh') && (boxH == null || boxH < 1 || boxH > 100000)) ||
-        !['cover', 'contain', 'fill'].includes(rawFit)) {
-      throw new MintDenied(400, 'bad request', { id, phase: 'token', viewerId, reason: 'bad-sizing' });
     }
     if (boxW > 0 && boxH > 0) {
       try {
@@ -2490,6 +2561,13 @@ export function createArchxMiddleware(options = {}) {
       issuedStegoProfile = entStegoCfg.profile ?? stegoGlobalCfg.profile ?? 'standard';
       if (issuedStegoProfile === 'robust') tokenPayload.sgv = 2;
       if (stegoScope === 'image') tokenPayload.sgi = 1;
+      // Viewer-scoped layout keys: colluding buyers then hold marks laid
+      // out under DIFFERENT spatial keys, so averaging/interleaving their
+      // copies no longer aligns cell-by-cell into a majority-vote phantom
+      // fingerprint (it can still erase — no pixel mark survives that —
+      // but it cannot frame a third party). Costs per-viewer derivatives.
+      const stegoKeyScope = entStegoCfg.keyScope ?? stegoGlobalCfg.keyScope ?? 'image';
+      if (stegoKeyScope === 'viewer' && stegoScope !== 'image') tokenPayload.sgk = 1;
       const fingerprintSubjectHash = stegoScope === 'image' ? '' : (trace.hash || viewerHash);
       if (entitlement.stegoFingerprint) {
         tokenPayload.sg = String(entitlement.stegoFingerprint);
@@ -2522,6 +2600,7 @@ export function createArchxMiddleware(options = {}) {
             issuedAt: new Date(iat).toISOString(),
             fingerprint: issuedFingerprint,
             profile: issuedStegoProfile,
+            keyScope: tokenPayload.sgk === 1 ? 'viewer' : 'image',
             keyId: activeSecretId,
           }], 'onStegoIssue callback');
         } catch {
@@ -3194,8 +3273,12 @@ export function createArchxMiddleware(options = {}) {
         const effectiveStegoGridX = payload.sgx ?? stegoGlobalCfg.gridX;
         const effectiveStegoGridY = payload.sgy ?? stegoGlobalCfg.gridY;
         const wmCachePart = payload.wm ? hmacShort('wm', JSON.stringify(payload.wm), 12, issuingSecret) : 'nowm';
+        const stegoKeySubject = payload.sgk === 1 ? (payload.th || payload.vh || '') : '';
+        const effectiveStegoKey = stegoPayload
+          ? deriveStegoKey(stegoKeySubject ? `${id}|viewer:${stegoKeySubject}` : id, issuingSecret)
+          : null;
         const stegoCachePart = stegoPayload
-          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}`
+          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}:k${hmacShort('sgkey', effectiveStegoKey || '', 8, issuingSecret)}`
           : 'nosg';
         // Cache identity contains only inputs that can change the delivered
         // bytes. Viewer/trace hashes are not added unconditionally: when a
@@ -3216,7 +3299,10 @@ export function createArchxMiddleware(options = {}) {
           `op${cfg.processing.maxOutputPixels}`,
         ].join(':');
         const cacheKey = [
-          'v2', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
+          // v3: padding changed from black to edge-replicate (v1.11); the
+          // version bump stops pre-fix black-padded entries being served
+          // from warm caches. Displayed pixels were already identical.
+          'v3', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,
@@ -3224,6 +3310,14 @@ export function createArchxMiddleware(options = {}) {
           stegoCachePart, processingCachePart,
         ].join('|');
         const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
+        // A derivative whose bytes depend on the one-time token nonce can
+        // never be served again (the token dies with this redemption), so
+        // writing it to RAM/disk/Redis only thrashes I/O and evicts
+        // reusable catalog entries. Skip every cache tier for those.
+        const perTokenDerivative = scrambleKeyMode === 'per-token' ||
+          (!!forensicSeed && forensicScope !== 'image' && forensicPerToken) ||
+          (stegoEnabled && payload.sgi !== 1 && payload.sgp !== 0);
+        const cacheable = !perTokenDerivative;
         const expectedCached = {
           grid,
           planVersion: scramblePlanVersion,
@@ -3233,13 +3327,13 @@ export function createArchxMiddleware(options = {}) {
             : deliveryFormat === 'jpeg' ? 'image/jpeg'
             : deliveryFormat === 'avif' ? 'image/avif' : 'image/webp',
         };
-        let bytes = getOutputCache(cacheKey);
+        let bytes = cacheable ? getOutputCache(cacheKey) : null;
         if (bytes) derivativeCacheStats.memoryHits++;
-        if (!bytes) {
+        if (!bytes && cacheable) {
           bytes = await getDiskOutputCache(sharedCacheKey, expectedCached);
           if (bytes) setOutputCache(cacheKey, bytes);
         }
-        if (!bytes) {
+        if (!bytes && cacheable) {
           bytes = await getSharedOutputCache(sharedCacheKey, expectedCached);
           if (bytes) {
             derivativeCacheStats.sharedHits++;
@@ -3318,7 +3412,7 @@ export function createArchxMiddleware(options = {}) {
                   forensicSeed,
                   forensic: typeof forensic === 'object' ? forensic : {},
                   stegoPayload,
-                  stegoKey: stegoPayload ? deriveStegoKey(id, issuingSecret) : null,
+                  stegoKey: effectiveStegoKey,
                   stegoStrength: effectiveStegoStrength,
                   stegoProfile: effectiveStegoProfile,
                   steganography: stegoPayload ? {
@@ -3337,7 +3431,7 @@ export function createArchxMiddleware(options = {}) {
                   allowedInputFormats: cfg.processing.allowedInputFormats,
                   blockUntrustedSharpLoaders: cfg.processing.blockUntrustedSharpLoaders,
                 }));
-                if (master.current) {
+                if (master.current && cacheable) {
                   setOutputCache(cacheKey, result.bytes);
                   await setDiskOutputCache(sharedCacheKey, result.bytes);
                   await setSharedOutputCache(sharedCacheKey, result.bytes);
@@ -3450,6 +3544,7 @@ export function createArchxMiddleware(options = {}) {
     masterCache.clear(); masterCacheBytes = 0;
     outputCache.clear(); outputCacheBytes = 0;
     dimensionCache.clear();
+    try { abuseAlertLatch.close(); } catch { /* shutdown best effort */ }
     outputInFlight.clear();
     dimensionInFlight.clear();
     masterInFlight.clear();

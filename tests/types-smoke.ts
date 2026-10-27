@@ -10,7 +10,7 @@ import Archx, {
 import { createArchxMiddleware, withHardenedProductionDefaults } from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
 import { createRedisStateStore } from '../types/redis.js';
-import { scramblePixelsPadded } from '../types/scramble.js';
+import { scramblePixelsPadded, useJsonParser } from '../types/scramble.js';
 
 // --- client ---
 const options: ArchxLoadOptions = {
@@ -33,9 +33,11 @@ declare const bytes: Uint8Array;
 const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
-const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto' });
+const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true });
 const found: boolean = detection.found;
-void found;
+const mirrored: boolean | undefined = detection.mirrored;
+void found; void mirrored;
+useJsonParser(JSON.parse);
 
 // --- server ---
 const handler = createArchxMiddleware(withHardenedProductionDefaults({
@@ -43,6 +45,7 @@ const handler = createArchxMiddleware(withHardenedProductionDefaults({
   imagesDir: '/srv/masters',
   scramblePlanVersion: 2,
   format: 'avif',
+  steganography: { scope: 'viewer', keyScope: 'viewer', profile: 'robust' },
   authorize: async (_req, _id, { phase }) => phase === 'token',
 }));
 const server = http.createServer((req, res) => { void handler(req, res); });

@@ -71,6 +71,10 @@ if (!['standard', 'robust'].includes(stegoProfile) ||
   console.error('Archx protect: --stego-profile must be standard or robust; StegoMark grid values must be integers from 4 to 64');
   process.exit(1);
 }
+if (args.stego && !(process.env.ARCHX_STEGO_KEY || args['stego-key'])) {
+  console.error('Archx protect: --stego requires a dedicated forensic key (ARCHX_STEGO_KEY or --stego-key). It is never defaulted to the scramble key: wherever a client can unscramble, that key is public, and keying the watermark with it would let anyone remove or forge marks.');
+  process.exit(1);
+}
 const opts = {
   key,
   grid: args.grid ? Number(args.grid) : 8,
@@ -83,7 +87,7 @@ const opts = {
   watermark: args.watermark || null,
   forensicSeed: process.env.ARCHX_FORENSIC_SEED || args['forensic-seed'] || null,
   stegoPayload: args.stego || null,
-  stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || key,
+  stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || null,
   stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
   stegoProfile,
   steganography: {

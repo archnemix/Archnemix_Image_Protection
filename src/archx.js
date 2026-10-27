@@ -40,9 +40,10 @@ import {
   buildScramblePlan, tileRect, paddedSize,
   isArchxContainer, decodeContainer, decryptPayload,
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
+  useJsonParser,
 } from './scramble.js';
 
-export const VERSION = '1.10.0';
+export const VERSION = '1.11.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -85,9 +86,19 @@ const NATIVES = (() => {
     linkProgram: grab(gl2Proto, 'linkProgram') || grab(gl1Proto, 'linkProgram'),
     useProgram: grab(gl2Proto, 'useProgram') || grab(gl1Proto, 'useProgram'),
   };
+  const elementProto = typeof Element !== 'undefined' ? Element.prototype : null;
+  const streamProto = typeof ReadableStream !== 'undefined' ? ReadableStream.prototype : null;
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, 'fetch'),
+    // Extra hooks an external review demonstrated: a patched JSON.parse can
+    // log every container header (which carries the per-response AES key),
+    // a patched attachShadow can downgrade closed roots to open, and a
+    // patched SubtleCrypto/getReader can skim plaintext or stream chunks.
+    // Capture and USE the pristine versions on sensitive paths.
+    jsonParse: (() => { try { return typeof JSON !== 'undefined' && typeof JSON.parse === 'function' ? JSON.parse : null; } catch { return null; } })(),
+    attachShadow: grab(elementProto, 'attachShadow'),
+    streamGetReader: grab(streamProto, 'getReader'),
     createImageBitmap: grab(g, 'createImageBitmap'),
     ImageCtor: typeof Image !== 'undefined' ? Image : null,
     createObjectURL: typeof URL !== 'undefined' ? grab(URL, 'createObjectURL') : null,
@@ -108,6 +119,10 @@ const NATIVES = (() => {
   });
 })();
 
+// Route the core's container-header parsing through the captured parser so
+// a later JSON.parse hook cannot skim per-response AES keys.
+try { useJsonParser(NATIVES.jsonParse); } catch { /* non-fatal */ }
+
 function isNativeFn(fn) {
   if (typeof fn !== 'function') return false;
   try { return /\[native code\]/.test(NATIVES.fnToString.call(fn)); } catch { return false; }
@@ -126,6 +141,9 @@ export function auditIntegrity() {
     ['CanvasRenderingContext2D.prototype.drawImage', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ['CanvasRenderingContext2D.prototype.getImageData', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
     ['Document.prototype.createElement', typeof Document !== 'undefined' ? Document.prototype.createElement : null, NATIVES.docCreateElement],
+    ['JSON.parse', typeof JSON !== 'undefined' ? JSON.parse : null, NATIVES.jsonParse],
+    ['Element.prototype.attachShadow', typeof Element !== 'undefined' ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
+    ['ReadableStream.prototype.getReader', typeof ReadableStream !== 'undefined' ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
   ];
   const webglMethodNames = [
     'texImage2D', 'readPixels', 'drawArrays', 'drawElements',
@@ -173,6 +191,9 @@ export function auditIntegrityDetails() {
     ['CanvasRenderingContext2D.prototype.drawImage', NATIVES.ctxDrawImage],
     ['CanvasRenderingContext2D.prototype.getImageData', NATIVES.ctxGetImageData],
     ['Document.prototype.createElement', NATIVES.docCreateElement],
+    ['JSON.parse', NATIVES.jsonParse],
+    ['Element.prototype.attachShadow', NATIVES.attachShadow],
+    ['ReadableStream.prototype.getReader', NATIVES.streamGetReader],
   ]);
   for (const [label, capturedMap] of [
     ['WebGLRenderingContext', NATIVES.webgl1],
@@ -1655,7 +1676,9 @@ async function readResponseBytes(response, maxBytes) {
     }
     return bytes;
   }
-  const reader = response.body.getReader();
+  const reader = NATIVES.streamGetReader
+    ? NATIVES.streamGetReader.call(response.body)
+    : response.body.getReader();
   const chunks = [];
   let total = 0;
   try {
@@ -1722,7 +1745,7 @@ function isPlainClientObject(value) {
 
 function parseBoundedJson(bytes) {
   let value;
-  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  try { value = (NATIVES.jsonParse || JSON.parse)(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
   catch { throw nonRetryableError('Archx: token endpoint returned invalid JSON'); }
   if (!isPlainClientObject(value)) throw nonRetryableError('Archx: token endpoint returned an invalid response');
   return value;
@@ -2038,8 +2061,12 @@ function scrambleCanvasLocally(source, grid, key) {
   cleanPadded.width = pw; cleanPadded.height = ph;
   const cctx = getNativeContext(cleanPadded, '2d');
   setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
-  cctx.fillStyle = '#000'; cctx.fillRect(0, 0, pw, ph);
   nativeDrawImage(cctx, source, 0, 0);
+  // Replicate the nearest edge into the padding (matching the server-side
+  // scramblePixelsPadded): an opaque-black pad makes every boundary tile
+  // identifiable by its black strip, leaking tile position + flip state.
+  if (pw > w) nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, pw - w, h);
+  if (ph > h) nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, ph - h);
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
   const ctx = getNativeContext(scrambled, '2d');
@@ -2127,6 +2154,7 @@ export class ProtectedImage {
   #options; #host; #root; #wrap; #canvas; #tilesEl; #shieldEl;
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
   #decoy = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
+  #glBudgetWarned = false; #taintWarned = false;
   #taintImage = null;
   #risk = new Set(); #blackoutTimer = 0; #resizeTimer = 0; #visibilityObs = null; #realCtx = null;
   #attemptHandler = null; #loading = false; #visible = false; #unloaded = false;
@@ -2140,6 +2168,7 @@ export class ProtectedImage {
   #renderedW = 0; #renderedH = 0; #deviceBox = null;
   #glFrameBudget = 0; #glFrames = 0; #temporalSign = 1; #temporalPhase = 0;
   #temporalRaf = 0; #temporalFrames = null; #temporalIndex = 0; #temporalEngineActual = null;
+  #phaseBag = []; #signBalance = 0;
   #temporalInterlaceCache = undefined;
 
   /** Sanitised, secret-free view of the effective options. */
@@ -2178,7 +2207,12 @@ export class ProtectedImage {
       root = this.#host;
     } else {
       try {
-        root = this.#host.attachShadow({ mode: o.shadow === 'open' ? 'open' : 'closed' });
+        // Use the captured native so a hooked attachShadow cannot silently
+        // downgrade the closed root to an open one.
+        const attachInit = { mode: o.shadow === 'open' ? 'open' : 'closed' };
+        root = NATIVES.attachShadow
+          ? NATIVES.attachShadow.call(this.#host, attachInit)
+          : this.#host.attachShadow(attachInit);
       } catch {
         // Never silently downgrade a requested closed/open shadow root to
         // light DOM: that would expose exactly the canvases this library is
@@ -2361,15 +2395,31 @@ export class ProtectedImage {
     }
   }
 
-  /** Heuristic: a lens swept rapidly across many cells == stitching attempt. */
+  /** Heuristic: a lens swept rapidly across many cells == stitching attempt.
+   * Accounting uses every cell the revealed DISC touches, not just the cell
+   * under its center: with a ~30%-radius lens one park position exposes
+   * ~28% of the frame, so center-only counting let a stitcher harvest the
+   * whole image in 3-4 parks without ever tripping the threshold. */
   #trackLensTravel(point) {
     const now = performance.now();
-    const cell = Math.floor(point.y * 6) * 6 + Math.floor(point.x * 6);
-    this.#lensCells.push({ cell, now });
+    const cfg = typeof this.#options.lens === 'object' && this.#options.lens ? this.#options.lens : {};
+    const cells = 8;
+    const bw = this.#canvas?.width || 1;
+    const bh = this.#canvas?.height || 1;
+    const radiusPx = Math.max(24, Math.min(bw, bh) * (cfg.radius ?? 0.30));
+    const rx = radiusPx / bw, ry = radiusPx / bh;
+    const reachX = rx + 0.75 / cells, reachY = ry + 0.75 / cells;
+    for (let cy = 0; cy < cells; cy++) {
+      for (let cx = 0; cx < cells; cx++) {
+        const ccx = (cx + 0.5) / cells, ccy = (cy + 0.5) / cells;
+        const dx = (ccx - point.x) / Math.max(reachX, 1e-6);
+        const dy = (ccy - point.y) / Math.max(reachY, 1e-6);
+        if (dx * dx + dy * dy <= 1) this.#lensCells.push({ cell: cy * cells + cx, now });
+      }
+    }
     this.#lensCells = this.#lensCells.filter((c) => now - c.now < 8000);
     const distinct = new Set(this.#lensCells.map((c) => c.cell)).size;
-    const cfg = typeof this.#options.lens === 'object' && this.#options.lens ? this.#options.lens : {};
-    const threshold = cfg.scanCells ?? 26;
+    const threshold = cfg.scanCells ?? 46;
     if (distinct >= threshold) {
       this.#lensCells = [];
       if (this.#attemptHandler) this.#attemptHandler('lens-scan');
@@ -3165,6 +3215,17 @@ export class ProtectedImage {
       if (this.#options.mode !== 'vault') {
         this.#taintImage = await ensureTaintImage(this.#options, this.#source);
         if (this.#destroyed) return;
+        // Browser-enforced readback denial needs a CROSS-ORIGIN taint pixel;
+        // same-origin deployments can't get one automatically. Surface that
+        // state once so operators can see shield/lite is relying on the
+        // (weaker, hookable) instance-poisoning layer alone.
+        if (!this.#taintImage && !this.#taintWarned &&
+            this.#options.taintReadback !== 'off' && this.#options.taintReadback !== false) {
+          this.#taintWarned = true;
+          this.#host.dispatchEvent(new CustomEvent('archx-taint-unavailable', {
+            detail: { mode: this.#options.mode }, bubbles: true,
+          }));
+        }
       }
       this._render();
       this.#loaded = true;
@@ -3453,7 +3514,11 @@ export class ProtectedImage {
     }
 
     const mk = (phase) => {
-      const sign = phase % 2 ? -1 : 1;
+      // Per-phase amplitude diversity: with identical |delta| every phase,
+      // a short capture's per-pixel multiset is {c+d, c-d, ...} and its
+      // median/mean lands exactly on c. Varied amplitudes make short-window
+      // statistics land off-target; the eye still integrates the cycle.
+      const sign = (phase % 2 ? -1 : 1) * [1, 0.6, 1.3, 0.85][phase % 4];
       const c = makeCanvas(this.#host.ownerDocument);
       c.width = w; c.height = h;
       const cctx = getNativeContext(c, '2d');
@@ -3551,12 +3616,26 @@ export class ProtectedImage {
     if (this.#visible) this.#startTemporal2d();
   }
 
+  // Next temporal phase from a shuffled bag: every phase appears once per
+  // cycle (so the eye still integrates the full set at the same rate) but
+  // the ORDER is unpredictable, so fixed-cadence capture cannot parity-lock
+  // onto a stable subsequence.
+  #nextPhase(phases) {
+    if (!this.#phaseBag.length || this.#phaseBag[0] >= phases) {
+      this.#phaseBag = Array.from({ length: phases }, (_, i) => i);
+      for (let i = phases - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        [this.#phaseBag[i], this.#phaseBag[j]] = [this.#phaseBag[j], this.#phaseBag[i]];
+      }
+    }
+    return this.#phaseBag.pop();
+  }
+
   #paintTemporal2d() {
     const ctx = this.#realCtx;
     const frames = this.#temporalFrames;
     if (!ctx || !frames?.length || this.#destroyed || !this.#canvas) return;
-    const phase = ((this.#temporalIndex % frames.length) + frames.length) % frames.length;
-    this.#temporalPhase = phase;
+    const phase = this.#temporalPhase % frames.length;
     if (this.#options.lens && this.#frameCanvas) {
       this.#paintLens2d();
       return;
@@ -3575,6 +3654,7 @@ export class ProtectedImage {
       this.#temporalRaf = 0;
       if (this.#destroyed || !this.#temporalFrames || !this.#visible) return;
       this.#temporalIndex++;
+      this.#temporalPhase = this.#nextPhase(this.#temporalFrames.length);
       this.#paintTemporal2d();
       this.#temporalRaf = requestAnimationFrame(step);
     };
@@ -3619,7 +3699,7 @@ export class ProtectedImage {
       ctx.clip();
       const phaseFrames = this.#temporalFrames;
       const sharpSource = phaseFrames?.length
-        ? phaseFrames[((this.#temporalIndex % phaseFrames.length) + phaseFrames.length) % phaseFrames.length]
+        ? phaseFrames[this.#temporalPhase % phaseFrames.length]
         : frame;
       nativeDrawImage(ctx, sharpSource, 0, 0);
       ctx.restore();
@@ -3901,7 +3981,15 @@ export class ProtectedImage {
   }
 
   _tryRenderWebGL() {
-    if (glContextsInUse >= GL_CONTEXT_BUDGET && !this.#gl) return false;
+    if (glContextsInUse >= GL_CONTEXT_BUDGET && !this.#gl) {
+      if (!this.#glBudgetWarned) {
+        this.#glBudgetWarned = true;
+        this.#host.dispatchEvent(new CustomEvent('archx-webgl-budget', {
+          detail: { inUse: glContextsInUse, budget: GL_CONTEXT_BUDGET }, bubbles: true,
+        }));
+      }
+      return false;
+    }
     const canvas = this.#canvas;
     this.#tilesEl.hidden = true;
     canvas.hidden = false;
@@ -3916,6 +4004,21 @@ export class ProtectedImage {
         powerPreference: 'low-power',
       });
       if (!gl) return false;
+      // A getContext proxy can honor our call but rewrite the attributes:
+      // verify the actual context configuration before trusting the vault
+      // property (non-preserved buffer). A mismatch fails closed to 2D.
+      try {
+        const attrs = gl.getContextAttributes();
+        if (attrs && attrs.preserveDrawingBuffer === true) {
+          this.#host.dispatchEvent(new CustomEvent('archx-integrity', {
+            detail: { issue: 'preserveDrawingBuffer-rewritten' }, bubbles: true,
+          }));
+          const lose = gl.getExtension && gl.getExtension('WEBGL_lose_context');
+          try { lose && lose.loseContext && lose.loseContext(); } catch { /* best-effort */ }
+          this.#fresh2dCanvas();
+          return false;
+        }
+      } catch { /* attributes unreadable: proceed, other layers still apply */ }
       this.#gl = gl;
       glContextsInUse++;
       // Prototype readbacks already return black (drawing buffer is not
@@ -4297,7 +4400,13 @@ export class ProtectedImage {
       gl.uniform2f(L.uFitScale, sx, sy);
       gl.uniform2f(L.uFitOffset, ox, oy);
       gl.uniform1f(L.uScrambled, meta.plan ? 1 : 0);
-      gl.uniform1f(L.uSeed, (hashSeed(sessionId()) % 1000) / 37.0);
+      // Per-frame noise seed: with a session-constant seed the temporal
+      // delta for a block is the same value every cycle, so a 6-frame
+      // capture's multiset is {c, c+d, c-d}x2 and the median IS c exactly.
+      // Re-seeding every presented frame makes deltas independent draws —
+      // short-window medians land off-target and recovery needs long
+      // averaging (which remains possible; this raises cost, not a wall).
+      gl.uniform1f(L.uSeed, (hashSeed(sessionId()) % 1000) / 37.0 + Math.random() * 997.0);
       gl.uniform1f(L.uWmOn, this.#glWmOn || 0);
       const lensCfg = typeof this.#options.lens === 'object' && this.#options.lens ? this.#options.lens : {};
       gl.uniform1f(L.uLensOn, this.#options.lens ? 1 : 0);
@@ -4312,7 +4421,7 @@ export class ProtectedImage {
       const interlacePhase = ((this.#temporalPhase % interlacePhases) + interlacePhases) % interlacePhases;
       gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
       gl.uniform1f(L.uTemporalSign, this.#temporalSign);
-      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength : 0);
+      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
       gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
       gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
@@ -4339,11 +4448,16 @@ export class ProtectedImage {
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
       if (temporal) {
-        this.#temporalSign = -this.#temporalSign;
+        // Randomized sign (balance-corrected so long-run brightness stays
+        // neutral) and shuffled phase order: fixed +- alternation let a
+        // 60 fps recorder split frames by parity and separate the subsets
+        // exactly.
+        let nextSign = Math.random() < 0.5 ? 1 : -1;
+        if (Math.abs(this.#signBalance + nextSign) > 2) nextSign = -nextSign;
+        this.#temporalSign = nextSign;
+        this.#signBalance += nextSign;
         this.#temporalIndex++;
-        this.#temporalPhase = interlace
-          ? (interlacePhase + 1) % interlacePhases
-          : (this.#temporalPhase + 1) % 2;
+        this.#temporalPhase = this.#nextPhase(interlace ? interlacePhases : 2);
       }
       if (this.#glFrameBudget !== Infinity && this.#glFrameBudget > 0) this.#glFrameBudget--;
       const keepGoing = this.#glContinuous() || this.#glFrameBudget > 0;

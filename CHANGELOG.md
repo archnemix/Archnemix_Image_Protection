@@ -3,6 +3,100 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.11.0] — Unreleased
+
+External adversarial-review response (full verification matrix in
+`docs/RESEARCH.md` §2.19). The review's real server bugs are fixed; its
+client-side bypasses that are fixable in-page are mitigated; the rest is
+documented as measured, named residual risk.
+
+### Breaking (security)
+
+- **StegoMark embedding now requires an explicit, dedicated `stegoKey`.**
+  `scrambleImage`, `buildArchxAssets`, and the CLIs previously defaulted the
+  forensic layout key to the tile-scramble key — which is *public* wherever
+  browsers unscramble (e.g. printed in static-build manifests) — letting
+  anyone detect, subtract, or forge marks. Embedding with a payload but no
+  `stegoKey`, or with `stegoKey === key`, now throws. The middleware fleet
+  path already derived a secret key per image and is unaffected. Marks
+  embedded under the old default should be treated as unkeyed: rotate by
+  re-issuing derivatives with a dedicated secret.
+- **Scramble padding is now edge-replicate, not black.** The opaque-black
+  pad let keyless solvers identify every boundary tile (and its flip) for
+  free. Displayed pixels are unchanged (browsers crop the pad), but padded
+  derivatives regenerate (middleware cache namespace bumped to `v3`; static
+  builds re-hash naturally). The client-side local scramble matches.
+- `withHardenedProductionDefaults()` now sets `encrypt: true` (AES-256-GCM
+  per response). Unencrypted scrambled payloads are reassemblable by
+  tile-edge "jigsaw" solvers without any key; scrambling is obfuscation,
+  encryption is the secrecy layer. `configAudit` now warns when
+  `encrypt` is off or the v1 (32-bit-seed) plan is in use. (Deliberate
+  opt-outs in host options still win.)
+
+### Fixed
+
+- **Redis shared cache corruption with node-redis v4 defaults.** String
+  GETs UTF-8-mangled binary derivatives (bytes ≥ 0x80) so every shared read
+  missed. Cache values are now base64-armored (`b64:` prefix, ≈ +33–37%
+  storage); legacy entries degrade to HMAC-tag misses and self-heal.
+- **Quota burn by malformed requests.** Token minting now validates the
+  request shape (width syntax/bounds, box params, entitlement width)
+  *before* any quota counter moves, and quota dimensions are checked
+  narrow→wide with early exit. Junk `?w=` traffic can no longer starve a
+  victim IP's budget, and exhausted narrow limits stop inflating wider ones.
+- **SIEM alert storm.** The suspicious-scraping alert now latches: it fires
+  once per client per detection window (the deny action keeps enforcing).
+  One scraper can no longer mint an alert per request.
+- **IPv6 rotation evaded every IP-keyed control.** Rate/quota/distinct keys
+  now group IPv6 clients by /64 prefix (token IP *binding* deliberately
+  keeps the exact address).
+- **Per-token derivatives polluted shared caches.** Per-token scramble keys,
+  per-token forensic seeds, and per-token stego now skip RAM/disk/Redis
+  output-cache reads and writes entirely (unique bytes were evicting the
+  reusable majority and could never hit).
+- **StegoMark `{found:false, confidence:0.99}`.** Confidence is capped at
+  0.49 whenever `found` is false; it no longer presents a negative verdict
+  as near-certain to attribution tooling.
+
+### Security / forensics
+
+- `steganography.keyScope: 'viewer'` (opt-in): per-viewer layout keys so
+  colluding buyers' copies no longer align cell-by-cell — averaging can
+  still erase marks but cannot majority-vote a third party's phantom
+  fingerprint. The issuance registry records the scope. `archx-detect`
+  warns prominently on repaired decodes (corrections > 0) and the JSON
+  output carries `repaired`/`evidenceNote`.
+- Detection: mirrored (flopped) suspects are recovered automatically
+  (`profile:'auto', searchGeometry:true` → `mirrored:true`); geometry
+  search gained quarter-point origins, fine scale refinement, and a
+  native-resolution offset roam (±4 cells). Rotation/warp remain
+  unsupported — measured limits documented in RESEARCH §2.19.
+- Client: `JSON.parse`, `Element.attachShadow`, and
+  `ReadableStream.getReader` are captured at load and *used* on sensitive
+  paths (container headers carry AES keys; a hooked attachShadow could
+  downgrade closed roots), and audited. The vault verifies
+  `getContextAttributes().preserveDrawingBuffer === false` after context
+  creation and fails closed. Observed hook defeats against proxies,
+  CDP-level capture, and same-origin untainted canvas reads remain
+  documented residual risks.
+- Temporal shield/interlace no longer uses fixed algebra: per-frame noise
+  re-seeding, amplitude jitter, shuffled phase order, and balance-corrected
+  random signs replace the deterministic `{c, c+d, c−d}` cycle whose
+  6-frame median was exactly `c`. (Long captures still average out — cost
+  raised, not a wall; see SECURITY.md.)
+- Lens anti-stitching accounting counts every cell the revealed disc
+  touches (8×8 grid) instead of only the center cell; default threshold
+  recalibrated (26/36 → 46/64).
+- Client events: `archx-taint-unavailable` (shield/lite without a
+  cross-origin taint pixel), `archx-webgl-budget` (8-context budget forced
+  a 2D fallback), `archx-integrity` (rewritten context attributes).
+
+### Performance
+
+- Hot path: 1 s TTL cache for indexed-master realpath/stat; DPoP public
+  keys cached by JWK thumbprint (bounded). Bench vs v1.10: payloads and
+  timings within noise; AES-GCM adds ≈0.5 ms per 960 px derivative.
+
 ## [1.10.0] — Unreleased
 
 Industry-standard hardening round: `docs/STANDARDS.md` now maps every control

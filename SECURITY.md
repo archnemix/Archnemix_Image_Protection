@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the latest 1.10.x release and the current development
+Security fixes target the latest 1.11.x release and the current development
 branch. Older releases should be upgraded, especially because image decoding
 depends on current Sharp/libvips security fixes.
 
@@ -70,3 +70,21 @@ Client integrity checks are tripwires. Fortress may refuse an image when a
 browser extension has patched fetch, canvas, or WebGL APIs; Vault's monitor
 policy can continue while reporting the same signal. Neither result proves
 that an attacker-owned browser is clean or compromised.
+
+## StegoMark keying and attribution discipline (v1.11)
+
+The StegoMark layout key (`stegoKey`) must be a dedicated secret, never
+the scramble key — the scramble key is public wherever browsers
+unscramble (static manifests publish it). Before v1.11, the library/CLI
+paths defaulted one to the other; those deployments' marks are
+effectively unkeyed and should be re-issued. Detection confidence is
+capped at 0.49 whenever `found` is false. A decode with
+`corrections > 0` is a *repaired* decode: corroborate with the issuance
+registry, the perceptual soft binding, and delivery logs before acting
+on it — multi-buyer collusion averaging can erase marks, and with a
+shared layout key it can synthesize a third party's fingerprint.
+`steganography.keyScope: 'viewer'` removes that alignment at the cost
+of per-viewer derivatives. Measured mark visibility (neon-portrait,
+800 px): strength 6 ≈ 33.4 dB PSNR (standard) / 30.4 dB (robust);
+strength 3 ≈ 39.4 / 35.9 dB with weaker survival. Pick deliberately;
+StegoMark is an attribution aid, not proof.

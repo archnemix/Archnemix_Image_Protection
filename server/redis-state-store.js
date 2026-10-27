@@ -209,15 +209,32 @@ export function createRedisStateStore({
       else if (typeof client.call === 'function') value = await client.call('GET', redisKey);
       else if (typeof client.sendCommand === 'function') value = await client.sendCommand(['GET', redisKey]);
       if (value == null) return null;
-      if (Buffer.isBuffer(value)) return value;
-      if (value instanceof Uint8Array) return Buffer.from(value);
-      if (typeof value === 'string') return Buffer.from(value);
+      // Cache blobs are stored base64-armored with a `b64:` prefix (see
+      // setCache): node-redis v4 GETs return UTF-8 strings by default,
+      // which lossily mangles bytes >= 0x80 and silently corrupted every
+      // shared derivative. Legacy unprefixed Buffer replies (ioredis
+      // getBuffer) are returned as-is; the middleware's HMAC entry tag
+      // rejects anything else, so mixed fleets self-heal.
+      if (typeof value === 'string') {
+        return value.startsWith('b64:')
+          ? Buffer.from(value.slice(4), 'base64')
+          : Buffer.from(value, 'latin1');
+      }
+      if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+        const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        return buf.subarray(0, 4).toString('latin1') === 'b64:'
+          ? Buffer.from(buf.subarray(4).toString('latin1'), 'base64')
+          : buf;
+      }
       throw new Error('Archx Redis state store: malformed cache reply');
     },
 
     async setCache(key, bytes, { ttlMs = 0 } = {}) {
       if (!bytes || typeof bytes.length !== 'number' || !bytes.length) return false;
-      const value = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      const raw = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      // Base64 armor: +33% size, but binary-safe across every client
+      // flavor (node-redis string GETs, sendCommand string arrays, ...).
+      const value = 'b64:' + raw.toString('base64');
       const redisKey = keyFor(key);
       const safeTtlMs = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
       let result;

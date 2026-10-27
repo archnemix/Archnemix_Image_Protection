@@ -118,7 +118,7 @@ try {
     stegoPayload: args.stego
       ? ({ id }) => String(args.stego).replaceAll('{id}', id)
       : null,
-    stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || key,
+    stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || null,
     stegoProfile: args['stego-profile'] || 'standard',
     jobs: args.jobs ? Number(args.jobs) : undefined,
     force: !!args.force,

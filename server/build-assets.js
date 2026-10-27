@@ -201,6 +201,17 @@ export async function buildArchxAssets(options = {}) {
   if (aesKey !== null && (typeof aesKey !== 'string' || aesKey.length < 16 || aesKey.length > 256 || /[\u0000-\u001f\u007f]/.test(aesKey))) {
     throw new TypeError('Archx asset build: aesKey must be a base64 string');
   }
+  // The manifest publishes `key` in plaintext so browsers can unscramble.
+  // Defaulting the forensic StegoMark layout key to it would hand every
+  // visitor the watermark secret (removal + forgery). Refuse loudly.
+  const wantsStego = options.stegoPayload != null && options.stegoPayload !== '';
+  const effectiveStegoKey = options.stegoKey ?? null;
+  if (wantsStego && (typeof effectiveStegoKey !== 'string' || !effectiveStegoKey || effectiveStegoKey === key)) {
+    throw new TypeError('Archx asset build: stegoKey must be an explicit dedicated secret when stegoPayload is set (never the scramble key — it is published in the manifest)');
+  }
+  if (effectiveStegoKey !== null && (typeof effectiveStegoKey !== 'string' || effectiveStegoKey.length > 512 || /[\u0000-\u001f\u007f]/.test(effectiveStegoKey))) {
+    throw new TypeError('Archx asset build: stegoKey must be a string of at most 512 characters');
+  }
   const maxWidth = options.maxWidth ?? 1920;
   if (maxWidth !== 0 && (!Number.isInteger(maxWidth) || maxWidth < 64 || maxWidth > 8192)) {
     throw new TypeError('Archx asset build: maxWidth must be 0 or an integer from 64 to 8192');
@@ -249,7 +260,7 @@ export async function buildArchxAssets(options = {}) {
     forensicSeed: options.forensicSeed ?? null,
     forensic: options.forensic ?? null,
     stegoPayload: options.stegoPayload ?? null,
-    stegoKeyHash: sha256(String(options.stegoKey ?? key)),
+    stegoKeyHash: sha256(String(effectiveStegoKey ?? '')),
     stegoStrength: options.stegoStrength ?? 6,
     stegoProfile: options.stegoProfile ?? 'standard',
     steganography: options.steganography ?? null,
@@ -321,7 +332,7 @@ export async function buildArchxAssets(options = {}) {
           forensicSeed,
           forensic: options.forensic,
           stegoPayload,
-          stegoKey: options.stegoKey ?? key,
+          stegoKey: effectiveStegoKey,
           stegoStrength: options.stegoStrength ?? 6,
           stegoProfile: options.stegoProfile ?? 'standard',
           steganography: options.steganography,

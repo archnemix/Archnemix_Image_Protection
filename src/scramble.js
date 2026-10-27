@@ -453,6 +453,18 @@ export function isArchxContainer(bytes) {
   return u8.length >= 10 && ARCHX_MAGIC_BYTES.every((c, i) => u8[i] === c);
 }
 
+let coreJsonParse = null;
+/**
+ * Supply the JSON parser used for container headers (which carry the
+ * per-response AES key for encrypted containers). The browser client passes
+ * its load-time-captured native JSON.parse so a JSON.parse hook installed
+ * later cannot skim keys; Node/library use can leave the default. Passing a
+ * non-function resets to the ambient JSON.parse.
+ */
+export function useJsonParser(fn) {
+  coreJsonParse = typeof fn === 'function' ? fn : null;
+}
+
 export function decodeContainer(bytes) {
   const u8 = asBytes(bytes);
   if (!isArchxContainer(u8)) throw new Error('Archx: not an .archx container');
@@ -463,7 +475,7 @@ export function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = JSON.parse(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
+    header = (coreJsonParse || JSON.parse)(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
   } catch { throw new Error('Archx: invalid .archx header encoding'); }
   validateArchxHeader(header);
   const payload = u8.subarray(10 + headerLen);
@@ -1052,7 +1064,33 @@ export function detectStegoFingerprint(rgba, w, h, {
     const robustGeometry = detectStegoFingerprint(rgba, w, h, {
       key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true,
     });
-    return robustGeometry?.found || (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0)
+    if (robustGeometry?.found) return robustGeometry;
+    // Last bounded candidate: a horizontally mirrored suspect (a common
+    // zero-cost evasion). One extra profile pair on flipped pixels — if it
+    // hits, the result is flagged so the investigator knows orientation
+    // had to be corrected before the fingerprint could be read.
+    try {
+      const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+      if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const flipped = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+          const row = y * w * 4;
+          for (let x = 0; x < w; x++) {
+            const si = row + x * 4;
+            const di = row + (w - 1 - x) * 4;
+            flipped[di] = src[si]; flipped[di + 1] = src[si + 1];
+            flipped[di + 2] = src[si + 2]; flipped[di + 3] = src[si + 3];
+          }
+        }
+        for (const candidateProfile of ['standard', 'robust']) {
+          const mirrored = detectStegoFingerprint(flipped, w, h, {
+            key, gridX, gridY, profile: candidateProfile, searchOffsets, searchGeometry: false,
+          });
+          if (mirrored?.found) return { ...mirrored, mirrored: true };
+        }
+      }
+    } catch { /* mirror probe is best-effort */ }
+    return (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0)
       ? robustGeometry
       : standardGeometry;
   }
@@ -1237,16 +1275,20 @@ export function detectStegoFingerprint(rgba, w, h, {
     // search itself manufactures the CRC match (false attribution).
     const standardCorrectionOk = robust || correctionCount <= 1 ||
       (meanAbs >= 2.0 && agreement >= 0.85);
+    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
+      cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
-        cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk,
+      found,
       fingerprint,
       profile: effectiveProfile,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
-      confidence: Math.round(confidence * 1000) / 1000,
+      // Confidence describes the ACCEPTED verdict: a candidate the gates
+      // rejected must never report near-certain confidence, or downstream
+      // tooling will treat a manufactured CRC match as an attribution.
+      confidence: Math.round((found ? confidence : Math.min(0.49, confidence)) * 1000) / 1000,
       agreement: Math.round(agreement * 1000) / 1000,
       meanSignal: Math.round(meanAbs * 100) / 100,
       cells: cellScores.length,
@@ -1304,6 +1346,17 @@ export function detectStegoFingerprint(rgba, w, h, {
     // well as symmetric crops. Geometry search is an offline forensic mode,
     // so a few hundred bounded candidates are acceptable.
     const scaleCandidates = [];
+    // Native-resolution crops (no resize): the signal is pristine but the
+    // grid is offset by whole cells — searchOffsets only covers ±1 cell.
+    // Roam ±4 cells at scale 1; the sub-cell refinement below polishes.
+    for (let cellX = -4; cellX <= 4; cellX++) {
+      for (let cellY = -4; cellY <= 4; cellY++) {
+        if (cellX === 0 && cellY === 0) continue;
+        scaleCandidates.push(consider(evaluate({
+          scaleX: 1, scaleY: 1, originX: cellX * cw, originY: cellY * ch,
+        })));
+      }
+    }
     for (const scaleX of scaleValues) {
       const rangeX = originRange(gx * cw * scaleX, w);
       for (const scaleY of scaleValues) {
@@ -1327,8 +1380,18 @@ export function detectStegoFingerprint(rgba, w, h, {
       seenPairs.add(key);
       const rangeX = originRange(gx * cw * candidate._scaleX, w);
       const rangeY = originRange(gy * ch * candidate._scaleY, h);
-      for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
-        for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+      // Quarter points as well as edges/center: an asymmetric crop (e.g.
+      // 14% off the left, 4% off the right) lands between center and edge
+      // and previously desynchronized every candidate.
+      const quarter = (range) => unique([
+        range.min,
+        range.min + (range.max - range.min) * 0.25,
+        range.center,
+        range.min + (range.max - range.min) * 0.75,
+        range.max,
+      ]);
+      for (const originX of quarter(rangeX)) {
+        for (const originY of quarter(rangeY)) {
           originCandidates.push(consider(evaluate({
             scaleX: candidate._scaleX,
             scaleY: candidate._scaleY,
@@ -1359,6 +1422,34 @@ export function detectStegoFingerprint(rgba, w, h, {
           originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
           originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY,
         }));
+      }
+    }
+
+    // Fine scale refinement around the leaders. The coarse scale grid is
+    // 5%-stepped; an 82%-retained crop sits between 0.80 and 0.85, and a
+    // 2–3% scale error drifts the macro-cell grid by up to ~0.7 cell at
+    // the far edge — enough to desync voting even at the right origin.
+    // Walk ±3.5% in ~1.2% steps on each axis around the best geometries,
+    // re-centering the origin so the grid center stays anchored.
+    if (!best?.found) {
+      const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
+      const leaders = refinements.slice(0, 2);
+      for (const leader of leaders) {
+        for (const fxScale of [1, ...fineFactors]) {
+          for (const fyScale of [1, ...fineFactors]) {
+            if (fxScale === 1 && fyScale === 1) continue;
+            const scaleX = leader._scaleX * fxScale;
+            const scaleY = leader._scaleY * fyScale;
+            consider(evaluate({
+              scaleX,
+              scaleY,
+              originX: leader._originX + (gx * cw * (leader._scaleX - scaleX)) / 2,
+              originY: leader._originY + (gy * ch * (leader._scaleY - scaleY)) / 2,
+            }));
+            if (best?.found) break;
+          }
+          if (best?.found) break;
+        }
       }
     }
   }
@@ -1483,10 +1574,10 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  const writePadPixel = (wordIndex) => {
-    const di = wordIndex * 4;
-    target[di] = 0; target[di + 1] = 0; target[di + 2] = 0; target[di + 3] = 255;
-  };
+  // Padding replicates the nearest edge pixel instead of black: a pure
+  // rgb(0,0,0) strip would blindly reveal which tiles are edge tiles and
+  // how they are flipped (an orientation oracle for keyless jigsaw
+  // solvers). Display is unaffected — the padded region is cropped away.
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
     if (!Number.isInteger(source) || source < 0 || source >= count) {
@@ -1500,26 +1591,25 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dx = (dest % grid) * tw;
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
-      const srcY = sy + (fy ? th - 1 - y : y);
+      // Rows beyond the source height replicate the last real row.
+      const srcY = Math.min(sy + (fy ? th - 1 - y : y), h - 1);
       const dstRow = (dy + y) * pw + dx;
-      if (srcY >= h) {
-        for (let x = 0; x < tw; x++) writePadPixel(dstRow + x);
-        continue;
-      }
       if (useWords && !fx) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
-        for (let x = avail; x < tw; x++) writePadPixel(dstRow + x);
+        if (avail < tw) {
+          // Replicate the final real pixel of the row across the pad tail.
+          const edgeWord = avail > 0 ? out32[dstRow + avail - 1] : src32[srcY * w + (w - 1)];
+          out32.fill(edgeWord, dstRow + avail, dstRow + tw);
+        }
       } else if (useWords) {
         for (let x = 0; x < tw; x++) {
-          const srcX = sx + (tw - 1 - x);
-          if (srcX < w) out32[dstRow + x] = src32[srcY * w + srcX];
-          else writePadPixel(dstRow + x);
+          const srcX = Math.min(sx + (tw - 1 - x), w - 1);
+          out32[dstRow + x] = src32[srcY * w + srcX];
         }
       } else {
         for (let x = 0; x < tw; x++) {
-          const srcX = sx + (fx ? tw - 1 - x : x);
-          if (srcX >= w) { writePadPixel(dstRow + x); continue; }
+          const srcX = Math.min(sx + (fx ? tw - 1 - x : x), w - 1);
           const si = (srcY * w + srcX) * 4;
           const di = (dstRow + x) * 4;
           target[di] = src[si]; target[di + 1] = src[si + 1];

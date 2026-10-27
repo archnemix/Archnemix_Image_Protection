@@ -85,6 +85,7 @@ __export(index_exports, {
   sniffImageInfo: () => sniffImageInfo,
   stegoFingerprint: () => stegoFingerprint,
   tileRect: () => tileRect,
+  useJsonParser: () => useJsonParser,
   usePlugin: () => usePlugin,
   validateArchxHeader: () => validateArchxHeader,
   verifyEarlyIntegritySnapshot: () => verifyEarlyIntegritySnapshot
@@ -485,6 +486,10 @@ function isArchxContainer(bytes) {
   const u8 = asBytes(bytes);
   return u8.length >= 10 && ARCHX_MAGIC_BYTES.every((c, i) => u8[i] === c);
 }
+var coreJsonParse = null;
+function useJsonParser(fn) {
+  coreJsonParse = typeof fn === "function" ? fn : null;
+}
 function decodeContainer(bytes) {
   const u8 = asBytes(bytes);
   if (!isArchxContainer(u8)) throw new Error("Archx: not an .archx container");
@@ -494,7 +499,7 @@ function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = JSON.parse(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
+    header = (coreJsonParse || JSON.parse)(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
   } catch {
     throw new Error("Archx: invalid .archx header encoding");
   }
@@ -1006,7 +1011,37 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: true
     });
-    return robustGeometry?.found || (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0) ? robustGeometry : standardGeometry;
+    if (robustGeometry?.found) return robustGeometry;
+    try {
+      const src2 = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+      if (src2.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const flipped = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+          const row = y * w * 4;
+          for (let x = 0; x < w; x++) {
+            const si = row + x * 4;
+            const di = row + (w - 1 - x) * 4;
+            flipped[di] = src2[si];
+            flipped[di + 1] = src2[si + 1];
+            flipped[di + 2] = src2[si + 2];
+            flipped[di + 3] = src2[si + 3];
+          }
+        }
+        for (const candidateProfile of ["standard", "robust"]) {
+          const mirrored = detectStegoFingerprint(flipped, w, h, {
+            key,
+            gridX,
+            gridY,
+            profile: candidateProfile,
+            searchOffsets,
+            searchGeometry: false
+          });
+          if (mirrored?.found) return { ...mirrored, mirrored: true };
+        }
+      }
+    } catch {
+    }
+    return (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0) ? robustGeometry : standardGeometry;
   }
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
@@ -1138,15 +1173,19 @@ function detectStegoFingerprint(rgba, w, h, {
     const correctionCount = Math.max(0, corrected.corrections);
     const robustCorrectionOk = !robust || correctionCount <= 3 || correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
     const standardCorrectionOk = robust || correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85;
+    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk,
+      found,
       fingerprint,
       profile: effectiveProfile,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
-      confidence: Math.round(confidence * 1e3) / 1e3,
+      // Confidence describes the ACCEPTED verdict: a candidate the gates
+      // rejected must never report near-certain confidence, or downstream
+      // tooling will treat a manufactured CRC match as an attribution.
+      confidence: Math.round((found ? confidence : Math.min(0.49, confidence)) * 1e3) / 1e3,
       agreement: Math.round(agreement * 1e3) / 1e3,
       meanSignal: Math.round(meanAbs * 100) / 100,
       cells: cellScores.length,
@@ -1187,6 +1226,17 @@ function detectStegoFingerprint(rgba, w, h, {
       return { min, max, center: (min + max) / 2 };
     };
     const scaleCandidates = [];
+    for (let cellX = -4; cellX <= 4; cellX++) {
+      for (let cellY = -4; cellY <= 4; cellY++) {
+        if (cellX === 0 && cellY === 0) continue;
+        scaleCandidates.push(consider(evaluate({
+          scaleX: 1,
+          scaleY: 1,
+          originX: cellX * cw,
+          originY: cellY * ch
+        })));
+      }
+    }
     for (const scaleX of scaleValues) {
       const rangeX = originRange(gx * cw * scaleX, w);
       for (const scaleY of scaleValues) {
@@ -1211,8 +1261,15 @@ function detectStegoFingerprint(rgba, w, h, {
       seenPairs.add(key2);
       const rangeX = originRange(gx * cw * candidate._scaleX, w);
       const rangeY = originRange(gy * ch * candidate._scaleY, h);
-      for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
-        for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+      const quarter = (range) => unique([
+        range.min,
+        range.min + (range.max - range.min) * 0.25,
+        range.center,
+        range.min + (range.max - range.min) * 0.75,
+        range.max
+      ]);
+      for (const originX of quarter(rangeX)) {
+        for (const originY of quarter(rangeY)) {
           originCandidates.push(consider(evaluate({
             scaleX: candidate._scaleX,
             scaleY: candidate._scaleY,
@@ -1240,6 +1297,27 @@ function detectStegoFingerprint(rgba, w, h, {
           originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
           originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY
         }));
+      }
+    }
+    if (!best?.found) {
+      const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
+      const leaders = refinements.slice(0, 2);
+      for (const leader of leaders) {
+        for (const fxScale of [1, ...fineFactors]) {
+          for (const fyScale of [1, ...fineFactors]) {
+            if (fxScale === 1 && fyScale === 1) continue;
+            const scaleX = leader._scaleX * fxScale;
+            const scaleY = leader._scaleY * fyScale;
+            consider(evaluate({
+              scaleX,
+              scaleY,
+              originX: leader._originX + gx * cw * (leader._scaleX - scaleX) / 2,
+              originY: leader._originY + gy * ch * (leader._scaleY - scaleY) / 2
+            }));
+            if (best?.found) break;
+          }
+          if (best?.found) break;
+        }
       }
     }
   }
@@ -1330,13 +1408,6 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
   const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 && target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  const writePadPixel = (wordIndex) => {
-    const di = wordIndex * 4;
-    target[di] = 0;
-    target[di + 1] = 0;
-    target[di + 2] = 0;
-    target[di + 3] = 255;
-  };
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
     if (!Number.isInteger(source) || source < 0 || source >= count) {
@@ -1350,29 +1421,23 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dx = dest % grid * tw;
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
-      const srcY = sy + (fy ? th - 1 - y : y);
+      const srcY = Math.min(sy + (fy ? th - 1 - y : y), h - 1);
       const dstRow = (dy + y) * pw + dx;
-      if (srcY >= h) {
-        for (let x = 0; x < tw; x++) writePadPixel(dstRow + x);
-        continue;
-      }
       if (useWords && !fx) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
-        for (let x = avail; x < tw; x++) writePadPixel(dstRow + x);
+        if (avail < tw) {
+          const edgeWord = avail > 0 ? out32[dstRow + avail - 1] : src32[srcY * w + (w - 1)];
+          out32.fill(edgeWord, dstRow + avail, dstRow + tw);
+        }
       } else if (useWords) {
         for (let x = 0; x < tw; x++) {
-          const srcX = sx + (tw - 1 - x);
-          if (srcX < w) out32[dstRow + x] = src32[srcY * w + srcX];
-          else writePadPixel(dstRow + x);
+          const srcX = Math.min(sx + (tw - 1 - x), w - 1);
+          out32[dstRow + x] = src32[srcY * w + srcX];
         }
       } else {
         for (let x = 0; x < tw; x++) {
-          const srcX = sx + (fx ? tw - 1 - x : x);
-          if (srcX >= w) {
-            writePadPixel(dstRow + x);
-            continue;
-          }
+          const srcX = Math.min(sx + (fx ? tw - 1 - x : x), w - 1);
           const si = (srcY * w + srcX) * 4;
           const di = (dstRow + x) * 4;
           target[di] = src[si];
@@ -1483,7 +1548,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.10.0";
+var VERSION = "1.11.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1515,9 +1580,25 @@ var NATIVES = (() => {
     linkProgram: grab(gl2Proto, "linkProgram") || grab(gl1Proto, "linkProgram"),
     useProgram: grab(gl2Proto, "useProgram") || grab(gl1Proto, "useProgram")
   };
+  const elementProto = typeof Element !== "undefined" ? Element.prototype : null;
+  const streamProto = typeof ReadableStream !== "undefined" ? ReadableStream.prototype : null;
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, "fetch"),
+    // Extra hooks an external review demonstrated: a patched JSON.parse can
+    // log every container header (which carries the per-response AES key),
+    // a patched attachShadow can downgrade closed roots to open, and a
+    // patched SubtleCrypto/getReader can skim plaintext or stream chunks.
+    // Capture and USE the pristine versions on sensitive paths.
+    jsonParse: (() => {
+      try {
+        return typeof JSON !== "undefined" && typeof JSON.parse === "function" ? JSON.parse : null;
+      } catch {
+        return null;
+      }
+    })(),
+    attachShadow: grab(elementProto, "attachShadow"),
+    streamGetReader: grab(streamProto, "getReader"),
     createImageBitmap: grab(g, "createImageBitmap"),
     ImageCtor: typeof Image !== "undefined" ? Image : null,
     createObjectURL: typeof URL !== "undefined" ? grab(URL, "createObjectURL") : null,
@@ -1537,6 +1618,10 @@ var NATIVES = (() => {
     webgl2: Object.freeze(Object.fromEntries(Object.keys(glMethods).map((name) => [name, grab(gl2Proto, name)])))
   });
 })();
+try {
+  useJsonParser(NATIVES.jsonParse);
+} catch {
+}
 function isNativeFn(fn) {
   if (typeof fn !== "function") return false;
   try {
@@ -1556,7 +1641,10 @@ function auditIntegrity() {
     ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
     ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
-    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement]
+    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
+    ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
+    ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
+    ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader]
   ];
   const webglMethodNames = [
     "texImage2D",
@@ -1605,7 +1693,10 @@ function auditIntegrityDetails() {
     ["HTMLCanvasElement.prototype.toBlob", NATIVES.canvasToBlob],
     ["CanvasRenderingContext2D.prototype.drawImage", NATIVES.ctxDrawImage],
     ["CanvasRenderingContext2D.prototype.getImageData", NATIVES.ctxGetImageData],
-    ["Document.prototype.createElement", NATIVES.docCreateElement]
+    ["Document.prototype.createElement", NATIVES.docCreateElement],
+    ["JSON.parse", NATIVES.jsonParse],
+    ["Element.prototype.attachShadow", NATIVES.attachShadow],
+    ["ReadableStream.prototype.getReader", NATIVES.streamGetReader]
   ]);
   for (const [label, capturedMap] of [
     ["WebGLRenderingContext", NATIVES.webgl1],
@@ -3085,7 +3176,7 @@ async function readResponseBytes(response, maxBytes) {
     }
     return bytes;
   }
-  const reader = response.body.getReader();
+  const reader = NATIVES.streamGetReader ? NATIVES.streamGetReader.call(response.body) : response.body.getReader();
   const chunks = [];
   let total = 0;
   try {
@@ -3165,7 +3256,7 @@ function isPlainClientObject(value) {
 function parseBoundedJson(bytes) {
   let value;
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    value = (NATIVES.jsonParse || JSON.parse)(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
     throw nonRetryableError("Archx: token endpoint returned invalid JSON");
   }
@@ -3470,9 +3561,9 @@ function scrambleCanvasLocally(source, grid, key) {
   cleanPadded.height = ph;
   const cctx = getNativeContext(cleanPadded, "2d");
   setSmoothing(cctx, false);
-  cctx.fillStyle = "#000";
-  cctx.fillRect(0, 0, pw, ph);
   nativeDrawImage(cctx, source, 0, 0);
+  if (pw > w) nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, pw - w, h);
+  if (ph > h) nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, ph - h);
   const scrambled = makeCanvas();
   scrambled.width = pw;
   scrambled.height = ph;
@@ -3550,7 +3641,7 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -3573,6 +3664,8 @@ var ProtectedImage = class {
     __privateAdd(this, _raf, 0);
     __privateAdd(this, _loaded, false);
     __privateAdd(this, _destroyed, false);
+    __privateAdd(this, _glBudgetWarned, false);
+    __privateAdd(this, _taintWarned, false);
     __privateAdd(this, _taintImage, null);
     __privateAdd(this, _risk, /* @__PURE__ */ new Set());
     __privateAdd(this, _blackoutTimer, 0);
@@ -3619,6 +3712,8 @@ var ProtectedImage = class {
     __privateAdd(this, _temporalFrames, null);
     __privateAdd(this, _temporalIndex, 0);
     __privateAdd(this, _temporalEngineActual, null);
+    __privateAdd(this, _phaseBag, []);
+    __privateAdd(this, _signBalance, 0);
     __privateAdd(this, _temporalInterlaceCache);
     __privateSet(this, _options, mergeOptions(options));
     __privateSet(this, _source, source);
@@ -3654,7 +3749,8 @@ var ProtectedImage = class {
       root = __privateGet(this, _host);
     } else {
       try {
-        root = __privateGet(this, _host).attachShadow({ mode: o.shadow === "open" ? "open" : "closed" });
+        const attachInit = { mode: o.shadow === "open" ? "open" : "closed" };
+        root = NATIVES.attachShadow ? NATIVES.attachShadow.call(__privateGet(this, _host), attachInit) : __privateGet(this, _host).attachShadow(attachInit);
       } catch {
         throw new Error('Archx: unable to attach the requested shadow root; use a fresh host element or shadow:"none" explicitly');
       }
@@ -4358,6 +4454,13 @@ var ProtectedImage = class {
       if (__privateGet(this, _options).mode !== "vault") {
         __privateSet(this, _taintImage, await ensureTaintImage(__privateGet(this, _options), __privateGet(this, _source)));
         if (__privateGet(this, _destroyed)) return;
+        if (!__privateGet(this, _taintImage) && !__privateGet(this, _taintWarned) && __privateGet(this, _options).taintReadback !== "off" && __privateGet(this, _options).taintReadback !== false) {
+          __privateSet(this, _taintWarned, true);
+          __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-taint-unavailable", {
+            detail: { mode: __privateGet(this, _options).mode },
+            bubbles: true
+          }));
+        }
       }
       this._render();
       __privateSet(this, _loaded, true);
@@ -4823,7 +4926,16 @@ var ProtectedImage = class {
     }
   }
   _tryRenderWebGL() {
-    if (glContextsInUse >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) return false;
+    if (glContextsInUse >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) {
+      if (!__privateGet(this, _glBudgetWarned)) {
+        __privateSet(this, _glBudgetWarned, true);
+        __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-webgl-budget", {
+          detail: { inUse: glContextsInUse, budget: GL_CONTEXT_BUDGET },
+          bubbles: true
+        }));
+      }
+      return false;
+    }
     const canvas = __privateGet(this, _canvas);
     __privateGet(this, _tilesEl).hidden = true;
     canvas.hidden = false;
@@ -4838,6 +4950,23 @@ var ProtectedImage = class {
         powerPreference: "low-power"
       });
       if (!gl) return false;
+      try {
+        const attrs = gl.getContextAttributes();
+        if (attrs && attrs.preserveDrawingBuffer === true) {
+          __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-integrity", {
+            detail: { issue: "preserveDrawingBuffer-rewritten" },
+            bubbles: true
+          }));
+          const lose = gl.getExtension && gl.getExtension("WEBGL_lose_context");
+          try {
+            lose && lose.loseContext && lose.loseContext();
+          } catch {
+          }
+          __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
+          return false;
+        }
+      } catch {
+      }
       __privateSet(this, _gl, gl);
       glContextsInUse++;
       this._poison(canvas, null);
@@ -5267,7 +5396,7 @@ var ProtectedImage = class {
       gl.uniform2f(L.uFitScale, sx, sy);
       gl.uniform2f(L.uFitOffset, ox, oy);
       gl.uniform1f(L.uScrambled, meta.plan ? 1 : 0);
-      gl.uniform1f(L.uSeed, hashSeed(sessionId()) % 1e3 / 37);
+      gl.uniform1f(L.uSeed, hashSeed(sessionId()) % 1e3 / 37 + Math.random() * 997);
       gl.uniform1f(L.uWmOn, __privateGet(this, _glWmOn) || 0);
       const lensCfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
       gl.uniform1f(L.uLensOn, __privateGet(this, _options).lens ? 1 : 0);
@@ -5282,7 +5411,7 @@ var ProtectedImage = class {
       const interlacePhase = (__privateGet(this, _temporalPhase) % interlacePhases + interlacePhases) % interlacePhases;
       gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
       gl.uniform1f(L.uTemporalSign, __privateGet(this, _temporalSign));
-      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength : 0);
+      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
       gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
       gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
@@ -5307,9 +5436,12 @@ var ProtectedImage = class {
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
       if (temporal) {
-        __privateSet(this, _temporalSign, -__privateGet(this, _temporalSign));
+        let nextSign = Math.random() < 0.5 ? 1 : -1;
+        if (Math.abs(__privateGet(this, _signBalance) + nextSign) > 2) nextSign = -nextSign;
+        __privateSet(this, _temporalSign, nextSign);
+        __privateSet(this, _signBalance, __privateGet(this, _signBalance) + nextSign);
         __privateWrapper(this, _temporalIndex)._++;
-        __privateSet(this, _temporalPhase, interlace ? (interlacePhase + 1) % interlacePhases : (__privateGet(this, _temporalPhase) + 1) % 2);
+        __privateSet(this, _temporalPhase, __privateMethod(this, _ProtectedImage_instances, nextPhase_fn).call(this, interlace ? interlacePhases : 2));
       }
       if (__privateGet(this, _glFrameBudget) !== Infinity && __privateGet(this, _glFrameBudget) > 0) __privateWrapper(this, _glFrameBudget)._--;
       const keepGoing = __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) || __privateGet(this, _glFrameBudget) > 0;
@@ -5476,6 +5608,8 @@ _gl = new WeakMap();
 _raf = new WeakMap();
 _loaded = new WeakMap();
 _destroyed = new WeakMap();
+_glBudgetWarned = new WeakMap();
+_taintWarned = new WeakMap();
 _taintImage = new WeakMap();
 _risk = new WeakMap();
 _blackoutTimer = new WeakMap();
@@ -5522,6 +5656,8 @@ _temporalRaf = new WeakMap();
 _temporalFrames = new WeakMap();
 _temporalIndex = new WeakMap();
 _temporalEngineActual = new WeakMap();
+_phaseBag = new WeakMap();
+_signBalance = new WeakMap();
 _temporalInterlaceCache = new WeakMap();
 _ProtectedImage_instances = new WeakSet();
 /** Strike accounting: repeated extraction attempts escalate to lockout. */
@@ -5553,15 +5689,31 @@ registerStrike_fn = function(kind) {
     }, 4e3);
   }
 };
-/** Heuristic: a lens swept rapidly across many cells == stitching attempt. */
+/** Heuristic: a lens swept rapidly across many cells == stitching attempt.
+ * Accounting uses every cell the revealed DISC touches, not just the cell
+ * under its center: with a ~30%-radius lens one park position exposes
+ * ~28% of the frame, so center-only counting let a stitcher harvest the
+ * whole image in 3-4 parks without ever tripping the threshold. */
 trackLensTravel_fn = function(point) {
   const now = performance.now();
-  const cell = Math.floor(point.y * 6) * 6 + Math.floor(point.x * 6);
-  __privateGet(this, _lensCells).push({ cell, now });
+  const cfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
+  const cells = 8;
+  const bw = __privateGet(this, _canvas)?.width || 1;
+  const bh = __privateGet(this, _canvas)?.height || 1;
+  const radiusPx = Math.max(24, Math.min(bw, bh) * (cfg.radius ?? 0.3));
+  const rx = radiusPx / bw, ry = radiusPx / bh;
+  const reachX = rx + 0.75 / cells, reachY = ry + 0.75 / cells;
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      const ccx = (cx + 0.5) / cells, ccy = (cy + 0.5) / cells;
+      const dx = (ccx - point.x) / Math.max(reachX, 1e-6);
+      const dy = (ccy - point.y) / Math.max(reachY, 1e-6);
+      if (dx * dx + dy * dy <= 1) __privateGet(this, _lensCells).push({ cell: cy * cells + cx, now });
+    }
+  }
   __privateSet(this, _lensCells, __privateGet(this, _lensCells).filter((c) => now - c.now < 8e3));
   const distinct = new Set(__privateGet(this, _lensCells).map((c) => c.cell)).size;
-  const cfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
-  const threshold = cfg.scanCells ?? 26;
+  const threshold = cfg.scanCells ?? 46;
   if (distinct >= threshold) {
     __privateSet(this, _lensCells, []);
     if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "lens-scan");
@@ -5903,7 +6055,7 @@ setupTemporalFrames_fn = function(frame, cfg) {
     }
   }
   const mk = (phase) => {
-    const sign = phase % 2 ? -1 : 1;
+    const sign = (phase % 2 ? -1 : 1) * [1, 0.6, 1.3, 0.85][phase % 4];
     const c = makeCanvas(__privateGet(this, _host).ownerDocument);
     c.width = w;
     c.height = h;
@@ -6004,12 +6156,25 @@ setupTemporalFrames_fn = function(frame, cfg) {
   __privateMethod(this, _ProtectedImage_instances, paintTemporal2d_fn).call(this);
   if (__privateGet(this, _visible)) __privateMethod(this, _ProtectedImage_instances, startTemporal2d_fn).call(this);
 };
+// Next temporal phase from a shuffled bag: every phase appears once per
+// cycle (so the eye still integrates the full set at the same rate) but
+// the ORDER is unpredictable, so fixed-cadence capture cannot parity-lock
+// onto a stable subsequence.
+nextPhase_fn = function(phases) {
+  if (!__privateGet(this, _phaseBag).length || __privateGet(this, _phaseBag)[0] >= phases) {
+    __privateSet(this, _phaseBag, Array.from({ length: phases }, (_, i) => i));
+    for (let i = phases - 1; i > 0; i--) {
+      const j = Math.random() * (i + 1) | 0;
+      [__privateGet(this, _phaseBag)[i], __privateGet(this, _phaseBag)[j]] = [__privateGet(this, _phaseBag)[j], __privateGet(this, _phaseBag)[i]];
+    }
+  }
+  return __privateGet(this, _phaseBag).pop();
+};
 paintTemporal2d_fn = function() {
   const ctx = __privateGet(this, _realCtx);
   const frames = __privateGet(this, _temporalFrames);
   if (!ctx || !frames?.length || __privateGet(this, _destroyed) || !__privateGet(this, _canvas)) return;
-  const phase = (__privateGet(this, _temporalIndex) % frames.length + frames.length) % frames.length;
-  __privateSet(this, _temporalPhase, phase);
+  const phase = __privateGet(this, _temporalPhase) % frames.length;
   if (__privateGet(this, _options).lens && __privateGet(this, _frameCanvas)) {
     __privateMethod(this, _ProtectedImage_instances, paintLens2d_fn).call(this);
     return;
@@ -6027,6 +6192,7 @@ startTemporal2d_fn = function() {
     __privateSet(this, _temporalRaf, 0);
     if (__privateGet(this, _destroyed) || !__privateGet(this, _temporalFrames) || !__privateGet(this, _visible)) return;
     __privateWrapper(this, _temporalIndex)._++;
+    __privateSet(this, _temporalPhase, __privateMethod(this, _ProtectedImage_instances, nextPhase_fn).call(this, __privateGet(this, _temporalFrames).length));
     __privateMethod(this, _ProtectedImage_instances, paintTemporal2d_fn).call(this);
     __privateSet(this, _temporalRaf, requestAnimationFrame(step));
   };
@@ -6071,7 +6237,7 @@ paintLens2d_fn = function() {
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.clip();
     const phaseFrames = __privateGet(this, _temporalFrames);
-    const sharpSource = phaseFrames?.length ? phaseFrames[(__privateGet(this, _temporalIndex) % phaseFrames.length + phaseFrames.length) % phaseFrames.length] : frame;
+    const sharpSource = phaseFrames?.length ? phaseFrames[__privateGet(this, _temporalPhase) % phaseFrames.length] : frame;
     nativeDrawImage(ctx, sharpSource, 0, 0);
     ctx.restore();
     ctx.save();

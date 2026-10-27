@@ -160,6 +160,10 @@ if (args.json) {
     width: info.width,
     height: info.height,
     ...result,
+    repaired: result.found && result.corrections > 0,
+    evidenceNote: result.found && result.corrections > 0
+      ? 'Repaired decode: corroborate before attributing (collusion can synthesize third-party fingerprints).'
+      : undefined,
     expected,
     matchesExpectation,
     perceptual: {
@@ -176,6 +180,15 @@ if (args.json) {
   if (result.geometry) console.log(`  geometry    : scale ${result.geometry.scaleX}×${result.geometry.scaleY}, origin ${result.geometry.originX},${result.geometry.originY}`);
   if (expected) console.log(`  expected    : ${expected} ${matchesExpectation ? '— MATCH' : '— does NOT match'}`);
   console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'})` : ''}`);
+  if (result.mirrored) console.log('  note        : mark was recovered from a horizontally flipped suspect.');
+  // Repaired decodes are weaker evidence: the CRC corrector flipped bits to
+  // reach a valid codeword, and under multi-buyer collusion averaging that
+  // repair can synthesize a fingerprint belonging to none of the colluders.
+  if (result.corrections > 0) {
+    console.log(`  ⚠ REPAIRED DECODE: ${result.corrections} bit(s) were corrected to reach a valid codeword.`);
+    console.log('    Do NOT attribute from this alone — corroborate with the issuance registry,');
+    console.log('    the perceptual soft binding above, visible marks, and delivery logs.');
+  }
   console.log('  Look this fingerprint up in your issuance registry (onStegoIssue) to identify the source view.');
 } else {
   console.log(`✘ No confident StegoMark found in ${input}`);

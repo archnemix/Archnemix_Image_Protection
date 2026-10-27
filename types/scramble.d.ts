@@ -77,6 +77,8 @@ export function validateArchxHeader<T = ArchxHeader>(header: T): T;
 export function encodeContainer(header: ArchxHeader, payload: Uint8Array): Uint8Array;
 export function isArchxContainer(bytes: ArchxBytes): boolean;
 export function decodeContainer(bytes: ArchxBytes): { header: ArchxHeader; payload: Uint8Array };
+/** Supply the JSON parser used for container headers (the browser client passes its captured native). */
+export function useJsonParser(fn: ((text: string) => unknown) | null): void;
 
 export function generateKeyBase64(): string;
 export function encryptPayload(plainBytes: ArchxBytes, keyBase64: string):
@@ -125,7 +127,10 @@ export interface StegoDetection {
   minBitRepetitions: number;
   crcValid: boolean;
   corrections: number;
+  /** Capped at 0.49 whenever `found` is false — never present a negative verdict as near-certain. */
   confidence: number;
+  /** True when the mark was recovered from a horizontally flipped suspect (auto profile + geometry search). */
+  mirrored?: boolean;
   agreement: number;
   meanSignal: number;
   cells: number;

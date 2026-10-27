@@ -436,9 +436,22 @@ export async function scrambleImage(input, opts = {}) {
   const stegoPayload = opts.stegoPayload ?? stegoCfg.payload ??
     (opts.steganography === true ? key || 'archx' : null);
   if (stegoPayload != null && stegoPayload !== '') {
+    // The forensic layout key must be an explicit secret, NEVER defaulted
+    // to the tile-scramble key: in static deployments the scramble key is
+    // published (manifest) so browsers can unscramble, and keying the
+    // watermark layout with it lets anyone subtract the mark or forge
+    // another buyer's fingerprint. An explicitly empty key remains the
+    // caller's choice (unkeyed layout); an omitted key is an error.
+    const effectiveStegoKey = opts.stegoKey ?? stegoCfg.key;
+    if (effectiveStegoKey == null) {
+      throw new TypeError('Archx image processing: stegoKey is required when a StegoMark payload is embedded (use a dedicated secret, never the scramble key)');
+    }
+    if (effectiveStegoKey !== '' && effectiveStegoKey === key) {
+      throw new TypeError('Archx image processing: stegoKey must differ from the scramble key (the scramble key is public wherever clients unscramble)');
+    }
     const stegoProfile = opts.stegoProfile ?? stegoCfg.profile ?? 'standard';
     rawPixels = embedStegoFingerprint(rawPixels, w, h, stegoPayload, {
-      key: opts.stegoKey ?? stegoCfg.key ?? key,
+      key: effectiveStegoKey,
       profile: stegoProfile,
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
       gridX: stegoCfg.gridX ?? (stegoProfile === 'robust' ? 20 : 24),
