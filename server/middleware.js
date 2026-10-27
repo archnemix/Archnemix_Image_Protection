@@ -3027,21 +3027,18 @@ export function createArchxMiddleware(options = {}) {
         const headerTokenRaw = req.headers?.['x-archx-token'];
         const headerTokens = headerTokenRaw === undefined ? [] : (Array.isArray(headerTokenRaw) ? headerTokenRaw : [headerTokenRaw]);
         const tokenValues = [...(cfg.allowQueryTokens ? queryTokens : []), ...headerTokens];
-        // Cheap shape pre-check ONLY — no trust derives from it. The actual
-        // security gate is verifyToken() (HMAC-SHA256, timing-safe) plus
-        // validateTokenClaims() below, which run before any sensitive
-        // action; a request that passes this shape check still cannot
-        // proceed without a valid signature from a known key.
-        // codeql[js/user-controlled-bypass]
-        if ((!cfg.allowQueryTokens && queryTokens.length > 0) || tokenValues.length !== 1 ||
-            // codeql[js/user-controlled-bypass]
-            typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192) {
-          return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-count' });
-        }
-        const payload = verifyToken(tokenValues[0], signingKeys);
+        // Shape alone never grants or denies anything: it only selects the
+        // candidate string (and the diagnostic deny reason). The security
+        // gate is verifyToken() itself — only a token whose HMAC-SHA256
+        // signature verifies under a known key produces a payload at all,
+        // and validateTokenClaims() then binds it to this image/TTL.
+        const shapeBad = (!cfg.allowQueryTokens && queryTokens.length > 0) || tokenValues.length !== 1 ||
+          typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192;
+        const payload = verifyToken(shapeBad ? '' : tokenValues[0], signingKeys);
         const issuingSecret = secretForToken(payload);
         if (!issuingSecret || !validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: ttlMs })) {
-          return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-claims' });
+          return deny(req, res, 403, 'invalid or expired token',
+            { id, phase, reason: shapeBad ? 'token-count' : 'token-claims' });
         }
 
         let verifiedProof = null;
