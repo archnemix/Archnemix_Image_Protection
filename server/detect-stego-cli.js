@@ -92,11 +92,15 @@ let info;
 let result;
 let suspectPerceptualFingerprint;
 try {
-  const stat = fs.statSync(input);
-  if (!stat.isFile() || stat.size < 1 || stat.size > maxInputBytes) {
-    throw new Error('suspect file is empty, not a regular file, or above the byte limit');
-  }
-  bytes = fs.readFileSync(input);
+  // fstat + read through one descriptor (no stat/read race).
+  const inputFd = fs.openSync(input, 'r');
+  try {
+    const stat = fs.fstatSync(inputFd);
+    if (!stat.isFile() || stat.size < 1 || stat.size > maxInputBytes) {
+      throw new Error('suspect file is empty, not a regular file, or above the byte limit');
+    }
+    bytes = fs.readFileSync(inputFd);
+  } finally { fs.closeSync(inputFd); }
   const sniffed = sniffImageInfo(bytes);
   const detectable = new Set(['jpeg', 'png', 'webp', 'avif', 'gif', 'tiff', 'bmp']);
   if (!sniffed || !detectable.has(sniffed.format)) throw new Error('suspect file is not a supported raster image');

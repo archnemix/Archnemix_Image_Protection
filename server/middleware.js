@@ -1837,16 +1837,24 @@ export function createArchxMiddleware(options = {}) {
   async function getDiskOutputCache(sharedCacheKey, expected = null) {
     if (!outputCacheDir || !cfg.outputCacheDiskMaxBytes || !cfg.outputCacheDiskMaxEntries) return null;
     const { file } = diskOutputCachePath(sharedCacheKey);
+    let cacheFileHandle = null;
     try {
-      const stat = await fs.promises.stat(file);
+      // Stat the OPEN handle (fstat) and read from it: the size/TTL facts
+      // and the bytes then describe the same file, so no check-then-use
+      // race exists even if another writer replaces the path. (The HMAC
+      // tag check below remains the content-integrity boundary.)
+      cacheFileHandle = await fs.promises.open(file, 'r');
+      const stat = await cacheFileHandle.stat();
       if (!stat.isFile() || stat.size < 1 || stat.size > cfg.outputCacheDiskMaxBytes ||
           stat.size > 256 * 1024 * 1024) return null;
       const ageMs = Date.now() - stat.mtimeMs;
       if (cfg.outputCacheDiskTtlMs > 0 && ageMs > cfg.outputCacheDiskTtlMs) {
+        await cacheFileHandle.close().catch(() => {}); cacheFileHandle = null;
         try { await fs.promises.unlink(file); } catch {}
         return null;
       }
-      const stored = await fs.promises.readFile(file);
+      const stored = await cacheFileHandle.readFile();
+      await cacheFileHandle.close().catch(() => {}); cacheFileHandle = null;
       if (stored.length !== stat.size) return null;
       const bytes = untagCacheBytes(sharedCacheKey, stored);
       if (!bytes || !isPlausibleCachedDerivative(bytes, expected)) {
@@ -1865,6 +1873,8 @@ export function createArchxMiddleware(options = {}) {
     } catch (err) {
       if (err?.code !== 'ENOENT') derivativeCacheStats.diskErrors++;
       return null;
+    } finally {
+      if (cacheFileHandle) await cacheFileHandle.close().catch(() => {});
     }
   }
 
@@ -3017,7 +3027,14 @@ export function createArchxMiddleware(options = {}) {
         const headerTokenRaw = req.headers?.['x-archx-token'];
         const headerTokens = headerTokenRaw === undefined ? [] : (Array.isArray(headerTokenRaw) ? headerTokenRaw : [headerTokenRaw]);
         const tokenValues = [...(cfg.allowQueryTokens ? queryTokens : []), ...headerTokens];
+        // Cheap shape pre-check ONLY — no trust derives from it. The actual
+        // security gate is verifyToken() (HMAC-SHA256, timing-safe) plus
+        // validateTokenClaims() below, which run before any sensitive
+        // action; a request that passes this shape check still cannot
+        // proceed without a valid signature from a known key.
+        // codeql[js/user-controlled-bypass] Pre-authentication shape check; authorization is the HMAC verification immediately below.
         if ((!cfg.allowQueryTokens && queryTokens.length > 0) || tokenValues.length !== 1 ||
+            // codeql[js/user-controlled-bypass] Pre-authentication shape check; authorization is the HMAC verification immediately below.
             typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192) {
           return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'token-count' });
         }

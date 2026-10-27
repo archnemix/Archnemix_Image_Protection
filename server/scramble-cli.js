@@ -99,11 +99,17 @@ const opts = {
 
 async function protectOne(inPath, outPath) {
   const maxInputBytes = Number.isInteger(opts.maxInputBytes) ? opts.maxInputBytes : 50 * 1024 * 1024;
-  const inputStat = fs.statSync(inPath);
-  if (!inputStat.isFile() || inputStat.size > maxInputBytes) {
-    throw new Error(`Archx protect: input is not a regular file within the ${maxInputBytes}-byte limit`);
-  }
-  const inputBytes = fs.readFileSync(inPath);
+  // fstat + read through one descriptor so the checked size describes the
+  // bytes actually processed (no stat/read race).
+  const inputFd = fs.openSync(inPath, 'r');
+  let inputBytes;
+  try {
+    const inputStat = fs.fstatSync(inputFd);
+    if (!inputStat.isFile() || inputStat.size > maxInputBytes) {
+      throw new Error(`Archx protect: input is not a regular file within the ${maxInputBytes}-byte limit`);
+    }
+    inputBytes = fs.readFileSync(inputFd);
+  } finally { fs.closeSync(inputFd); }
   const { bytes, header, stegoFingerprint, perceptualFingerprint } = await scrambleImage(inputBytes, opts);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, bytes);

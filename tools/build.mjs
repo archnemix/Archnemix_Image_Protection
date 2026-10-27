@@ -26,11 +26,12 @@ await build({
   target: ['es2020'],
   outfile: 'dist/archx.min.js',
 });
-const size = fs.statSync('dist/archx.min.js').size;
+// Read the bundle once: size and SRI both describe these exact bytes.
+const minified = fs.readFileSync('dist/archx.min.js');
 // Keep stdout clean so lifecycle consumers such as `npm pack --json` remain machine-readable.
-console.error(`\n✔ dist/archx.min.js  ${(size / 1024).toFixed(1)} kB minified`);
+console.error(`\n✔ dist/archx.min.js  ${(minified.length / 1024).toFixed(1)} kB minified`);
 // Subresource Integrity pin for sites that serve the browser bundle from a
 // CDN: <script src="…/archx.min.js" integrity="sha384-…" crossorigin="anonymous">
-const sri = `sha384-${crypto.createHash('sha384').update(fs.readFileSync('dist/archx.min.js')).digest('base64')}`;
+const sri = `sha384-${crypto.createHash('sha384').update(minified).digest('base64')}`;
 fs.writeFileSync('dist/archx.min.js.sri', `${sri}\n`);
 console.error(`✔ dist/archx.min.js.sri  ${sri}`);
