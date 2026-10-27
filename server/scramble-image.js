@@ -6,7 +6,7 @@
  */
 import sharp from 'sharp';
 import {
-  buildScramblePlan, paddedSize, scramblePixels,
+  buildScramblePlan, paddedSize, scramblePixels, scramblePixelsPadded,
   encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
   embedStegoFingerprint, stegoFingerprint, sniffImageInfo,
   perceptualFingerprint as computePerceptualFingerprint,
@@ -296,25 +296,6 @@ function watermarkSvg(w, h, wm) {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><g font-family="Arial, Helvetica, sans-serif" fill="${color}">${body}</g></svg>`);
 }
 
-/** Pad a raw RGBA buffer (w×h) into pw×ph with black. */
-function padRaw(raw, w, h, pw, ph) {
-  if (raw.length < w * h * 4) throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'decoded image did not produce RGBA pixels');
-  if (w === pw && h === ph) return raw.subarray(0, w * h * 4);
-  const out = new Uint8Array(pw * ph * 4);
-  // Opaque black only in the actual right/bottom padding, not a separate
-  // full-frame alpha pass over pixels that are about to be overwritten.
-  for (let y = 0; y < h; y++) {
-    const row = y * pw * 4;
-    out.set(raw.subarray(y * w * 4, (y + 1) * w * 4), row);
-    for (let x = w; x < pw; x++) out[row + x * 4 + 3] = 255;
-  }
-  for (let y = h; y < ph; y++) {
-    const row = y * pw * 4;
-    for (let x = 0; x < pw; x++) out[row + x * 4 + 3] = 255;
-  }
-  return out;
-}
-
 /**
  * @param {Buffer} input master image bytes
  * @param {object} opts { grid, key, maxWidth, quality, lossless, format, aesKey, container }
@@ -386,8 +367,13 @@ export async function scrambleImage(input, opts = {}) {
     }
   }
 
-  let pipeline = sharpInput(inputBytes, limits).rotate() // bake EXIF orientation, drop metadata
-    .resize({
+  let pipeline = sharpInput(inputBytes, limits);
+  // Bake EXIF orientation only when the master actually carries one:
+  // libvips autorotate costs a full extra frame pass (~60% of the decode
+  // stage at 960px) even for orientation-1 images. The pipeline re-encodes
+  // from raw pixels below, so no master metadata can leak through skipping.
+  if (srcMeta.orientation && srcMeta.orientation !== 1) pipeline = pipeline.rotate();
+  pipeline = pipeline.resize({
       width: tw,
       height: th,
       withoutEnlargement: true,
@@ -458,13 +444,21 @@ export async function scrambleImage(input, opts = {}) {
     : null;
 
   const { pw, ph } = paddedSize(w, h, grid);
-  const padded = padRaw(rawPixels, w, h, pw, ph);
   const plan = buildScramblePlan(grid, key);
-  const scrambled = scramblePixels(padded, pw, ph, plan, 'scramble');
+  // Fused pad+scramble writes the encoder's raw input in a single pass:
+  // no pad copy, no scramble copy, no Buffer.from copy. Buffer.allocUnsafe
+  // is safe here because every output pixel is written by the tile loop.
+  const scrambled = Buffer.allocUnsafe(pw * ph * 4);
+  scramblePixelsPadded(rawPixels, w, h, plan, scrambled);
 
   const format = opts.format ?? 'webp';
-  let encoder = sharp(Buffer.from(scrambled), { raw: { width: pw, height: ph, channels: 4 } })
+  let encoder = sharp(scrambled, { raw: { width: pw, height: ph, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });
+  // For opaque masters the synthesized alpha band carries zero information:
+  // PNG would store/ship it (+~12% bytes) and libwebp still pays to analyze
+  // it (~15% of catalog encode time) before dropping it. Dropping it before
+  // the encoder changes no decoded pixel. JPEG flattens anyway.
+  if (format !== 'jpeg' && !srcMeta.hasAlpha) encoder = encoder.removeAlpha();
   if (format === 'png') {
     encoder = encoder.png({ compressionLevel: limits.pngCompressionLevel, adaptiveFiltering: true });
   } else if (format === 'jpeg') {

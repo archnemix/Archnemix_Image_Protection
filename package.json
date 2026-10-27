@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -66,6 +66,7 @@
     "test:browser": "node tests/browser-test.mjs",
     "test:all": "npm run build && npm test && npm run test:browser",
     "bench": "node tools/benchmark.mjs",
+    "bench:opt": "node --expose-gc tools/optimization-bench.mjs",
     "load-test": "node tools/load-test.mjs",
     "lint": "node tools/lint.mjs",
     "verify": "npm run lint && npm run build && npm test && npm run test:browser && npm audit --audit-level=high"

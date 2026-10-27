@@ -7,7 +7,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import {
-  buildScramblePlan, scramblePixels, paddedSize,
+  buildScramblePlan, scramblePixels, scramblePixelsPadded, paddedSize,
   encodeContainer, decodeContainer, isArchxContainer,
   encryptPayload, decryptPayload, generateKeyBase64,
   applyForensicBlocks, forensicScore, forensicBlockSigns,
@@ -65,6 +65,36 @@ test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
   let same = 0;
   for (let i = 0; i < raw.length; i++) if (raw[i] === scrambled[i]) same++;
   assert.ok(same / raw.length < 0.08, `scrambled too similar: ${same}/${raw.length} bytes identical`);
+});
+
+test('fused pad+scramble is byte-identical to pad-then-scramble (incl. awkward sizes)', () => {
+  const manualPad = (raw, w, h, pw, ph) => {
+    const out = new Uint8Array(pw * ph * 4);
+    for (let y = 0; y < ph; y++) {
+      for (let x = 0; x < pw; x++) {
+        const di = (y * pw + x) * 4;
+        if (x < w && y < h) out.set(raw.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), di);
+        else out[di + 3] = 255;
+      }
+    }
+    return out;
+  };
+  for (const [w, h, grid] of [[64, 48, 8], [61, 47, 8], [10, 10, 8], [333, 17, 16], [129, 257, 4], [7, 7, 32]]) {
+    const raw = new Uint8Array(w * h * 4);
+    for (let i = 0; i < raw.length; i++) raw[i] = (i * 40503 + 17) % 256;
+    const plan = buildScramblePlan(grid, `fused-${w}x${h}-${grid}`);
+    const { pw, ph } = paddedSize(w, h, grid);
+    const expected = scramblePixels(manualPad(raw, w, h, pw, ph), pw, ph, plan, 'scramble');
+    assert.deepEqual(scramblePixelsPadded(raw, w, h, plan), expected, `${w}x${h} grid ${grid}`);
+    const out = Buffer.alloc(pw * ph * 4);
+    assert.equal(scramblePixelsPadded(raw, w, h, plan, out), out);
+    assert.deepEqual(new Uint8Array(out), expected, `${w}x${h} grid ${grid} (provided buffer)`);
+    // and the fused output unscrambles back to the padded original
+    assert.deepEqual(
+      scramblePixels(scramblePixelsPadded(raw, w, h, plan), pw, ph, plan, 'unscramble'),
+      manualPad(raw, w, h, pw, ph));
+  }
+  assert.throws(() => scramblePixelsPadded(new Uint8Array(8), 64, 64, buildScramblePlan(8, 'k')), /smaller/);
 });
 
 test('forensic block mark: seeded signs are embedded and recoverable by correlation', () => {

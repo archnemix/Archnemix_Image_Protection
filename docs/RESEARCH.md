@@ -859,6 +859,28 @@ deployments cannot taint (origin-clean by definition) and retain instance
 poisoning; compositor/OS capture and cameras remain addressed only by
 derivative caps, marks, Lens/temporal layers, and attribution.
 
+### 2.17 Measured optimization round (v1.9)
+
+Optimizations were admitted only with same-machine before/after evidence
+(`tools/optimization-bench.mjs`, plus interleaved A/B against the v1.8
+code to cancel sandbox CPU drift). Findings: the cold pipeline was
+already encode-dominated (libwebp ≈ 70% of a 960 px catalog transform;
+fused pad+scramble ≈ 2 ms; metadata < 1 ms), so wins came from removing
+whole frame passes rather than micro-tuning JS: fusing
+pad+scramble+encoder-input into one pass (byte-identical output, proven
+against 21 fixture hashes and a permanent equality test), skipping EXIF
+autorotate for orientation-1 masters, and dropping the synthesized
+alpha band before WebP/PNG encoding of opaque masters (PNG −34% encode
+time, −11% bytes; WebP encode −6%). Aggregate cold-transform gain was
+~3–10% depending on size/profile, with peak RSS a few MB lower. On the
+warm path, CPU profiling showed GC pressure from `filter()`-copying
+sliding-window timestamp arrays on every limiter hit; in-place
+front-pruning raised loopback mint+redeem throughput 859 → 915 flows/s
+(6,000-request A/B). Client-side probes found per-image JS overhead
+already negligible (`auditIntegrity()` ≈ 0 ms; native decode dominates),
+so no client behavior changed; an es2022 bundle-target bump was measured
+(−1.4 kB gzip) and rejected for its browser-floor cost.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

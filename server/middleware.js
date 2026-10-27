@@ -121,11 +121,18 @@ export class SlidingWindowLimiter {
 
   get size() { return this.#map.size; }
 
+  // Timestamps are appended in non-decreasing order, so expiry is a
+  // front-prune: one splice instead of a filter+copy on every hit/cleanup.
+  #prune(list, now) {
+    let firstFresh = 0;
+    while (firstFresh < list.length && now - list[firstFresh] >= this.windowMs) firstFresh++;
+    if (firstFresh) list.splice(0, firstFresh);
+    return list;
+  }
+
   cleanup(now = Date.now()) {
     for (const [key, list] of this.#map) {
-      const fresh = list.filter((t) => now - t < this.windowMs);
-      if (fresh.length) this.#map.set(key, fresh);
-      else this.#map.delete(key);
+      if (!this.#prune(list, now).length) this.#map.delete(key);
     }
     while (this.#map.size > this.maxClients) {
       this.#map.delete(this.#map.keys().next().value);
@@ -134,7 +141,7 @@ export class SlidingWindowLimiter {
 
   hit(key, max, now = Date.now()) {
     if (!max || max <= 0) return { limited: false, retryAfterSec: 0, count: 0 };
-    let list = (this.#map.get(key) || []).filter((t) => now - t < this.windowMs);
+    const list = this.#prune(this.#map.get(key) || [], now);
     if (list.length >= max) {
       this.#map.set(key, list);
       this.#bound();

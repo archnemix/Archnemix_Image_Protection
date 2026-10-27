@@ -3,6 +3,55 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.9.0] — Unreleased
+
+Measured optimization round: every change below was benchmarked before and
+after on the same 2-vCPU machine (`npm run bench:opt`, interleaved A/B
+against v1.8.0). WebP/JPEG output bytes are unchanged (21/21 fixture
+hashes identical); the only output that changes is PNG, which gets
+smaller with identical decoded pixels.
+
+### Performance
+
+- **Fused pad+scramble+encode input.** New `scramblePixelsPadded()` core
+  primitive writes the padded, scrambled frame directly into the encoder's
+  raw input buffer in one pass, replacing pad-copy → scramble-copy →
+  `Buffer.from` copy. A unit test pins byte-equality with the old two-step
+  path across awkward sizes/grids, including provided-buffer use.
+- **Skip EXIF autorotate when absent.** `scrambleImage()` now calls
+  Sharp's `.rotate()` only when the master carries an orientation other
+  than 1; output is re-encoded from raw pixels either way, so no metadata
+  can leak through the skip.
+- **Drop the synthesized alpha band for opaque masters** before WebP/PNG
+  encoding. PNG payloads shrink ~11–13% and encode ~34% faster at 960 px;
+  WebP encode saves ~6% (libwebp no longer analyzes a uniform alpha
+  plane). Masters with real alpha are untouched.
+- **In-place sliding-window pruning.** `SlidingWindowLimiter` front-prunes
+  expired timestamps with one splice instead of a `filter()` copy on every
+  hit/cleanup. Warm loopback mint+redeem throughput rose from 859 to
+  915 flows/s over 6,000 requests (p50 21.3 → 20.3 ms) in back-to-back
+  A/B; the earlier same-shape pair measured 772 → 881 flows/s.
+- Cold transforms overall: ~3–10% faster across the 640–1600 px
+  quality/catalog matrix in interleaved A/B (encode remains the dominant
+  cost and is user-tunable via `processing` profiles); peak transform RSS
+  a few MB lower per 1600 px job. Evaluated and rejected: raising the
+  bundle target to es2022 (−1.4 kB gzip for a higher browser floor).
+
+### Tooling
+
+- `npm run bench:opt` (`tools/optimization-bench.mjs`): repeatable
+  before/after harness covering cold-transform wall/CPU/peak-RSS/payload,
+  scramble throughput, warm throughput, batch-mint latency, and Chromium
+  time-to-paint phase timings, 100-image gallery wall/requests/heap, and
+  bundle sizes, with JSON output and a `--compare` delta table. Uses the
+  new inert `demo/perf-bench.html` so animated demo instances cannot
+  pollute timings.
+
+### Tests
+
+- 48 Node tests (new fused-scramble equality proof) and 104 Chromium
+  checks.
+
 ## [1.8.0] — Unreleased
 
 Scattered-memory display hardening: browser-enforced readback denial and

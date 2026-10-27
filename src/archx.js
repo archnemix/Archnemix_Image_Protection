@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
 } from './scramble.js';
 
-export const VERSION = '1.8.0';
+export const VERSION = '1.9.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */

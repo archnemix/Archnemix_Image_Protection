@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Archx performance bench page</title>
+<!-- Deliberately inert page for tools/optimization-bench.mjs: it creates no
+     instances on its own, so measurements are not polluted by the animated
+     demo/test-harness instances. Not a usage example. -->
+<style>body { margin: 0; background: #111; }</style>
+<script type="module">
+import Archx from '/src/index.js';
+window.Archx = Archx;
+Archx.config({ tokenEndpoint: '/archx/token/' });
+window.__perfReady = true;
+</script>

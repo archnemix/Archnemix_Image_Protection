@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the latest 1.8.x release and the current development
+Security fixes target the latest 1.9.x release and the current development
 branch. Older releases should be upgraded, especially because image decoding
 depends on current Sharp/libvips security fixes.
 

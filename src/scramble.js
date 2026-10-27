@@ -1384,6 +1384,92 @@ export function scramblePixels(rgba, pw, ph, plan, direction = 'scramble') {
   return out;
 }
 
+/**
+ * Fused pad + scramble: read a raw RGBA buffer of w×h (NOT pre-padded) and
+ * write the scrambled pw×ph result, treating out-of-bounds source pixels as
+ * opaque black (the same padding `padRaw` + `scramblePixels` produced).
+ * One output allocation and one pass replace the pad copy, the scramble
+ * copy, and the caller's Buffer.from copy. `out`, when given, must hold at
+ * least pw*ph*4 bytes and is fully overwritten; the written bytes are
+ * identical to `scramblePixels(pad(rgba), pw, ph, plan, 'scramble')`.
+ * @param {Uint8Array|Buffer} rgba w*h*4 bytes (unpadded)
+ * @param {Uint8Array|Buffer} [out] optional destination buffer
+ * @returns {Uint8Array|Buffer} the destination buffer
+ */
+export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
+  const grid = plan?.grid;
+  const count = plan?.count;
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 ||
+      !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid ||
+      !Array.isArray(plan.order) || !Array.isArray(plan.flips) ||
+      plan.order.length !== count || plan.flips.length !== count) {
+    throw new RangeError('Archx: invalid scramble geometry');
+  }
+  const tw = Math.ceil(w / grid);
+  const th = Math.ceil(h / grid);
+  const pw = tw * grid;
+  const ph = th * grid;
+  const src = asBytes(rgba);
+  if (!Number.isSafeInteger(w * h * 4) || src.length < w * h * 4) {
+    throw new RangeError('Archx: RGBA buffer is smaller than the image');
+  }
+  const expected = pw * ph * 4;
+  const target = out ? asBytes(out) : new Uint8Array(expected);
+  if (!Number.isSafeInteger(expected) || target.length < expected) {
+    throw new RangeError('Archx: scramble output buffer is too small');
+  }
+  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 &&
+    target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
+  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
+  const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
+  const writePadPixel = (wordIndex) => {
+    const di = wordIndex * 4;
+    target[di] = 0; target[di + 1] = 0; target[di + 2] = 0; target[di + 3] = 255;
+  };
+  for (let dest = 0; dest < count; dest++) {
+    const source = plan.order[dest];
+    if (!Number.isInteger(source) || source < 0 || source >= count) {
+      throw new RangeError('Archx: invalid scramble plan');
+    }
+    const flip = plan.flips[dest];
+    if (!flip || typeof flip !== 'object') throw new RangeError('Archx: invalid scramble plan');
+    const { fx, fy } = flip;
+    const sx = (source % grid) * tw;
+    const sy = Math.floor(source / grid) * th;
+    const dx = (dest % grid) * tw;
+    const dy = Math.floor(dest / grid) * th;
+    for (let y = 0; y < th; y++) {
+      const srcY = sy + (fy ? th - 1 - y : y);
+      const dstRow = (dy + y) * pw + dx;
+      if (srcY >= h) {
+        for (let x = 0; x < tw; x++) writePadPixel(dstRow + x);
+        continue;
+      }
+      if (useWords && !fx) {
+        const avail = Math.max(0, Math.min(tw, w - sx));
+        if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
+        for (let x = avail; x < tw; x++) writePadPixel(dstRow + x);
+      } else if (useWords) {
+        for (let x = 0; x < tw; x++) {
+          const srcX = sx + (tw - 1 - x);
+          if (srcX < w) out32[dstRow + x] = src32[srcY * w + srcX];
+          else writePadPixel(dstRow + x);
+        }
+      } else {
+        for (let x = 0; x < tw; x++) {
+          const srcX = sx + (fx ? tw - 1 - x : x);
+          if (srcX >= w) { writePadPixel(dstRow + x); continue; }
+          const si = (srcY * w + srcX) * 4;
+          const di = (dstRow + x) * 4;
+          target[di] = src[si]; target[di + 1] = src[si + 1];
+          target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
+        }
+      }
+    }
+  }
+  return target;
+}
+
 /* ------------------------------------------------------------------ */
 /* Perceptual content fingerprint (soft binding)                       */
 /* ------------------------------------------------------------------ */
