@@ -63,7 +63,12 @@ shows payloads unchanged with all timings within noise.
 ### Supply chain / CI
 
 - CodeQL workflow (javascript-typescript, security-extended queries,
-  weekly schedule), Dependabot (npm + GitHub Actions), and an OIDC
+  weekly schedule) — its first run flagged 7 alerts: four stat→read
+  filesystem races (fixed with fstat/handle-based reads in the disk
+  cache, both CLIs, and the build SRI step) and three "user-controlled
+  bypass" flags on the token shape pre-check (restructured so the HMAC
+  verification result is the only gate; behavior unchanged). Zero open
+  alerts. Dependabot (npm + GitHub Actions), and an OIDC
   trusted-publishing workflow with automatic npm provenance (operator
   configures the npm trusted publisher once). CI also runs the type smoke
   test and the seeded fuzz suite (`tests/fuzz.test.mjs`, part of

@@ -66,7 +66,7 @@ called out as a gap with its disposition.
 |---|---|
 | SECURITY.md policy | Met — reporting path + supported versions |
 | CI tests on PR/push, 2 Node majors | Met — lint/build/unit/browser/audit workflow |
-| SAST | Met — CodeQL workflow (javascript-typescript) |
+| SAST | Met — CodeQL workflow (javascript-typescript, security-extended queries); first run's 7 alerts (4 fs check-then-use races, 3 HMAC-blind bypass flags) were fixed or restructured away — 0 open alerts |
 | Least-privilege CI tokens | Met — workflows declare minimal `permissions:` |
 | Dependency updates + vuln gate | Met — Dependabot (npm + Actions), `npm audit` in verify/CI |
 | SBOM | Met — CycloneDX generated in CI |
