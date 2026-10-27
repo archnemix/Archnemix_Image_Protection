@@ -13,6 +13,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { buildArchxAssets } from '../server/build-assets.js';
+import { decodeContainer } from '../src/scramble.js';
+import { unscrambleImage } from '../server/scramble-image.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4179;
@@ -90,7 +92,11 @@ async function chromiumEnv() {
 
 const browser = await puppeteer.launch({
   executablePath: await chromium.executablePath(),
-  args: [...chromium.args, '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader'],
+  // Real web security stays ON: CORS/origin-taint behavior under test is
+  // exactly what production browsers enforce, and the Lambda-oriented
+  // '--disable-web-security' bundled default would hide it.
+  args: [...chromium.args.filter((a) => a !== '--disable-web-security'),
+    '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader'],
   headless: true,
   env: await chromiumEnv(),
 });
@@ -1302,6 +1308,144 @@ try {
   check('a tampered CDN variant fails its manifest SHA-256 check and never renders',
     tamperOutcome.loaded === false && /integrity/.test(tamperOutcome.error || ''),
     JSON.stringify(tamperOutcome));
+
+  console.log('\n[8d] Scattered-memory display — origin-tainted readback and pixel-exact quality');
+  // The page origin is 127.0.0.1; the same server reached as "localhost" is
+  // a different origin, which is exactly what tainting needs.
+  const taintOutcome = await page.evaluate(async (taintUrl) => {
+    // Warm the immutable HTTP cache so the client's bounded first-paint wait
+    // for the pixel is a cache hit even on a loaded test machine.
+    await new Promise((res) => {
+      const i = new Image();
+      i.onload = i.onerror = () => res();
+      i.src = taintUrl;
+    });
+    const host = document.createElement('div');
+    host.id = 't-tainted';
+    host.style.cssText = 'width:320px;height:240px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'aurora-valley' }, {
+      mode: 'shield', lazy: false, debug: true, shadow: 'open', taintUrl,
+    });
+    await inst.ready;
+    const canvas = inst._debug().canvas;
+    const out = { loaded: inst.loaded };
+    try { HTMLCanvasElement.prototype.toDataURL.call(canvas, 'image/png'); out.prototypeDataUrl = 'returned'; }
+    catch (e) { out.prototypeDataUrl = e.name; }
+    try {
+      CanvasRenderingContext2D.prototype.getImageData.call(canvas.getContext('2d'), 0, 0, 1, 1);
+      out.prototypePixels = 'returned';
+    } catch (e) { out.prototypePixels = e.name; }
+    try { out.instanceDataUrl = typeof canvas.toDataURL('image/png') === 'string'; }
+    catch { out.instanceDataUrl = false; }
+    window.__taintInstance = inst;
+    return out;
+  }, `http://localhost:${PORT}/archx/taint.png`);
+  check('origin-tainted shield canvas: even prototype-call toDataURL throws SecurityError',
+    taintOutcome.loaded && taintOutcome.prototypeDataUrl === 'SecurityError',
+    JSON.stringify(taintOutcome));
+  check('origin-tainted shield canvas: even prototype-call getImageData throws SecurityError',
+    taintOutcome.prototypePixels === 'SecurityError', JSON.stringify(taintOutcome));
+  check('instance-level decoy readback still answers on a tainted canvas (friendly layer intact)',
+    taintOutcome.instanceDataUrl === true, JSON.stringify(taintOutcome));
+  const taintedShot = await boxStats('#t-tainted');
+  check('tainting does not change the displayed picture',
+    taintedShot.std > 18 && taintedShot.mean > 12,
+    `mean=${taintedShot.mean.toFixed(1)} std=${taintedShot.std.toFixed(1)}`);
+  await page.evaluate(() => {
+    window.__taintInstance?.destroy();
+    document.querySelector('#t-tainted')?.remove();
+  });
+
+  const vaultShadow = await page.evaluate(() => {
+    const canvas = window.__instances.vault._debug().canvas;
+    return {
+      stream: Object.prototype.hasOwnProperty.call(canvas, 'captureStream'),
+      dataUrl: Object.prototype.hasOwnProperty.call(canvas, 'toDataURL'),
+      blob: Object.prototype.hasOwnProperty.call(canvas, 'toBlob'),
+    };
+  });
+  check('WebGL vault canvas shadows record/read APIs like 2D canvases (no live captureStream of animated frames)',
+    vaultShadow.stream && vaultShadow.dataUrl && vaultShadow.blob, JSON.stringify(vaultShadow));
+
+  // Pixel-exactness: the shield display must equal the authorized derivative
+  // pixel-for-pixel at 1:1 — zero quality loss beyond the derivative itself.
+  let exactToken = null;
+  let exactPayload = null;
+  const exactListener = async (response) => {
+    const u = response.url();
+    try {
+      if (u.includes('/archx/token/aurora-valley')) {
+        exactToken = JSON.parse((await response.buffer()).toString('utf8'));
+      } else if (u.includes('/archx/i/aurora-valley')) {
+        exactPayload = await response.buffer();
+      }
+    } catch {}
+  };
+  page.on('response', exactListener);
+  const exactLoad = await page.evaluate(async () => {
+    const host = document.createElement('div');
+    host.id = 't-exact';
+    host.style.cssText = 'width:320px;height:240px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'aurora-valley' }, {
+      mode: 'shield', lazy: false, debug: true, shadow: 'open',
+      sourceOversample: 1, dprCap: 1, forensic: false,
+    });
+    await inst.ready;
+    const out = {
+      loaded: inst.loaded,
+      origW: inst._debug()?.meta?.origW,
+      origH: inst._debug()?.meta?.origH,
+    };
+    window.__exactInstance = inst;
+    return out;
+  });
+  page.off('response', exactListener);
+  let exactDiff = null;
+  if (exactLoad.loaded && exactToken && exactPayload) {
+    const decoded = decodeContainer(new Uint8Array(exactPayload));
+    const restored = await unscrambleImage(Buffer.from(decoded.payload), {
+      grid: decoded.header.grid, key: exactToken.key,
+      w: decoded.header.w, h: decoded.header.h,
+    });
+    const refMeta = await sharp(restored).metadata();
+    const targetAspect = 320 / 240;
+    let refPipeline = sharp(restored);
+    if (refMeta.width / refMeta.height > targetAspect) {
+      const cw = Math.round(refMeta.height * targetAspect);
+      refPipeline = refPipeline.extract({
+        left: Math.round((refMeta.width - cw) / 2), top: 0, width: cw, height: refMeta.height,
+      });
+      if (cw !== 320) refPipeline = refPipeline.resize(320, 240);
+    } else if (refMeta.width !== 320 || refMeta.height !== 240) {
+      refPipeline = refPipeline.resize(320, 240, { fit: 'cover' });
+    }
+    const refRaw = (await refPipeline.removeAlpha().raw().toBuffer({ resolveWithObject: true })).data;
+    const exactEl = await page.$('#t-exact');
+    const shotRaw = (await sharp(await exactEl.screenshot()).removeAlpha().raw()
+      .toBuffer({ resolveWithObject: true })).data;
+    let absSum = 0;
+    let within2 = 0;
+    const px = Math.min(refRaw.length, shotRaw.length) / 3;
+    for (let i = 0; i < px; i++) {
+      const d = Math.max(
+        Math.abs(refRaw[i * 3] - shotRaw[i * 3]),
+        Math.abs(refRaw[i * 3 + 1] - shotRaw[i * 3 + 1]),
+        Math.abs(refRaw[i * 3 + 2] - shotRaw[i * 3 + 2]),
+      );
+      absSum += d;
+      if (d <= 2) within2++;
+    }
+    exactDiff = { mad: absSum / px, within2: within2 / px, refW: refMeta.width, refH: refMeta.height };
+  }
+  check('shield display is pixel-exact against the authorized derivative at 1:1 (no added quality loss)',
+    !!exactDiff && exactDiff.mad < 2 && exactDiff.within2 > 0.99,
+    JSON.stringify({ exactLoad, exactDiff, tokenCaptured: !!exactToken, payloadCaptured: !!exactPayload }));
+  await page.evaluate(() => {
+    window.__exactInstance?.destroy();
+    document.querySelector('#t-exact')?.remove();
+  });
 
   console.log('\n[9] Performance — 100-image protected gallery');
   scaleTraffic.batchMints = 0;

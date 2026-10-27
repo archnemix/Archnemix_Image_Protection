@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
 } from './scramble.js';
 
-export const VERSION = '1.7.0';
+export const VERSION = '1.8.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -325,6 +325,8 @@ const DEFAULTS = {
   maxDecodedPixels: 40000000,   // pre-decode header budget + post-decode bitmap budget
   maxDecodedDimension: 16384,
   onExtract: 'black',           // 'black' | 'lowres' | 'scrambled'
+  taintReadback: 'auto',        // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
+  taintUrl: null,               // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
   splitCanvases: false,         // shield+: one canvas per tile (hero images)
   splitGrid: 3,
   maxBackingWidth: 1920,        // never paint a wider backing store than this
@@ -582,7 +584,7 @@ function sanitizeOptionsView(opts) {
   if (!opts) return opts;
   const sensitive = new Set([
     'key', 'aeskey', 'cachescope', 'sessionid', 'token', 'accesstoken', 'refreshtoken',
-    'secret', 'password', 'authorization', 'cookie', 'assetmanifest',
+    'secret', 'password', 'authorization', 'cookie', 'assetmanifest', 'tainturl',
   ]);
   const seen = new WeakMap();
   const clone = (value, keyName = '') => {
@@ -1135,6 +1137,76 @@ function effectiveSampling(o) {
     }
   }
   return { dprCap, oversample, requestQuality };
+}
+
+/* ---------- origin-tainted readback (2D canvases) ----------
+ * Instance-level API poisoning cannot stop a determined script that reaches
+ * the canvas and calls HTMLCanvasElement.prototype.toDataURL.call(canvas).
+ * The browser itself can: drawing a cross-origin image WITHOUT CORS
+ * approval flips the canvas's origin-clean flag to false, after which
+ * toDataURL/toBlob/getImageData/captureStream throw SecurityError no
+ * matter how they are invoked, and the taint propagates through
+ * createImageBitmap/drawImage into any laundering canvas. Archx draws a
+ * 1x1 cross-origin "taint" pixel first and paints the image over it, so
+ * displayed pixels are unchanged. The middleware serves the pixel at
+ * {basePath}/taint.png; it only helps when that origin differs from the
+ * page origin (cross-origin API/CDN deployments) or when the operator
+ * supplies any other cross-origin 1x1 via `taintUrl`. Same-origin
+ * deployments simply keep the instance-poisoning layer. */
+const taintImageCache = new Map(); // url -> { img, promise }
+
+function resolveTaintUrl(o, src) {
+  if (o.taintReadback === 'off' || o.taintReadback === false) return null;
+  try {
+    if (o.taintUrl) {
+      const url = resolveHttpUrl(o.taintUrl, { label: 'taint image URL' });
+      return typeof location !== 'undefined' && url.origin === location.origin ? null : url.href;
+    }
+    const endpointRaw = (src && typeof src === 'object' && src.tokenEndpoint) || o.tokenEndpoint;
+    if (!endpointRaw || typeof location === 'undefined') return null;
+    const endpoint = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
+    if (endpoint.origin === location.origin) return null; // same-origin loads cannot taint
+    const segments = endpoint.pathname.split('/').filter(Boolean);
+    if (segments[segments.length - 1] !== 'token') return null;
+    segments[segments.length - 1] = 'taint.png';
+    endpoint.pathname = `/${segments.join('/')}`;
+    endpoint.search = '';
+    endpoint.hash = '';
+    return endpoint.href;
+  } catch { return null; }
+}
+
+function loadTaintImage(url) {
+  let entry = taintImageCache.get(url);
+  if (entry) return entry;
+  entry = { img: null, promise: null };
+  entry.promise = new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      // Deliberately NO crossOrigin property: a CORS-approved load would
+      // stay origin-clean and defeat the entire purpose.
+      const timer = setTimeout(() => resolve(entry.img), 3000);
+      img.onload = () => { clearTimeout(timer); entry.img = img; resolve(img); };
+      img.onerror = () => { clearTimeout(timer); resolve(null); };
+      img.src = url;
+    } catch { resolve(null); }
+  });
+  taintImageCache.set(url, entry);
+  return entry;
+}
+
+async function ensureTaintImage(o, src) {
+  const url = resolveTaintUrl(o, src);
+  if (!url) return null;
+  const entry = loadTaintImage(url);
+  if (entry.img) return entry.img;
+  // First paint waits briefly for a 68-byte immutable pixel, never longer:
+  // a dead taint host must not delay or block image display.
+  return Promise.race([
+    entry.promise,
+    new Promise((resolve) => setTimeout(() => resolve(entry.img), 1500)),
+  ]);
 }
 
 function normalizedHttpCache(value, fallback = 'no-store') {
@@ -2054,6 +2126,7 @@ export class ProtectedImage {
   #options; #host; #root; #wrap; #canvas; #tilesEl; #shieldEl;
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
   #decoy = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
+  #taintImage = null;
   #risk = new Set(); #blackoutTimer = 0; #resizeTimer = 0; #visibilityObs = null; #realCtx = null;
   #attemptHandler = null; #loading = false; #visible = false; #unloaded = false;
   #glProg = null; #glLoc = null; #glTex = null; #glMap = null; #glWm = null; #glWmOn = 0;
@@ -3084,6 +3157,12 @@ export class ProtectedImage {
       if (!this.#options.aspectRatio && !this.#options.height) {
         this.#host.style.aspectRatio = meta.origW + ' / ' + meta.origH;
       }
+      // Resolve the optional origin-taint pixel before first paint (2D
+      // paths only; WebGL canvases never expose a readable bitmap).
+      if (this.#options.mode !== 'vault') {
+        this.#taintImage = await ensureTaintImage(this.#options, this.#source);
+        if (this.#destroyed) return;
+      }
       this._render();
       this.#loaded = true;
       this.#unloaded = false;
@@ -3190,6 +3269,7 @@ export class ProtectedImage {
     this.#renderedW = w; this.#renderedH = h;
     const ctx = getNativeContext(canvas, '2d', { alpha: false });
     this.#realCtx = ctx;
+    this.#taintContext(ctx); // covered by every paint below; flag is sticky
     const { full, fit } = this._workingCanvas(w, h);
     const temporalCfg = this.#temporalConfig();
     this.#temporalEngineActual = temporalCfg ? 'frames' : null;
@@ -3573,6 +3653,7 @@ export class ProtectedImage {
       const c = makeCanvas();
       c.width = tw; c.height = th;
       const tctx = getNativeContext(c, '2d', { alpha: false });
+      this.#taintContext(tctx); // each tile canvas is tainted before its slice covers the pixel
       nativeDrawImage(tctx, composed, (i % g) * tw, Math.floor(i / g) * th, tw, th, 0, 0, tw, th);
       this.#tilesEl.appendChild(c);
       this.#decoy = this.#decoy || this._makeDecoy(full, w, h);
@@ -3728,6 +3809,19 @@ export class ProtectedImage {
    * Note: HTMLCanvasElement.prototype.toDataURL.call(canvas) bypasses any
    * instance patch on a 2D canvas — vault/WebGL mode exists for that threat.
    */
+  /**
+   * Draw the cross-origin 1x1 taint pixel into a fresh 2D bitmap BEFORE
+   * any image pixels cover it. The pixel itself is invisible in the final
+   * composition; its only effect is flipping origin-clean to false so the
+   * browser itself rejects every readback (see resolveTaintUrl). Must be
+   * re-applied after any canvas resize, which resets the flag.
+   */
+  #taintContext(ctx) {
+    const img = this.#taintImage;
+    if (!img || !ctx) return;
+    try { nativeDrawImage(ctx, img, 0, 0, 1, 1); } catch {}
+  }
+
   _poison(canvas, ctx) {
     const decoy = () => this.#decoy;
     // Captured at module load — a hook installed afterwards cannot hijack
@@ -3821,6 +3915,10 @@ export class ProtectedImage {
       if (!gl) return false;
       this.#gl = gl;
       glContextsInUse++;
+      // Prototype readbacks already return black (drawing buffer is not
+      // preserved), but captureStream() could record frames WHILE temporal
+      // animation draws them; shadow the instance APIs here too.
+      this._poison(canvas, null);
       canvas.addEventListener('webglcontextlost', (e) => {
         e.preventDefault();
         this.#gl = null; glContextsInUse = Math.max(0, glContextsInUse - 1);
@@ -4593,6 +4691,8 @@ function defineElement() {
         networkAware: this.hasAttribute('network-aware')
           ? this.getAttribute('network-aware') !== 'false'
           : presetOptions.networkAware,
+        taintReadback: this.getAttribute('taint-readback') || presetOptions.taintReadback,
+        taintUrl: this.getAttribute('taint-url') || presetOptions.taintUrl,
         fetchPriority: this.getAttribute('fetch-priority') || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute('proof-of-possession') || undefined,
         cacheScope: this.getAttribute('cache-scope') || undefined,

@@ -1822,6 +1822,160 @@ test('cold derivative stampede: concurrent redemptions coalesce into one Sharp t
   assert.ok(cache.coalesced >= 1, 'waiters are reported as coalesced, not hidden inside misses');
 });
 
+test('taint image endpoint: public constant pixel, no CORS, method-bounded, disableable', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-taint-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(64, 48));
+  const startWith = async (extra) => {
+    const handler = createArchxMiddleware({
+      secret: 'taint-endpoint-secret-for-unit-tests-32',
+      imagesDir: mastersDir,
+      authorize: async () => true,
+      ...extra,
+    });
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { handler, server, base: `http://127.0.0.1:${server.address().port}` };
+  };
+  let running = await startWith({});
+  t.after(async () => {
+    await new Promise((resolve) => running.server.close(resolve));
+    running.handler.close();
+  });
+
+  const res = await fetch(running.base + '/archx/taint.png');
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'image/png');
+  assert.equal(res.headers.get('access-control-allow-origin'), null,
+    'no CORS headers: a CORS-approved load would stay origin-clean and not taint');
+  assert.match(res.headers.get('cache-control') || '', /immutable/);
+  const png = new Uint8Array(await res.arrayBuffer());
+  assert.ok(png.length > 0 && png.length < 256);
+  assert.deepEqual([...png.slice(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    'real PNG signature');
+
+  const head = await fetch(running.base + '/archx/taint.png', { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+
+  const post = await fetch(running.base + '/archx/taint.png', { method: 'POST' });
+  assert.equal(post.status, 405);
+
+  await new Promise((resolve) => running.server.close(resolve));
+  running.handler.close();
+  running = await startWith({ taintImage: false });
+  const disabled = await fetch(running.base + '/archx/taint.png');
+  assert.equal(disabled.status, 404, 'taintImage:false removes the public route');
+});
+
+test('poisoned disk derivative cache entries are rejected and regenerated', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-cache-poison-'));
+  const mastersDir = path.join(root, 'masters');
+  const cacheDir = path.join(root, 'derivative-cache');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(640, 420));
+  const makeHandler = () => createArchxMiddleware({
+    secret: 'cache-poison-secret-for-unit-tests-32ch',
+    imagesDir: mastersDir,
+    ttlSec: 120,
+    quality: 88,
+    outputCacheDir: cacheDir,
+    processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
+    authorize: async () => true,
+  });
+  const start = async (handler) => {
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, base: `http://127.0.0.1:${server.address().port}` };
+  };
+  let handler = makeHandler();
+  let running = await start(handler);
+  t.after(async () => {
+    await new Promise((resolve) => running.server.close(resolve));
+    handler.close();
+  });
+  const redeemFresh = async (base) => {
+    const token = await (await postToken(base + '/archx/token/cat?w=320')).json();
+    const response = await redeemToken(base, token);
+    assert.equal(response.status, 200);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+
+  const original = await redeemFresh(running.base);
+  assert.ok(isArchxContainer(original));
+  await new Promise((resolve) => running.server.close(resolve));
+  handler.close();
+
+  const cacheFiles = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.archx-cache')) cacheFiles.push(full);
+    }
+  })(cacheDir);
+  assert.equal(cacheFiles.length, 1);
+  fs.writeFileSync(cacheFiles[0], Buffer.alloc(original.length, 0x41));
+
+  handler = makeHandler();
+  running = await start(handler);
+  const regenerated = await redeemFresh(running.base);
+  assert.deepEqual(regenerated, original,
+    'poisoned cache bytes are never served; the derivative is regenerated');
+  const cache = handler.stats().derivativeCache;
+  assert.equal(cache.diskHits, 0);
+  assert.equal(cache.misses, 1);
+  assert.ok(cache.diskErrors >= 1, 'the invalid entry is counted and evicted');
+});
+
+test('batch minting accepts framework string/Buffer bodies with the same strict parsing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-batch-body-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'batch-body-secret-for-unit-tests-32chars',
+    imagesDir: mastersDir,
+    authorize: async () => true,
+  });
+  const invoke = (body) => new Promise((resolvePromise, rejectPromise) => {
+    const req = {
+      method: 'POST',
+      url: '/archx/tokens',
+      headers: { 'content-type': 'application/json', 'x-archx-request': 'token', host: 'unit.test' },
+      body,
+      socket: { remoteAddress: '127.0.0.1' },
+    };
+    const res = {
+      statusCode: 0,
+      headers: {},
+      writeHead(status, headers) {
+        this.statusCode = status;
+        Object.assign(this.headers, headers);
+        return this;
+      },
+      end(payload) {
+        resolvePromise({
+          status: this.statusCode,
+          body: payload ? JSON.parse(String(payload)) : null,
+        });
+      },
+    };
+    Promise.resolve(handler(req, res)).catch(rejectPromise);
+  });
+
+  const payload = JSON.stringify({ items: [{ ref: 'a', id: 'cat', w: 160 }] });
+  for (const body of [payload, Buffer.from(payload, 'utf8'), new TextEncoder().encode(payload)]) {
+    const out = await invoke(body);
+    assert.equal(out.status, 200);
+    assert.ok(out.body.tokens.a.token, 'string, Buffer, and Uint8Array bodies all mint');
+  }
+  const malformed = await invoke('{not json');
+  assert.equal(malformed.status, 400, 'malformed pre-parsed bodies still fail closed');
+  handler.close();
+});
+
 test('precomputed asset builder is incremental, canonical, and emits a usable manifest', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-build-assets-'));
   const mastersDir = path.join(root, 'masters');

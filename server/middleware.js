@@ -27,12 +27,23 @@ import { isIP } from 'node:net';
 import {
   stegoFingerprint as resolveStegoFingerprint,
   sniffImageInfo,
+  isArchxContainer,
+  decodeContainer,
 } from '../src/scramble.js';
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SECRET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const TOKEN_AUDIENCE = 'archx:image';
 const TOKEN_SCOPE = 'image:view';
+/* 1x1 transparent PNG served from `{basePath}/taint.png`. A browser that
+ * draws it into a canvas cross-origin WITHOUT CORS approval flips that
+ * canvas's origin-clean flag to false, after which every readback API —
+ * including prototype-call bypasses of instance-level poisoning — throws
+ * SecurityError. The bytes are constant and input-independent. */
+const TAINT_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+  'base64',
+);
 const FORMAT_EXTENSIONS = Object.freeze({
   jpeg: ['.jpg', '.jpeg'],
   png: ['.png'],
@@ -783,6 +794,7 @@ function inspectServerConfig(options = {}) {
 
   const knownTopLevelOptions = new Set([
     'abuseDetection', 'activeSecretId', 'allowAnonymous', 'allowClientQuality', 'allowQueryTokens',
+    'taintImage',
     'allowedInputFormats', 'allowedOrigins', 'authorize', 'authorizeTimeoutMs',
     'basePath', 'batchTokenMaxBytes', 'batchTokenMaxItems', 'bindTokenTo',
     'blockUntrustedSharpLoaders', 'cacheMasters',
@@ -994,7 +1006,7 @@ function inspectServerConfig(options = {}) {
   for (const field of [
     'oneTimeTokens', 'encrypt', 'lossless', 'allowClientQuality', 'forensicPerToken',
     'cacheMasters', 'trustProxy', 'requireSameSiteTokenRequests',
-    'requireTokenRequestHeader', 'allowQueryTokens',
+    'requireTokenRequestHeader', 'allowQueryTokens', 'taintImage',
   ]) checkBoolean(field, options[field]);
   if (options.quality != null && options.quality !== 'lossless') checkInt('quality', options.quality, 1, 100);
   if (options.format != null && !['webp', 'png', 'jpeg'].includes(options.format)) fail("format must be 'webp', 'png', or 'jpeg'");
@@ -1201,6 +1213,10 @@ function inspectServerConfig(options = {}) {
     // leak through history, Referer headers, screenshots of logs, and many
     // proxy/telemetry pipelines.
     allowQueryTokens: options.allowQueryTokens === true,
+    // Public constant-bytes 1x1 PNG used to origin-taint 2D display canvases
+    // in cross-origin deployments (see TAINT_PNG). Disable only if the host
+    // route policy forbids any unauthenticated route under basePath.
+    taintImage: options.taintImage !== false,
     proofOfPossession: options.proofOfPossession === true ? 'required'
       : options.proofOfPossession === false ? 'off'
         : (options.proofOfPossession ?? 'optional'),
@@ -1263,6 +1279,7 @@ export function auditArchxServerConfig(options = {}) {
       requireTokenRequestHeader: config.requireTokenRequestHeader,
       requireSameSiteTokenRequests: config.requireSameSiteTokenRequests,
       allowQueryTokens: config.allowQueryTokens,
+      taintImage: config.taintImage,
       proofOfPossession: config.proofOfPossession,
       abuseDetection: config.abuseDetection,
       quotasConfigured: Object.values(config.quotas).some((value) => typeof value === 'number' && value > 0),
@@ -1650,20 +1667,40 @@ export function createArchxMiddleware(options = {}) {
   }
   const sharedOutputCacheEnabled = !ownsStateStore && cfg.sharedCacheTtlMs > 0 &&
     typeof stateStore.getCache === 'function' && typeof stateStore.setCache === 'function';
-  async function getSharedOutputCache(key) {
+  /* A disk/shared derivative cache is operator infrastructure, but its
+   * bytes are still never served blind: they must parse as an Archx
+   * container whose header matches this exact request (grid, width cap,
+   * format, encryption). A poisoned, truncated, or mis-keyed entry then
+   * degrades to an authorized reprocess instead of wrong pixels. Header
+   * parsing only — no payload decode — so the check is cheap. */
+  function isPlausibleCachedDerivative(bytes, expected) {
+    if (!expected) return true;
+    try {
+      if (!isArchxContainer(bytes)) return false;
+      const { header } = decodeContainer(bytes);
+      return header.scrambled === true &&
+        header.grid === expected.grid &&
+        header.w >= 1 && header.w <= expected.maxWidth &&
+        header.encrypted === expected.encrypted &&
+        header.mime === expected.mime;
+    } catch { return false; }
+  }
+  async function getSharedOutputCache(key, expected = null) {
     if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes) return null;
     try {
       const value = await callStateStore('getCache', key);
-      if (Buffer.isBuffer(value)) return value.length >= 1 && value.length <= cfg.outputCacheMaxBytes ? value : null;
-      if (value instanceof Uint8Array) {
-        return value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes
+      let bytes = null;
+      if (Buffer.isBuffer(value)) {
+        bytes = value.length >= 1 && value.length <= cfg.outputCacheMaxBytes ? value : null;
+      } else if (value instanceof Uint8Array) {
+        bytes = value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes
           ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
           : null;
+      } else if (value instanceof ArrayBuffer) {
+        bytes = value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes ? Buffer.from(value) : null;
       }
-      if (value instanceof ArrayBuffer) {
-        return value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes ? Buffer.from(value) : null;
-      }
-      return null;
+      if (bytes && !isPlausibleCachedDerivative(bytes, expected)) return null;
+      return bytes;
     } catch {
       // The derivative cache is an optimization, unlike replay/quota state:
       // a cache-read failure safely falls back to authorized reprocessing.
@@ -1764,7 +1801,7 @@ export function createArchxMiddleware(options = {}) {
     return diskPrunePromise;
   }
 
-  async function getDiskOutputCache(sharedCacheKey) {
+  async function getDiskOutputCache(sharedCacheKey, expected = null) {
     if (!outputCacheDir || !cfg.outputCacheDiskMaxBytes || !cfg.outputCacheDiskMaxEntries) return null;
     const { file } = diskOutputCachePath(sharedCacheKey);
     try {
@@ -1778,6 +1815,11 @@ export function createArchxMiddleware(options = {}) {
       }
       const bytes = await fs.promises.readFile(file);
       if (bytes.length !== stat.size) return null;
+      if (!isPlausibleCachedDerivative(bytes, expected)) {
+        derivativeCacheStats.diskErrors++;
+        try { await fs.promises.unlink(file); } catch {}
+        return null;
+      }
       derivativeCacheStats.diskHits++;
       if (ageMs > 3600000) {
         // Refresh at most hourly so mtime is a cheap approximate LRU clock
@@ -2544,6 +2586,29 @@ export function createArchxMiddleware(options = {}) {
       }
       return req.body;
     }
+    // Frameworks with text/raw body parsers deliver a string or Buffer and
+    // consume the stream; accept those shapes explicitly (same byte cap and
+    // strict JSON rules) instead of failing as "body unavailable".
+    const rawParsedBody = typeof req?.body === 'string'
+      ? Buffer.from(req.body, 'utf8')
+      : Buffer.isBuffer(req?.body)
+        ? req.body
+        : req?.body instanceof Uint8Array
+          ? Buffer.from(req.body.buffer, req.body.byteOffset, req.body.byteLength)
+          : null;
+    if (rawParsedBody) {
+      if (rawParsedBody.length > cfg.batchTokenMaxBytes) {
+        throw new MintDenied(413, 'request too large', { reason: 'batch-body' });
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(rawParsedBody));
+      } catch { throw new MintDenied(400, 'bad request', { reason: 'batch-json' }); }
+      if (!isPlainObject(parsed)) {
+        throw new MintDenied(400, 'bad request', { reason: 'batch-json' });
+      }
+      return parsed;
+    }
     if (!req || typeof req[Symbol.asyncIterator] !== 'function') {
       throw new MintDenied(400, 'bad request', { reason: 'batch-body-unavailable' });
     }
@@ -2590,6 +2655,26 @@ export function createArchxMiddleware(options = {}) {
       }
       const parts = url.pathname.slice(basePath.length + 1).split('/');
       const isBatchTokens = parts.length === 1 && parts[0] === 'tokens';
+      if (cfg.taintImage && parts.length === 1 && parts[0] === 'taint.png') {
+        // Public by design and exempt from token rate budgets: the response
+        // is 68 constant bytes with no input-dependent behavior, no secrets,
+        // and deliberately no CORS headers, so a cross-origin no-CORS draw
+        // marks the destination canvas origin-dirty (see TAINT_PNG).
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          return deny(req, res, 405, 'method not allowed', {
+            phase: 'taint', reason: 'taint-method', headers: { Allow: 'GET, HEAD' },
+          });
+        }
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': TAINT_PNG.length,
+          'Cache-Control': 'public, max-age=31536000, immutable',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+        });
+        return req.method === 'HEAD' ? res.end() : res.end(TAINT_PNG);
+      }
       if (!isBatchTokens && parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
       const kind = isBatchTokens ? 'tokens' : parts[0];
       const rawId = isBatchTokens ? null : parts[1];
@@ -3056,14 +3141,21 @@ export function createArchxMiddleware(options = {}) {
           stegoCachePart, processingCachePart,
         ].join('|');
         const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
+        const expectedCached = {
+          grid,
+          maxWidth: effectiveWidth,
+          encrypted: !!aesKey,
+          mime: deliveryFormat === 'png' ? 'image/png'
+            : deliveryFormat === 'jpeg' ? 'image/jpeg' : 'image/webp',
+        };
         let bytes = getOutputCache(cacheKey);
         if (bytes) derivativeCacheStats.memoryHits++;
         if (!bytes) {
-          bytes = await getDiskOutputCache(sharedCacheKey);
+          bytes = await getDiskOutputCache(sharedCacheKey, expectedCached);
           if (bytes) setOutputCache(cacheKey, bytes);
         }
         if (!bytes) {
-          bytes = await getSharedOutputCache(sharedCacheKey);
+          bytes = await getSharedOutputCache(sharedCacheKey, expectedCached);
           if (bytes) {
             derivativeCacheStats.sharedHits++;
             setOutputCache(cacheKey, bytes);

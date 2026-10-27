@@ -827,6 +827,38 @@ Three smaller scale/integrity gaps remained after §2.14:
    `Archx.preloadAssets()` removes first-paint network latency for known
    hero assets while refusing to spend bytes on Save-Data connections.
 
+### 2.16 Scattered-memory display and browser-enforced readback denial (v1.8)
+
+Verified against the implementation, the browser never stores a clean,
+whole image: the retained payload bytes and the decoded `ImageBitmap` are
+always the keyed tile-scrambled mosaic (tiles shuffled and per-tile
+mirrored, grid 2–32). Canvas2D display reassembles tiles on a private
+off-DOM canvas with exact integer 1:1 copies, paints the visible canvas
+once, and wipes the working copy; `splitCanvases` slices the composition
+across separately poisoned tile canvases, so no single canvas holds the
+picture. Vault/Fortress never reassembles in JavaScript at all — the
+scrambled mosaic is a GPU texture and each output pixel is unscrambled in
+the fragment shader at present time, with `preserveDrawingBuffer:false`
+black readback.
+
+For 2D modes, v1.8 adds deliberate **origin tainting**: MDN documents that
+drawing a cross-origin image without CORS approval flips the canvas's
+origin-clean flag, after which `getImageData`/`toBlob`/`toDataURL`/
+`captureStream` throw `SecurityError`[1], and the HTML Standard shows the
+flag propagating through `createImageBitmap()` and `drawImage`, so the
+canvas cannot be laundered clean[11]. The middleware serves the required
+constant cross-origin pixel at `{basePath}/taint.png}`; the client draws
+it under the real pixels when the API is cross-origin (or `taintUrl` is
+set), upgrading 2D readback denial from instance poisoning (bypassable
+via prototype calls) to browser-platform enforcement. WebGL canvases also
+now shadow read/record APIs to block `captureStream` recording of
+animated frames[1]. Quality is measured, not asserted: the browser suite
+compares the painted shield canvas to an independently unscrambled
+reference at 1:1 and records mean absolute difference 0. Same-origin
+deployments cannot taint (origin-clean by definition) and retain instance
+poisoning; compositor/OS capture and cameras remain addressed only by
+derivative caps, marks, Lens/temporal layers, and attribution.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -1047,7 +1079,7 @@ error — see the README checklist).
   hit with no new miss, the asset builder reuses every unchanged variant and
   regenerates only a damaged one, and the in-place server Stego path is
   byte-identical to the copying public API.
-- **Real browser (headless Chromium, 98 checks):** a page with 7 protected
+- **Real browser (headless Chromium, 104 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have

@@ -297,6 +297,16 @@ Create a Cache Rule for the token and payload paths:
 - Disable any generic rule that caches based on file extension or a
   static-looking URL for these routes.
 
+### Origin-taint pixel
+
+`{basePath}/taint.png` is a constant 68-byte transparent PNG with immutable
+caching and deliberately **no** CORS headers; it exists so cross-origin
+pages can origin-taint 2D canvas readback (see the README's memory model).
+Keep it reachable cross-origin, never behind authentication, and never
+redirect it to the page's own origin — a same-origin load is origin-clean
+and the layer silently disappears. Set `taintImage:false` if you serve
+your own pixel through the client's `taintUrl` instead.
+
 ### Precomputed static assets are a separate behavior
 
 Versioned files produced by `archx-build` are not dynamic token payloads.

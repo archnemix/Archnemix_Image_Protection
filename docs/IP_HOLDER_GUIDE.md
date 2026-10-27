@@ -22,6 +22,12 @@ your evidence; it cannot repeal the "analog hole."
 
 - **Ordinary right-click saving:** the protected viewer does not present the
   valuable image as a normal downloadable image file.
+- **Pulling the picture out of the page with tools:** the picture does not
+  travel to, or sit in, the visitor's browser as a whole image. It arrives
+  as a shuffled jigsaw of tiles that the viewer reassembles only in order
+  to display it, and the usual "copy the picture out of the page" tricks
+  return a decoy, a black card, or are refused by the browser itself — yet
+  on screen it looks exactly like the viewing copy you approved.
 - **Guessing the original file address:** masters stay outside the public
   website folder and the protected route only returns an approved viewing
   derivative.

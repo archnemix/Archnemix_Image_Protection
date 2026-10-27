@@ -110,6 +110,7 @@ app.use(createArchxMiddleware(withHardenedProductionDefaults({
   oneTimeTokens: true,                  // a captured signed token cannot be replayed
   bindTokenTo: { userAgent: true, session: true }, // friction only; authorize() is the boundary
   allowedOrigins: ['https://example.com'], // exact origins; '*' is rejected
+  taintImage: true,                     // default; serves {basePath}/taint.png so cross-origin pages can origin-taint 2D readback (browser-enforced SecurityError)
   quotas: { perViewer: 500, perViewerImage: 20, perIp: 2000, windowMs: 3600000 },
   abuseDetection: { distinctImages: 250, windowMs: 600000, action: 'deny' }, // 'event' only records; it does not block
   processing: {
@@ -422,10 +423,10 @@ The perceptual soft binding is a separate 64-bit DCT fingerprint of image struct
 | Guess the master path | Masters live outside every static route; IDs are allowlisted, files/symlinks are realpath-contained and revalidated at redemption, configured master/public overlaps fail startup, and the middleware never returns originals | `404` |
 | Decode the captured payload | Pixels are cut into an 8×8 grid, shuffled & mirrored under a key (optional AES-GCM transport/obfuscation layer) inside an `.archx` container | A meaningless mosaic / ciphertext |
 | Capture payload **and** steal the client session key, then reconstruct offline | Server watermarks and forensic block marks can be applied **before tile scrambling**, so a mathematically perfect reconstruction is still marked; it also remains limited to the server-authorized web resolution | A marked, traceable web-size copy — never the master |
-| `canvas.toDataURL()` · `toBlob()` · `getImageData()` · `captureStream()` (download extensions) | Read-back APIs are **poisoned per canvas instance** and report the attempt; optional strike policies escalate repeated probes to blur/blackout lockouts | Your choice: ⬛ black “PROTECTED” card · 🥔 72-px pixelated copy · 🧩 re-scrambled mosaic |
+| `canvas.toDataURL()` · `toBlob()` · `getImageData()` · `captureStream()` (download extensions) | Read-back APIs are **poisoned per canvas instance** and report the attempt; optional strike policies escalate repeated probes to blur/blackout lockouts. Where origin tainting applies (cross-origin API/`taintUrl`), the browser itself rejects these calls with `SecurityError` before any wrapper runs | Your choice: ⬛ black “PROTECTED” card · 🥔 72-px pixelated copy · 🧩 re-scrambled mosaic · 🚫 a thrown `SecurityError` on tainted canvases |
 | Reach into library objects/DOM for canvases, URLs, or keys | Instance state uses JavaScript `#private` fields; host/element lookup uses module-private `WeakMap`s (no `__archx`/`_inst` expando), there is no public instance registry, option/config views redact keys, and `_debug()` is inert unless that instance was explicitly created with `debug:true` | No supported handle to internal canvases, payloads, bitmaps, or secrets |
 | Monkey-patch `fetch`, `createImageBitmap`, canvas, or WebGL APIs around the viewer | Sensitive native functions are captured at module load and used internally; `auditIntegrity()` reports replacements/non-native implementations. Fortress defaults to **fail closed** when hooks are detected; other modes can monitor or lock | The cheap userscript/extension hook is bypassed or causes a lock instead of silently recording clean pixels |
-| Expert move: `HTMLCanvasElement.prototype.toDataURL.call(canvas)` | **Vault/Fortress** render in WebGL with `preserveDrawingBuffer:false` — the browser clears the buffer after compositing, so even the prototype call returns black. In other modes the backing store only ever contains the display-size, watermarked copy | Vault/Fortress: black. Elsewhere: screen-size marked copy at best |
+| Expert move: `HTMLCanvasElement.prototype.toDataURL.call(canvas)` | **Vault/Fortress** render in WebGL with `preserveDrawingBuffer:false` — the browser clears the buffer after compositing, so even the prototype call returns black. On 2D canvases, **origin tainting** makes the browser throw `SecurityError` for prototype calls too (below); only same-origin 2D relies on instance poisoning alone, and its backing store still only ever contains the display-size, watermarked derivative | Vault/Fortress: black · Tainted 2D: `SecurityError` · Same-origin 2D: screen-size marked copy at best |
 | Bulk scrapers & AI crawlers | No URLs in HTML, POST + authorization + a fresh token per view, separate bounded token/image rate windows, per-IP/viewer/image quotas, distinct-image scraping alerts/denial, exact-origin and same-site token gating, bounded caches/nonce stores, and automation tripwires | An empty or very expensive harvest |
 | Stealth browser / raw CDP / coherent fingerprint spoofing | Modern stealth stacks can imitate a real browser, pierce shadow trees, and capture composited frames. Archx therefore treats client automation signals as telemetry only; the durable controls remain authenticated `authorize()`, per-viewer quotas/abuse detection, derivative caps, proof-bound one-time delivery, marks, and monitoring | It can obtain only derivatives that the authenticated session is entitled to view, at a rate/pattern your server can throttle or revoke |
 | Web-cache deception through a CDN/shared cache | Token and payload responses send `Cache-Control: private, no-store`, `CDN-Cache-Control: private, no-store`, `Surrogate-Control: no-store`, and credential/token/proof-sensitive `Vary` fields. Your CDN must still be tested: a rule that overrides origin `no-store` can defeat these headers | Compliant caches do not retain or replay another viewer's derivative |
@@ -438,6 +439,21 @@ The perceptual soft binding is a separate 64-bit DCT fingerprint of image struct
 | Single presented frame under `temporalInterlace` | Only the cells assigned to that phase retain sharp pixels; pixel-level, checker, strip, or randomized-block subsets cycle over 2–4 phases. Inactive cells get a low-detail local-colour fill by default (or dim/black/noise), and 60 Hz optimization clamps the cycle to two phases so each subset still updates at 30 Hz | One spatially incomplete frame. Capturing several presented phases, recording video, or using an integrating camera exposure can recombine most detail; interlace raises capture effort, it does not create a screenshot veto |
 | AI denoise/upscale/regeneration of a degraded capture | No web layer can honestly promise AI-proof pixels. Archx limits the source information (entitled derivative, Lens/temporal capture), keeps visible attribution, and adds evidence/control layers around it | At best a plausible regenerated approximation and a marked/attributable trail — not the withheld master pixels |
 | Reposted copy — “prove it's yours” | StegoMark embeds a blind, keyed, redundant 48-bit fingerprint + CRC in delivered pixels; `archx-detect` recovers it without the original and your `onStegoIssue` registry maps it to the issued view. An optional registered perceptual soft binding gives a second lookup path if metadata/marks were stripped | Attribution evidence for the measured resize/re-encode/mild-blur/photometric and bounded axis-aligned crop cases above—not rotation/perspective proof or standalone legal proof |
+
+### What the browser actually holds in memory
+
+The image is **not** kept whole. On the server, the entitled derivative is cut into a keyed 8×8 (configurable 2–32) tile grid whose tiles are shuffled and mirrored; only that mosaic — optionally AES-GCM-encrypted — is transmitted and retained. The decoded bitmap sitting in JavaScript memory is the *scrambled mosaic*, never your picture. Display then differs per renderer:
+
+| Stage | Shield / Lite (Canvas2D) | Vault / Fortress (WebGL) |
+|---|---|---|
+| Decoded source in JS memory | Scrambled mosaic `ImageBitmap` | Scrambled mosaic, uploaded as a GPU texture |
+| Reassembly | Tiles are copied to their true positions on a short-lived private canvas, painted once to the display canvas, and the private canvas is wiped immediately | A fragment shader maps every output pixel back to its scrambled texel; an unscrambled copy never exists as a bitmap |
+| Display surface | One canvas holds the composed picture; `splitCanvases:true` instead slices it across a grid of separately poisoned canvases, so no single canvas holds the whole image | Presented frame only — the drawing buffer is cleared after compositing |
+| Programmatic read-back | Decoy from the poisoned instance APIs; `SecurityError` from the browser itself when origin-tainted | Black by platform design; record/read APIs are shadowed too |
+
+Reassembly is pixel-exact — tiles are copied 1:1 at integer coordinates, and the browser suite measures a mean absolute difference of **0** against the authorized derivative — so display adds no quality loss of its own; the only lossy step is the derivative encode you configure (`quality:'lossless'` removes even that, at larger payloads). What no renderer can change: pixels a user can *see* can be captured by OS/browser-privileged tools or a camera. Archx makes every *programmatic* route return a decoy, black, or a browser-enforced `SecurityError`, and degrades/attributes the privileged routes; it cannot veto a photograph.
+
+**Origin-tainted readback.** When the token API is served from a different origin than the page (`api.example.com` serving `www.example.com`), or you set `taintUrl` to any cross-origin pixel, Archx draws the middleware's 1×1 `{basePath}/taint.png` into each 2D display/tile canvas before painting. That flips the canvas's origin-clean flag, so the *browser platform* — not Archx's wrappers — rejects `toDataURL`/`toBlob`/`getImageData`/`captureStream`, including `HTMLCanvasElement.prototype...call(canvas)` bypasses, and the taint propagates through any canvas or `ImageBitmap` an extractor copies the picture into. Display is unaffected (the transparent pixel is painted over). Same-origin deployments cannot taint — a same-origin load is origin-clean by definition — and keep the instance-poisoning layer shown in the table above. Disable with `taintReadback:'off'` (client) or `taintImage:false` (server).
 
 ### Modes
 
@@ -467,6 +483,7 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `renderer` | `'auto'` | `'auto' \| 'canvas' \| 'webgl'`. Direct pipeline selection for custom setups: use with `mode:'custom'`, or omit `mode` and pass `renderer` plus individual flags. `'webgl'` falls back to Canvas if WebGL/context budget is unavailable |
 | `watermark` | `null` | string or `{text, opacity, tile, corner, color}` — baked into the same pixels; `{session}` expands to a per-visitor id |
 | `onExtract` | `'black'` | decoy for canvas grabbers: `'black' \| 'lowres' \| 'scrambled'`. `scrambled` first destroys detail at 144 px wide, pixel-upscales, tile-scrambles that degraded staging image, and overlays the brand/watermark, so even a perfect unscramble does not recover the clean displayed derivative |
+| `taintReadback` / `taintUrl` | `'auto'` / `null` | origin-taint 2D canvases with a cross-origin 1×1 pixel so the browser itself throws `SecurityError` on every readback API, prototype calls included (see *What the browser actually holds in memory*). `'auto'` derives `{basePath}/taint.png` from a cross-origin token endpoint; set `taintUrl` for any other cross-origin pixel; `'off'` disables. No-op on same-origin deployments and in WebGL modes (already black-readback) |
 | `tokenEndpoint` | `null` | e.g. `'/archx/token/'` (id is appended) |
 | `tokenTransport` | `'header'` | `'header' \| 'query' \| 'auto'`. Header transport redeems the separate token in `X-Archx-Token` against a clean payload URL, keeping bearer material out of URLs/history/Referer/proxy logs/Resource Timing names; query transport requires an explicit server `allowQueryTokens:true` legacy opt-in |
 | `proofOfPossession` | `'auto'` | `'auto' \| 'required' \| 'off'` (or boolean). Auto creates one ephemeral non-extractable ECDSA P-256 key pair per page when WebCrypto is available, binds minted tokens to its thumbprint, and signs a 60-second method/path/token-hash proof for each payload. Required fails closed without WebCrypto. It stops token replay in another browser; it does not stop the legitimate page/browser from displaying authorized pixels |
@@ -658,7 +675,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 44 unit/integration tests (scramble/crypto, delivery quality,
+npm test            # 47 unit/integration tests (scramble/crypto, delivery quality,
                     # cover-aware sizing, server marks, standard/robust StegoMark survival + crop geometry,
                     # perceptual soft bindings, strict config/claims, hardened production defaults/audit,
                     # buyer/order hooks, malformed HTTP, replay races, reauthorization, sender-constrained proofs,
@@ -666,8 +683,11 @@ npm test            # 44 unit/integration tests (scramble/crypto, delivery quali
                     # 60 Hz interlace normalization, cross-instance shared state, Redis adapter contract,
                     # signing-key rotation, fail-closed store errors, canonical widths,
                     # batch minting, persistent derivative reuse, cold-stampede coalescing,
+                    # validated derivative-cache hits, the origin-taint pixel endpoint,
+                    # framework-parsed batch bodies,
                     # and incremental asset builds with manifest/variant digests)
-npm run test:browser  # 98 checks in real headless Chromium (encapsulation, decoys,
+npm run test:browser  # 104 checks in real headless Chromium (encapsulation, decoys,
+                      # pixel-exact 1:1 display (MAD 0), origin-tainted SecurityError readback,
                       # native detail retention, WebGL black read-back, post-load and pre-load draw-hook
                       # Fortress/Vault policy regressions, sanitized plugin telemetry,
                       # Fortress Lens/camera + shader/frames temporal-interlace patterns/capture trace/strikes/integrity,

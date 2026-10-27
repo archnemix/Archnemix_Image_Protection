@@ -1285,7 +1285,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.7.0";
+var VERSION = "1.8.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1573,6 +1573,10 @@ var DEFAULTS = {
   maxDecodedDimension: 16384,
   onExtract: "black",
   // 'black' | 'lowres' | 'scrambled'
+  taintReadback: "auto",
+  // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
+  taintUrl: null,
+  // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
   splitCanvases: false,
   // shield+: one canvas per tile (hero images)
   splitGrid: 3,
@@ -1839,7 +1843,8 @@ function sanitizeOptionsView(opts) {
     "password",
     "authorization",
     "cookie",
-    "assetmanifest"
+    "assetmanifest",
+    "tainturl"
   ]);
   const seen = /* @__PURE__ */ new WeakMap();
   const clone = (value, keyName = "") => {
@@ -2380,6 +2385,65 @@ function effectiveSampling(o) {
     }
   }
   return { dprCap, oversample, requestQuality };
+}
+var taintImageCache = /* @__PURE__ */ new Map();
+function resolveTaintUrl(o, src) {
+  if (o.taintReadback === "off" || o.taintReadback === false) return null;
+  try {
+    if (o.taintUrl) {
+      const url = resolveHttpUrl(o.taintUrl, { label: "taint image URL" });
+      return typeof location !== "undefined" && url.origin === location.origin ? null : url.href;
+    }
+    const endpointRaw = src && typeof src === "object" && src.tokenEndpoint || o.tokenEndpoint;
+    if (!endpointRaw || typeof location === "undefined") return null;
+    const endpoint = resolveHttpUrl(endpointRaw, { label: "token endpoint" });
+    if (endpoint.origin === location.origin) return null;
+    const segments = endpoint.pathname.split("/").filter(Boolean);
+    if (segments[segments.length - 1] !== "token") return null;
+    segments[segments.length - 1] = "taint.png";
+    endpoint.pathname = `/${segments.join("/")}`;
+    endpoint.search = "";
+    endpoint.hash = "";
+    return endpoint.href;
+  } catch {
+    return null;
+  }
+}
+function loadTaintImage(url) {
+  let entry = taintImageCache.get(url);
+  if (entry) return entry;
+  entry = { img: null, promise: null };
+  entry.promise = new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.referrerPolicy = "no-referrer";
+      const timer = setTimeout(() => resolve(entry.img), 3e3);
+      img.onload = () => {
+        clearTimeout(timer);
+        entry.img = img;
+        resolve(img);
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        resolve(null);
+      };
+      img.src = url;
+    } catch {
+      resolve(null);
+    }
+  });
+  taintImageCache.set(url, entry);
+  return entry;
+}
+async function ensureTaintImage(o, src) {
+  const url = resolveTaintUrl(o, src);
+  if (!url) return null;
+  const entry = loadTaintImage(url);
+  if (entry.img) return entry.img;
+  return Promise.race([
+    entry.promise,
+    new Promise((resolve) => setTimeout(() => resolve(entry.img), 1500))
+  ]);
 }
 function normalizedHttpCache(value, fallback = "no-store") {
   const mode = String(value ?? fallback).toLowerCase();
@@ -3286,7 +3350,7 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -3309,6 +3373,7 @@ var ProtectedImage = class {
     __privateAdd(this, _raf, 0);
     __privateAdd(this, _loaded, false);
     __privateAdd(this, _destroyed, false);
+    __privateAdd(this, _taintImage, null);
     __privateAdd(this, _risk, /* @__PURE__ */ new Set());
     __privateAdd(this, _blackoutTimer, 0);
     __privateAdd(this, _resizeTimer, 0);
@@ -4088,6 +4153,10 @@ var ProtectedImage = class {
       if (!__privateGet(this, _options).aspectRatio && !__privateGet(this, _options).height) {
         __privateGet(this, _host).style.aspectRatio = meta.origW + " / " + meta.origH;
       }
+      if (__privateGet(this, _options).mode !== "vault") {
+        __privateSet(this, _taintImage, await ensureTaintImage(__privateGet(this, _options), __privateGet(this, _source)));
+        if (__privateGet(this, _destroyed)) return;
+      }
       this._render();
       __privateSet(this, _loaded, true);
       __privateSet(this, _unloaded, false);
@@ -4178,6 +4247,7 @@ var ProtectedImage = class {
     __privateSet(this, _renderedH, h);
     const ctx = getNativeContext(canvas, "2d", { alpha: false });
     __privateSet(this, _realCtx, ctx);
+    __privateMethod(this, _ProtectedImage_instances, taintContext_fn).call(this, ctx);
     const { full, fit } = this._workingCanvas(w, h);
     const temporalCfg = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
     __privateSet(this, _temporalEngineActual, temporalCfg ? "frames" : null);
@@ -4328,6 +4398,7 @@ var ProtectedImage = class {
       c.width = tw;
       c.height = th;
       const tctx = getNativeContext(c, "2d", { alpha: false });
+      __privateMethod(this, _ProtectedImage_instances, taintContext_fn).call(this, tctx);
       nativeDrawImage(tctx, composed, i % g * tw, Math.floor(i / g) * th, tw, th, 0, 0, tw, th);
       __privateGet(this, _tilesEl).appendChild(c);
       __privateSet(this, _decoy, __privateGet(this, _decoy) || this._makeDecoy(full, w, h));
@@ -4493,13 +4564,6 @@ var ProtectedImage = class {
     ctx.fillText("This image is displayed with Archnemix Image Protection.", decoy.width / 2, decoy.height / 2 + Math.max(42, decoy.width / 13));
     return decoy;
   }
-  /**
-   * Poison read-back APIs on ONE canvas instance (prototypes untouched, so
-   * the rest of the host page's canvases keep working). Naïve grabbers and
-   * extensions calling canvas.toDataURL() etc. receive the decoy.
-   * Note: HTMLCanvasElement.prototype.toDataURL.call(canvas) bypasses any
-   * instance patch on a 2D canvas — vault/WebGL mode exists for that threat.
-   */
   _poison(canvas, ctx) {
     const decoy = () => __privateGet(this, _decoy);
     const realToDataURL = NATIVES.canvasToDataURL || HTMLCanvasElement.prototype.toDataURL;
@@ -4574,6 +4638,7 @@ var ProtectedImage = class {
       if (!gl) return false;
       __privateSet(this, _gl, gl);
       glContextsInUse++;
+      this._poison(canvas, null);
       canvas.addEventListener("webglcontextlost", (e) => {
         e.preventDefault();
         __privateSet(this, _gl, null);
@@ -5209,6 +5274,7 @@ _gl = new WeakMap();
 _raf = new WeakMap();
 _loaded = new WeakMap();
 _destroyed = new WeakMap();
+_taintImage = new WeakMap();
 _risk = new WeakMap();
 _blackoutTimer = new WeakMap();
 _resizeTimer = new WeakMap();
@@ -5815,6 +5881,28 @@ paintLens2d_fn = function() {
     ctx.restore();
   }
 };
+/**
+ * Poison read-back APIs on ONE canvas instance (prototypes untouched, so
+ * the rest of the host page's canvases keep working). Naïve grabbers and
+ * extensions calling canvas.toDataURL() etc. receive the decoy.
+ * Note: HTMLCanvasElement.prototype.toDataURL.call(canvas) bypasses any
+ * instance patch on a 2D canvas — vault/WebGL mode exists for that threat.
+ */
+/**
+ * Draw the cross-origin 1x1 taint pixel into a fresh 2D bitmap BEFORE
+ * any image pixels cover it. The pixel itself is invisible in the final
+ * composition; its only effect is flipping origin-clean to false so the
+ * browser itself rejects every readback (see resolveTaintUrl). Must be
+ * re-applied after any canvas resize, which resets the flag.
+ */
+taintContext_fn = function(ctx) {
+  const img = __privateGet(this, _taintImage);
+  if (!img || !ctx) return;
+  try {
+    nativeDrawImage(ctx, img, 0, 0, 1, 1);
+  } catch {
+  }
+};
 /* ---------------- WebGL vault ---------------- */
 /** A canvas that already owns a WebGL context can never become a 2D
  * canvas — fallback therefore swaps in a fresh element inside the shadow. */
@@ -6054,6 +6142,8 @@ function defineElement() {
         assetIntegrity: this.getAttribute("asset-integrity") || presetOptions.assetIntegrity,
         assetManifestIntegrity: this.getAttribute("asset-manifest-integrity") || presetOptions.assetManifestIntegrity,
         networkAware: this.hasAttribute("network-aware") ? this.getAttribute("network-aware") !== "false" : presetOptions.networkAware,
+        taintReadback: this.getAttribute("taint-readback") || presetOptions.taintReadback,
+        taintUrl: this.getAttribute("taint-url") || presetOptions.taintUrl,
         fetchPriority: this.getAttribute("fetch-priority") || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute("proof-of-possession") || void 0,
         cacheScope: this.getAttribute("cache-scope") || void 0

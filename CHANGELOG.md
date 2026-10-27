@@ -3,6 +3,59 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.8.0] — Unreleased
+
+Scattered-memory display hardening: browser-enforced readback denial and
+fail-safe cache/body handling, with measurement proof that display remains
+pixel-exact.
+
+### Added
+
+- **Origin-tainted 2D readback.** The middleware serves a constant 1×1
+  transparent PNG at `{basePath}/taint.png` (public, immutable-cached,
+  deliberately without CORS headers; disable with `taintImage:false`).
+  When the token API is cross-origin to the page — or the client is given
+  any cross-origin `taintUrl` — the client draws that pixel into every 2D
+  display/split-tile canvas before painting, flipping the canvas's
+  origin-clean flag: `toDataURL`/`toBlob`/`getImageData`/`captureStream`
+  then throw `SecurityError` at the browser-platform level, including
+  `HTMLCanvasElement.prototype...call(canvas)` bypasses, and the taint
+  propagates through copied canvases/`ImageBitmap`s. Controlled by client
+  `taintReadback:'auto'|'off'` and `taintUrl` (also `taint-readback` /
+  `taint-url` element attributes). Display pixels are unchanged: the
+  browser suite measures a mean absolute difference of 0 between the
+  painted shield canvas and the authorized derivative at 1:1. Same-origin
+  deployments cannot taint and keep instance-poisoned readback.
+- WebGL display canvases now receive the same instance-level read/record
+  API shadowing as 2D canvases, in addition to the platform's black
+  non-preserved readback, so `captureStream`-style recording of animated
+  vault/temporal frames meets an explicit poison first line.
+
+### Security
+
+- Disk/shared derivative-cache hits are validated before serving: bytes
+  must parse as an `.archx` container matching the expected scramble grid,
+  width cap, encryption state, and content type. Tampered or poisoned
+  cache entries are evicted and regenerated instead of being trusted by
+  key alone.
+
+### Fixed
+
+- Batch token minting accepts framework-parsed string/`Buffer`/
+  `Uint8Array` request bodies under the same byte cap and strict JSON
+  validation (previously only a live request stream worked; pre-parsed
+  object bodies still fail closed with 400).
+- The Chromium test harness no longer launches with
+  `--disable-web-security`, so CORS and canvas origin-taint behavior are
+  exercised exactly as production browsers enforce them.
+
+### Tests
+
+- 47 Node tests and 104 Chromium checks (up from 44/98), adding the taint
+  endpoint contract, poisoned-cache regeneration, parsed-body minting,
+  tainted-canvas `SecurityError` assertions, WebGL API shadowing, and
+  pixel-exact display verification.
+
 ## [1.7.0] — Unreleased
 
 ### Added
