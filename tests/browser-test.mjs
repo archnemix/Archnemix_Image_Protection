@@ -1182,6 +1182,11 @@ try {
     preloadOutcome.preloaded.includes('neon-portrait') &&
       preloadOutcome.failed.includes('missing-asset') && preloadOutcome.skipped === null,
     JSON.stringify(preloadOutcome));
+  // CDP response events can lag the in-page fetch resolution on a loaded
+  // machine; wait (bounded) for the counter to settle before asserting.
+  for (let i = 0; i < 80 && scaleTraffic.assetPayloadNetwork < networkBeforePreload + 1; i++) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
   check('preloading fetches the largest variant from the network exactly once',
     scaleTraffic.assetPayloadNetwork === networkBeforePreload + 1,
     `network 200s before=${networkBeforePreload} after=${scaleTraffic.assetPayloadNetwork}`);
@@ -1372,17 +1377,6 @@ try {
   // pixel-for-pixel at 1:1 — zero quality loss beyond the derivative itself.
   let exactToken = null;
   let exactPayload = null;
-  const exactListener = async (response) => {
-    const u = response.url();
-    try {
-      if (u.includes('/archx/token/aurora-valley')) {
-        exactToken = JSON.parse((await response.buffer()).toString('utf8'));
-      } else if (u.includes('/archx/i/aurora-valley')) {
-        exactPayload = await response.buffer();
-      }
-    } catch {}
-  };
-  page.on('response', exactListener);
   const exactLoad = await page.evaluate(async () => {
     const host = document.createElement('div');
     host.id = 't-exact';
@@ -1401,7 +1395,20 @@ try {
     window.__exactInstance = inst;
     return out;
   });
-  page.off('response', exactListener);
+  // Deterministic replay instead of CDP response-body sniffing (whose
+  // bodies can be evicted under the 100-image gallery's network pressure):
+  // a derivative is a pure function of (id, box, quality, grid, key), so
+  // minting the same cover box the browser reported returns the same
+  // derivative it painted.
+  if (exactLoad.loaded && exactLoad.origW && exactLoad.origH) {
+    try {
+      exactToken = await (await fetch(
+        `${BASE}/archx/token/aurora-valley?w=${exactLoad.origW}&bw=${exactLoad.origW}&bh=${exactLoad.origH}&fit=cover`,
+        { method: 'POST', headers: { 'x-archx-request': 'token' } })).json();
+      exactPayload = Buffer.from(await (await fetch(BASE + exactToken.cleanUrl,
+        { headers: { 'x-archx-token': exactToken.token } })).arrayBuffer());
+    } catch {}
+  }
   let exactDiff = null;
   if (exactLoad.loaded && exactToken && exactPayload) {
     const decoded = decodeContainer(new Uint8Array(exactPayload));
@@ -1441,7 +1448,7 @@ try {
   }
   check('shield display is pixel-exact against the authorized derivative at 1:1 (no added quality loss)',
     !!exactDiff && exactDiff.mad < 2 && exactDiff.within2 > 0.99,
-    JSON.stringify({ exactLoad, exactDiff, tokenCaptured: !!exactToken, payloadCaptured: !!exactPayload }));
+    JSON.stringify({ exactLoad, exactDiff, replayOk: !!(exactToken && exactPayload) }));
   await page.evaluate(() => {
     window.__exactInstance?.destroy();
     document.querySelector('#t-exact')?.remove();
