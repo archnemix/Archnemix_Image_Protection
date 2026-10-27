@@ -53,6 +53,36 @@ test('scramble plan is deterministic per key and differs across keys', () => {
   assert.deepEqual([...a.order].sort((x, y) => x - y), Array.from({ length: 64 }, (_, i) => i));
 });
 
+test('scramble plan v2 (128-bit seed) is deterministic, distinct from v1, and round-trips', () => {
+  const v1 = buildScramblePlan(8, 'correct horse battery staple');
+  const v2 = buildScramblePlan(8, 'correct horse battery staple', 2);
+  const v2Again = buildScramblePlan(8, 'correct horse battery staple', 2);
+  assert.equal(v1.version, 1);
+  assert.equal(v2.version, 2);
+  assert.deepEqual(v2.order, v2Again.order);
+  assert.deepEqual(v2.flips, v2Again.flips);
+  assert.notDeepEqual(v2.order, v1.order, 'v2 must not reproduce the 32-bit-seed permutation');
+  assert.deepEqual([...v2.order].sort((a, b) => a - b), Array.from({ length: 64 }, (_, i) => i));
+  v2.order.forEach((orig, pos) => assert.equal(v2.inverse[orig], pos));
+  assert.throws(() => buildScramblePlan(8, 'k', 3), /plan version/);
+  // round-trip through the fused padded path at an awkward size
+  const w = 61, h = 47;
+  const raw = new Uint8Array(w * h * 4);
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 2654435761) % 256;
+  const { pw, ph } = paddedSize(w, h, 8);
+  const scrambled = scramblePixelsPadded(raw, w, h, v2);
+  const restoredPadded = scramblePixels(scrambled, pw, ph, v2, 'unscramble');
+  for (let y = 0; y < h; y++) {
+    assert.deepEqual(
+      restoredPadded.subarray(y * pw * 4, (y * pw + w) * 4),
+      raw.subarray(y * w * 4, (y + 1) * w * 4));
+  }
+  // container header carries pv only for v2 and validation enforces the enum
+  const header = { v: 1, w, h, pw, ph, grid: 8, mime: 'image/webp', scrambled: true, encrypted: false, pv: 2 };
+  assert.equal(decodeContainer(encodeContainer(header, new Uint8Array([1, 2, 3]))).header.pv, 2);
+  assert.throws(() => encodeContainer({ ...header, pv: 9 }, new Uint8Array([1])), /plan version/);
+});
+
 test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
   const w = 64, h = 48;
   const raw = new Uint8Array(w * h * 4);
@@ -1959,6 +1989,70 @@ test('poisoned disk derivative cache entries are rejected and regenerated', asyn
   assert.ok(cache.diskErrors >= 1, 'the invalid entry is counted and evicted');
 });
 
+test('forged-but-plausible disk cache containers are rejected by the HMAC entry tag', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-cache-forge-'));
+  const mastersDir = path.join(root, 'masters');
+  const cacheDir = path.join(root, 'derivative-cache');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(640, 420));
+  const makeHandler = () => createArchxMiddleware({
+    secret: 'cache-forge-secret-for-unit-tests-32chr',
+    imagesDir: mastersDir,
+    ttlSec: 120,
+    quality: 88,
+    outputCacheDir: cacheDir,
+    processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
+    authorize: async () => true,
+  });
+  const start = async (handler) => {
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, base: `http://127.0.0.1:${server.address().port}` };
+  };
+  let handler = makeHandler();
+  let running = await start(handler);
+  t.after(async () => {
+    await new Promise((resolve) => running.server.close(resolve));
+    handler.close();
+  });
+  const redeemFresh = async (base) => {
+    const token = await (await postToken(base + '/archx/token/cat?w=320')).json();
+    const response = await redeemToken(base, token);
+    assert.equal(response.status, 200);
+    return new Uint8Array(await response.arrayBuffer());
+  };
+
+  const original = await redeemFresh(running.base);
+  await new Promise((resolve) => running.server.close(resolve));
+  handler.close();
+
+  // The attacker (write access to the cache dir, no server secret) plants a
+  // structurally valid .archx of a DIFFERENT image with matching geometry —
+  // it passes every plausibility check, so only the HMAC tag can stop it.
+  const forged = await scrambleImage(await syntheticMaster(320, 210), {
+    key: 'attacker-key', grid: 8, maxWidth: 320, quality: 88,
+    processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2' },
+  });
+  assert.ok(isArchxContainer(forged.bytes));
+  assert.notDeepEqual(new Uint8Array(forged.bytes), original);
+  const cacheFiles = [];
+  (function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.archx-cache')) cacheFiles.push(full);
+    }
+  })(cacheDir);
+  assert.equal(cacheFiles.length, 1);
+  fs.writeFileSync(cacheFiles[0], forged.bytes);
+
+  handler = makeHandler();
+  running = await start(handler);
+  const after = await redeemFresh(running.base);
+  assert.deepEqual(after, original, 'the forged derivative is never served; the authorized one is regenerated');
+  assert.equal(handler.stats().derivativeCache.diskHits, 0);
+});
+
 test('batch minting accepts framework string/Buffer bodies with the same strict parsing', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-batch-body-'));
   const mastersDir = path.join(root, 'masters');
@@ -2102,4 +2196,151 @@ test('StegoMark in-place server path is byte-identical to the copying public pat
     assert.deepEqual(inPlace, copied, `${profile} profile must be byte-identical in-place`);
   }
   assert.deepEqual(original, new Uint8Array(data), 'default public path still does not mutate its input');
+});
+
+test('batch body stream reads are deadline-bounded (slow-trickle fails fast with 408)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-batch-trickle-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'batch-trickle-secret-for-unit-tests-32c',
+    imagesDir: mastersDir,
+    callbackTimeoutMs: 100,
+    authorize: async () => true,
+  });
+  const started = Date.now();
+  const out = await new Promise((resolvePromise, rejectPromise) => {
+    const req = {
+      method: 'POST',
+      url: '/archx/tokens',
+      headers: { 'content-type': 'application/json', 'x-archx-request': 'token', host: 'unit.test' },
+      socket: { remoteAddress: '127.0.0.1' },
+      destroyed: false,
+      destroy() { this.destroyed = true; },
+      async *[Symbol.asyncIterator]() {
+        await new Promise((r) => setTimeout(r, 500));
+        yield Buffer.from('{"items":[]}');
+      },
+    };
+    const res = {
+      statusCode: 0,
+      headers: {},
+      writeHead(status, headers) { this.statusCode = status; Object.assign(this.headers, headers); return this; },
+      end(payload) { resolvePromise({ status: this.statusCode, body: payload ? String(payload) : '' }); },
+    };
+    Promise.resolve(handler(req, res)).catch(rejectPromise);
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(out.status, 408, JSON.stringify(out));
+  assert.ok(elapsed < 400, `deadline must fire before the trickled first chunk (elapsed ${elapsed} ms)`);
+  handler.close();
+});
+
+test('taint image supports ETag revalidation (304 with no CORS leakage)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-taint-etag-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(64, 48));
+  const handler = createArchxMiddleware({
+    secret: 'taint-etag-secret-for-unit-tests-32chars',
+    imagesDir: mastersDir,
+    authorize: async () => true,
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const first = await fetch(base + '/archx/taint.png');
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('etag'), '"archx-taint-1"');
+  assert.equal((await first.arrayBuffer()).byteLength, 68);
+  const revalidated = await fetch(base + '/archx/taint.png', {
+    headers: { 'if-none-match': '"archx-taint-1"' },
+  });
+  assert.equal(revalidated.status, 304);
+  assert.equal((await revalidated.arrayBuffer()).byteLength, 0);
+  assert.equal(revalidated.headers.get('access-control-allow-origin'), null,
+    'even the 304 must not become CORS-approved (that would un-taint)');
+});
+
+test('middleware scramblePlanVersion 2 issues pv=2 payloads that only unscramble with the v2 plan', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-planv2-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  const master = await syntheticMaster(640, 420);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), master);
+  const start = async (extra) => {
+    const handler = createArchxMiddleware({
+      secret: 'planv2-secret-for-unit-tests-min-32chars',
+      imagesDir: mastersDir,
+      authorize: async () => true,
+      ...extra,
+    });
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { handler, server, base: `http://127.0.0.1:${server.address().port}` };
+  };
+  const redeem = async (base) => {
+    const token = await (await postToken(base + '/archx/token/cat?w=320')).json();
+    const response = await redeemToken(base, token);
+    assert.equal(response.status, 200);
+    return { token, bytes: new Uint8Array(await response.arrayBuffer()) };
+  };
+
+  const v1 = await start({});
+  t.after(async () => { await new Promise((r) => v1.server.close(r)); v1.handler.close(); });
+  const one = await redeem(v1.base);
+  const oneHeader = decodeContainer(one.bytes).header;
+  assert.equal(oneHeader.pv, undefined, 'v1 payloads omit pv (byte-compatible with deployed clients)');
+
+  const v2 = await start({ scramblePlanVersion: 2 });
+  t.after(async () => { await new Promise((r) => v2.server.close(r)); v2.handler.close(); });
+  const two = await redeem(v2.base);
+  const twoDecoded = decodeContainer(two.bytes);
+  assert.equal(twoDecoded.header.pv, 2);
+  assert.notDeepEqual(two.bytes, one.bytes, 'v1 and v2 permutations must differ');
+
+  const restoredV2 = await unscrambleImage(Buffer.from(twoDecoded.payload), {
+    grid: twoDecoded.header.grid, key: two.token.key,
+    w: twoDecoded.header.w, h: twoDecoded.header.h, planVersion: 2,
+  });
+  assert.ok((await meanAbsDiff(master, restoredV2, 320, 210)) < 22,
+    'v2 payload unscrambles back to the master with the v2 plan');
+  const restoredWrongPlan = await unscrambleImage(Buffer.from(twoDecoded.payload), {
+    grid: twoDecoded.header.grid, key: two.token.key,
+    w: twoDecoded.header.w, h: twoDecoded.header.h, planVersion: 1,
+  });
+  assert.ok((await meanAbsDiff(master, restoredWrongPlan, 320, 210)) > 22,
+    'the v1 plan must NOT reconstruct a v2 payload');
+  assert.throws(() => createArchxMiddleware({
+    secret: 'planv2-secret-for-unit-tests-min-32chars', imagesDir: mastersDir,
+    authorize: async () => true, scramblePlanVersion: 3,
+  }), /scramblePlanVersion/);
+});
+
+test('AVIF derivatives round-trip, carry the avif MIME, and beat WebP bytes at comparable quality', async () => {
+  const master = await syntheticMaster(640, 420);
+  const webp = await scrambleImage(master, {
+    grid: 8, key: 'avif-test', maxWidth: 640, quality: 88, format: 'webp',
+    processing: { webpEffort: 2 },
+  });
+  const avif = await scrambleImage(master, {
+    grid: 8, key: 'avif-test', maxWidth: 640, quality: 70, format: 'avif',
+    processing: { avifEffort: 2 },
+  });
+  assert.equal(avif.header.mime, 'image/avif');
+  const decoded = decodeContainer(avif.bytes);
+  assert.equal(decoded.header.mime, 'image/avif');
+  assert.equal(sniffImageInfo(decoded.payload).format, 'avif');
+  const restored = await unscrambleImage(Buffer.from(decoded.payload), {
+    grid: 8, key: 'avif-test', w: decoded.header.w, h: decoded.header.h,
+  });
+  assert.ok((await meanAbsDiff(master, restored, 640, 420)) < 22,
+    'AVIF derivative unscrambles back near the master');
+  assert.ok(avif.bytes.length < webp.bytes.length,
+    `expected AVIF (${avif.bytes.length}) to be smaller than WebP q88 (${webp.bytes.length}) for photographic content`);
 });

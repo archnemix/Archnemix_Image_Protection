@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
 } from './scramble.js';
 
-export const VERSION = '1.9.0';
+export const VERSION = '1.10.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -301,6 +301,7 @@ const DEFAULTS = {
   shadow: 'closed',             // 'closed' | 'open' | 'none'
   grid: DEFAULT_GRID,
   scrambled: false,             // source pixels are tile-scrambled
+  planVersion: 1,               // scramble plan derivation for container-less scrambled sources (1 = legacy 32-bit seed, 2 = 128-bit seed); .archx headers carry their own `pv` and win
   key: null,                    // scramble seed and/or AES key (see docs)
   aesKey: null,                 // base64 AES key for encrypted .archx payloads
   tokenEndpoint: null,          // e.g. '/archx/token/'  (+ image id)
@@ -2032,7 +2033,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
 function scrambleCanvasLocally(source, grid, key) {
   const w = source.width, h = source.height;
   const { tw, th, pw, ph } = paddedSize(w, h, grid);
-  const plan = buildScramblePlan(grid, key);
+  const plan = buildScramblePlan(grid, key, 2); // ephemeral in-page plan: strongest seed is free here
   const cleanPadded = makeCanvas();
   cleanPadded.width = pw; cleanPadded.height = ph;
   const cctx = getNativeContext(cleanPadded, '2d');
@@ -3005,6 +3006,8 @@ export class ProtectedImage {
     const keyValue = extra.key ?? o.key ?? '';
     if (!['string', 'number', 'bigint'].includes(typeof keyValue)) throw nonRetryableError('Archx: invalid scramble key');
     const key = String(keyValue);
+    const planVersion = header?.pv ?? o.planVersion ?? 1;
+    if (planVersion !== 1 && planVersion !== 2) throw nonRetryableError('Archx: invalid scramble plan version');
     const blob = new Blob([payload], { type: header?.mime || sniffed.mime });
     let bitmap;
     try {
@@ -3043,7 +3046,7 @@ export class ProtectedImage {
         }
         origW = bitmapW; origH = bitmapH; padW = bitmapW; padH = bitmapH;
       }
-      meta = { plan: buildScramblePlan(grid, key), origW, origH, padW, padH };
+      meta = { plan: buildScramblePlan(grid, key, planVersion), origW, origH, padW, padH };
     } else {
       meta = { plan: null, origW: bitmapW, origH: bitmapH, padW: bitmapW, padH: bitmapH };
     }
@@ -3767,7 +3770,7 @@ export class ProtectedImage {
       tiny.width = 0; tiny.height = 0;
 
       const g = 8;
-      const plan = buildScramblePlan(g, 'decoy-' + sessionId());
+      const plan = buildScramblePlan(g, 'decoy-' + sessionId(), 2);
       const tw = staging.width / g, th = staging.height / g;
       const dw = w / g, dh = h / g;
       for (let dest = 0; dest < plan.count; dest++) {
@@ -4618,7 +4621,7 @@ function defineElement() {
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope']; }
+    static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope', 'taint-readback', 'taint-url', 'plan-version']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -4693,6 +4696,9 @@ function defineElement() {
           : presetOptions.networkAware,
         taintReadback: this.getAttribute('taint-readback') || presetOptions.taintReadback,
         taintUrl: this.getAttribute('taint-url') || presetOptions.taintUrl,
+        planVersion: this.hasAttribute('plan-version')
+          ? Number(this.getAttribute('plan-version'))
+          : presetOptions.planVersion,
         fetchPriority: this.getAttribute('fetch-priority') || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute('proof-of-possession') || undefined,
         cacheScope: this.getAttribute('cache-scope') || undefined,

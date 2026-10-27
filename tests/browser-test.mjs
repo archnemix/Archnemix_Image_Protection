@@ -52,6 +52,22 @@ const browserCatalogBuild = await buildArchxAssets({
   processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
 });
 
+/* A second catalog with scramble plan v2 (128-bit seed) for the [8e] checks. */
+const protectedTestDirV2 = path.join(root, 'demo', 'protected-test-v2');
+fs.rmSync(protectedTestDirV2, { recursive: true, force: true });
+await buildArchxAssets({
+  images: { 'aurora-valley': path.join(root, 'demo-masters', 'aurora-valley.jpg') },
+  outputDir: protectedTestDirV2,
+  baseUrl: '/demo/protected-test-v2/',
+  widths: [320],
+  maxWidth: 320,
+  key: 'browser-manifest-test-key',
+  planVersion: 2,
+  quality: 88,
+  jobs: 1,
+  processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
+});
+
 /* boot server */
 const server = spawn('node', ['server/demo-server.js'], {
   cwd: root, env: { ...process.env, PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -1454,6 +1470,60 @@ try {
     document.querySelector('#t-exact')?.remove();
   });
 
+  console.log('\n[8e] Scramble plan v2 — the browser applies the 128-bit-seed plan from the header');
+  {
+    const v2Manifest = JSON.parse(fs.readFileSync(path.join(protectedTestDirV2, 'archx-manifest.json'), 'utf8'));
+    const v2Variant = v2Manifest.assets['aurora-valley'].variants[0];
+    const v2Bytes = fs.readFileSync(path.join(protectedTestDirV2, path.basename(new URL(v2Variant.url, 'http://local').pathname)));
+    const v2Decoded = decodeContainer(new Uint8Array(v2Bytes));
+    check('plan v2 catalog asset declares pv=2 in its container header',
+      v2Decoded.header.pv === 2, JSON.stringify(v2Decoded.header));
+    const v2Load = await page.evaluate(async () => {
+      const host = document.createElement('div');
+      host.id = 't-planv2';
+      host.style.cssText = 'width:320px;height:240px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { assetId: 'aurora-valley' }, {
+        assetManifest: '/demo/protected-test-v2/archx-manifest.json',
+        assetHttpCache: 'no-store',
+        mode: 'shield', lazy: false, debug: true, shadow: 'open',
+        sourceOversample: 1, dprCap: 1,
+      });
+      await inst.ready;
+      const out = { loaded: inst.loaded, planVersion: inst._debug()?.meta?.plan?.version ?? null };
+      window.__planV2Instance = inst;
+      return out;
+    });
+    const madAgainst = async (planVersion) => {
+      const restored = await unscrambleImage(Buffer.from(v2Decoded.payload), {
+        grid: v2Decoded.header.grid, key: v2Manifest.assets['aurora-valley'].key,
+        w: v2Decoded.header.w, h: v2Decoded.header.h, planVersion,
+      });
+      const refRaw = (await sharp(restored).resize(320, 240, { fit: 'cover' }).removeAlpha()
+        .raw().toBuffer({ resolveWithObject: true })).data;
+      const el = await page.$('#t-planv2');
+      const shotRaw = (await sharp(await el.screenshot()).removeAlpha().raw()
+        .toBuffer({ resolveWithObject: true })).data;
+      let sum = 0;
+      for (let i = 0; i < refRaw.length; i++) sum += Math.abs(refRaw[i] - shotRaw[i]);
+      return sum / refRaw.length;
+    };
+    const madV2 = v2Load.loaded ? await madAgainst(2) : Infinity;
+    const madV1 = v2Load.loaded ? await madAgainst(1) : 0;
+    // Threshold is loose because the reference's cover crop and the
+    // browser's cover math differ slightly at the edges; the plan signal is
+    // the 10x gap to the v1 reference below (MAD ~57).
+    check('browser unscrambles the v2 payload with the v2 plan (display matches the v2 reference)',
+      v2Load.loaded && v2Load.planVersion === 2 && madV2 < 12,
+      JSON.stringify({ v2Load, madV2: Number(madV2.toFixed(2)) }));
+    check('the legacy v1 plan does NOT reconstruct what the browser shows',
+      madV1 > 20, `madV1=${madV1.toFixed(1)}`);
+    await page.evaluate(() => {
+      window.__planV2Instance?.destroy();
+      document.querySelector('#t-planv2')?.remove();
+    });
+  }
+
   console.log('\n[9] Performance — 100-image protected gallery');
   scaleTraffic.batchMints = 0;
   scaleTraffic.singleMints = 0;
@@ -1477,6 +1547,7 @@ try {
   await browser.close().catch(() => {});
   server.kill('SIGTERM');
   fs.rmSync(protectedTestDir, { recursive: true, force: true });
+  fs.rmSync(protectedTestDirV2, { recursive: true, force: true });
 }
 
 console.log(`\n${failures === 0 ? '🟢 ALL BROWSER CHECKS PASSED' : '🔴 FAILURES: ' + failures}  (${checks} checks)`);

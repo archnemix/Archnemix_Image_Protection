@@ -189,6 +189,10 @@ export async function buildArchxAssets(options = {}) {
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) {
     throw new TypeError('Archx asset build: grid must be an integer from 2 to 32');
   }
+  const planVersion = options.planVersion ?? 1;
+  if (planVersion !== 1 && planVersion !== 2) {
+    throw new TypeError('Archx asset build: planVersion must be 1 or 2');
+  }
   const key = options.key ?? '';
   if (typeof key !== 'string' || !key || key.length > 512 || /[\u0000-\u001f\u007f]/.test(key)) {
     throw new TypeError('Archx asset build: key must be a non-empty string of at most 512 characters (set ARCHX_SCRAMBLE_KEY for the CLI)');
@@ -207,8 +211,8 @@ export async function buildArchxAssets(options = {}) {
     throw new TypeError('Archx asset build: quality must be lossless or an integer from 1 to 100');
   }
   const format = options.format ?? 'webp';
-  if (!['webp', 'png', 'jpeg'].includes(format)) {
-    throw new TypeError("Archx asset build: format must be 'webp', 'png', or 'jpeg'");
+  if (!['webp', 'png', 'jpeg', 'avif'].includes(format)) {
+    throw new TypeError("Archx asset build: format must be 'webp', 'png', 'jpeg', or 'avif'");
   }
   const jobs = options.jobs ?? Math.max(1, Math.min(4,
     typeof os.availableParallelism === 'function' ? os.availableParallelism() : (os.cpus()?.length || 2)));
@@ -233,6 +237,7 @@ export async function buildArchxAssets(options = {}) {
 
   const optionsMaterial = stableValue({
     grid,
+    planVersion,
     keyHash: sha256(key),
     aesKeyHash: aesKey ? sha256(aesKey) : null,
     maxWidth,
@@ -305,6 +310,7 @@ export async function buildArchxAssets(options = {}) {
         const stegoPayload = await resolveDynamic(options.stegoPayload ?? null, context);
         const result = await scrambleImage(sourceBytes, {
           grid,
+          planVersion,
           key,
           maxWidth: requestedWidth >= 64 ? requestedWidth : 0,
           quality,
@@ -361,6 +367,7 @@ export async function buildArchxAssets(options = {}) {
       height: metadata.height,
       key,
       grid,
+      ...(planVersion === 2 ? { planVersion: 2 } : {}),
       ...(aesKey ? { aesKey } : {}),
       variants,
     };

@@ -881,6 +881,53 @@ already negligible (`auditIntegrity()` ≈ 0 ms; native decode dominates),
 so no client behavior changed; an es2022 bundle-target bump was measured
 (−1.4 kB gzip) and rejected for its browser-floor cost.
 
+### 2.18 Industry-standard hardening round (v1.10)
+
+The round began by writing `docs/STANDARDS.md` — every control mapped to
+the external standard it answers (OWASP API Top 10 2023, browser platform
+rules, crypto/key guidance, media-processing safety, provenance, OpenSSF
+supply-chain signals, accessibility, and explicit non-goals) — then
+closing the gaps it exposed:
+
+- **Untrusted-cache integrity (OWASP API10).** Derivative bytes were
+  already container-validated after a cache read, but a writer with access
+  to the disk/shared cache (not the server secret) could substitute a
+  *different structurally valid* derivative. Cache entries now carry an
+  HMAC-SHA256 tag bound to key + bytes; forged entries miss and
+  regenerate (proven by a planted-container unit test).
+- **Scramble seed strength.** The effective plan seed was 32-bit, so the
+  permutation of an unencrypted payload could be brute-forced (trial
+  unscrambling per candidate seed) in seconds. Plan v2 (cyrb128 + sfc32,
+  128-bit state, header `pv:2`) removes that shortcut; v1 stays the
+  byte-compatible default. This raises the offline-attack cost of the
+  obfuscation layer; AES-256-GCM remains the actual secrecy mechanism.
+- **Parser fuzzing paid for itself immediately.** A new seeded fuzz suite
+  over the container decoder, header schema, format sniffer, scramble
+  round-trips, stego detector, and live token redemption found a real
+  false-attribution bug: on tiny unmarked noise, ~1 cell per code bit
+  makes majority "agreement" tautological, and the CRC corrector could
+  flip near-zero-reliability bits into a `found: true` at confidence
+  0.82. Detection now requires dense evidence (≥3 cells/bit average, ≥2
+  for every bit; repaired candidates need clearly genuine raw signal).
+  Genuine marks measured in this round (≥320 px, clean + JPEG-80) sit at
+  ~6 cells/bit, ≤1 correction, agreement ≥ 0.84 — and 3,000 seeded noise
+  scans now yield 0 false positives with the corruption matrix intact.
+- **Slow-body resource holding (OWASP API4).** Streamed batch-token
+  bodies had a byte cap but no time budget; they now share
+  `callbackTimeoutMs` and fail 408, with the connection destroyed first
+  (an `iterator.return()` await queues behind a suspended generator, so
+  the deadline must cut the socket, not ask politely).
+- **AVIF, measured before admitted.** On scrambled tiles AVIF q55 is 56%
+  smaller than WebP q88 but encodes 8–70× slower; it ships as an opt-in
+  for precomputed catalogs, not the on-demand default.
+- **Industry floor items:** TypeScript declarations with a `tsc` smoke
+  test in CI, CodeQL SAST, Dependabot, an OIDC trusted-publishing
+  workflow (npm provenance, no long-lived token), an ETag/304-capable
+  taint pixel (still non-CORS), and shared TextEncoder/Decoder instances.
+  Bench vs v1.9: payload bytes identical (default v1 outputs verified
+  byte-identical against the released implementation), timings within
+  noise, bundle +0.4 kB gzip.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

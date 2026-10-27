@@ -586,7 +586,7 @@ export function validateTokenClaims(payload, {
     if (typeof payload.n !== 'string' || !/^[A-Za-z0-9_-]{8,86}$/.test(payload.n)) return false;
     if (payload.q != null && payload.q !== 'lossless' &&
         !(Number.isInteger(payload.q) && payload.q >= 1 && payload.q <= 100)) return false;
-    if (payload.fmt != null && !['webp', 'png', 'jpeg'].includes(payload.fmt)) return false;
+    if (payload.fmt != null && !['webp', 'png', 'jpeg', 'avif'].includes(payload.fmt)) return false;
     if (payload.ls !== undefined && payload.ls !== 1) return false;
     if (payload.sgp !== undefined && payload.sgp !== 0) return false;
     if (payload.sgv !== undefined && payload.sgv !== 2) return false;
@@ -772,7 +772,7 @@ export function normalizeAuthorizationResult(auth) {
     if ('quality' in auth && auth.quality !== undefined && auth.quality !== 'lossless' &&
         (!Number.isInteger(auth.quality) || auth.quality < 1 || auth.quality > 100)) return null;
     if ('lossless' in auth && auth.lossless !== undefined && typeof auth.lossless !== 'boolean') return null;
-    if ('format' in auth && auth.format !== undefined && !['webp', 'png', 'jpeg'].includes(auth.format)) return null;
+    if ('format' in auth && auth.format !== undefined && !['webp', 'png', 'jpeg', 'avif'].includes(auth.format)) return null;
     if ('watermark' in auth && auth.watermark != null && typeof auth.watermark !== 'function' &&
         !validateWatermarkValue(auth.watermark)) return null;
     if ('steganography' in auth && auth.steganography !== undefined && !validateStegoConfig(auth.steganography)) return null;
@@ -817,7 +817,7 @@ function inspectServerConfig(options = {}) {
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
     'rateLimitPerMinute', 'requireSameSiteTokenRequests', 'requireTokenRequestHeader',
-    'scrambleKeyMode', 'secret', 'secretId', 'secrets', 'serverWatermark', 'sharedCacheTtlMs',
+    'scrambleKeyMode', 'scramblePlanVersion', 'secret', 'secretId', 'secrets', 'serverWatermark', 'sharedCacheTtlMs',
     'stateStore', 'stateStoreTimeoutMs', 'steganography',
     'stegoRegistryFailure', 'timeoutSec', 'tokenMethods', 'tokenRateLimitPerMinute',
     'trustProxy', 'trustedProxyHops', 'ttlSec', 'widthBuckets',
@@ -1016,8 +1016,9 @@ function inspectServerConfig(options = {}) {
     'requireTokenRequestHeader', 'allowQueryTokens', 'taintImage',
   ]) checkBoolean(field, options[field]);
   if (options.quality != null && options.quality !== 'lossless') checkInt('quality', options.quality, 1, 100);
-  if (options.format != null && !['webp', 'png', 'jpeg'].includes(options.format)) fail("format must be 'webp', 'png', or 'jpeg'");
+  if (options.format != null && !['webp', 'png', 'jpeg', 'avif'].includes(options.format)) fail("format must be 'webp', 'png', 'jpeg', or 'avif'");
   if (options.scrambleKeyMode != null && !['per-image', 'per-token'].includes(options.scrambleKeyMode)) fail('scrambleKeyMode is invalid');
+  if (options.scramblePlanVersion != null && options.scramblePlanVersion !== 1 && options.scramblePlanVersion !== 2) fail('scramblePlanVersion must be 1 or 2');
   checkInt('rateLimitPerMinute', options.rateLimitPerMinute, 1, 1000000);
   checkInt('tokenRateLimitPerMinute', options.tokenRateLimitPerMinute, 1, 1000000);
   checkInt('rateLimitMaxClients', options.rateLimitMaxClients, 10, 1000000);
@@ -1224,6 +1225,7 @@ function inspectServerConfig(options = {}) {
     // in cross-origin deployments (see TAINT_PNG). Disable only if the host
     // route policy forbids any unauthenticated route under basePath.
     taintImage: options.taintImage !== false,
+    scramblePlanVersion: options.scramblePlanVersion ?? 1,
     proofOfPossession: options.proofOfPossession === true ? 'required'
       : options.proofOfPossession === false ? 'off'
         : (options.proofOfPossession ?? 'optional'),
@@ -1287,6 +1289,7 @@ export function auditArchxServerConfig(options = {}) {
       requireSameSiteTokenRequests: config.requireSameSiteTokenRequests,
       allowQueryTokens: config.allowQueryTokens,
       taintImage: config.taintImage,
+      scramblePlanVersion: config.scramblePlanVersion,
       proofOfPossession: config.proofOfPossession,
       abuseDetection: config.abuseDetection,
       quotasConfigured: Object.values(config.quotas).some((value) => typeof value === 'number' && value > 0),
@@ -1321,6 +1324,7 @@ export function withHardenedProductionDefaults(options = {}) {
     oneTimeTokens: true,
     ttlSec: 120,
     callbackTimeoutMs: 10000,
+    scramblePlanVersion: 2, // 128-bit permutation seed (see buildScramblePlan)
     stegoRegistryFailure: 'deny',
     provenanceFailure: 'deny',
     ...options,
@@ -1471,6 +1475,7 @@ export function createArchxMiddleware(options = {}) {
   const basePath = cfg.basePath;
   const ttlMs = cfg.ttlMs;
   const grid = cfg.grid;
+  const scramblePlanVersion = cfg.scramblePlanVersion;
   const maxWidthCap = cfg.maxWidthCap;
   const quality = options.quality ?? 95; // 'lossless' is also accepted
   const lossless = options.lossless === true;
@@ -1687,10 +1692,30 @@ export function createArchxMiddleware(options = {}) {
       const { header } = decodeContainer(bytes);
       return header.scrambled === true &&
         header.grid === expected.grid &&
+        (header.pv ?? 1) === (expected.planVersion ?? 1) &&
         header.w >= 1 && header.w <= expected.maxWidth &&
         header.encrypted === expected.encrypted &&
         header.mime === expected.mime;
     } catch { return false; }
+  }
+  // Disk/shared derivative entries carry an HMAC tag (magic 'A1' + 32-byte
+  // MAC over key || bytes). Cache keys are already HMAC-derived, which
+  // stops targeted planting by filename; the tag additionally stops
+  // content substitution by anyone who can write the cache (shared Redis,
+  // host with a writable cache dir) but does not know the server secret:
+  // structural validity alone would accept a forged container of matching
+  // grid/size/mime. Memory-cache entries are in-process and untagged.
+  // Secret rotation simply misses (and regenerates) tagged entries.
+  const cacheTag = (key, bytes) => crypto.createHmac('sha256', secret)
+    .update('archx-cache-v1\0', 'utf8').update(String(key), 'utf8').update('\0').update(bytes).digest();
+  const tagCacheBytes = (key, bytes) => Buffer.concat([Buffer.from('A1', 'latin1'), cacheTag(key, bytes), bytes]);
+  function untagCacheBytes(key, stored) {
+    if (!stored || stored.length < 35) return null;
+    if (stored[0] !== 0x41 || stored[1] !== 0x31) return null; // legacy/foreign entry → regenerate
+    const bytes = stored.subarray(34);
+    return crypto.timingSafeEqual(stored.subarray(2, 34), cacheTag(key, bytes))
+      ? Buffer.from(bytes)
+      : null;
   }
   async function getSharedOutputCache(key, expected = null) {
     if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes) return null;
@@ -1706,6 +1731,7 @@ export function createArchxMiddleware(options = {}) {
       } else if (value instanceof ArrayBuffer) {
         bytes = value.byteLength >= 1 && value.byteLength <= cfg.outputCacheMaxBytes ? Buffer.from(value) : null;
       }
+      if (bytes) bytes = untagCacheBytes(key, bytes);
       if (bytes && !isPlausibleCachedDerivative(bytes, expected)) return null;
       return bytes;
     } catch {
@@ -1716,9 +1742,9 @@ export function createArchxMiddleware(options = {}) {
   }
   async function setSharedOutputCache(key, bytes) {
     if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes ||
-        !bytes?.length || bytes.length > cfg.outputCacheMaxBytes) return;
+        !bytes?.length || bytes.length + 34 > cfg.outputCacheMaxBytes) return;
     try {
-      await callStateStore('setCache', key, bytes, { ttlMs: cfg.sharedCacheTtlMs });
+      await callStateStore('setCache', key, tagCacheBytes(key, bytes), { ttlMs: cfg.sharedCacheTtlMs });
       derivativeCacheStats.sharedWrites++;
     } catch { /* cache write failures do not change authorization */ }
   }
@@ -1820,9 +1846,10 @@ export function createArchxMiddleware(options = {}) {
         try { await fs.promises.unlink(file); } catch {}
         return null;
       }
-      const bytes = await fs.promises.readFile(file);
-      if (bytes.length !== stat.size) return null;
-      if (!isPlausibleCachedDerivative(bytes, expected)) {
+      const stored = await fs.promises.readFile(file);
+      if (stored.length !== stat.size) return null;
+      const bytes = untagCacheBytes(sharedCacheKey, stored);
+      if (!bytes || !isPlausibleCachedDerivative(bytes, expected)) {
         derivativeCacheStats.diskErrors++;
         try { await fs.promises.unlink(file); } catch {}
         return null;
@@ -1849,7 +1876,7 @@ export function createArchxMiddleware(options = {}) {
     const tmp = `${target.file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
       await fs.promises.mkdir(target.dir, { recursive: true, mode: 0o700 });
-      await fs.promises.writeFile(tmp, bytes, { mode: 0o600 });
+      await fs.promises.writeFile(tmp, tagCacheBytes(sharedCacheKey, bytes), { mode: 0o600 });
       await fs.promises.rename(tmp, target.file);
       derivativeCacheStats.diskWrites++;
       diskWritesSincePrune++;
@@ -2432,7 +2459,7 @@ export function createArchxMiddleware(options = {}) {
       ? 'lossless'
       : Math.max(1, Math.min(100, Math.round(Number(rawQuality) || 95)));
     const rawFormat = entitlement.format || format;
-    const deliveryFormat = ['webp', 'png', 'jpeg'].includes(rawFormat) ? rawFormat : 'webp';
+    const deliveryFormat = ['webp', 'png', 'jpeg', 'avif'].includes(rawFormat) ? rawFormat : 'webp';
     tokenPayload.q = deliveryQuality;
     if (deliveryLossless) tokenPayload.ls = 1;
     if (deliveryFormat !== format) tokenPayload.fmt = deliveryFormat;
@@ -2621,7 +2648,34 @@ export function createArchxMiddleware(options = {}) {
     }
     const chunks = [];
     let total = 0;
-    for await (const chunk of req) {
+    // Byte caps alone do not stop a slow-trickle body from holding the
+    // handler open (the host server may have no request timeout): bound
+    // the whole read by the same deadline family as hung callbacks.
+    const deadline = Date.now() + cfg.callbackTimeoutMs;
+    const iterator = req[Symbol.asyncIterator]();
+    const BODY_TIMEOUT = Symbol('body-timeout');
+    for (;;) {
+      const remaining = deadline - Date.now();
+      let step = BODY_TIMEOUT;
+      if (remaining > 0) {
+        let timer;
+        try {
+          step = await Promise.race([
+            iterator.next(),
+            new Promise((resolve) => { timer = setTimeout(() => resolve(BODY_TIMEOUT), remaining); timer.unref?.(); }),
+          ]);
+        } finally { clearTimeout(timer); }
+      }
+      if (step === BODY_TIMEOUT) {
+        // Destroy first: awaiting iterator.return() on a suspended
+        // generator would wait for its pending read — exactly what the
+        // deadline exists to avoid. Real request streams settle on destroy.
+        try { req.destroy?.(); } catch {}
+        try { const closing = iterator.return?.(); if (closing?.catch) closing.catch(() => {}); } catch {}
+        throw new MintDenied(408, 'request timeout', { reason: 'batch-body-timeout' });
+      }
+      if (step.done) break;
+      const chunk = step.value;
       const bytes = Buffer.isBuffer(chunk)
         ? chunk
         : chunk instanceof Uint8Array
@@ -2672,14 +2726,22 @@ export function createArchxMiddleware(options = {}) {
             phase: 'taint', reason: 'taint-method', headers: { Allow: 'GET, HEAD' },
           });
         }
-        res.writeHead(200, {
+        const taintHeaders = {
           'Content-Type': 'image/png',
-          'Content-Length': TAINT_PNG.length,
           'Cache-Control': 'public, max-age=31536000, immutable',
+          ETag: '"archx-taint-1"',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
           'Cross-Origin-Resource-Policy': 'cross-origin',
-        });
+        };
+        // A 304 still taints when the browser revalidates against its HTTP
+        // cache (the cached response is what gets drawn), and immutable
+        // caching means revalidation itself is rare.
+        if (String(req.headers?.['if-none-match'] || '').includes('"archx-taint-1"')) {
+          res.writeHead(304, taintHeaders);
+          return res.end();
+        }
+        res.writeHead(200, { ...taintHeaders, 'Content-Length': TAINT_PNG.length });
         return req.method === 'HEAD' ? res.end() : res.end(TAINT_PNG);
       }
       if (!isBatchTokens && parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
@@ -3070,9 +3132,9 @@ export function createArchxMiddleware(options = {}) {
           effectiveQuality = Math.min(signedQuality, Math.round(currentQuality));
           effectiveLossless = false;
         }
-        let effectiveFormat = ['webp', 'png', 'jpeg'].includes(payload.fmt) ? payload.fmt : format;
+        let effectiveFormat = ['webp', 'png', 'jpeg', 'avif'].includes(payload.fmt) ? payload.fmt : format;
         if (entitlement.format != null) {
-          if (!['webp', 'png', 'jpeg'].includes(entitlement.format)) {
+          if (!['webp', 'png', 'jpeg', 'avif'].includes(entitlement.format)) {
             return deny(req, res, 403, 'forbidden', { id, phase, viewerId: currentViewerId, reason: 'invalid-entitlement-format' });
           }
           effectiveFormat = entitlement.format;
@@ -3140,7 +3202,7 @@ export function createArchxMiddleware(options = {}) {
           `op${cfg.processing.maxOutputPixels}`,
         ].join(':');
         const cacheKey = [
-          'v2', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`,
+          'v2', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,
@@ -3150,10 +3212,12 @@ export function createArchxMiddleware(options = {}) {
         const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
         const expectedCached = {
           grid,
+          planVersion: scramblePlanVersion,
           maxWidth: effectiveWidth,
           encrypted: !!aesKey,
           mime: deliveryFormat === 'png' ? 'image/png'
-            : deliveryFormat === 'jpeg' ? 'image/jpeg' : 'image/webp',
+            : deliveryFormat === 'jpeg' ? 'image/jpeg'
+            : deliveryFormat === 'avif' ? 'image/avif' : 'image/webp',
         };
         let bytes = getOutputCache(cacheKey);
         if (bytes) derivativeCacheStats.memoryHits++;
@@ -3229,6 +3293,7 @@ export function createArchxMiddleware(options = {}) {
                 }
                 const result = await processingSemaphore.run(() => scrambleImage(master.bytes, {
                   grid,
+                  planVersion: scramblePlanVersion,
                   key: scrambleKey,
                   maxWidth: Math.min(maxWidthCap, effectiveWidth),
                   quality: deliveryQuality,
@@ -3343,7 +3408,7 @@ export function createArchxMiddleware(options = {}) {
       stateStore: storeStats.kind || stateStore.kind || (ownsStateStore ? 'memory' : 'custom'),
       stateStoreShared: !ownsStateStore,
       activeSecretId,
-      signingKeyCount: Object.keys(signingKeys).length,
+      signingKeyCount: signingKeys.size,
       rateLimitClients: statNumber(storeStats.rateLimitClients),
       quotaClients: statNumber(storeStats.quotaClients),
       consumedTokens: statNumber(storeStats.consumedTokens),

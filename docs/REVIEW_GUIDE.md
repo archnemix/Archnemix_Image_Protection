@@ -48,7 +48,7 @@ npm pack --dry-run
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
 and then runs the real-Chromium browser suite. At the current review point
-the expected results are 48/48 Node tests and 104/104 Chromium checks,
+the expected results are 61/61 Node tests (54 unit + 7 seeded fuzz), a clean `tsc --noEmit` type smoke test, and 107/107 Chromium checks,
 including precomputed manifest assets, manifest-pinning/tampered-variant
 rejection, network-aware sampling, preload cache warming, a cold-stampede
 coalescing test, and a 100-image batch-minted gallery

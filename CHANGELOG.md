@@ -3,6 +3,79 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.10.0] — Unreleased
+
+Industry-standard hardening round: `docs/STANDARDS.md` now maps every control
+to the external standard it answers (OWASP API Top 10 2023, RFC 9111, NIST
+key management, C2PA, OpenSSF/supply-chain, WCAG) with an honest Met/Partial
+status. Default (plan v1) derivative bytes are byte-identical to v1.9.0
+(verified against the released implementation), and `npm run bench:opt`
+shows payloads unchanged with all timings within noise.
+
+### Security
+
+- **Derivative-cache entry integrity.** Disk and shared-store cache entries
+  now carry an `A1` + 32-byte HMAC-SHA256 tag over key + bytes under the
+  server secret. A cache writer without the secret (a compromised cache
+  host, a rogue bucket user) can no longer substitute a structurally valid
+  forged derivative; forged or legacy untagged entries silently become
+  misses and regenerate (one-time re-warm, no correctness risk).
+- **Scramble plan v2 (128-bit seed).** `buildScramblePlan(grid, key, 2)`
+  derives the tile permutation from cyrb128 + sfc32 (128-bit state) instead
+  of the legacy 32-bit seed, so the permutation of an *unencrypted* payload
+  is no longer recoverable by seed brute force in seconds. Opt-in via
+  middleware `scramblePlanVersion: 2` (set by
+  `withHardenedProductionDefaults`), builder `planVersion` /
+  `--plan-version`, CLI `--plan-version`, and client `planVersion` for
+  container-less sources; containers self-describe via header `pv`. Plan v1
+  output is byte-for-byte unchanged. Roll out client-first: pre-v1.10
+  clients cannot unscramble v2 payloads. Scrambling remains obfuscation —
+  AES-256-GCM (`encrypt: true`) is the secrecy layer.
+- **StegoMark false-positive gates.** Fuzzing found that the standard
+  profile could, on tiny unmarked noise, manufacture a CRC-valid candidate
+  by flipping near-zero-reliability bits (confidence up to 0.82 on random
+  pixels — a false-attribution risk). Detection now requires dense evidence
+  (≥3 cells/bit average, ≥2 for every bit) and demands clearly genuine raw
+  signal whenever 2+ bits need repair; 3,000 seeded noise scans now produce
+  0 false positives while the full robustness matrix still passes. Results
+  also expose `minBitRepetitions` for investigators.
+- **Deadline-bounded batch bodies.** Streamed batch-token request bodies
+  are now bounded by `callbackTimeoutMs` (returns 408), closing a
+  slow-trickle connection-holding gap that the byte cap alone did not
+  cover.
+- `stats().signingKeyCount` previously always reported 0 (counted a `Map`
+  incorrectly); fixed.
+
+### Features
+
+- **AVIF derivatives** (`format: 'avif'`, `processing.avifEffort`,
+  `processing.avifChromaSubsampling`): ~40–55% smaller than WebP on
+  scrambled tiles at comparable quality (76 vs 171 KiB measured at 960 px),
+  at 8–70× the encode CPU — intended for precomputed `archx-build`
+  catalogs; requires an AVIF-capable browser (Safari 16.4+/Chrome 85+/FF
+  113+).
+- **TypeScript declarations** ship for all five entry points
+  (`.`/`server`/`build`/`redis`/`scramble`) with a `tsc --noEmit` smoke
+  test (`npm run test:types`) in CI and `npm run verify`.
+- The taint pixel (`{basePath}/taint.png`) now answers conditional requests
+  with `ETag`/`304` while remaining deliberately non-CORS.
+
+### Supply chain / CI
+
+- CodeQL workflow (javascript-typescript, security-extended queries,
+  weekly schedule), Dependabot (npm + GitHub Actions), and an OIDC
+  trusted-publishing workflow with automatic npm provenance (operator
+  configures the npm trusted publisher once). CI also runs the type smoke
+  test and the seeded fuzz suite (`tests/fuzz.test.mjs`, part of
+  `npm test`): 61 Node tests, 107 real-Chromium checks.
+
+### Performance
+
+- Shared `TextEncoder`/`TextDecoder` instances in the core (one fewer
+  construction per sniff/container decode); local decoy/texture scrambles
+  use the 128-bit plan (free, ephemeral). Bench vs v1.9: identical
+  payloads, timings within noise, bundle +1.1 kB (+0.4 kB gzip).
+
 ## [1.9.0] — Unreleased
 
 Measured optimization round: every change below was benchmarked before and

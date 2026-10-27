@@ -18,7 +18,7 @@ not a claim that every browser/OS combination below has been certified.
 
 | Browser / platform | Status | Expected behavior |
 | --- | --- | --- |
-| Chromium (headless, repository test build) | **Automated: 104 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, guard behavior, manifest integrity pinning/tamper rejection, network-aware sampling, asset preload cache warming, origin-tainted `SecurityError` readback, and pixel-exact display verification are exercised (with real web security enabled — no `--disable-web-security`). |
+| Chromium (headless, repository test build) | **Automated: 107 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, guard behavior, manifest integrity pinning/tamper rejection, network-aware sampling, asset preload cache warming, origin-tainted `SecurityError` readback, and pixel-exact display verification are exercised (with real web security enabled — no `--disable-web-security`). |
 | Google Chrome, current stable and previous major | Expected | Same Chromium platform family. Test your exact site CSP, cookies, CDN, and extensions before release. |
 | Microsoft Edge, current stable and previous major | Expected | Chromium-based; same caveats as Chrome. |
 | Brave and other Chromium browsers | Expected with site testing | Privacy/network defaults or extension policies can affect fetch, WebGL, storage, and proof-key behavior. |
@@ -46,6 +46,8 @@ not a claim that every browser/OS combination below has been certified.
 | Asset integrity | Per-variant SHA-256 digests in the manifest; optional whole-manifest pin (`assetManifestIntegrity`) | Verification uses WebCrypto `SubtleCrypto` (secure contexts). `assetIntegrity:'auto'` skips verification only when no digest or no WebCrypto exists; `'require'` and a configured manifest pin fail closed in that situation. |
 | Network-aware sampling | Network Information API (`navigator.connection.saveData` / `effectiveType`), Chromium-family | Firefox/Safari do not expose the API; `networkAware` is then a no-op and the configured DPR/oversample/quality sampling applies unchanged. It is a performance hint, never a security input. |
 | StegoMark | Server-side pixel embedding through Sharp | `standard` remains backward-compatible. `robust` uses larger cells, a dual-CRC/marker codeword, median voting, and bounded correction; detection remains empirical and format/geometry dependent, so test it on your catalog and preserve the issued profile. |
+| Scramble plan version | v1 (32-bit seed) default; payloads self-describe via container header `pv` | v2 (128-bit seed) requires a pv-aware client (≥ v1.10). Older clients fail to unscramble v2 payloads (mosaic), so deploy clients first, then enable server `scramblePlanVersion: 2` / rebuild catalogs. |
+| AVIF derivatives | Server `format: 'avif'` (opt-in) | Requires browser AVIF decode (Chrome 85+, Safari 16.4+, Firefox 113+). Older browsers fail to decode and the viewer errors — there is no per-browser format fallback today, so keep WebP for mixed/legacy audiences. |
 
 ## CSP and viewer construction
 

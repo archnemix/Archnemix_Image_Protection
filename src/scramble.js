@@ -62,18 +62,62 @@ export function mulberry32(seed) {
 /* Scramble plan                                                        */
 /* ------------------------------------------------------------------ */
 
+/** cyrb128 — 128-bit string hash (public-domain algorithm) for plan v2 seeds. */
+export function cyrb128(str) {
+  const s = String(str);
+  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+  for (let i = 0, k; i < s.length; i++) {
+    k = s.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  return [(h1 ^ h2 ^ h3 ^ h4) >>> 0, (h2 ^ h1) >>> 0, (h3 ^ h1) >>> 0, (h4 ^ h1) >>> 0];
+}
+
+/** sfc32 — small fast counter-based PRNG with a 128-bit state. */
+export function sfc32(a, b, c, d) {
+  return function next() {
+    a >>>= 0; b >>>= 0; c >>>= 0; d >>>= 0;
+    let t = (a + b | 0) + d | 0;
+    d = (d + 1) | 0;
+    a = b ^ (b >>> 9);
+    b = (c + (c << 3)) | 0;
+    c = (c << 21) | (c >>> 11);
+    c = (c + t) | 0;
+    return (t >>> 0) / 4294967296;
+  };
+}
+
 /**
  * Build the deterministic scramble plan for a key.
  * @param {number} grid tiles per side (2..32)
  * @param {string} key  secret seed material
- * @returns {{grid:number,count:number,order:number[],inverse:number[],flips:{fx:boolean,fy:boolean}[]}}
+ * @param {number} [version=1] plan derivation version. **1** is the legacy
+ *   32-bit-seed plan (kept for payload compatibility). **2** derives the
+ *   permutation from a 128-bit seed (cyrb128 + sfc32), so recovering the
+ *   permutation by seed brute force is infeasible; the tile permutation is
+ *   still obfuscation, not encryption — use the AES-GCM layer for secrecy.
+ * @returns {{grid:number,count:number,version:number,order:number[],inverse:number[],flips:{fx:boolean,fy:boolean}[]}}
  *   order[scrambledPos]   = originalPos
  *   inverse[originalPos]  = scrambledPos
  */
-export function buildScramblePlan(grid = DEFAULT_GRID, key = '') {
+export function buildScramblePlan(grid = DEFAULT_GRID, key = '', version = 1) {
+  if (version !== 1 && version !== 2) throw new TypeError('Archx: scramble plan version must be 1 or 2');
   const g = Math.max(2, Math.min(32, grid | 0));
   const count = g * g;
-  const rand = mulberry32(hashSeed(String(key) + '::archx-grid-' + g));
+  let rand;
+  if (version === 2) {
+    rand = sfc32(...cyrb128(String(key) + '::archx-grid2-' + g));
+    for (let i = 0; i < 8; i++) rand(); // diffuse the state before shuffling
+  } else {
+    rand = mulberry32(hashSeed(String(key) + '::archx-grid-' + g));
+  }
   const order = Array.from({ length: count }, (_, i) => i);
   for (let i = count - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -85,7 +129,7 @@ export function buildScramblePlan(grid = DEFAULT_GRID, key = '') {
   }));
   const inverse = new Array(count);
   order.forEach((orig, scrambledPos) => { inverse[orig] = scrambledPos; });
-  return { grid: g, count, order, inverse, flips };
+  return { grid: g, count, version, order, inverse, flips };
 }
 
 /** Pixel rect of tile `index` in a padded image of tile size tw×th. */
@@ -110,6 +154,12 @@ function asBytes(bytes) {
   if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return new Uint8Array(bytes || []);
 }
+
+// Shared codec instances: constructing these per call is measurable churn
+// on the per-image path (sniff + container decode) and entirely avoidable.
+const utf8Encoder = new TextEncoder();
+const utf8Fatal = new TextDecoder('utf-8', { fatal: true });
+const utf8Lenient = new TextDecoder('utf-8', { fatal: false });
 
 const IMAGE_FORMAT_MIME = Object.freeze({
   jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', avif: 'image/avif',
@@ -235,7 +285,7 @@ export function sniffImageInfo(bytes) {
       (u8.length >= 4 && u8[0] === 0x4d && u8[1] === 0x4d && u8[2] === 0 && u8[3] === 0x2a)) {
     return done('tiff');
   }
-  const head = new TextDecoder('utf-8', { fatal: false }).decode(u8.subarray(0, Math.min(1024, u8.length))).trimStart().toLowerCase();
+  const head = utf8Lenient.decode(u8.subarray(0, Math.min(1024, u8.length))).trimStart().toLowerCase();
   if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return done('svg');
   return null;
 }
@@ -349,7 +399,7 @@ export function base64ToBytes(b64) {
 export const MAX_ARCHX_HEADER_BYTES = 16384;
 const ARCHX_MAGIC_BYTES = Object.freeze([...ARCHX_MAGIC].map((c) => c.charCodeAt(0)));
 const ARCHX_HEADER_FIELDS = new Set([
-  'v', 'w', 'h', 'pw', 'ph', 'grid', 'mime', 'scrambled', 'encrypted', 'iv', 'wm', 'fx', 'sg',
+  'v', 'w', 'h', 'pw', 'ph', 'grid', 'mime', 'scrambled', 'encrypted', 'iv', 'wm', 'fx', 'sg', 'pv',
 ]);
 const ARCHX_MIME_FORMATS = Object.freeze({
   'image/webp': 'webp', 'image/png': 'png', 'image/jpeg': 'jpeg', 'image/avif': 'avif',
@@ -365,6 +415,7 @@ export function validateArchxHeader(header) {
     if (!Number.isSafeInteger(header[field]) || header[field] < 1 || header[field] > 65536) fail(`bad ${field}`);
   }
   if (!Number.isInteger(header.grid) || header.grid < 2 || header.grid > 32) fail('bad grid');
+  if (header.pv !== undefined && header.pv !== 1 && header.pv !== 2) fail('bad plan version');
   const padded = paddedSize(header.w, header.h, header.grid);
   if (header.pw !== padded.pw || header.ph !== padded.ph) fail('padded dimensions do not match');
   if (!ARCHX_MIME_FORMATS[header.mime]) fail('unsupported MIME type');
@@ -384,7 +435,7 @@ export function validateArchxHeader(header) {
 
 export function encodeContainer(header, payload) {
   validateArchxHeader(header);
-  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const headerBytes = utf8Encoder.encode(JSON.stringify(header));
   if (headerBytes.length > MAX_ARCHX_HEADER_BYTES) throw new Error('Archx: .archx header is too large');
   const body = asBytes(payload);
   if (!body.length) throw new Error('Archx: .archx payload is empty');
@@ -412,7 +463,7 @@ export function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(u8.subarray(10, 10 + headerLen)));
+    header = JSON.parse(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
   } catch { throw new Error('Archx: invalid .archx header encoding'); }
   validateArchxHeader(header);
   const payload = u8.subarray(10 + headerLen);
@@ -1165,11 +1216,15 @@ export function detectStegoFingerprint(rgba, w, h, {
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
     // A center crop can remove every repetition of a few robust code bits.
     // Accept that bounded case only when at least 88/96 bits were observed
-    // and the dual-CRC/marker codeword plus signal thresholds all validate;
-    // the standard profile keeps its stricter every-bit-observed rule.
+    // and the dual-CRC/marker codeword plus signal thresholds all validate.
+    // The standard profile requires dense evidence — >=3 cells per bit on
+    // average and >=2 for every bit: with ~1-2 cells per bit, majority
+    // "agreement" is near-tautological and the CRC corrector can flip
+    // low-reliability bits into a false positive on unmarked noise (found
+    // by fuzzing; genuine marks measure ~6 cells/bit, agreement >= 0.84).
     const bitCoverageOk = robust
       ? observedBits >= 88 && cellScores.length >= 128
-      : minBitCount >= 1;
+      : minBitCount >= 2 && cellScores.length >= codeLength * 3;
     // The robust syndrome decoder can search farther than the standard
     // decoder. To prefer "not found" over a wrong attribution, candidates
     // needing four or five corrections must also show strong raw signal and
@@ -1177,12 +1232,18 @@ export function detectStegoFingerprint(rgba, w, h, {
     const correctionCount = Math.max(0, corrected.corrections);
     const robustCorrectionOk = !robust || correctionCount <= 3 ||
       (correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95);
+    // Same principle for the standard decoder: a candidate needing 2+
+    // repaired bits must carry clearly genuine raw signal, or the repair
+    // search itself manufactures the CRC match (false attribution).
+    const standardCorrectionOk = robust || correctionCount <= 1 ||
+      (meanAbs >= 2.0 && agreement >= 0.85);
     return {
       found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
-        cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk,
+        cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk,
       fingerprint,
       profile: effectiveProfile,
       observedBits,
+      minBitRepetitions: minBitCount,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
       confidence: Math.round(confidence * 1000) / 1000,

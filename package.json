@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -21,14 +21,27 @@
   "unpkg": "./dist/archx.min.js",
   "exports": {
     ".": {
+      "types": "./types/index.d.ts",
       "import": "./dist/archx.esm.js",
       "require": "./dist/archx.cjs",
       "default": "./dist/archx.esm.js"
     },
-    "./server": "./server/middleware.js",
-    "./build": "./server/build-assets.js",
-    "./redis": "./server/redis-state-store.js",
-    "./scramble": "./src/scramble.js"
+    "./server": {
+      "types": "./types/server.d.ts",
+      "default": "./server/middleware.js"
+    },
+    "./build": {
+      "types": "./types/build.d.ts",
+      "default": "./server/build-assets.js"
+    },
+    "./redis": {
+      "types": "./types/redis.d.ts",
+      "default": "./server/redis-state-store.js"
+    },
+    "./scramble": {
+      "types": "./types/scramble.d.ts",
+      "default": "./src/scramble.js"
+    }
   },
   "files": [
     "dist/archx.cjs",
@@ -50,7 +63,8 @@
     "CHANGELOG.md",
     "README.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "types/*.d.ts"
   ],
   "bin": {
     "archx-protect": "./server/scramble-cli.js",
@@ -62,14 +76,16 @@
     "prepack": "npm run build",
     "demo": "node server/demo-server.js",
     "demo:images": "node tools/generate-test-images.mjs",
-    "test": "node --test tests/unit.test.mjs",
+    "test": "node --test tests/unit.test.mjs tests/fuzz.test.mjs",
+    "test:fuzz": "node --test tests/fuzz.test.mjs",
     "test:browser": "node tests/browser-test.mjs",
     "test:all": "npm run build && npm test && npm run test:browser",
     "bench": "node tools/benchmark.mjs",
     "bench:opt": "node --expose-gc tools/optimization-bench.mjs",
     "load-test": "node tools/load-test.mjs",
     "lint": "node tools/lint.mjs",
-    "verify": "npm run lint && npm run build && npm test && npm run test:browser && npm audit --audit-level=high"
+    "verify": "npm run lint && npm run build && npm run test:types && npm test && npm run test:browser && npm audit --audit-level=high",
+    "test:types": "tsc --noEmit -p tsconfig.json"
   },
   "keywords": [
     "image-protection",
@@ -88,9 +104,11 @@
   },
   "devDependencies": {
     "@sparticuz/chromium": "^138.0.0",
+    "@types/node": "^22.20.5",
     "esbuild": "^0.25.0",
     "puppeteer-core": "^25.16.0",
-    "sharp": "^0.35.5"
+    "sharp": "^0.35.5",
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "sharp": "^0.35.5"
@@ -99,5 +117,6 @@
     "sharp": {
       "optional": true
     }
-  }
+  },
+  "types": "./types/index.d.ts"
 }

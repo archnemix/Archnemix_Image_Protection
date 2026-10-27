@@ -152,6 +152,10 @@ function normalizeProcessingOptions(opts = {}) {
   if (!['4:2:0', '4:4:4'].includes(jpegChromaSubsampling)) {
     throw new TypeError("Archx image processing: jpegChromaSubsampling must be '4:2:0' or '4:4:4'");
   }
+  const avifChromaSubsampling = pick('avifChromaSubsampling') ?? '4:2:0';
+  if (!['4:2:0', '4:4:4'].includes(avifChromaSubsampling)) {
+    throw new TypeError("Archx image processing: avifChromaSubsampling must be '4:2:0' or '4:4:4'");
+  }
   const sharpCacheRaw = pick('sharpCache');
   if (sharpCacheRaw !== undefined && typeof sharpCacheRaw !== 'boolean') {
     throw new TypeError('Archx image processing: sharpCache must be boolean');
@@ -174,6 +178,8 @@ function normalizeProcessingOptions(opts = {}) {
     resizeKernel,
     pngCompressionLevel: integer('pngCompressionLevel', pick('pngCompressionLevel'), 9, 0, 9),
     jpegChromaSubsampling,
+    avifEffort: integer('avifEffort', pick('avifEffort'), 4, 0, 9),
+    avifChromaSubsampling,
     sharpConcurrency: integer('sharpConcurrency', pick('sharpConcurrency'), 0, 0, 1024),
     sharpCache: sharpCacheRaw,
   });
@@ -309,6 +315,10 @@ export async function scrambleImage(input, opts = {}) {
   const { bytes: inputBytes, sniffed } = assertInputWithinLimits(input, limits);
   const grid = opts.grid ?? 8;
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
+  const planVersion = opts.planVersion ?? 1;
+  if (planVersion !== 1 && planVersion !== 2) {
+    throw new TypeError('Archx image processing: planVersion must be 1 or 2');
+  }
   const key = opts.key ?? '';
   if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');
   const maxWidth = opts.maxWidth ?? 1600;
@@ -322,8 +332,8 @@ export async function scrambleImage(input, opts = {}) {
       (!Number.isInteger(opts.quality) || opts.quality < 1 || opts.quality > 100)) {
     throw new TypeError('Archx image processing: quality must be lossless or an integer from 1 to 100');
   }
-  if (opts.format !== undefined && !['webp', 'png', 'jpeg'].includes(opts.format)) {
-    throw new TypeError("Archx image processing: format must be 'webp', 'png', or 'jpeg'");
+  if (opts.format !== undefined && !['webp', 'png', 'jpeg', 'avif'].includes(opts.format)) {
+    throw new TypeError("Archx image processing: format must be 'webp', 'png', 'jpeg', or 'avif'");
   }
   if (opts.container !== undefined && typeof opts.container !== 'boolean') {
     throw new TypeError('Archx image processing: container must be boolean');
@@ -444,7 +454,7 @@ export async function scrambleImage(input, opts = {}) {
     : null;
 
   const { pw, ph } = paddedSize(w, h, grid);
-  const plan = buildScramblePlan(grid, key);
+  const plan = buildScramblePlan(grid, key, planVersion);
   // Fused pad+scramble writes the encoder's raw input in a single pass:
   // no pad copy, no scramble copy, no Buffer.from copy. Buffer.allocUnsafe
   // is safe here because every output pixel is written by the tile loop.
@@ -469,6 +479,13 @@ export async function scrambleImage(input, opts = {}) {
       chromaSubsampling: limits.jpegChromaSubsampling,
       mozjpeg: true,
     });
+  } else if (format === 'avif') {
+    // Opt-in: AVIF is roughly 40-55% smaller than WebP on scrambled tiles at
+    // comparable quality but encodes 8-70x slower, so it suits precomputed
+    // catalogs (archx-build) far better than on-demand token delivery.
+    encoder = encoder.avif(lossless
+      ? { lossless: true, effort: limits.avifEffort, chromaSubsampling: limits.avifChromaSubsampling }
+      : { quality, effort: limits.avifEffort, chromaSubsampling: limits.avifChromaSubsampling });
   } else if (lossless) {
     encoder = encoder.webp({ lossless: true, alphaQuality: 100, effort: limits.webpEffort });
   } else {
@@ -482,10 +499,12 @@ export async function scrambleImage(input, opts = {}) {
   let payload;
   try { payload = await encoder.toBuffer(); }
   catch (err) { throw mapSharpError(err); }
-  const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp';
+  const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg'
+    : format === 'avif' ? 'image/avif' : 'image/webp';
 
   const header = {
     v: 1, w, h, pw, ph, grid, mime, scrambled: true, encrypted: false,
+    ...(planVersion === 2 ? { pv: 2 } : {}),
     ...(watermarked ? { wm: 1 } : {}),
     ...(forensicMarked ? { fx: 1 } : {}),
     ...(stegoMarked ? { sg: 1 } : {}),
@@ -509,8 +528,9 @@ export async function scrambleImage(input, opts = {}) {
 }
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */
-export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, ...processingOpts } = {}) {
+export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, planVersion = 1, ...processingOpts } = {}) {
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
+  if (planVersion !== 1 && planVersion !== 2) throw new TypeError('Archx image processing: planVersion must be 1 or 2');
   if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');
   if ((w !== undefined && (!Number.isSafeInteger(w) || w < 1)) ||
       (h !== undefined && (!Number.isSafeInteger(h) || h < 1)) || ((w == null) !== (h == null))) {
@@ -526,7 +546,7 @@ export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h
       data.length < info.width * info.height * 4 || (w && (w > info.width || h > info.height))) {
     throw processingError('ARCHX_UNSUPPORTED_IMAGE', 'scrambled image geometry is invalid');
   }
-  const plan = buildScramblePlan(grid, key);
+  const plan = buildScramblePlan(grid, key, planVersion);
   const raw = scramblePixels(data, info.width, info.height, plan, 'unscramble');
   let out = sharp(bufferView(raw), { raw: { width: info.width, height: info.height, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });

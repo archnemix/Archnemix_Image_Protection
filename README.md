@@ -75,6 +75,11 @@ Archx.load.image('#product', { id: 'watch-01' },
 Archx.protectAll('img[data-protect]');
 ```
 
+TypeScript works without `@types` extras — declarations ship with the package
+for `@archnemix/image-protection`, `/server`, `/build`, `/redis`, and
+`/scramble`. The industry-standards mapping lives in
+[docs/STANDARDS.md](docs/STANDARDS.md).
+
 ### 3 · Declarative web component
 
 ```html
@@ -607,7 +612,7 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 - `<archx-image>` — attributes: `src`, `image-id`, `asset-id`, `asset-manifest`, `token-endpoint`, `token-method`, `token-transport`, `token-batch`, `fetch-priority`, `proof-of-possession`, `cache-scope`, `mode`, `preset`, `quality-profile`, `watermark`, `fit`, `grid`, `key`, `scrambled`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, `temporal-interlace-refresh-hz`, `render-loop`, `reload-on-resize`, `on-extract`, `alt` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
 - Server: `createArchxMiddleware(options)` needs `sharp` (optional peer; pinned examples use Sharp 0.35). Important direct controls:
   - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec`, `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens` (default `false`), `proofOfPossession:'optional'|'required'|'off'` (bare default `'optional'`; hardened defaults select `'required'`), `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
-  - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `maxWidthCap`, `widthBuckets` (canonical widths, or `null` for exact widths), `batchTokenMaxItems`, `batchTokenMaxBytes`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'`, `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `forensicScope:'viewer'|'image'`, `steganography` (including `scope:'viewer'|'image'`), `onStegoIssue`, `stegoRegistryFailure:'deny'|'allow'`, `onProvenanceIssue`, `provenanceFailure:'deny'|'allow'`, `onDelivery`.
+  - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `scramblePlanVersion:1|2` (1 = legacy 32-bit plan seed, the default; 2 = 128-bit seed — deploy pv-aware clients first, then enable; `withHardenedProductionDefaults` sets 2), `maxWidthCap`, `widthBuckets` (canonical widths, or `null` for exact widths), `batchTokenMaxItems`, `batchTokenMaxBytes`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'|'avif'` (AVIF is ~40–55% smaller on scrambled tiles but encodes 8–70× slower — best for precomputed catalogs; needs an AVIF-capable browser), `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `forensicScope:'viewer'|'image'`, `steganography` (including `scope:'viewer'|'image'`), `onStegoIssue`, `stegoRegistryFailure:'deny'|'allow'`, `onProvenanceIssue`, `provenanceFailure:'deny'|'allow'`, `onDelivery`.
   - **Abuse/CPU/memory:** `rateLimitPerMinute`, `tokenRateLimitPerMinute`, `rateLimitMaxClients`/`maxTrackedClients`, `oneTimeTokenMaxEntries`, `quotas:{windowMs,perIp,perViewer,perIpImage,perViewerImage}`, `abuseDetection:{distinctImages,windowMs,action:'event'|'deny'}`, `onSecurityEvent` (or legacy `onAbuse`), `processing:{maxInputBytes,maxInputPixels,maxInputWidth,maxInputHeight,maxOutputPixels,processingTimeoutSec,allowedInputFormats}`, `processingConcurrency`, `processingQueueMax`, `processingQueueTimeoutMs`, `outputCacheMax`, `outputCacheMaxBytes`, persistent `outputCacheDir` + `outputCacheDiskMaxBytes`/`outputCacheDiskMaxEntries`/`outputCacheDiskTtlMs`, `sharedCacheTtlMs`, `masterCacheMaxBytes`, `cacheMasters`, and `processing:{webpEffort,webpSmartSubsample,resizeKernel,pngCompressionLevel,jpegChromaSubsampling,sharpConcurrency,sharpCache}`. `withCatalogThroughputDefaults()` supplies the catalog starting point described above; `handler.stats().derivativeCache` reports memory/disk/shared hits, misses, coalesced singleflight waiters (concurrent cold requests that shared one Sharp job instead of stampeding), writes, prunes, and errors without exposing keys.
   - `authorize(req, id, { phase, token })` may return `true`/`false` or `{ allow, viewerId|userId|subject|sessionId, buyerId, orderId, deliveryId, traceId, permissions|scopes|scope, maxWidth, watermark, quality, lossless, format, steganography, stegoFingerprint }`. If scopes are supplied, one of `image:view`, `archx:image:view`, or `*` is required. It runs before minting and again before bytes are served; current entitlements can tighten width/quality/format but cannot widen signed claims. Viewer IDs and the buyer/order/delivery/trace subject are HMAC-hashed before token/cache/forensic/Stego derivation; the raw trace fields are supplied only to your server-side registry/provenance callbacks, never to browser delivery events. `allowClientQuality:true` only lets the browser request `q=` when no entitlement quality overrides it.
   - Token requests include the display box (`bw`, `bh`, `fit`, optional `q`); the server validates them as strict integers/enums and uses source aspect to sign a cover-safe derivative width before entitlement caps. Responses use `Cache-Control: private,no-store`, CDN/surrogate `no-store` controls, credential/token/proof-sensitive `Vary`, `nosniff`, `Referrer-Policy:no-referrer`, same-origin/cross-origin CORP as configured, exact-origin credentialled CORS only, a sandboxed CSP on payloads, `Retry-After` on 429s, and generic error bodies that do not leak paths/stacks/decoder/token details.
@@ -636,7 +641,8 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - Quality: on the detailed 800 px watch benchmark, q95 reconstruction measured **41.0 dB PSNR / 1.43 MAD** versus 36.6 dB / 2.56 MAD at the old q82. `lossless:true` is exact at the delivered size (800 px test payload ~360 kB lossless WebP vs ~128 kB q95), so use it selectively for hero/product detail.
 - Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; permanent 4xx/aborted fetches are not retried. Temporal work is the deliberate exception: shader interlace evaluates a small phase mask per fragment (plus one extra sample for inactive `lowres` fragments), while the frames engine spends one clamped-array pixel pass and one extra backing store per phase at setup, then only `drawImage`s. Either way, an interlaced image must present continuously while visible, so reserve it for selected hero/paid views rather than hundreds of thumbnails. In the Chromium interlace fixture, screenshots from opposite black-fill strip phases differed by **about 96 mean absolute channel value** in recent runs, confirming that the compositor was actually presenting materially different incomplete frames
 - Server caches and security stores are entry- **and byte-bounded**, limiter clients expire, nonce claims fail closed when saturated, and image jobs pass through a bounded semaphore/queue. Trade-offs remain: per-token/dynamic server watermarks, viewer-scoped forensics/StegoMarks, and `scrambleKeyMode:'per-token'` intentionally defeat cross-viewer output-cache reuse; Fortress strict memory bypasses the shared bitmap cache, but with default `cachePayload:true` it can decode privately retained scrambled bytes locally instead of reminting. Use the strongest per-viewer settings on valuable items, not every thumbnail.
-- Scrambled pixels compress worse than natural images (tile edges), so payloads run larger than an equivalent plain WebP. Lower `grid` (e.g. 6) if bytes matter more than shuffle strength.
+- Scrambled pixels compress worse than natural images (tile edges), so payloads run larger than an equivalent plain WebP. Lower `grid` (e.g. 6) if bytes matter more than shuffle strength. For precomputed catalogs, opt-in AVIF claws bandwidth back: on the scrambled 960 px demo master, AVIF q55 measured **76 KiB vs 171 KiB WebP q88 (−56%)**, at 311 ms (effort 2) to ~3 s (effort 4) encode time per image — a one-time build cost, not a per-request one.
+- v1.10 hardening cost ≈ zero: re-running `bench:opt` against the v1.9 after-state shows identical payload bytes and all timings within noise (gallery −4.7%); the browser bundle grew 1.1 kB (0.4 kB gzip) for the plan-v2 derivation, and each disk/shared cache entry carries a 34-byte HMAC integrity tag. Default (plan v1) derivatives remain byte-identical to v1.9.0.
 
 ## The honest limits
 
@@ -670,23 +676,28 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - [ ] Test the deployed CSP in every supported browser (including the current inline-style compatibility exception); decide the support path before choosing Fortress, because legitimate extensions that patch fetch/canvas/WebGL can cause fail-closed false positives while Vault monitoring intentionally continues
 - [ ] `fortress`/`vault` reserved for the few images that matter most; `lite` for bulk grids. Enable Lens/camera/interlace patterns only where flicker, GPU, accessibility, and legitimate-viewing trade-offs are acceptable; keep reduced-motion honoured and test on real 60/120 Hz displays + phone cameras before claiming camera degradation for your hardware
 - [ ] Keep full-resolution masters offline/backed-up — the server only needs web-size sources if you pre-resize
+- [ ] After every supported client is on a pv-aware build (≥ v1.10), enable `scramblePlanVersion:2` (128-bit plan seed) server-side and in `archx-build --plan-version 2`; older clients cannot unscramble v2 payloads, so roll out client-first like a key rotation
 
 ## Tests
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 48 unit/integration tests (scramble/crypto, fused pad+scramble equality, delivery quality,
-                    # cover-aware sizing, server marks, standard/robust StegoMark survival + crop geometry,
-                    # perceptual soft bindings, strict config/claims, hardened production defaults/audit,
-                    # buyer/order hooks, malformed HTTP, replay races, reauthorization, sender-constrained proofs,
+npm test            # 61 tests: 54 unit/integration (scramble/crypto incl. plan v2, fused pad+scramble equality,
+                    # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
+                    # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
+                    # strict config/claims, hardened production defaults/audit, buyer/order hooks,
+                    # malformed HTTP, replay races, reauthorization, sender-constrained proofs,
                     # bounded stores/quotas/abuse, trusted-hop proxy parsing, Sharp processing limits,
                     # 60 Hz interlace normalization, cross-instance shared state, Redis adapter contract,
                     # signing-key rotation, fail-closed store errors, canonical widths,
                     # batch minting, persistent derivative reuse, cold-stampede coalescing,
-                    # validated derivative-cache hits, the origin-taint pixel endpoint,
-                    # framework-parsed batch bodies,
-                    # and incremental asset builds with manifest/variant digests)
-npm run test:browser  # 104 checks in real headless Chromium (encapsulation, decoys,
+                    # HMAC-tagged + validated derivative-cache hits (forged entries rejected),
+                    # the origin-taint pixel endpoint (ETag/304), deadline-bounded batch bodies,
+                    # framework-parsed batch bodies, and incremental asset builds with manifest/variant digests)
+                    # + 7 seeded fuzz cases (container/header/sniffer/scramble/stego parsers + live token
+                    # mutation; ARCHX_FUZZ_MULTIPLIER scales campaigns)
+npm run test:types  # tsc --noEmit smoke test over the shipped TypeScript declarations
+npm run test:browser  # 107 checks in real headless Chromium (encapsulation, decoys,
                       # pixel-exact 1:1 display (MAD 0), origin-tainted SecurityError readback,
                       # native detail retention, WebGL black read-back, post-load and pre-load draw-hook
                       # Fortress/Vault policy regressions, sanitized plugin telemetry,
@@ -706,14 +717,16 @@ npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload 
 
 ```
 src/         browser library (archx.js) + shared scramble/crypto core (scramble.js)
+types/       hand-maintained TypeScript declarations for every public entry point
+             (verified by `npm run test:types`)
 dist/        committed built bundles (ESM / CJS / minified browser-global; regenerate, do not hand-edit)
 server/      token+scramble middleware, responsive asset builder, Redis state-store adapter, image scrambler, archx-protect + archx-build + archx-detect CLIs, demo server
 demo/        interactive demo + attack simulator, automated-test harness
 demo-masters/  three tracked demo originals — deliberately NOT web-accessible; generated gallery is ignored
-docs/        reviewer guide, research, operations, compliance readiness,
-             compatibility matrix, and plain-language IP-holder guide
+docs/        industry-standards checklist (docs/STANDARDS.md), reviewer guide, research,
+             operations, compliance readiness, compatibility matrix, and plain-language IP-holder guide
 examples/    copy-and-run protection ladder and custom-flags showcase
-tests/       unit + real-browser test suites
+tests/       unit + seeded fuzz + real-browser suites + TypeScript smoke test
 tools/       build, demo-image generator, benchmarks, bounded load test
 ```
 

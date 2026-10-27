@@ -41,10 +41,48 @@ function mulberry32(seed) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-function buildScramblePlan(grid = DEFAULT_GRID, key = "") {
+function cyrb128(str) {
+  const s = String(str);
+  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+  for (let i = 0, k; i < s.length; i++) {
+    k = s.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ h1 >>> 18, 597399067);
+  h2 = Math.imul(h4 ^ h2 >>> 22, 2869860233);
+  h3 = Math.imul(h1 ^ h3 >>> 17, 951274213);
+  h4 = Math.imul(h2 ^ h4 >>> 19, 2716044179);
+  return [(h1 ^ h2 ^ h3 ^ h4) >>> 0, (h2 ^ h1) >>> 0, (h3 ^ h1) >>> 0, (h4 ^ h1) >>> 0];
+}
+function sfc32(a, b, c, d) {
+  return function next() {
+    a >>>= 0;
+    b >>>= 0;
+    c >>>= 0;
+    d >>>= 0;
+    let t = (a + b | 0) + d | 0;
+    d = d + 1 | 0;
+    a = b ^ b >>> 9;
+    b = c + (c << 3) | 0;
+    c = c << 21 | c >>> 11;
+    c = c + t | 0;
+    return (t >>> 0) / 4294967296;
+  };
+}
+function buildScramblePlan(grid = DEFAULT_GRID, key = "", version = 1) {
+  if (version !== 1 && version !== 2) throw new TypeError("Archx: scramble plan version must be 1 or 2");
   const g = Math.max(2, Math.min(32, grid | 0));
   const count = g * g;
-  const rand = mulberry32(hashSeed(String(key) + "::archx-grid-" + g));
+  let rand;
+  if (version === 2) {
+    rand = sfc32(...cyrb128(String(key) + "::archx-grid2-" + g));
+    for (let i = 0; i < 8; i++) rand();
+  } else {
+    rand = mulberry32(hashSeed(String(key) + "::archx-grid-" + g));
+  }
   const order = Array.from({ length: count }, (_, i) => i);
   for (let i = count - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -58,7 +96,7 @@ function buildScramblePlan(grid = DEFAULT_GRID, key = "") {
   order.forEach((orig, scrambledPos) => {
     inverse[orig] = scrambledPos;
   });
-  return { grid: g, count, order, inverse, flips };
+  return { grid: g, count, version, order, inverse, flips };
 }
 function tileRect(index, grid, tw, th) {
   return { x: index % grid * tw, y: Math.floor(index / grid) * th, w: tw, h: th };
@@ -77,6 +115,9 @@ function asBytes(bytes) {
   if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return new Uint8Array(bytes || []);
 }
+var utf8Encoder = new TextEncoder();
+var utf8Fatal = new TextDecoder("utf-8", { fatal: true });
+var utf8Lenient = new TextDecoder("utf-8", { fatal: false });
 var IMAGE_FORMAT_MIME = Object.freeze({
   jpeg: "image/jpeg",
   png: "image/png",
@@ -211,7 +252,7 @@ function sniffImageInfo(bytes) {
   if (u8.length >= 4 && u8[0] === 73 && u8[1] === 73 && u8[2] === 42 && u8[3] === 0 || u8.length >= 4 && u8[0] === 77 && u8[1] === 77 && u8[2] === 0 && u8[3] === 42) {
     return done("tiff");
   }
-  const head = new TextDecoder("utf-8", { fatal: false }).decode(u8.subarray(0, Math.min(1024, u8.length))).trimStart().toLowerCase();
+  const head = utf8Lenient.decode(u8.subarray(0, Math.min(1024, u8.length))).trimStart().toLowerCase();
   if (head.startsWith("<svg") || head.startsWith("<?xml") && head.includes("<svg")) return done("svg");
   return null;
 }
@@ -309,7 +350,8 @@ var ARCHX_HEADER_FIELDS = /* @__PURE__ */ new Set([
   "iv",
   "wm",
   "fx",
-  "sg"
+  "sg",
+  "pv"
 ]);
 var ARCHX_MIME_FORMATS = Object.freeze({
   "image/webp": "webp",
@@ -328,6 +370,7 @@ function validateArchxHeader(header) {
     if (!Number.isSafeInteger(header[field]) || header[field] < 1 || header[field] > 65536) fail(`bad ${field}`);
   }
   if (!Number.isInteger(header.grid) || header.grid < 2 || header.grid > 32) fail("bad grid");
+  if (header.pv !== void 0 && header.pv !== 1 && header.pv !== 2) fail("bad plan version");
   const padded = paddedSize(header.w, header.h, header.grid);
   if (header.pw !== padded.pw || header.ph !== padded.ph) fail("padded dimensions do not match");
   if (!ARCHX_MIME_FORMATS[header.mime]) fail("unsupported MIME type");
@@ -350,7 +393,7 @@ function validateArchxHeader(header) {
 }
 function encodeContainer(header, payload) {
   validateArchxHeader(header);
-  const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+  const headerBytes = utf8Encoder.encode(JSON.stringify(header));
   if (headerBytes.length > MAX_ARCHX_HEADER_BYTES) throw new Error("Archx: .archx header is too large");
   const body = asBytes(payload);
   if (!body.length) throw new Error("Archx: .archx payload is empty");
@@ -375,7 +418,7 @@ function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(u8.subarray(10, 10 + headerLen)));
+    header = JSON.parse(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
   } catch {
     throw new Error("Archx: invalid .archx header encoding");
   }
@@ -1015,14 +1058,16 @@ function detectStegoFingerprint(rgba, w, h, {
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 : minBitCount >= 1;
+    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 : minBitCount >= 2 && cellScores.length >= codeLength * 3;
     const correctionCount = Math.max(0, corrected.corrections);
     const robustCorrectionOk = !robust || correctionCount <= 3 || correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
+    const standardCorrectionOk = robust || correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85;
     return {
-      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk,
+      found: crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk,
       fingerprint,
       profile: effectiveProfile,
       observedBits,
+      minBitRepetitions: minBitCount,
       crcValid,
       corrections: Math.max(0, corrected.corrections),
       confidence: Math.round(confidence * 1e3) / 1e3,
@@ -1362,7 +1407,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.9.0";
+var VERSION = "1.10.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1605,6 +1650,8 @@ var DEFAULTS = {
   grid: DEFAULT_GRID,
   scrambled: false,
   // source pixels are tile-scrambled
+  planVersion: 1,
+  // scramble plan derivation for container-less scrambled sources (1 = legacy 32-bit seed, 2 = 128-bit seed); .archx headers carry their own `pv` and win
   key: null,
   // scramble seed and/or AES key (see docs)
   aesKey: null,
@@ -3341,7 +3388,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
 function scrambleCanvasLocally(source, grid, key) {
   const w = source.width, h = source.height;
   const { tw, th, pw, ph } = paddedSize(w, h, grid);
-  const plan = buildScramblePlan(grid, key);
+  const plan = buildScramblePlan(grid, key, 2);
   const cleanPadded = makeCanvas();
   cleanPadded.width = pw;
   cleanPadded.height = ph;
@@ -4101,6 +4148,8 @@ var ProtectedImage = class {
     const keyValue = extra.key ?? o.key ?? "";
     if (!["string", "number", "bigint"].includes(typeof keyValue)) throw nonRetryableError("Archx: invalid scramble key");
     const key = String(keyValue);
+    const planVersion = header?.pv ?? o.planVersion ?? 1;
+    if (planVersion !== 1 && planVersion !== 2) throw nonRetryableError("Archx: invalid scramble plan version");
     const blob = new Blob([payload], { type: header?.mime || sniffed.mime });
     let bitmap;
     try {
@@ -4143,7 +4192,7 @@ var ProtectedImage = class {
         padW = bitmapW;
         padH = bitmapH;
       }
-      meta = { plan: buildScramblePlan(grid, key), origW, origH, padW, padH };
+      meta = { plan: buildScramblePlan(grid, key, planVersion), origW, origH, padW, padH };
     } else {
       meta = { plan: null, origW: bitmapW, origH: bitmapH, padW: bitmapW, padH: bitmapH };
     }
@@ -4589,7 +4638,7 @@ var ProtectedImage = class {
       tiny.width = 0;
       tiny.height = 0;
       const g = 8;
-      const plan = buildScramblePlan(g, "decoy-" + sessionId());
+      const plan = buildScramblePlan(g, "decoy-" + sessionId(), 2);
       const tw = staging.width / g, th = staging.height / g;
       const dw = w / g, dh = h / g;
       for (let dest = 0; dest < plan.count; dest++) {
@@ -6141,7 +6190,7 @@ function defineElement() {
   const elementInstances = /* @__PURE__ */ new WeakMap();
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
-      return ["src", "image-id", "asset-id", "asset-manifest", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "temporal-interlace", "temporal-interlace-engine", "temporal-interlace-layout", "temporal-interlace-phases", "temporal-interlace-cell-size", "temporal-interlace-fill", "temporal-interlace-refresh-hz", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "token-batch", "fetch-priority", "proof-of-possession", "cache-scope"];
+      return ["src", "image-id", "asset-id", "asset-manifest", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "temporal-interlace", "temporal-interlace-engine", "temporal-interlace-layout", "temporal-interlace-phases", "temporal-interlace-cell-size", "temporal-interlace-fill", "temporal-interlace-refresh-hz", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "token-batch", "fetch-priority", "proof-of-possession", "cache-scope", "taint-readback", "taint-url", "plan-version"];
     }
     connectedCallback() {
       if (elementInstances.has(this)) return;
@@ -6221,6 +6270,7 @@ function defineElement() {
         networkAware: this.hasAttribute("network-aware") ? this.getAttribute("network-aware") !== "false" : presetOptions.networkAware,
         taintReadback: this.getAttribute("taint-readback") || presetOptions.taintReadback,
         taintUrl: this.getAttribute("taint-url") || presetOptions.taintUrl,
+        planVersion: this.hasAttribute("plan-version") ? Number(this.getAttribute("plan-version")) : presetOptions.planVersion,
         fetchPriority: this.getAttribute("fetch-priority") || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute("proof-of-possession") || void 0,
         cacheScope: this.getAttribute("cache-scope") || void 0
@@ -6317,6 +6367,7 @@ export {
   bytesToBase64,
   captureEarlyIntegritySnapshot,
   comparePerceptualFingerprints,
+  cyrb128,
   decodeBmpImage,
   decodeContainer,
   decryptPayload,
@@ -6344,6 +6395,7 @@ export {
   preset,
   scramblePixels,
   scramblePixelsPadded,
+  sfc32,
   sniffImageFormat,
   sniffImageInfo,
   stegoFingerprint,
