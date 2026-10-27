@@ -51,6 +51,33 @@ export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 
   return true;
 }
 
+/**
+ * Process-global Sharp/libvips throughput controls. `concurrency` is the
+ * number of libvips threads used *per image operation*; when the middleware
+ * already runs several image jobs in parallel, a small value (often 1)
+ * usually gives better total throughput and less thread churn than letting
+ * every job fan out across every core. The last call wins for the process, so
+ * hosts embedding several Archx handlers should configure this once.
+ */
+export function configureSharpPerformance({ concurrency, cache } = {}) {
+  if (concurrency !== undefined) {
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 1024) {
+      throw new TypeError('Archx Sharp performance: concurrency must be an integer from 1 to 1024');
+    }
+    if (typeof sharp.concurrency === 'function') sharp.concurrency(concurrency);
+  }
+  if (cache !== undefined) {
+    if (typeof cache !== 'boolean') {
+      throw new TypeError('Archx Sharp performance: cache must be boolean');
+    }
+    if (typeof sharp.cache === 'function') sharp.cache(cache);
+  }
+  return Object.freeze({
+    concurrency: typeof sharp.concurrency === 'function' ? sharp.concurrency() : null,
+    cache: typeof sharp.cache === 'function' ? sharp.cache() : null,
+  });
+}
+
 function bufferView(bytes) {
   return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
@@ -113,6 +140,22 @@ function normalizeProcessingOptions(opts = {}) {
   if (blockRaw !== undefined && typeof blockRaw !== 'boolean') {
     throw new TypeError('Archx image processing: blockUntrustedSharpLoaders must be boolean');
   }
+  const smartRaw = pick('webpSmartSubsample', 'smartSubsample');
+  if (smartRaw !== undefined && typeof smartRaw !== 'boolean') {
+    throw new TypeError('Archx image processing: webpSmartSubsample must be boolean');
+  }
+  const resizeKernel = pick('resizeKernel') ?? 'lanczos3';
+  if (!['nearest', 'cubic', 'mitchell', 'lanczos2', 'lanczos3', 'mks2013', 'mks2021'].includes(resizeKernel)) {
+    throw new TypeError('Archx image processing: resizeKernel is invalid');
+  }
+  const jpegChromaSubsampling = pick('jpegChromaSubsampling') ?? '4:4:4';
+  if (!['4:2:0', '4:4:4'].includes(jpegChromaSubsampling)) {
+    throw new TypeError("Archx image processing: jpegChromaSubsampling must be '4:2:0' or '4:4:4'");
+  }
+  const sharpCacheRaw = pick('sharpCache');
+  if (sharpCacheRaw !== undefined && typeof sharpCacheRaw !== 'boolean') {
+    throw new TypeError('Archx image processing: sharpCache must be boolean');
+  }
   return Object.freeze({
     maxInputBytes: integer('maxInputBytes', pick('maxInputBytes'), 50 * 1024 * 1024, 1024, 500 * 1024 * 1024),
     maxInputPixels: integer('maxInputPixels', pick('maxInputPixels'), 40000000, 10000, 268402689),
@@ -122,6 +165,17 @@ function normalizeProcessingOptions(opts = {}) {
     timeoutSec,
     allowedInputFormats: Object.freeze(allowedInputFormats),
     blockUntrustedSharpLoaders: blockRaw !== false,
+    // Encoder/resampling controls are explicit because they are the dominant
+    // cold-derivative CPU cost. Defaults preserve the historical high-quality
+    // output; catalog/throughput deployments can trade a little compression
+    // efficiency for several-fold faster WebP encoding.
+    webpEffort: integer('webpEffort', pick('webpEffort', 'encoderEffort'), 4, 0, 6),
+    webpSmartSubsample: smartRaw !== false,
+    resizeKernel,
+    pngCompressionLevel: integer('pngCompressionLevel', pick('pngCompressionLevel'), 9, 0, 9),
+    jpegChromaSubsampling,
+    sharpConcurrency: integer('sharpConcurrency', pick('sharpConcurrency'), 0, 0, 1024),
+    sharpCache: sharpCacheRaw,
   });
 }
 
@@ -182,6 +236,27 @@ function assertMetadataWithinLimits(meta, limits, sniffed = null) {
       meta.width * meta.height > limits.maxInputPixels) {
     throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured dimension budget');
   }
+}
+
+/** Bounded Sharp metadata read used by ingest/build tooling. Width/height are
+ * reported in displayed orientation (EXIF rotations 5–8 swap the axes). */
+export async function inspectImageMetadata(input, opts = {}) {
+  const limits = normalizeProcessingOptions(opts);
+  const { bytes, sniffed } = assertInputWithinLimits(input, limits);
+  let meta;
+  try { meta = await sharpInput(bytes, limits).metadata(); }
+  catch (err) { throw mapSharpError(err); }
+  assertMetadataWithinLimits(meta, limits, sniffed);
+  const rotated = meta.orientation >= 5 && meta.orientation <= 8;
+  return Object.freeze({
+    format: normalizedSharpFormat(meta.format),
+    width: rotated ? meta.height : meta.width,
+    height: rotated ? meta.width : meta.height,
+    orientation: meta.orientation || 1,
+    hasAlpha: !!meta.hasAlpha,
+    channels: meta.channels || null,
+    pages: meta.pages || 1,
+  });
 }
 
 
@@ -311,12 +386,12 @@ export async function scrambleImage(input, opts = {}) {
     }
   }
 
-  let pipeline = sharpInput(input, limits).rotate() // bake EXIF orientation, drop metadata
+  let pipeline = sharpInput(inputBytes, limits).rotate() // bake EXIF orientation, drop metadata
     .resize({
       width: tw,
       height: th,
       withoutEnlargement: true,
-      kernel: sharp.kernel.lanczos3, // high-quality downscale, like a good <img> pipeline
+      kernel: sharp.kernel[limits.resizeKernel],
     });
 
   // Server-baked visible watermark: composited pre-scramble so that NO
@@ -342,7 +417,10 @@ export async function scrambleImage(input, opts = {}) {
 
   // Block-level forensic mark (also pre-scramble): survives into any
   // reconstructed copy and can be correlated against the viewing session.
-  let rawPixels = new Uint8Array(data);
+  // `data` is a fresh Sharp-owned Buffer for this call. Reusing its view
+  // avoids an otherwise pointless full-frame copy before the mark/scramble
+  // stages; the caller-supplied compressed master is never mutated.
+  let rawPixels = data;
   let forensicMarked = false;
   if (opts.forensicSeed) {
     const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
@@ -369,6 +447,7 @@ export async function scrambleImage(input, opts = {}) {
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
       gridX: stegoCfg.gridX ?? (stegoProfile === 'robust' ? 20 : 24),
       gridY: stegoCfg.gridY ?? (stegoProfile === 'robust' ? 14 : 16),
+      inPlace: true,
     });
     stegoMarked = true;
     resolvedStegoFingerprint = stegoFingerprint(stegoPayload);
@@ -387,14 +466,24 @@ export async function scrambleImage(input, opts = {}) {
   let encoder = sharp(Buffer.from(scrambled), { raw: { width: pw, height: ph, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });
   if (format === 'png') {
-    encoder = encoder.png({ compressionLevel: 9, adaptiveFiltering: true });
+    encoder = encoder.png({ compressionLevel: limits.pngCompressionLevel, adaptiveFiltering: true });
   } else if (format === 'jpeg') {
-    // 4:4:4 keeps colour edges/text crisp instead of chroma-subsampled slurry.
-    encoder = encoder.jpeg({ quality, chromaSubsampling: '4:4:4', mozjpeg: true });
+    // 4:4:4 remains the quality default because it keeps colour edges/text
+    // crisp; throughput deployments may explicitly choose 4:2:0.
+    encoder = encoder.jpeg({
+      quality,
+      chromaSubsampling: limits.jpegChromaSubsampling,
+      mozjpeg: true,
+    });
   } else if (lossless) {
-    encoder = encoder.webp({ lossless: true, alphaQuality: 100, effort: 4 });
+    encoder = encoder.webp({ lossless: true, alphaQuality: 100, effort: limits.webpEffort });
   } else {
-    encoder = encoder.webp({ quality, alphaQuality: 100, smartSubsample: true, effort: 4 });
+    encoder = encoder.webp({
+      quality,
+      alphaQuality: 100,
+      smartSubsample: limits.webpSmartSubsample,
+      effort: limits.webpEffort,
+    });
   }
   let payload;
   try { payload = await encoder.toBuffer(); }

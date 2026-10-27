@@ -48,8 +48,9 @@ npm pack --dry-run
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
 and then runs the real-Chromium browser suite. At the current review point
-the expected results are 39/39 Node tests and 82/82 Chromium checks,
-including a 100-image protected gallery with no protected `<img>` elements.
+the expected results are 43/43 Node tests and 89/89 Chromium checks,
+including precomputed manifest assets and a 100-image batch-minted gallery
+with no protected `<img>` elements.
 The Node suite includes production-default/audit tests, a two-handler
 shared-state replay/quota test, a Redis adapter fake-client contract test,
 buyer/order/provenance hook tests, robust StegoMark transforms, and a
@@ -76,11 +77,12 @@ at the top of that file.
 
 | Path | Purpose | Review priority |
 | --- | --- | --- |
-| `server/middleware.js` | Token mint/redemption boundary: authorization, hardened defaults/audit, buyer/order tracing, claims, proof of possession, quotas, replay state, proxy handling, security/delivery/provenance events | Critical |
+| `server/middleware.js` | Token mint/batch/redemption boundary: authorization, hardened/catalog defaults and audit, canonical widths, derivative caches, buyer/order tracing, claims, proof of possession, quotas, replay state, proxy handling, security/delivery/provenance events | Critical |
 | `server/redis-state-store.js` | Bundled atomic Redis/Valkey state-store adapter | Critical for multi-instance review |
 | `server/scramble-image.js` | Sharp derivative pipeline, format/dimension/pixel/time budgets, marks and StegoMark profiles, scrambling | Critical |
 | `src/scramble.js` | Shared container, scramble, AES-GCM, forensic, StegoMark, fingerprint, and BMP primitives | High |
 | `src/archx.js` | Browser loader/viewer: token fetch/proofs, decode/cache lifecycle, Canvas/WebGL renderers, guards, Lens, temporal effects | High |
+| `server/build-assets.js` / `server/build-assets-cli.js` | Incremental responsive `.archx` builder and `archx-build` CLI for static/CDN catalogs | High for scale/static review |
 | `server/scramble-cli.js` | `archx-protect` command-line tool | Medium |
 | `server/detect-stego-cli.js` | `archx-detect` attribution tool | Medium |
 | `server/demo-server.js` | Local demonstration server only | Medium: verify demo relaxations cannot leak into library defaults |
@@ -126,7 +128,11 @@ Inspect `createArchxMiddleware()` and follow one request through:
 - proof-of-possession key binding and signature inputs;
 - trusted-proxy/IP selection;
 - rate limits, quotas, processing queues, and bounded stores;
-- cache-deception and error-response behavior.
+- cache-deception and error-response behavior;
+- batch-mint item isolation/rate spending and whether derivative-cache hits
+  occur only after authorization/replay/quota checks;
+- canonical width selection inside, never above, the current entitlement;
+- disk-cache path containment, bounds, pruning, and non-public placement.
 
 The key question is whether any unauthenticated, revoked, replayed,
 oversized, or cross-viewer request can obtain bytes outside the current
@@ -145,7 +151,8 @@ information-leaking.
 
 Follow a token image through `src/archx.js`:
 
-- token JSON schema/origin/redirect/size validation;
+- token and asset-manifest schema/origin/redirect/size validation;
+- batch-mint grouping/fallback and manifest variant selection/cache bounds;
 - header-token and proof creation;
 - payload/container/decode budgets;
 - bitmap/payload cache scopes and logout behavior;
@@ -214,8 +221,10 @@ accepting diagrams or configuration prose:
 - repeat the replay and cross-viewer tests through the public CDN hostname;
 - forward security/delivery events to the intended SIEM/monitoring system
   and trigger test alerts while proving tokens/keys are absent from logs;
-- run the load tool against staging with production-like images, auth, and
-  state-store placement;
+- run the load tool against staging with production-like images, auth,
+  batch/single minting, cold and warm derivative caches, and state-store
+  placement; for `archx-build`, verify manifest authorization/cache policy
+  and that masters/build state are absent from the deployed artifact;
 - exercise regional failover with unexpired tokens.
 
 `docs/COMPLIANCE.md` is a self-assessment. Do not report Archx as

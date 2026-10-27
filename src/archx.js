@@ -42,7 +42,7 @@ import {
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
 } from './scramble.js';
 
-export const VERSION = '1.5.0';
+export const VERSION = '1.6.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -286,6 +286,11 @@ function nativeGlDrawArrays(gl, mode, first, count) {
 /* Global config + registries                                          */
 /* ================================================================== */
 
+/** Canonical browser-requested widths shared with the server/build ladder. */
+export const DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
+  160, 240, 320, 480, 640, 800, 960, 1200, 1440, 1600, 1920, 2240, 2560,
+]);
+
 const DEFAULTS = {
   mode: 'shield',               // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
   renderer: 'auto',             // 'auto' | 'canvas' | 'webgl' — direct renderer flag (lets custom setups skip preset modes)
@@ -301,6 +306,16 @@ const DEFAULTS = {
   tokenEndpoint: null,          // e.g. '/archx/token/'  (+ image id)
   tokenMethod: 'POST',          // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
   tokenTransport: 'header',     // 'header' | 'query' | 'auto' — header keeps bearer tokens out of image URLs/logs
+  tokenBatch: false,            // coalesce simultaneous POST mints into {basePath}/tokens (catalog/gallery presets enable it)
+  tokenBatchEndpoint: null,     // explicit batch endpoint; otherwise derived by replacing a trailing /token segment
+  tokenBatchSize: 50,           // maximum mints per batch HTTP request
+  tokenBatchDelayMs: 8,         // quiet-period coalescing window for gallery/page bursts
+  tokenBatchMaxDelayMs: 50,     // hard cap so a continuous trickle cannot starve the first mint
+  assetManifest: null,          // archx-build manifest URL or object for { assetId } sources
+  assetManifestMaxBytes: 8 * 1024 * 1024,
+  assetHttpCache: 'default',    // manifest/variant fetches may use browser/CDN HTTP caching
+  httpCache: 'no-store',        // direct URL sources; token mint/payload requests always remain no-store
+  fetchPriority: null,          // null | 'high' | 'low' | 'auto' (hero images may use high; leave auto for galleries)
   proofOfPossession: 'auto',    // 'auto' | 'required' | 'off' — bind tokens to a non-extractable page key when WebCrypto allows
   allowedTokenOrigins: null,    // exact extra origins allowed for token-returned payload URLs (endpoint origin is always allowed)
   fetchTimeoutMs: 20000,        // per-request network deadline (mint, payload, and direct sources)
@@ -314,7 +329,8 @@ const DEFAULTS = {
   dprCap: 3,                    // match modern retina/mobile displays instead of upscaling a 2x canvas
   sourceOversample: 2,          // fetch a 2x derivative then supersample down (server entitlement still caps the signed width)
   maxSourceWidth: 2560,         // client-side ceiling before the server's own entitlement cap
-  qualityProfile: 'high',       // 'original' | 'high' | 'balanced' | 'fast' (sets requestQuality + sampling unless overridden)
+  sourceWidthBuckets: null,     // canonical requested widths (catalog/gallery presets supply a ladder)
+  qualityProfile: 'high',       // 'original' | 'high' | 'balanced' | 'catalog' | 'fast' (sets requestQuality + sampling unless overridden)
   requestQuality: null,         // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
   cacheBitmap: true,            // reuse a decoded bitmap for the same source in this page session
   bitmapCacheMaxEntries: 40,
@@ -513,6 +529,7 @@ function mergeOptions(opts = {}) {
     original: { requestQuality: 'lossless', sourceOversample: 2, dprCap: 3 },
     high: { requestQuality: 95, sourceOversample: 2, dprCap: 3 },
     balanced: { requestQuality: 90, sourceOversample: 1.5, dprCap: 2.5 },
+    catalog: { requestQuality: 88, sourceOversample: 1, dprCap: 2 },
     fast: { requestQuality: 82, sourceOversample: 1.25, dprCap: 2 },
   };
   const qp = qualityProfiles[merged.qualityProfile];
@@ -562,7 +579,7 @@ function sanitizeOptionsView(opts) {
   if (!opts) return opts;
   const sensitive = new Set([
     'key', 'aeskey', 'cachescope', 'sessionid', 'token', 'accesstoken', 'refreshtoken',
-    'secret', 'password', 'authorization', 'cookie',
+    'secret', 'password', 'authorization', 'cookie', 'assetmanifest',
   ]);
   const seen = new WeakMap();
   const clone = (value, keyName = '') => {
@@ -589,9 +606,21 @@ function sanitizeOptionsView(opts) {
  *  Archx.load.image(el, src, { ...Archx.preset('commerce'), temporalShield: false }) */
 export const PRESETS = Object.freeze({
   gallery: Object.freeze({
-    mode: 'lite', qualityProfile: 'balanced', sourceOversample: 1.5, lazy: true,
-    unloadOnExit: false, cacheBitmap: true, cachePayload: true, renderLoop: 'static',
-    reloadOnResize: 'never', guards: Object.freeze({ blurOnBlur: false }),
+    mode: 'lite', qualityProfile: 'catalog', sourceOversample: 1, dprCap: 2, lazy: true,
+    unloadOnExit: true, cacheBitmap: true, cachePayload: true, renderLoop: 'static',
+    reloadOnResize: 'never', tokenBatch: true, tokenBatchDelayMs: 20, tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS, httpCache: 'default',
+    bitmapCacheMaxEntries: 24, bitmapCacheMaxBytes: 128 * 1024 * 1024,
+    guards: Object.freeze({ blurOnBlur: false }),
+  }),
+  catalog: Object.freeze({
+    mode: 'lite', qualityProfile: 'catalog', sourceOversample: 1, dprCap: 2, lazy: true,
+    unloadOnExit: true, cacheBitmap: true, cachePayload: true, renderLoop: 'static',
+    reloadOnResize: 'never', tokenBatch: true, tokenBatchDelayMs: 20, tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS, httpCache: 'default',
+    assetHttpCache: 'default', bitmapCacheMaxEntries: 24,
+    bitmapCacheMaxBytes: 128 * 1024 * 1024,
+    guards: Object.freeze({ blurOnBlur: false }),
   }),
   editorial: Object.freeze({
     mode: 'shield', qualityProfile: 'original', cacheBitmap: true, cachePayload: true,
@@ -1037,6 +1066,333 @@ function cacheDigest(parts) {
 
 function boundedInteger(value, fallback, min, max) {
   return Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
+function normalizeSourceWidthBuckets(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((width) => Number.isInteger(width) && width >= 64 && width <= 16384))]
+    .sort((a, b) => a - b)
+    .slice(0, 64);
+}
+
+function canonicalSourceWidth(value, bucketsValue, maxWidth) {
+  const max = Math.max(1, Math.floor(Number(maxWidth) || 1));
+  const requested = Math.max(1, Math.min(max, Math.ceil(Number(value) || 1)));
+  const buckets = normalizeSourceWidthBuckets(bucketsValue);
+  if (!buckets.length) return requested;
+  for (const bucket of buckets) {
+    if (bucket >= requested && bucket <= max) return bucket;
+  }
+  const atOrBelowMax = buckets.filter((bucket) => bucket <= max);
+  return atOrBelowMax.length ? atOrBelowMax[atOrBelowMax.length - 1] : requested;
+}
+
+function normalizedHttpCache(value, fallback = 'no-store') {
+  const mode = String(value ?? fallback).toLowerCase();
+  return ['default', 'no-store', 'reload', 'no-cache', 'force-cache', 'only-if-cached'].includes(mode)
+    ? mode
+    : fallback;
+}
+
+function fetchPriorityInit(options = {}) {
+  const priority = String(options.fetchPriority || '').toLowerCase();
+  return ['high', 'low', 'auto'].includes(priority) ? { priority } : {};
+}
+
+/* ---------- precomputed asset manifests (archx-build) ---------- */
+const ASSET_MANIFEST_CACHE_MAX = 8;
+const assetManifestCache = new Map(); // digest -> Promise<normalized manifest> (bounded LRU)
+const assetManifestObjectCache = new WeakMap(); // host object -> normalized manifest
+
+function normalizeAssetManifest(raw, baseUrl) {
+  if (!isPlainClientObject(raw) || raw.version !== 1 || !isPlainClientObject(raw.assets)) {
+    throw nonRetryableError('Archx: asset manifest is invalid');
+  }
+  const entries = Object.entries(raw.assets);
+  if (!entries.length || entries.length > 100000) {
+    throw nonRetryableError('Archx: asset manifest has an invalid asset count');
+  }
+  const assets = new Map();
+  for (const [id, assetRaw] of entries) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) || !isPlainClientObject(assetRaw)) {
+      throw nonRetryableError('Archx: asset manifest contains an invalid asset');
+    }
+    if (assetRaw.id !== undefined && assetRaw.id !== id) {
+      throw nonRetryableError('Archx: asset manifest contains a mismatched asset id');
+    }
+    const width = assetRaw.width;
+    const height = assetRaw.height;
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+        width < 1 || height < 1 || width > 65536 || height > 65536) {
+      throw nonRetryableError('Archx: asset manifest contains invalid dimensions');
+    }
+    if (!validTokenString(assetRaw.key, { min: 1, max: 512 })) {
+      throw nonRetryableError('Archx: asset manifest contains an invalid key');
+    }
+    if (!Number.isInteger(assetRaw.grid) || assetRaw.grid < 2 || assetRaw.grid > 32) {
+      throw nonRetryableError('Archx: asset manifest contains an invalid grid');
+    }
+    if (assetRaw.aesKey !== undefined &&
+        !validTokenString(assetRaw.aesKey, { min: 16, max: 256 })) {
+      throw nonRetryableError('Archx: asset manifest contains an invalid AES key');
+    }
+    if (!Array.isArray(assetRaw.variants) || !assetRaw.variants.length || assetRaw.variants.length > 32) {
+      throw nonRetryableError('Archx: asset manifest contains invalid variants');
+    }
+    const variants = assetRaw.variants.map((variantRaw) => {
+      if (!isPlainClientObject(variantRaw) ||
+          !Number.isSafeInteger(variantRaw.width) || !Number.isSafeInteger(variantRaw.height) ||
+          variantRaw.width < 1 || variantRaw.height < 1 ||
+          variantRaw.width > 65536 || variantRaw.height > 65536 ||
+          typeof variantRaw.url !== 'string' || !variantRaw.url || variantRaw.url.length > 16384) {
+        throw nonRetryableError('Archx: asset manifest contains an invalid variant');
+      }
+      const url = resolveHttpUrl(variantRaw.url, { base: baseUrl?.href, label: 'asset variant URL' });
+      return Object.freeze({
+        width: variantRaw.width,
+        height: variantRaw.height,
+        url,
+        bytes: Number.isSafeInteger(variantRaw.bytes) && variantRaw.bytes > 0 ? variantRaw.bytes : null,
+      });
+    }).sort((a, b) => a.width - b.width || a.height - b.height);
+    assets.set(id, Object.freeze({
+      id,
+      width,
+      height,
+      key: assetRaw.key,
+      grid: assetRaw.grid,
+      ...(assetRaw.aesKey !== undefined ? { aesKey: assetRaw.aesKey } : {}),
+      variants: Object.freeze(variants),
+    }));
+  }
+  return Object.freeze({ version: 1, assets });
+}
+
+async function loadAssetManifest(manifestSource, options, controls) {
+  if (isPlainClientObject(manifestSource)) {
+    let normalized = assetManifestObjectCache.get(manifestSource);
+    if (!normalized) {
+      const base = typeof document !== 'undefined'
+        ? new URL(document.baseURI)
+        : new URL('http://archx.local/');
+      normalized = normalizeAssetManifest(manifestSource, base);
+      assetManifestObjectCache.set(manifestSource, normalized);
+    }
+    return normalized;
+  }
+  const manifestUrl = resolveHttpUrl(manifestSource, { label: 'asset manifest URL' });
+  if (manifestUrl.hash) throw nonRetryableError('Archx: asset manifest URL must not contain a fragment');
+  const maxBytes = boundedInteger(
+    options.assetManifestMaxBytes,
+    DEFAULTS.assetManifestMaxBytes,
+    1024,
+    64 * 1024 * 1024,
+  );
+  const cacheMode = normalizedHttpCache(options.assetHttpCache, 'default');
+  const cacheKey = cacheDigest([
+    'asset-manifest', 1, options.cacheScope || '', manifestUrl.href,
+    controls.credentials, cacheMode, maxBytes, controls.fetchTimeoutMs, controls.retries,
+  ]);
+  let pending = assetManifestCache.get(cacheKey);
+  if (pending) {
+    assetManifestCache.delete(cacheKey);
+    assetManifestCache.set(cacheKey, pending);
+  }
+  if (!pending) {
+    pending = (async () => {
+      const response = await fetchBounded(manifestUrl.href, {
+        method: 'GET',
+        credentials: controls.credentials,
+        cache: cacheMode,
+        redirect: 'error',
+        ...fetchPriorityInit(options),
+      }, {
+        retries: controls.retries,
+        maxBytes,
+        timeoutMs: controls.fetchTimeoutMs,
+        validateResponse: (res) => assertResponseFinalOrigin(res, new Set([manifestUrl.origin])),
+      });
+      return normalizeAssetManifest(parseBoundedJson(response.bytes), manifestUrl);
+    })();
+    assetManifestCache.set(cacheKey, pending);
+    while (assetManifestCache.size > ASSET_MANIFEST_CACHE_MAX) {
+      const oldest = assetManifestCache.keys().next().value;
+      if (oldest === cacheKey) break;
+      assetManifestCache.delete(oldest);
+    }
+    pending.catch(() => {
+      if (assetManifestCache.get(cacheKey) === pending) assetManifestCache.delete(cacheKey);
+    });
+  }
+  return pending;
+}
+
+function chooseAssetVariant(asset, neededWidth) {
+  const wanted = Math.max(1, Math.ceil(Number(neededWidth) || 1));
+  return asset.variants.find((variant) => variant.width >= wanted) ||
+    asset.variants[asset.variants.length - 1];
+}
+
+/* ---------- batch token mint scheduler ---------- */
+const tokenBatchQueues = new Map();
+let tokenBatchSequence = 0;
+
+function deriveTokenBatchEndpoint(endpointUrl, options = {}) {
+  if (options.tokenBatchEndpoint) {
+    const batchUrl = resolveHttpUrl(options.tokenBatchEndpoint, {
+      base: endpointUrl.href,
+      label: 'batch token endpoint',
+    });
+    if (batchUrl.search || batchUrl.hash) {
+      throw nonRetryableError('Archx: batch token endpoint must not contain a query or fragment');
+    }
+    return batchUrl;
+  }
+  const segments = endpointUrl.pathname.split('/').filter(Boolean);
+  if (segments[segments.length - 1] !== 'token') return null;
+  const batchUrl = new URL(endpointUrl.href);
+  segments[segments.length - 1] = 'tokens';
+  batchUrl.pathname = `/${segments.join('/')}`;
+  batchUrl.search = '';
+  batchUrl.hash = '';
+  return batchUrl;
+}
+
+function queueTokenBatchRequest({
+  batchUrl,
+  item,
+  headers,
+  credentials,
+  controls,
+  signal,
+  options,
+}) {
+  const batchSize = boundedInteger(options.tokenBatchSize, DEFAULTS.tokenBatchSize, 1, 500);
+  const delayMs = boundedInteger(options.tokenBatchDelayMs, DEFAULTS.tokenBatchDelayMs, 0, 1000);
+  const maxDelayMs = Math.max(
+    delayMs,
+    boundedInteger(options.tokenBatchMaxDelayMs, DEFAULTS.tokenBatchMaxDelayMs, 0, 5000),
+  );
+  const groupKey = cacheDigest([
+    'token-batch', 1, options.cacheScope || '', batchUrl.href, credentials,
+    headers?.['X-Archx-Proof-Key'] || '', controls.fetchTimeoutMs, controls.retries, batchSize,
+  ]);
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new Error('Archx: request aborted'));
+      return;
+    }
+    let group = tokenBatchQueues.get(groupKey);
+    if (!group) {
+      group = {
+        key: groupKey,
+        batchUrl,
+        headers,
+        credentials,
+        controls,
+        options,
+        entries: [],
+        timer: 0,
+        firstQueuedAt: Date.now(),
+        controller: null,
+        started: false,
+      };
+      tokenBatchQueues.set(groupKey, group);
+    }
+    const entry = {
+      ref: `r${tokenBatchSequence++}`,
+      item,
+      resolve,
+      reject,
+      signal,
+      cancelled: false,
+      onAbort: null,
+    };
+    entry.onAbort = () => {
+      if (entry.cancelled) return;
+      entry.cancelled = true;
+      reject(signal?.reason || new Error('Archx: request aborted'));
+      if (!group.started) {
+        group.entries = group.entries.filter((candidate) => candidate !== entry);
+        if (!group.entries.length) {
+          clearTimeout(group.timer);
+          if (tokenBatchQueues.get(groupKey) === group) tokenBatchQueues.delete(groupKey);
+        }
+      } else if (group.entries.every((candidate) => candidate.cancelled)) {
+        try { group.controller?.abort(signal?.reason); } catch { group.controller?.abort(); }
+      }
+    };
+    signal?.addEventListener?.('abort', entry.onAbort, { once: true });
+    group.entries.push(entry);
+    if (group.entries.length >= batchSize) {
+      clearTimeout(group.timer);
+      void flushTokenBatch(group);
+    } else {
+      // Debounce rather than flushing strictly N ms after the first entry:
+      // stable-size checks and proof-key setup make gallery mints trickle in
+      // over a few frames. The max-delay cap keeps first-image latency sane.
+      clearTimeout(group.timer);
+      const elapsed = Date.now() - group.firstQueuedAt;
+      const wait = Math.max(0, Math.min(delayMs, maxDelayMs - elapsed));
+      group.timer = setTimeout(() => { void flushTokenBatch(group); }, wait);
+    }
+  });
+}
+
+async function flushTokenBatch(group) {
+  if (group.started) return;
+  group.started = true;
+  clearTimeout(group.timer);
+  if (tokenBatchQueues.get(group.key) === group) tokenBatchQueues.delete(group.key);
+  const active = group.entries.filter((entry) => !entry.cancelled);
+  if (!active.length) return;
+  group.controller = new AbortController();
+  const settle = (entry, fn, value) => {
+    entry.signal?.removeEventListener?.('abort', entry.onAbort);
+    if (!entry.cancelled) fn(value);
+  };
+  try {
+    const body = JSON.stringify({
+      items: active.map((entry) => ({ ref: entry.ref, ...entry.item })),
+    });
+    const response = await fetchBounded(group.batchUrl.href, {
+      method: 'POST',
+      credentials: group.credentials,
+      cache: 'no-store',
+      redirect: 'error',
+      headers: { ...group.headers, 'Content-Type': 'application/json' },
+      body,
+      signal: group.controller.signal,
+      ...fetchPriorityInit(group.options),
+    }, {
+      retries: Math.min(1, group.controls.retries),
+      maxBytes: Math.min(2 * 1024 * 1024, Math.max(65536, active.length * 16384)),
+      timeoutMs: group.controls.fetchTimeoutMs,
+      validateResponse: (res) => assertResponseFinalOrigin(res, new Set([group.batchUrl.origin])),
+    });
+    const parsed = parseBoundedJson(response.bytes);
+    if (!isPlainClientObject(parsed.tokens || {}) || !isPlainClientObject(parsed.errors || {})) {
+      throw nonRetryableError('Archx: batch token endpoint returned an invalid response');
+    }
+    for (const entry of active) {
+      const raw = parsed.tokens?.[entry.ref];
+      const failure = parsed.errors?.[entry.ref];
+      if (isPlainClientObject(raw)) {
+        settle(entry, entry.resolve, raw);
+      } else if (isPlainClientObject(failure) && Number.isInteger(failure.status)) {
+        const err = new Error('Archx fetch failed: HTTP ' + failure.status);
+        err.status = failure.status;
+        err.archxBatchItem = true;
+        if (failure.status < 500 && ![408, 425, 429].includes(failure.status)) err.nonRetryable = true;
+        settle(entry, entry.reject, err);
+      } else {
+        settle(entry, entry.reject, nonRetryableError('Archx: batch token response is incomplete'));
+      }
+    }
+  } catch (err) {
+    for (const entry of active) settle(entry, entry.reject, err);
+  }
 }
 
 function fetchControls(o = {}) {
@@ -1591,7 +1947,7 @@ export class ProtectedImage {
   #traceEl = null; #traceTimer = 0;
   #strikes = 0; #lockedUntil = 0; #lockTimer = 0; #integrityIssues = [];
   #bitmapReleased = false;
-  #loadedOnce = false; #cachedBytes = null; #cachedExtra = null; #bitmapCacheEntry = null;
+  #loadedOnce = false; #cachedBytes = null; #cachedExtra = null; #bitmapCacheEntry = null; #prefetchedTokenMint = null;
   #renderedW = 0; #renderedH = 0; #deviceBox = null;
   #glFrameBudget = 0; #glFrames = 0; #temporalSign = 1; #temporalPhase = 0;
   #temporalRaf = 0; #temporalFrames = null; #temporalIndex = 0; #temporalEngineActual = null;
@@ -1846,13 +2202,21 @@ export class ProtectedImage {
       !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id);
   }
 
+  #isAssetSource() {
+    const src = this.#source;
+    return !!(src && typeof src === 'object' && !(src instanceof Blob) &&
+      !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) &&
+      (src.assetId || src.asset));
+  }
+
   /**
    * Only a token source can produce a *different, larger* derivative. For it,
    * a large host growth (or explicit reloadOnResize:'always') may justify one
    * fresh mint; every ordinary resize remains a local repaint.
    */
   #shouldUpgradeDerivative(previousW, previousH) {
-    if (!this.#loadedOnce || !this.#meta || !this.#visible || !this.#isTokenSource()) return false;
+    if (!this.#loadedOnce || !this.#meta || !this.#visible ||
+        (!this.#isTokenSource() && !this.#isAssetSource())) return false;
     const policy = this.#options.reloadOnResize;
     if (policy === 'never') return false;
     let size;
@@ -1909,12 +2273,12 @@ export class ProtectedImage {
         // force a fresh, adequately sized derivative; other sources simply
         // decode the privately cached payload locally.
         const policy = this.#options.reloadOnResize;
-        if (policy === 'always') void this._load({ force: this.#isTokenSource() });
+        if (policy === 'always') void this._load({ force: this.#isTokenSource() || this.#isAssetSource() });
         else if (policy === 'upscale' && this.#meta) {
           const { w, h } = this._backingSize();
           const f = Math.max(1, this.#options.resizeUpscaleFactor || 1.75);
           if (w > previousW * f || h > previousH * f) {
-            void this._load({ force: this.#isTokenSource() });
+            void this._load({ force: this.#isTokenSource() || this.#isAssetSource() });
           }
         }
       }
@@ -2025,6 +2389,96 @@ export class ProtectedImage {
     }
   }
 
+  async #tokenMintContext(controls) {
+    const o = this.#options;
+    const src = this.#source;
+    const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
+    if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
+    const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
+    if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError('Archx: token endpoint must not contain a query or fragment');
+    const rect = this.#host.getBoundingClientRect?.();
+    const cssWidth = rect?.width || this.#host.clientWidth || 800;
+    const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
+    const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
+    const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+    const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
+    const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
+    const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
+    const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
+    const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
+    const requestQuality = o.requestQuality === 'lossless' ||
+      (Number.isInteger(o.requestQuality) && o.requestQuality >= 1 && o.requestQuality <= 100)
+      ? o.requestQuality : null;
+    const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
+    const tokenTransport = ['header', 'query', 'auto'].includes(String(o.tokenTransport || 'header').toLowerCase())
+      ? String(o.tokenTransport || 'header').toLowerCase() : 'header';
+    const proofSetting = o.proofOfPossession;
+    const proofMode = proofSetting === false || proofSetting === 'off' ? 'off'
+      : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
+    const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
+    const mintUrl = new URL(endpointUrl.href);
+    mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(src.id)}`;
+    mintUrl.searchParams.set('w', String(boxW));
+    mintUrl.searchParams.set('bw', String(boxW));
+    mintUrl.searchParams.set('bh', String(boxH));
+    mintUrl.searchParams.set('fit', fit);
+    if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
+
+    const tokenCacheKey = cacheDigest([
+      'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, src.id,
+      boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
+      o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
+      controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
+    ]);
+    return {
+      endpointUrl, boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport,
+      proofMode, proofKey, mintUrl, tokenCacheKey,
+    };
+  }
+
+  async #prefetchTokenBatchMint(force = false) {
+    const o = this.#options;
+    const src = this.#source;
+    if (o.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
+    if (!force && this.#cachedBytes) return;
+    if (!src || typeof src !== 'object' || src instanceof Blob ||
+        src instanceof ArrayBuffer || ArrayBuffer.isView(src) || !src.id) return;
+    if (typeof src.id !== 'string' || !src.id || src.id.length > 256 || /[\u0000-\u001f\u007f]/.test(src.id)) return;
+    const controls = fetchControls(o);
+    let context;
+    try { context = await this.#tokenMintContext(controls); }
+    catch { return; } // _resolveBytes reports the authoritative error in-order.
+    if (this.#destroyed || this.#prefetchedTokenMint || context.tokenMethod !== 'POST') return;
+    const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, o);
+    if (!batchUrl) return;
+    const cacheBitmap = o.cacheBitmap !== false && o.memory !== 'strict';
+    if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return;
+    const headers = context.proofKey
+      ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': context.proofKey.header }
+      : { 'X-Archx-Request': 'token' };
+    const promise = queueTokenBatchRequest({
+      batchUrl,
+      item: {
+        id: src.id,
+        w: context.boxW,
+        bw: context.boxW,
+        bh: context.boxH,
+        fit: context.fit,
+        ...(context.requestQuality != null ? { q: context.requestQuality } : {}),
+      },
+      headers,
+      credentials: controls.credentials,
+      controls,
+      signal: this.#abort.signal,
+      options: o,
+    });
+    // The authoritative await happens inside _resolveBytes. Attach a benign
+    // handler now so a destroyed/unused prefetch cannot surface as an
+    // unhandled rejection while other gallery items are still being queued.
+    promise.catch(() => {});
+    this.#prefetchedTokenMint = { key: context.tokenCacheKey, promise };
+  }
+
   async _resolveBytes(force = false) {
     const o = this.#options;
     const src = this.#source;
@@ -2038,6 +2492,87 @@ export class ProtectedImage {
       return { ...(await this._bytesToBitmap(this.#cachedBytes, this.#cachedExtra || {})), extra: this.#cachedExtra || {} };
     }
 
+    // Precomputed asset flow: { assetId } + an archx-build manifest. Variant
+    // payloads are immutable scrambled derivatives on static/CDN hosting, so
+    // this path deliberately uses the browser HTTP cache by default and does
+    // not mint, authorize, or run Sharp per view. The manifest is the trust
+    // boundary: serve/sign it appropriately for private catalogs.
+    if (src && typeof src === 'object' && !(src instanceof Blob) &&
+        !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) &&
+        (src.assetId || src.asset)) {
+      const assetId = src.assetId || src.asset;
+      if (typeof assetId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(assetId)) {
+        throw nonRetryableError('Archx: asset id is invalid');
+      }
+      const manifestSource = src.manifest || o.assetManifest;
+      if (!manifestSource) throw new Error('Archx: assetManifest required for {assetId} sources');
+      const manifest = await loadAssetManifest(manifestSource, o, controls);
+      const asset = manifest.assets.get(assetId);
+      if (!asset) throw nonRetryableError('Archx: asset id is not present in the manifest');
+      const rect = this.#host.getBoundingClientRect?.();
+      const cssWidth = rect?.width || this.#host.clientWidth || 800;
+      const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
+      const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
+      const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+      const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
+      const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
+      const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
+      const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
+      const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
+      const aspect = asset.width / asset.height;
+      const neededWidth = fit === 'contain'
+        ? Math.min(boxW, boxH * aspect)
+        : fit === 'fill'
+          ? boxW
+          : Math.max(boxW, boxH * aspect);
+      const variant = chooseAssetVariant(asset, neededWidth);
+      const assetExtra = {
+        key: asset.key,
+        grid: asset.grid,
+        ...(asset.aesKey !== undefined ? { aesKey: asset.aesKey } : {}),
+      };
+      const assetCacheMode = normalizedHttpCache(o.assetHttpCache, 'default');
+      const assetCacheKey = cacheDigest([
+        'asset', 1, o.cacheScope || '', assetId, variant.url.href, variant.width,
+        asset.key, asset.grid, asset.aesKey || '', controls.credentials, assetCacheMode,
+        controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
+      ]);
+      if (!force && cacheBitmap) {
+        const hitEntry = cacheGetEntry(assetCacheKey, { acquire: true });
+        if (hitEntry) {
+          const hit = await hitEntry.promise;
+          return { ...hit, extra: hit.extra || assetExtra, cacheEntry: hitEntry };
+        }
+      }
+      const assetPromise = (async () => {
+        const { bytes: buf } = await fetchBounded(variant.url.href, {
+          method: 'GET',
+          credentials: controls.credentials,
+          cache: assetCacheMode,
+          signal: this.#abort.signal,
+          ...fetchPriorityInit(o),
+        }, {
+          retries: controls.retries,
+          maxBytes: controls.maxResponseBytes,
+          timeoutMs: controls.fetchTimeoutMs,
+          validateResponse: (res) => {
+            if (!res.url) return;
+            let finalUrl;
+            try { finalUrl = new URL(res.url); }
+            catch { throw nonRetryableError('Archx: asset response URL is invalid'); }
+            if (!['http:', 'https:'].includes(finalUrl.protocol) || finalUrl.username || finalUrl.password) {
+              throw nonRetryableError('Archx: asset response URL is disallowed');
+            }
+          },
+        });
+        if (o.cachePayload !== false) { this.#cachedBytes = buf; this.#cachedExtra = assetExtra; }
+        return { ...(await this._bytesToBitmap(buf, assetExtra)), extra: assetExtra };
+      })();
+      const cacheEntry = cacheBitmap ? cachePut(assetCacheKey, assetPromise, o) : null;
+      const result = await assetPromise;
+      return { ...result, cacheEntry };
+    }
+
     // Token flow: { id } against the signing server. The token JSON is an
     // untrusted upstream response: it is byte-bounded, schema-checked, and
     // only the key/grid/AES fields needed for decoding are retained. Payload
@@ -2048,70 +2583,77 @@ export class ProtectedImage {
       if (typeof src.id !== 'string' || !src.id || src.id.length > 256 || /[\u0000-\u001f\u007f]/.test(src.id)) {
         throw nonRetryableError('Archx: token image id is invalid');
       }
-      const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
-      if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
-      const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
-      if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError('Archx: token endpoint must not contain a query or fragment');
-      const rect = this.#host.getBoundingClientRect?.();
-      const cssWidth = rect?.width || this.#host.clientWidth || 800;
-      const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
-      const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
-      const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
-      const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
-      const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
-      const boxW = Math.min(maxSourceWidth, Math.ceil(cssWidth * pixelScale));
-      const boxH = Math.min(maxSourceWidth, Math.ceil(cssHeight * pixelScale));
-      const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
-      const requestQuality = o.requestQuality === 'lossless' ||
-        (Number.isInteger(o.requestQuality) && o.requestQuality >= 1 && o.requestQuality <= 100)
-        ? o.requestQuality : null;
-      const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
-      const tokenTransport = ['header', 'query', 'auto'].includes(String(o.tokenTransport || 'header').toLowerCase())
-        ? String(o.tokenTransport || 'header').toLowerCase() : 'header';
-      const proofSetting = o.proofOfPossession;
-      const proofMode = proofSetting === false || proofSetting === 'off' ? 'off'
-        : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
-      const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
-      const mintUrl = new URL(endpointUrl.href);
-      mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(src.id)}`;
-      mintUrl.searchParams.set('w', String(boxW));
-      mintUrl.searchParams.set('bw', String(boxW));
-      mintUrl.searchParams.set('bh', String(boxH));
-      mintUrl.searchParams.set('fit', fit);
-      if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
-
-      const tokenCacheKey = cacheDigest([
-        'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, src.id,
-        boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
-        o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
-        controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
-      ]);
+      const {
+        endpointUrl, boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport,
+        proofMode, proofKey, mintUrl, tokenCacheKey,
+      } = await this.#tokenMintContext(controls);
       if (!force && cacheBitmap) {
         const hitEntry = cacheGetEntry(tokenCacheKey, { acquire: true });
         if (hitEntry) {
+          this.#prefetchedTokenMint = null;
           const hit = await hitEntry.promise;
           return { ...hit, extra: hit.extra || {}, cacheEntry: hitEntry };
         }
       }
 
+      const mintHeaders = proofKey
+        ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': proofKey.header }
+        : { 'X-Archx-Request': 'token' };
+      const batchUrl = o.tokenBatch === true && tokenMethod === 'POST'
+        ? deriveTokenBatchEndpoint(endpointUrl, o)
+        : null;
+      const requestMint = async (tokenAttempt) => {
+        if (batchUrl && tokenAttempt === 0) {
+          try {
+            const prefetched = this.#prefetchedTokenMint?.key === tokenCacheKey
+              ? this.#prefetchedTokenMint.promise : null;
+            this.#prefetchedTokenMint = null;
+            return await (prefetched || queueTokenBatchRequest({
+              batchUrl,
+              item: {
+                id: src.id,
+                w: boxW,
+                bw: boxW,
+                bh: boxH,
+                fit,
+                ...(requestQuality != null ? { q: requestQuality } : {}),
+              },
+              headers: mintHeaders,
+              credentials: controls.credentials,
+              controls,
+              signal: this.#abort.signal,
+              options: o,
+            }));
+          } catch (err) {
+            // A batch endpoint is an optimization, not a new hard dependency:
+            // an older/partial server deployment can still serve the ordinary
+            // single-token route. Per-item authorization/rate decisions are
+            // not retried through the fallback.
+            const endpointUnsupported = !err?.archxBatchItem &&
+              [404, 405, 501].includes(err?.status);
+            if (this.#abort.signal.aborted || !endpointUnsupported) throw err;
+          }
+        }
+        const mint = await fetchBounded(mintUrl.href, {
+          method: tokenMethod,
+          credentials: controls.credentials,
+          cache: 'no-store',
+          redirect: 'error',
+          headers: mintHeaders,
+          signal: this.#abort.signal,
+          ...fetchPriorityInit(o),
+        }, {
+          retries: controls.retries,
+          maxBytes: 65536,
+          timeoutMs: controls.fetchTimeoutMs,
+          validateResponse: (res) => assertResponseFinalOrigin(res, new Set([endpointUrl.origin])),
+        });
+        return parseBoundedJson(mint.bytes);
+      };
+
       const tokenPromise = (async () => {
         for (let tokenAttempt = 0; tokenAttempt <= 1; tokenAttempt++) {
-          const mint = await fetchBounded(mintUrl.href, {
-            method: tokenMethod,
-            credentials: controls.credentials,
-            cache: 'no-store',
-            redirect: 'error',
-            headers: proofKey
-              ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': proofKey.header }
-              : { 'X-Archx-Request': 'token' },
-            signal: this.#abort.signal,
-          }, {
-            retries: controls.retries,
-            maxBytes: 65536,
-            timeoutMs: controls.fetchTimeoutMs,
-            validateResponse: (res) => assertResponseFinalOrigin(res, new Set([endpointUrl.origin])),
-          });
-          const parsed = parseTokenResponse(parseBoundedJson(mint.bytes), o, mintUrl);
+          const parsed = parseTokenResponse(await requestMint(tokenAttempt), o, mintUrl);
           const payloadHeaders = parsed.headerToken ? { 'X-Archx-Token': parsed.headerToken } : {};
           if (proofKey) {
             const proof = await createProofHeader(proofKey, parsed.accessToken, parsed.payloadUrl);
@@ -2125,6 +2667,7 @@ export class ProtectedImage {
             redirect: 'error',
             headers: payloadHeaders,
             signal: this.#abort.signal,
+            ...fetchPriorityInit(o),
           }, {
             retries: 0,
             maxBytes: controls.maxResponseBytes,
@@ -2164,6 +2707,7 @@ export class ProtectedImage {
       } catch { throw nonRetryableError('Archx: image source URL is invalid'); }
       const cacheKey = cacheDigest([
         'url', 1, o.cacheScope || '', sourceUrl.href, controls.credentials,
+        normalizedHttpCache(o.httpCache, 'no-store'),
         o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
         controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
       ]);
@@ -2177,8 +2721,9 @@ export class ProtectedImage {
       const promise = (async () => {
         const { bytes: buf } = await fetchBounded(sourceUrl.href, {
           credentials: controls.credentials,
-          cache: 'no-store',
+          cache: normalizedHttpCache(o.httpCache, 'no-store'),
           signal: this.#abort.signal,
+          ...fetchPriorityInit(o),
         }, {
           retries: controls.retries,
           maxBytes: controls.maxResponseBytes,
@@ -2396,6 +2941,8 @@ export class ProtectedImage {
     this.#loading = true;
     try {
       if (!this.#loadedOnce) await this.#waitForStableSize();
+      if (this.#destroyed) return;
+      await this.#prefetchTokenBatchMint(force);
       if (this.#destroyed) return;
       const result = await limiter.run(() => this._resolveBytes(force));
       if (this.#destroyed) {
@@ -3728,12 +4275,28 @@ function loadImage(target, source, options) {
 function loadGallery(container, items, options = {}) {
   const host = $(container);
   if (!host) throw new Error('Archx: gallery container not found');
-  const galleryDefaults = { mode: 'lite', unloadOnExit: false, sourceOversample: 1.5, cachePayload: true, reloadOnResize: 'never' };
+  const galleryDefaults = {
+    mode: 'lite',
+    qualityProfile: 'catalog',
+    unloadOnExit: true,
+    sourceOversample: 1,
+    dprCap: 2,
+    cachePayload: true,
+    reloadOnResize: 'never',
+    tokenBatch: true,
+    tokenBatchDelayMs: 20,
+    tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    httpCache: 'default',
+    bitmapCacheMaxEntries: 24,
+    bitmapCacheMaxBytes: 128 * 1024 * 1024,
+  };
   const made = items.map((item) => {
     const cell = document.createElement('div');
     cell.className = options.itemClass || 'archx-gallery-item';
     host.appendChild(cell);
-    const isObj = item && typeof item === 'object' && ('src' in item || 'id' in item);
+    const isObj = item && typeof item === 'object' &&
+      ('src' in item || 'id' in item || 'assetId' in item || 'asset' in item);
     const src = isObj && 'src' in item ? item.src : item;
     const per = isObj ? { alt: item.alt || '', ...(item.options || {}) } : {};
     return new ProtectedImage(cell, src, { ...galleryDefaults, ...options, ...per });
@@ -3764,7 +4327,7 @@ function defineElement() {
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'proof-of-possession', 'cache-scope']; }
+    static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -3772,7 +4335,8 @@ function defineElement() {
       inner.style.width = '100%'; inner.style.height = '100%';
       this.appendChild(inner);
       const id = this.getAttribute('image-id');
-      const src = id ? { id } : this.getAttribute('src');
+      const assetId = this.getAttribute('asset-id');
+      const src = assetId ? { assetId } : id ? { id } : this.getAttribute('src');
       let presetOptions = {};
       const presetName = this.getAttribute('preset');
       if (presetName) { try { presetOptions = preset(presetName); } catch {} }
@@ -3827,6 +4391,11 @@ function defineElement() {
         tokenEndpoint: this.getAttribute('token-endpoint') || undefined,
         tokenMethod: this.getAttribute('token-method') || undefined,
         tokenTransport: this.getAttribute('token-transport') || undefined,
+        tokenBatch: this.hasAttribute('token-batch')
+          ? this.getAttribute('token-batch') !== 'false'
+          : presetOptions.tokenBatch,
+        assetManifest: this.getAttribute('asset-manifest') || presetOptions.assetManifest,
+        fetchPriority: this.getAttribute('fetch-priority') || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute('proof-of-possession') || undefined,
         cacheScope: this.getAttribute('cache-scope') || undefined,
       });
@@ -3851,6 +4420,7 @@ const Archx = {
   ProtectedImage,
   presets: PRESETS,
   preset,
+  sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
   temporalInterlaceProfiles: TEMPORAL_INTERLACE_PROFILES,
   normalizeTemporalInterlace,
   config(partial = {}) {
@@ -3872,7 +4442,7 @@ const Archx = {
   /** Number of live protected images (the registry itself stays private). */
   get instanceCount() { return instances.size; },
   /** Prevent future reuse of shared decoded bitmaps (call on logout/account switch). */
-  clearCaches() { clearBitmapCache(); pageSessionId = null; },
+  clearCaches() { clearBitmapCache(); assetManifestCache.clear(); pageSessionId = null; },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,
   auditIntegrityDetails,

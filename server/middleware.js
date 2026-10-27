@@ -46,6 +46,34 @@ const KNOWN_WEAK_SECRETS = new Set([
   'demo-secret-change-me-in-production', 'archx-secret',
 ]);
 
+/** Canonical responsive derivative widths for image-heavy catalogs. Serving a
+ * handful of reusable widths instead of every viewport/DPR combination is
+ * what lets memory/disk/CDN derivative caches reach a high hit rate. */
+export const DEFAULT_WIDTH_BUCKETS = Object.freeze([
+  160, 240, 320, 480, 640, 800, 960, 1200, 1440, 1600, 1920, 2240, 2560,
+]);
+
+/** Round a requested derivative width to a canonical bucket without ever
+ * exceeding the server's entitlement cap. If the cap falls between buckets,
+ * the largest bucket at or below the cap wins; exact-width serving remains
+ * available by not configuring buckets. */
+export function canonicalDerivativeWidth(requestedWidth, widthCap, buckets = DEFAULT_WIDTH_BUCKETS) {
+  const cap = Math.floor(Number(widthCap));
+  const requested = Math.ceil(Number(requestedWidth));
+  if (!Number.isFinite(cap) || cap < 1) return 1;
+  if (!Number.isFinite(requested) || requested < 1) return cap;
+  const desired = Math.min(cap, requested);
+  const normalized = [...new Set((Array.isArray(buckets) ? buckets : [])
+    .filter((value) => Number.isInteger(value) && value >= 64 && value <= 8192))]
+    .sort((a, b) => a - b);
+  if (!normalized.length) return desired;
+  for (const bucket of normalized) {
+    if (bucket >= desired && bucket <= cap) return bucket;
+  }
+  const atOrBelowCap = normalized.filter((bucket) => bucket <= cap);
+  return atOrBelowCap.length ? atOrBelowCap[atOrBelowCap.length - 1] : desired;
+}
+
 export function validateImageId(id) {
   return typeof id === 'string' && ID_RE.test(id);
 }
@@ -513,7 +541,7 @@ function isPlainObject(value) {
 
 const TOKEN_CLAIM_FIELDS = new Set([
   'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm',
-  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'nsg', 'b', 'jkt',
+  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'nsg', 'b', 'jkt',
 ]);
 
 /** Strict server-side claim validation for v2 Archx image tokens. Signature
@@ -545,6 +573,7 @@ export function validateTokenClaims(payload, {
     if (payload.sgp !== undefined && payload.sgp !== 0) return false;
     if (payload.sgv !== undefined && payload.sgv !== 2) return false;
     if (payload.sge !== undefined && payload.sge !== 0 && payload.sge !== 1) return false;
+    if (payload.sgi !== undefined && payload.sgi !== 1) return false;
     if (payload.nsg !== undefined && payload.nsg !== 1) return false;
     if (payload.sgs !== undefined && (typeof payload.sgs !== 'number' || !Number.isFinite(payload.sgs) || payload.sgs < 1 || payload.sgs > 16)) return false;
     if (payload.sgx !== undefined && (!Number.isInteger(payload.sgx) || payload.sgx < 4 || payload.sgx > 64)) return false;
@@ -658,9 +687,10 @@ function validateStegoConfig(value) {
   try {
     if (typeof value === 'boolean') return true;
     if (!isPlainObject(value)) return false;
-    const fields = new Set(['perToken', 'profile', 'strength', 'gridX', 'gridY']);
+    const fields = new Set(['perToken', 'scope', 'profile', 'strength', 'gridX', 'gridY']);
     if (Object.keys(value).some((field) => !fields.has(field))) return false;
     if (value.perToken !== undefined && typeof value.perToken !== 'boolean') return false;
+    if (value.scope !== undefined && !['viewer', 'image'].includes(value.scope)) return false;
     if (value.profile !== undefined && !['standard', 'robust'].includes(value.profile)) return false;
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
@@ -754,21 +784,24 @@ function inspectServerConfig(options = {}) {
   const knownTopLevelOptions = new Set([
     'abuseDetection', 'activeSecretId', 'allowAnonymous', 'allowClientQuality', 'allowQueryTokens',
     'allowedInputFormats', 'allowedOrigins', 'authorize', 'authorizeTimeoutMs',
-    'basePath', 'bindTokenTo', 'blockUntrustedSharpLoaders', 'cacheMasters',
-    'callbackTimeoutMs', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken', 'format', 'grid',
+    'basePath', 'batchTokenMaxBytes', 'batchTokenMaxItems', 'bindTokenTo',
+    'blockUntrustedSharpLoaders', 'cacheMasters',
+    'callbackTimeoutMs', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken',
+    'forensicScope', 'format', 'grid',
     'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
     'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'onAbuse',
     'onDelivery', 'onProvenanceIssue', 'onSecurityEvent', 'onStegoIssue', 'oneTimeTokenMaxEntries',
     'oneTimeTokens', 'proofOfPossession', 'provenanceFailure',
-    'outputCacheMax', 'outputCacheMaxBytes', 'processing', 'processingConcurrency',
+    'outputCacheDir', 'outputCacheDiskMaxBytes', 'outputCacheDiskMaxEntries',
+    'outputCacheDiskTtlMs', 'outputCacheMax', 'outputCacheMaxBytes', 'processing', 'processingConcurrency',
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
     'rateLimitPerMinute', 'requireSameSiteTokenRequests', 'requireTokenRequestHeader',
     'scrambleKeyMode', 'secret', 'secretId', 'secrets', 'serverWatermark', 'sharedCacheTtlMs',
     'stateStore', 'stateStoreTimeoutMs', 'steganography',
     'stegoRegistryFailure', 'timeoutSec', 'tokenMethods', 'tokenRateLimitPerMinute',
-    'trustProxy', 'trustedProxyHops', 'ttlSec',
+    'trustProxy', 'trustedProxyHops', 'ttlSec', 'widthBuckets',
   ]);
   for (const field of Object.keys(options)) {
     if (!knownTopLevelOptions.has(field)) fail(`unknown option ${field} (refusing to silently ignore a possible security-setting typo)`);
@@ -935,6 +968,25 @@ function inspectServerConfig(options = {}) {
     fail('basePath must be a simple absolute URL path without traversal, query, or fragment');
   }
   checkInt('ttlSec', options.ttlSec, 5, 900);
+  checkInt('batchTokenMaxItems', options.batchTokenMaxItems, 1, 500);
+  checkInt('batchTokenMaxBytes', options.batchTokenMaxBytes, 1024, 1024 * 1024);
+  if (options.forensicScope !== undefined && !['viewer', 'image'].includes(options.forensicScope)) {
+    fail("forensicScope must be 'viewer' or 'image'");
+  }
+  if (options.widthBuckets !== undefined && options.widthBuckets !== null) {
+    if (!Array.isArray(options.widthBuckets) || options.widthBuckets.length > 32 ||
+        options.widthBuckets.some((value) => !Number.isInteger(value) || value < 64 || value > 8192)) {
+      fail('widthBuckets must be an array of up to 32 integer widths from 64 to 8192, or null to disable canonical widths');
+    }
+  }
+  if (options.outputCacheDir !== undefined && options.outputCacheDir !== null &&
+      (typeof options.outputCacheDir !== 'string' || !options.outputCacheDir ||
+       options.outputCacheDir.length > 4096 || options.outputCacheDir.includes('\0'))) {
+    fail('outputCacheDir must be a non-empty filesystem path string');
+  }
+  checkInt('outputCacheDiskMaxBytes', options.outputCacheDiskMaxBytes, 0, 16 * 1024 * 1024 * 1024 * 1024);
+  checkInt('outputCacheDiskMaxEntries', options.outputCacheDiskMaxEntries, 0, 1000000);
+  checkInt('outputCacheDiskTtlMs', options.outputCacheDiskTtlMs, 0, 365 * 24 * 3600 * 1000);
   checkInt('grid', options.grid, 2, 32);
   checkInt('maxWidthCap', options.maxWidthCap, 64, 8192);
   checkInt('callbackTimeoutMs', options.callbackTimeoutMs ?? options.authorizeTimeoutMs, 100, 60000);
@@ -981,7 +1033,9 @@ function inspectServerConfig(options = {}) {
     'maxInputBytes', 'maxInputPixels', 'maxInputWidth', 'maxInputHeight', 'maxOutputPixels',
     'processingTimeoutSec', 'timeoutSec', 'allowedInputFormats', 'processingConcurrency',
     'maxConcurrentProcessing', 'processingQueueMax', 'processingQueueTimeoutMs',
-    'blockUntrustedSharpLoaders',
+    'blockUntrustedSharpLoaders', 'webpEffort', 'encoderEffort', 'webpSmartSubsample',
+    'smartSubsample', 'resizeKernel', 'pngCompressionLevel', 'jpegChromaSubsampling',
+    'sharpConcurrency', 'sharpCache',
   ]));
   const pick = (...names) => {
     for (const name of names) {
@@ -1000,6 +1054,19 @@ function inspectServerConfig(options = {}) {
   checkInt('processingQueueMax', pick('processingQueueMax'), 0, 10000);
   checkInt('processingQueueTimeoutMs', pick('processingQueueTimeoutMs'), 0, 120000);
   checkBoolean('blockUntrustedSharpLoaders', pick('blockUntrustedSharpLoaders'));
+  checkInt('webpEffort', pick('webpEffort', 'encoderEffort'), 0, 6);
+  checkBoolean('webpSmartSubsample', pick('webpSmartSubsample', 'smartSubsample'));
+  checkInt('pngCompressionLevel', pick('pngCompressionLevel'), 0, 9);
+  checkInt('sharpConcurrency', pick('sharpConcurrency'), 0, 1024);
+  checkBoolean('sharpCache', pick('sharpCache'));
+  if (pick('resizeKernel') !== undefined &&
+      !['nearest', 'cubic', 'mitchell', 'lanczos2', 'lanczos3', 'mks2013', 'mks2021'].includes(pick('resizeKernel'))) {
+    fail('processing.resizeKernel is invalid');
+  }
+  if (pick('jpegChromaSubsampling') !== undefined &&
+      !['4:2:0', '4:4:4'].includes(pick('jpegChromaSubsampling'))) {
+    fail("processing.jpegChromaSubsampling must be '4:2:0' or '4:4:4'");
+  }
   const allowedInputFormatsRaw = pick('allowedInputFormats') ?? ['jpeg', 'png', 'webp', 'avif'];
   if (!Array.isArray(allowedInputFormatsRaw) || !allowedInputFormatsRaw.length ||
       allowedInputFormatsRaw.some((f) => !FORMAT_EXTENSIONS[String(f).toLowerCase()])) {
@@ -1075,6 +1142,12 @@ function inspectServerConfig(options = {}) {
     ttlMs: (options.ttlSec ?? 120) * 1000,
     grid: options.grid ?? 8,
     maxWidthCap: options.maxWidthCap ?? 1920,
+    widthBuckets: options.widthBuckets == null
+      ? null
+      : Object.freeze([...new Set(options.widthBuckets)].sort((a, b) => a - b)),
+    batchTokenMaxItems: options.batchTokenMaxItems ?? 100,
+    batchTokenMaxBytes: options.batchTokenMaxBytes ?? 65536,
+    forensicScope: options.forensicScope ?? 'viewer',
     tokenMethods: Object.freeze([...new Set((tokenMethodsRaw || ['POST']).map((m) => String(m).toUpperCase()))]),
     oneTimeTokens: options.oneTimeTokens !== false,
     rateLimitMaxClients: options.rateLimitMaxClients ?? options.maxTrackedClients ?? 10000,
@@ -1088,6 +1161,13 @@ function inspectServerConfig(options = {}) {
       timeoutSec: Number(pick('processingTimeoutSec', 'timeoutSec') ?? 10),
       allowedInputFormats: Object.freeze(allowedInputFormatsRaw.map((f) => String(f).toLowerCase())),
       blockUntrustedSharpLoaders: pick('blockUntrustedSharpLoaders') !== false,
+      webpEffort: pick('webpEffort', 'encoderEffort') ?? 4,
+      webpSmartSubsample: pick('webpSmartSubsample', 'smartSubsample') !== false,
+      resizeKernel: pick('resizeKernel') ?? 'lanczos3',
+      pngCompressionLevel: pick('pngCompressionLevel') ?? 9,
+      jpegChromaSubsampling: pick('jpegChromaSubsampling') ?? '4:4:4',
+      sharpConcurrency: pick('sharpConcurrency') ?? 0,
+      sharpCache: pick('sharpCache'),
     }),
     processingConcurrency: pick('processingConcurrency', 'maxConcurrentProcessing') ?? Math.max(1, Math.min(4, availableParallelism || 2)),
     processingQueueMax: pick('processingQueueMax') ?? 100,
@@ -1106,6 +1186,10 @@ function inspectServerConfig(options = {}) {
     }),
     outputCacheMax: options.outputCacheMax ?? 100,
     outputCacheMaxBytes: options.outputCacheMaxBytes ?? 64 * 1024 * 1024,
+    outputCacheDir: options.outputCacheDir ?? null,
+    outputCacheDiskMaxBytes: options.outputCacheDiskMaxBytes ?? 2 * 1024 * 1024 * 1024,
+    outputCacheDiskMaxEntries: options.outputCacheDiskMaxEntries ?? 20000,
+    outputCacheDiskTtlMs: options.outputCacheDiskTtlMs ?? 30 * 24 * 3600 * 1000,
     masterCacheMaxBytes: options.masterCacheMaxBytes ?? 128 * 1024 * 1024,
     cacheMasters: options.cacheMasters !== false,
     trustProxy: options.trustProxy === true && (options.trustedProxyHops ?? 0) > 0,
@@ -1141,6 +1225,12 @@ function inspectServerConfig(options = {}) {
   if (options.encrypt === true) warn('encrypt is enabled: the AES and scramble keys in the mint response are necessarily visible to the authorized browser/page and are not secrets from that viewer');
   if (options.allowClientQuality) warn('allowClientQuality lets browsers request quality up to the server entitlement; keep authorize() caps strict');
   if (config.oneTimeTokens === false) warn('oneTimeTokens is disabled: signed tokens can be replayed until expiry');
+  if (!config.widthBuckets?.length) warn('widthBuckets is not configured: every viewport/DPR combination can create a distinct derivative and fragment the output cache; image-heavy sites should use canonical widths');
+  if (!config.outputCacheDir && !suppliedStateStore) warn('no persistent outputCacheDir or shared state-store cache is configured: derivative reuse is limited to this process memory and is lost on restart');
+  if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
+  if (options.forensic && config.forensicScope !== 'image') warn('viewer-scoped forensic marks make derivatives viewer-specific and reduce output-cache sharing; use forensicScope image for reusable catalog derivatives');
+  const stegoCfgForWarning = typeof options.steganography === 'object' && options.steganography ? options.steganography : {};
+  if (options.steganography && stegoCfgForWarning.scope !== 'image') warn('viewer/token-scoped StegoMark makes derivatives hard to share across viewers; use steganography { scope: "image", perToken: false } for reusable catalog derivatives');
   return { ok: issues.length === 0, issues, warnings, config: issues.length ? null : config };
 }
 
@@ -1164,6 +1254,10 @@ export function auditArchxServerConfig(options = {}) {
       tokenMethods: config.tokenMethods,
       oneTimeTokens: config.oneTimeTokens,
       maxWidthCap: config.maxWidthCap,
+      widthBuckets: config.widthBuckets,
+      batchTokenMaxItems: config.batchTokenMaxItems,
+      forensicScope: config.forensicScope,
+      diskOutputCache: !!config.outputCacheDir,
       processing: config.processing,
       processingConcurrency: config.processingConcurrency,
       requireTokenRequestHeader: config.requireTokenRequestHeader,
@@ -1216,6 +1310,59 @@ export function withHardenedProductionDefaults(options = {}) {
 }
 
 /**
+ * Defaults for a high-traffic, image-heavy catalog. This helper deliberately
+ * optimizes for *transform once, reuse many times*: canonical widths, larger
+ * bounded caches, faster WebP settings, image-scoped (rather than per-viewer)
+ * baked marks when those marks are already enabled, and batch minting. It
+ * does not supply authorization, secrets, masters, a state store, or a cache
+ * directory, and it does not weaken token entitlement checks. Host-supplied
+ * fields always win, including per-viewer tracing when a paid/high-value
+ * workflow needs it more than cache sharing.
+ */
+export function withCatalogThroughputDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx catalog throughput defaults: options must be an object');
+  }
+  const processing = isPlainObject(options.processing) ? options.processing : {};
+  let steganography = options.steganography;
+  if (steganography === true) {
+    steganography = { perToken: false, scope: 'image' };
+  } else if (isPlainObject(steganography)) {
+    steganography = { perToken: false, scope: 'image', ...steganography };
+  }
+  const available = typeof os.availableParallelism === 'function'
+    ? os.availableParallelism()
+    : (os.cpus()?.length || 2);
+  const out = {
+    quality: 88,
+    format: 'webp',
+    scrambleKeyMode: 'per-image',
+    widthBuckets: [...DEFAULT_WIDTH_BUCKETS],
+    batchTokenMaxItems: 100,
+    outputCacheMax: 1000,
+    outputCacheMaxBytes: 256 * 1024 * 1024,
+    masterCacheMaxBytes: 256 * 1024 * 1024,
+    sharedCacheTtlMs: 24 * 3600 * 1000,
+    forensicPerToken: false,
+    forensicScope: 'image',
+    processingConcurrency: Math.max(1, Math.min(8, available || 2)),
+    processingQueueMax: 500,
+    ...options,
+    processing: {
+      webpEffort: 2,
+      webpSmartSubsample: false,
+      resizeKernel: 'lanczos2',
+      pngCompressionLevel: 6,
+      jpegChromaSubsampling: '4:2:0',
+      sharpConcurrency: 1,
+      ...processing,
+    },
+  };
+  if (options.steganography !== undefined) out.steganography = steganography;
+  return out;
+}
+
+/**
  * Stricter, named production-readiness audit. `auditArchxServerConfig()`
  * answers "is this configuration internally valid and fail-closed?" This
  * audit additionally answers "does it match the hardened baseline for a
@@ -1250,6 +1397,10 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (expectedInstances === 1 && summary.stateStore === 'memory') recommendations.push('the memory state store is valid only for one middleware process; declare and test the shared-store topology before adding a second process');
     if (!summary.provenanceHookConfigured) recommendations.push('configure onProvenanceIssue if an external C2PA/provenance registry or reverse-image monitoring workflow needs a signed issuance record');
     if (!summary.deliveryHookConfigured) recommendations.push('configure onDelivery if token issuance/redemption must feed monitoring, reverse-image-search, or enforcement systems');
+    if (!summary.widthBuckets?.length) recommendations.push('configure widthBuckets (or withCatalogThroughputDefaults) so thousands of viewport/DPR combinations reuse a small set of derivatives');
+    if (!summary.diskOutputCache && summary.stateStore === 'memory') recommendations.push('configure outputCacheDir on a persistent non-public volume and/or a shared cache-capable stateStore so cold Sharp work survives restarts and is shared across the fleet');
+    if (options.scrambleKeyMode === 'per-token' || options.forensicPerToken === true) recommendations.push('per-token scramble/forensic material defeats cross-viewer derivative reuse; reserve it for high-value views and use shared catalog derivatives for ordinary browsing');
+    if (options.encrypt === true) recommendations.push('encrypt derives a per-token AES key, so encrypted derivatives cannot be reused across viewers; reserve it for high-value views when catalog-scale derivative sharing matters');
   }
   return Object.freeze({
     ok: base.ok,
@@ -1314,6 +1465,7 @@ export function createArchxMiddleware(options = {}) {
   const serverWatermark = options.serverWatermark ?? null;
   const forensic = options.forensic ?? false; // true | { blockSize, delta }
   const forensicPerToken = options.forensicPerToken !== false;
+  const forensicScope = cfg.forensicScope;
   const allowClientQuality = options.allowClientQuality === true;
   const steganography = options.steganography ?? false;
   const stegoGlobalCfg = typeof steganography === 'object' && steganography ? steganography : {};
@@ -1378,6 +1530,34 @@ export function createArchxMiddleware(options = {}) {
     }
   }
   if (!index.size) throw new TypeError('Archx server: no supported master images were indexed');
+
+  // Optional persistent L2 derivative cache. It stores only already-scrambled
+  // .archx payloads under HMAC-derived names, is consulted only after the
+  // normal token/authorization/replay checks, and must never live in a public
+  // web root or inside/alongside the master tree it protects.
+  let outputCacheDir = null;
+  if (cfg.outputCacheDir) {
+    const requestedDir = path.resolve(cfg.outputCacheDir);
+    try { fs.mkdirSync(requestedDir, { recursive: true, mode: 0o700 }); }
+    catch { throw new TypeError('Archx server: outputCacheDir could not be created'); }
+    let realDir;
+    try { realDir = fs.realpathSync(requestedDir); }
+    catch { throw new TypeError('Archx server: outputCacheDir could not be resolved'); }
+    if (!fs.statSync(realDir).isDirectory()) {
+      throw new TypeError('Archx server: outputCacheDir is not a directory');
+    }
+    for (const publicRoot of publicRoots) {
+      if (pathsOverlap(realDir, publicRoot)) {
+        throw new TypeError('Archx server: outputCacheDir overlaps a configured public directory');
+      }
+    }
+    for (const entry of index.values()) {
+      if (pathsOverlap(realDir, path.dirname(entry.filePath))) {
+        throw new TypeError('Archx server: outputCacheDir overlaps a master-image directory');
+      }
+    }
+    outputCacheDir = realDir;
+  }
 
   function resolveIndexedFile(id) {
     const entry = index.get(id);
@@ -1495,7 +1675,139 @@ export function createArchxMiddleware(options = {}) {
         !bytes?.length || bytes.length > cfg.outputCacheMaxBytes) return;
     try {
       await callStateStore('setCache', key, bytes, { ttlMs: cfg.sharedCacheTtlMs });
+      derivativeCacheStats.sharedWrites++;
     } catch { /* cache write failures do not change authorization */ }
+  }
+
+  const derivativeCacheStats = {
+    memoryHits: 0,
+    diskHits: 0,
+    sharedHits: 0,
+    misses: 0,
+    diskWrites: 0,
+    sharedWrites: 0,
+    diskEntries: 0,
+    diskBytes: 0,
+    diskPrunes: 0,
+    diskErrors: 0,
+  };
+  let diskWritesSincePrune = 0;
+  let diskPrunePromise = null;
+  let sharpPerformanceConfigured = false;
+
+  function diskOutputCachePath(sharedCacheKey) {
+    const digest = crypto.createHash('sha256').update(sharedCacheKey, 'utf8').digest('hex');
+    return {
+      digest,
+      dir: path.join(outputCacheDir, digest.slice(0, 2)),
+      file: path.join(outputCacheDir, digest.slice(0, 2), `${digest}.archx-cache`),
+    };
+  }
+
+  async function pruneDiskOutputCache() {
+    if (!outputCacheDir || diskPrunePromise) return diskPrunePromise;
+    diskPrunePromise = (async () => {
+      const entries = [];
+      let totalBytes = 0;
+      let subdirs = [];
+      try { subdirs = await fs.promises.readdir(outputCacheDir, { withFileTypes: true }); }
+      catch { derivativeCacheStats.diskErrors++; return; }
+      for (const subdir of subdirs) {
+        if (!subdir.isDirectory() || !/^[0-9a-f]{2}$/.test(subdir.name)) continue;
+        const dirPath = path.join(outputCacheDir, subdir.name);
+        let files = [];
+        try { files = await fs.promises.readdir(dirPath, { withFileTypes: true }); }
+        catch { derivativeCacheStats.diskErrors++; continue; }
+        for (const file of files) {
+          if (!file.isFile() || !/^[0-9a-f]{64}\.archx-cache$/.test(file.name)) continue;
+          const filePath = path.join(dirPath, file.name);
+          try {
+            const stat = await fs.promises.stat(filePath);
+            if (!stat.isFile()) continue;
+            entries.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs });
+            totalBytes += stat.size;
+          } catch { /* a concurrent prune/rename may have removed it */ }
+        }
+      }
+      const staleBefore = cfg.outputCacheDiskTtlMs > 0 ? Date.now() - cfg.outputCacheDiskTtlMs : 0;
+      const live = [];
+      for (const entry of entries) {
+        if (staleBefore && entry.mtimeMs < staleBefore) {
+          try { await fs.promises.unlink(entry.filePath); totalBytes -= entry.size; }
+          catch { live.push(entry); }
+        } else live.push(entry);
+      }
+      const byteTarget = cfg.outputCacheDiskMaxBytes > 0
+        ? Math.floor(cfg.outputCacheDiskMaxBytes * 0.9)
+        : 0;
+      const entryTarget = cfg.outputCacheDiskMaxEntries > 0
+        ? Math.max(0, Math.floor(cfg.outputCacheDiskMaxEntries * 0.9))
+        : 0;
+      live.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      let liveCount = live.length;
+      for (const entry of live) {
+        const overBytes = cfg.outputCacheDiskMaxBytes > 0 && totalBytes > byteTarget;
+        const overEntries = cfg.outputCacheDiskMaxEntries > 0 && liveCount > entryTarget;
+        if (!overBytes && !overEntries) break;
+        try {
+          await fs.promises.unlink(entry.filePath);
+          totalBytes -= entry.size;
+          liveCount--;
+        } catch { /* already removed */ }
+      }
+      derivativeCacheStats.diskEntries = Math.max(0, liveCount);
+      derivativeCacheStats.diskBytes = Math.max(0, totalBytes);
+      derivativeCacheStats.diskPrunes++;
+      diskWritesSincePrune = 0;
+    })().finally(() => { diskPrunePromise = null; });
+    return diskPrunePromise;
+  }
+
+  async function getDiskOutputCache(sharedCacheKey) {
+    if (!outputCacheDir || !cfg.outputCacheDiskMaxBytes || !cfg.outputCacheDiskMaxEntries) return null;
+    const { file } = diskOutputCachePath(sharedCacheKey);
+    try {
+      const stat = await fs.promises.stat(file);
+      if (!stat.isFile() || stat.size < 1 || stat.size > cfg.outputCacheDiskMaxBytes ||
+          stat.size > 256 * 1024 * 1024) return null;
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (cfg.outputCacheDiskTtlMs > 0 && ageMs > cfg.outputCacheDiskTtlMs) {
+        try { await fs.promises.unlink(file); } catch {}
+        return null;
+      }
+      const bytes = await fs.promises.readFile(file);
+      if (bytes.length !== stat.size) return null;
+      derivativeCacheStats.diskHits++;
+      if (ageMs > 3600000) {
+        // Refresh at most hourly so mtime is a cheap approximate LRU clock
+        // without turning every cache hit into a metadata write.
+        const now = new Date();
+        fs.promises.utimes(file, now, now).catch(() => {});
+      }
+      return bytes;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') derivativeCacheStats.diskErrors++;
+      return null;
+    }
+  }
+
+  async function setDiskOutputCache(sharedCacheKey, bytes) {
+    if (!outputCacheDir || !bytes?.length || !cfg.outputCacheDiskMaxBytes ||
+        !cfg.outputCacheDiskMaxEntries || bytes.length > cfg.outputCacheDiskMaxBytes ||
+        bytes.length > 256 * 1024 * 1024) return;
+    const target = diskOutputCachePath(sharedCacheKey);
+    const tmp = `${target.file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try {
+      await fs.promises.mkdir(target.dir, { recursive: true, mode: 0o700 });
+      await fs.promises.writeFile(tmp, bytes, { mode: 0o600 });
+      await fs.promises.rename(tmp, target.file);
+      derivativeCacheStats.diskWrites++;
+      diskWritesSincePrune++;
+      if (diskWritesSincePrune >= 100) void pruneDiskOutputCache();
+    } catch {
+      derivativeCacheStats.diskErrors++;
+      try { await fs.promises.unlink(tmp); } catch {}
+    }
   }
   const processingSemaphore = new AsyncSemaphore({
     maxConcurrent: cfg.processingConcurrency,
@@ -1967,6 +2279,301 @@ export function createArchxMiddleware(options = {}) {
     return sendJson(req, res, status, { error }, headers);
   }
 
+  class MintDenied extends Error {
+    constructor(status, error, details = {}) {
+      super(error);
+      this.name = 'MintDenied';
+      this.status = status;
+      this.error = error;
+      this.details = details;
+    }
+  }
+
+  async function mintTokenResponse(req, id, params = {}, proofThumbprint = null) {
+    const hasParam = (name) => params?.[name] !== undefined && params?.[name] !== null && params?.[name] !== '';
+    const paramValue = (name) => (hasParam(name) ? String(params[name]) : null);
+    const entitlement = await authorizeRequest(req, id, 'token');
+    if (!entitlement) throw new MintDenied(403, 'forbidden', { id, phase: 'token', reason: 'authorization' });
+    const viewerId = authorizationViewerId(entitlement);
+    const trace = authorizationTrace(entitlement, viewerId);
+    const quota = await quotaExceeded(req, id, viewerId, 'token');
+    if (quota) {
+      throw new MintDenied(429, 'quota exceeded', {
+        id, phase: 'token', viewerId, reason: `quota:${quota.name}`,
+        headers: { 'Retry-After': String(quota.retryAfterSec || 60) },
+      });
+    }
+    const abuse = await abusePattern(req, id, viewerId);
+    if (abuse.crossed) {
+      emitSecurityEvent('archx.suspicious_scraping', req, {
+        id, phase: 'token', viewerId, status: 200, reason: `distinct-images:${abuse.distinct}`,
+      });
+    }
+    if (abuse.suspicious && cfg.abuseDetection.action === 'deny') {
+      throw new MintDenied(429, 'too many requests', {
+        id, phase: 'token', viewerId, reason: 'distinct-image-abuse', headers: { 'Retry-After': '600' },
+      });
+    }
+    // The BROWSER asks for a width; the SERVER's entitlement caps it.
+    // A tampered client can no longer "just ask for 1920px" beyond policy.
+    const entitlementWidth = entitlement.maxWidth == null ? maxWidthCap : Number(entitlement.maxWidth);
+    if (!Number.isFinite(entitlementWidth) || entitlementWidth < 64) {
+      throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'invalid-entitlement-width' });
+    }
+    const widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
+    const rawRequested = paramValue('w') || paramValue('bw') || '1200';
+    let requestedW = parseStrictInt(rawRequested);
+    const boxW = hasParam('bw') ? parseStrictInt(paramValue('bw')) : null;
+    const boxH = hasParam('bh') ? parseStrictInt(paramValue('bh')) : null;
+    const rawFit = String(paramValue('fit') || 'cover').toLowerCase();
+    if (requestedW == null || requestedW < 1 || requestedW > 100000 ||
+        (hasParam('bw') && (boxW == null || boxW < 1 || boxW > 100000)) ||
+        (hasParam('bh') && (boxH == null || boxH < 1 || boxH > 100000)) ||
+        !['cover', 'contain', 'fill'].includes(rawFit)) {
+      throw new MintDenied(400, 'bad request', { id, phase: 'token', viewerId, reason: 'bad-sizing' });
+    }
+    if (boxW > 0 && boxH > 0) {
+      try {
+        const dims = await imageDimensions(id);
+        if (dims) {
+          const aspect = dims.width / dims.height;
+          const fit = rawFit;
+          // For cover, derivative width must satisfy BOTH box dimensions.
+          // Width-only sizing crops a landscape source and then upscales
+          // it in a squarer/taller host, visibly softening detail.
+          requestedW = fit === 'contain'
+            ? Math.min(boxW, boxH * aspect)
+            : fit === 'fill'
+              ? boxW
+              : Math.max(boxW, boxH * aspect);
+        }
+      } catch { /* fall back to width-only sizing */ }
+    }
+    const exactW = Math.max(64, Math.min(widthCap, Math.ceil(requestedW)));
+    const w = cfg.widthBuckets?.length
+      ? canonicalDerivativeWidth(exactW, widthCap, cfg.widthBuckets)
+      : exactW;
+    const nonce = crypto.randomBytes(18).toString('base64url');
+    const iat = Date.now();
+    const exp = iat + ttlMs;
+    const watermark = await resolveWatermark(
+      entitlement.watermark ?? serverWatermark,
+      { req, id, nonce, viewerId, trace, exp },
+    );
+    const tokenPayload = {
+      v: 2,
+      kid: activeSecretId,
+      aud: TOKEN_AUDIENCE,
+      scope: TOKEN_SCOPE,
+      id, w, iat, exp, n: nonce,
+    };
+    const viewerHash = viewerId ? hmacShort('viewer', viewerId, 20) : '';
+    if (viewerId) tokenPayload.vh = viewerHash;
+    if (trace.hash) tokenPayload.th = trace.hash;
+    if (proofThumbprint) tokenPayload.jkt = proofThumbprint;
+    if (watermark) tokenPayload.wm = watermark;
+
+    // Direct delivery-quality control. Your authorize() entitlement wins;
+    // the browser's q=… request is honoured only when you opt in.
+    const clientQuality = allowClientQuality ? paramValue('q') : null;
+    const rawQuality = entitlement.quality ?? clientQuality ?? quality;
+    let deliveryLossless = entitlement.lossless ?? (lossless || rawQuality === 'lossless');
+    let deliveryQuality = deliveryLossless
+      ? 'lossless'
+      : Math.max(1, Math.min(100, Math.round(Number(rawQuality) || 95)));
+    const rawFormat = entitlement.format || format;
+    const deliveryFormat = ['webp', 'png', 'jpeg'].includes(rawFormat) ? rawFormat : 'webp';
+    tokenPayload.q = deliveryQuality;
+    if (deliveryLossless) tokenPayload.ls = 1;
+    if (deliveryFormat !== format) tokenPayload.fmt = deliveryFormat;
+
+    // StegoMark issuance: derive (but do not expose) the fingerprint that
+    // will be baked into this view's pixels, and let the host persist the
+    // fingerprint -> image/viewer/order mapping via onStegoIssue.
+    const effectiveStego = entitlement.steganography ?? steganography;
+    let issuedFingerprint = null;
+    let issuedStegoProfile = null;
+    if (effectiveStego) {
+      tokenPayload.sge = 1;
+      const entStegoCfg = typeof effectiveStego === 'object' ? effectiveStego : {};
+      const stegoScope = entStegoCfg.scope ?? stegoGlobalCfg.scope ?? 'viewer';
+      const stegoPerToken = stegoScope === 'image'
+        ? false
+        : (entStegoCfg.perToken ?? stegoGlobalCfg.perToken ?? true);
+      issuedStegoProfile = entStegoCfg.profile ?? stegoGlobalCfg.profile ?? 'standard';
+      if (issuedStegoProfile === 'robust') tokenPayload.sgv = 2;
+      if (stegoScope === 'image') tokenPayload.sgi = 1;
+      const fingerprintSubjectHash = stegoScope === 'image' ? '' : (trace.hash || viewerHash);
+      if (entitlement.stegoFingerprint) {
+        tokenPayload.sg = String(entitlement.stegoFingerprint);
+        issuedFingerprint = resolveStegoFingerprint(entitlement.stegoFingerprint);
+      } else {
+        if (!stegoPerToken) tokenPayload.sgp = 0;
+        issuedFingerprint = deriveStegoFingerprint({
+          id, nonce, viewerHash: fingerprintSubjectHash, secret, perToken: stegoPerToken,
+        });
+      }
+      const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
+      if (strength != null) tokenPayload.sgs = strength;
+      const stegoGridX = entStegoCfg.gridX ?? stegoGlobalCfg.gridX;
+      const stegoGridY = entStegoCfg.gridY ?? stegoGlobalCfg.gridY;
+      if (stegoGridX != null) tokenPayload.sgx = stegoGridX;
+      if (stegoGridY != null) tokenPayload.sgy = stegoGridY;
+      if (onStegoIssue) {
+        try {
+          await withCallbackTimeout(onStegoIssue, [{
+            req,
+            id,
+            viewerId,
+            buyerId: trace.buyerId,
+            orderId: trace.orderId,
+            deliveryId: trace.deliveryId,
+            traceId: trace.traceId,
+            traceHash: trace.hash || null,
+            nonce,
+            exp,
+            issuedAt: new Date(iat).toISOString(),
+            fingerprint: issuedFingerprint,
+            profile: issuedStegoProfile,
+            keyId: activeSecretId,
+          }], 'onStegoIssue callback');
+        } catch {
+          emitSecurityEvent('archx.stego_registry_failed', req, { id, phase: 'token', viewerId, status: 503 });
+          if (cfg.stegoRegistryFailure !== 'allow') {
+            throw new MintDenied(503, 'service unavailable', { id, viewerId, reason: 'callback-unavailable' });
+          }
+        }
+      }
+    } else if (steganography) {
+      tokenPayload.nsg = 1; // entitlement explicitly opted this view out
+    }
+    if (onProvenanceIssue) {
+      // C2PA-ready extension point: the host may create/sign/store a
+      // Content Credentials manifest (or another provenance record) and
+      // bind it to these soft-binding identifiers. Archx does not claim
+      // to implement C2PA signing itself, and this record contains no
+      // bearer token, scramble key, AES key, or proof material.
+      try {
+        await withCallbackTimeout(onProvenanceIssue, [Object.freeze({
+          schemaVersion: 1,
+          type: 'archx.provenance_issued',
+          req,
+          id,
+          viewerId,
+          viewerHash: viewerHash || null,
+          buyerId: trace.buyerId,
+          orderId: trace.orderId,
+          deliveryId: trace.deliveryId,
+          traceId: trace.traceId,
+          traceHash: trace.hash || null,
+          nonce,
+          exp,
+          issuedAt: new Date(iat).toISOString(),
+          keyId: activeSecretId,
+          width: w,
+          quality: deliveryQuality,
+          format: deliveryFormat,
+          stegoFingerprint: issuedFingerprint,
+          stegoProfile: issuedStegoProfile,
+        })], 'onProvenanceIssue callback');
+      } catch {
+        emitSecurityEvent('archx.provenance_failed', req, { id, phase: 'token', viewerId, status: 503 });
+        if (cfg.provenanceFailure !== 'allow') {
+          throw new MintDenied(503, 'service unavailable', { id, viewerId, reason: 'callback-unavailable' });
+        }
+      }
+    }
+    if (bindTokenTo.session === true && !viewerId) {
+      throw new MintDenied(403, 'forbidden', { id, phase: 'token', reason: 'session-binding-unavailable' });
+    }
+    const bindings = {};
+    try {
+      const bindingValue = (setting, fallback) => resolveBindingValue(setting, req, fallback);
+      const ipBinding = await bindingValue(bindTokenTo.ip, requestIp(req));
+      if (ipBinding != null) bindings.ip = hmacShort('bind-ip', ipBinding, 16);
+      const uaBinding = await bindingValue(bindTokenTo.userAgent, req.headers?.['user-agent'] || '');
+      if (uaBinding != null) bindings.ua = hmacShort('bind-ua', uaBinding, 16);
+      const sessionBinding = await bindingValue(bindTokenTo.session, viewerId);
+      if (sessionBinding != null) bindings.sess = hmacShort('bind-session', sessionBinding, 16);
+    } catch {
+      throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'binding-unavailable' });
+    }
+    if (Object.keys(bindings).length) tokenPayload.b = bindings;
+    const token = signToken(tokenPayload, secret);
+    const imagePath = `${basePath}/i/${encodeURIComponent(id)}`;
+    const out = {
+      // `url` is the clean URL by default. Only an explicit
+      // allowQueryTokens compatibility opt-in appends ?t=. New clients
+      // use `token` in X-Archx-Token with cleanUrl, keeping bearer
+      // material out of URLs, browser history, Referer headers, and
+      // proxy logs. Header transport does NOT hide token/key/aesKey from
+      // JavaScript or a viewer controlling the authorized browser: that
+      // browser must receive them to redeem, unscramble, and decrypt.
+      // Never log this response object.
+      url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
+      cleanUrl: imagePath,
+      token,
+      key: deriveScrambleKey(id, nonce),
+      grid,
+      exp,
+    };
+    if (encrypt) out.aesKey = deriveAesKey(id, nonce);
+    emitDeliveryEvent('archx.token_issued', {
+      id,
+      phase: 'token',
+      viewerHash: viewerHash || null,
+      traceHash: trace.hash || null,
+      keyId: activeSecretId,
+      width: w,
+      quality: deliveryQuality,
+      format: deliveryFormat,
+      stegoFingerprint: issuedFingerprint,
+      stegoProfile: issuedStegoProfile,
+    });
+    return out;
+  }
+
+  async function readBatchTokenBody(req) {
+    if (isPlainObject(req?.body)) {
+      let serialized = '';
+      try { serialized = JSON.stringify(req.body) || ''; }
+      catch { throw new MintDenied(400, 'bad request', { reason: 'batch-json' }); }
+      if (Buffer.byteLength(serialized, 'utf8') > cfg.batchTokenMaxBytes) {
+        throw new MintDenied(413, 'request too large', { reason: 'batch-body' });
+      }
+      return req.body;
+    }
+    if (!req || typeof req[Symbol.asyncIterator] !== 'function') {
+      throw new MintDenied(400, 'bad request', { reason: 'batch-body-unavailable' });
+    }
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of req) {
+      const bytes = Buffer.isBuffer(chunk)
+        ? chunk
+        : chunk instanceof Uint8Array
+          ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+          : Buffer.from(String(chunk));
+      total += bytes.length;
+      if (total > cfg.batchTokenMaxBytes) {
+        try { req.destroy?.(); } catch {}
+        throw new MintDenied(413, 'request too large', { reason: 'batch-body' });
+      }
+      if (bytes.length) chunks.push(bytes);
+    }
+    let parsed;
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total));
+      parsed = JSON.parse(text);
+    } catch {
+      throw new MintDenied(400, 'bad request', { reason: 'batch-json' });
+    }
+    if (!isPlainObject(parsed)) {
+      throw new MintDenied(400, 'bad request', { reason: 'batch-json' });
+    }
+    return parsed;
+  }
+
   async function handler(req, res, next) {
     let routeId = null;
     let phase = null;
@@ -1981,22 +2588,188 @@ export function createArchxMiddleware(options = {}) {
         return next ? next() : sendJson(req, res, 404, { error: 'not found' });
       }
       const parts = url.pathname.slice(basePath.length + 1).split('/');
-      if (parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
-      const [kind, rawId] = parts;
-      if (!['token', 'i'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
-      phase = kind === 'token' ? 'token' : 'image';
+      const isBatchTokens = parts.length === 1 && parts[0] === 'tokens';
+      if (!isBatchTokens && parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
+      const kind = isBatchTokens ? 'tokens' : parts[0];
+      const rawId = isBatchTokens ? null : parts[1];
+      if (!['token', 'tokens', 'i'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
+      phase = kind === 'i' ? 'image' : 'token';
       // Count malformed/unknown-ID attempts too. Otherwise the cheapest
       // enumeration/flood path would bypass every request budget simply by
       // never naming a real image. CORS preflight is the one exemption: it
       // carries no entitlement and is followed by the rate-limited token call.
       if (req.method !== 'OPTIONS') {
-        const rate = await rateLimited(req, kind);
+        const rate = await rateLimited(req, kind === 'i' ? 'i' : 'token');
         if (rate.limited) {
           return deny(req, res, 429, 'too many requests', {
             phase, reason: 'rate-limit', headers: { 'Retry-After': String(rate.retryAfterSec || 60) },
           });
         }
       }
+
+      if (isBatchTokens) {
+        if (req.method === 'OPTIONS') {
+          if (!allowedOrigins?.length || !originAllowed(req)) {
+            return deny(req, res, 403, 'forbidden', { phase, reason: 'cors-origin' });
+          }
+          res.writeHead(204, {
+            ...protectedHeaders(req),
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, X-Archx-Request, X-Archx-Proof-Key',
+            'Access-Control-Max-Age': '600',
+          });
+          return res.end();
+        }
+        if (String(req.method || '').toUpperCase() !== 'POST' || !cfg.tokenMethods.includes('POST')) {
+          return deny(req, res, 405, 'method not allowed', {
+            phase, reason: 'batch-token-method', headers: { Allow: 'POST' },
+          });
+        }
+        const contentType = String(req.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
+        const contentEncoding = String(req.headers?.['content-encoding'] || 'identity').trim().toLowerCase();
+        const declaredLength = req.headers?.['content-length'] == null
+          ? null
+          : Number(req.headers['content-length']);
+        if (contentType !== 'application/json' || contentEncoding !== 'identity' ||
+            (declaredLength !== null &&
+             (!Number.isFinite(declaredLength) || declaredLength < 0 || declaredLength > cfg.batchTokenMaxBytes))) {
+          return deny(req, res, declaredLength > cfg.batchTokenMaxBytes ? 413 : 415,
+            declaredLength > cfg.batchTokenMaxBytes ? 'request too large' : 'unsupported media type', {
+              phase, reason: 'batch-content-type',
+            });
+        }
+        if (!originAllowed(req)) return deny(req, res, 403, 'forbidden', { phase, reason: 'origin' });
+        if (!fetchSiteAllowed(req)) return deny(req, res, 403, 'forbidden', { phase, reason: 'cross-site-token' });
+        if (!tokenRequestHeaderAllowed(req)) {
+          return deny(req, res, 403, 'forbidden', { phase, reason: 'token-request-header' });
+        }
+
+        let proofThumbprint = null;
+        if (cfg.proofOfPossession !== 'off') {
+          const proofKeyHeader = req.headers?.['x-archx-proof-key'];
+          if (proofKeyHeader !== undefined) {
+            const parsedProofKey = parseProofPublicKeyHeader(proofKeyHeader);
+            if (!parsedProofKey) {
+              return deny(req, res, 403, 'forbidden', { phase, reason: 'proof-key-invalid' });
+            }
+            proofThumbprint = parsedProofKey.jkt;
+          } else if (cfg.proofOfPossession === 'required') {
+            return deny(req, res, 403, 'forbidden', { phase, reason: 'proof-key-required' });
+          }
+        }
+
+        let batchBody;
+        try { batchBody = await readBatchTokenBody(req); }
+        catch (err) {
+          if (err instanceof MintDenied) {
+            return deny(req, res, err.status, err.error, {
+              phase, reason: err.details.reason || 'batch-body',
+            });
+          }
+          throw err;
+        }
+        if (Object.keys(batchBody).some((field) => field !== 'items') ||
+            !Array.isArray(batchBody.items) || !batchBody.items.length ||
+            batchBody.items.length > cfg.batchTokenMaxItems) {
+          return deny(req, res, 400, 'bad request', { phase, reason: 'batch-items' });
+        }
+
+        const tokens = Object.create(null);
+        const errors = Object.create(null);
+        const validatedRefs = new Set();
+        // Validate the response-addressing refs before any token is minted;
+        // discovering a duplicate halfway through would otherwise issue
+        // real one-time tokens that can no longer be returned coherently.
+        for (let refIndex = 0; refIndex < batchBody.items.length; refIndex++) {
+          const candidate = batchBody.items[refIndex];
+          const candidateRef = isPlainObject(candidate) && candidate.ref !== undefined
+            ? candidate.ref
+            : String(refIndex);
+          if (typeof candidateRef !== 'string' ||
+              !/^[A-Za-z0-9._~-]{1,64}$/.test(candidateRef) || validatedRefs.has(candidateRef)) {
+            return deny(req, res, 400, 'bad request', { phase, reason: 'batch-ref' });
+          }
+          validatedRefs.add(candidateRef);
+        }
+        const seenRefs = new Set();
+        const allowedItemFields = new Set(['ref', 'id', 'w', 'bw', 'bh', 'fit', 'q']);
+        let hardFailure = null;
+        for (let itemIndex = 0; itemIndex < batchBody.items.length; itemIndex++) {
+          const item = batchBody.items[itemIndex];
+          const fallbackRef = String(itemIndex);
+          const ref = isPlainObject(item) && item.ref !== undefined ? item.ref : fallbackRef;
+          if (typeof ref !== 'string' || !/^[A-Za-z0-9._~-]{1,64}$/.test(ref) || seenRefs.has(ref)) {
+            return deny(req, res, 400, 'bad request', { phase, reason: 'batch-ref' });
+          }
+          seenRefs.add(ref);
+          if (hardFailure) {
+            errors[ref] = hardFailure;
+            continue;
+          }
+          if (itemIndex > 0) {
+            // The handler-level limiter paid for item 0. Every additional
+            // item pays too, including malformed/unknown IDs, so batching
+            // cannot amplify enumeration or mint attempts for free.
+            const itemRate = await rateLimited(req, 'token');
+            if (itemRate.limited) {
+              hardFailure = { status: 429, error: 'too many requests' };
+              errors[ref] = hardFailure;
+              emitSecurityEvent('archx.denied', req, {
+                id: isPlainObject(item) && validateImageId(item.id) ? item.id : null,
+                phase, status: 429, reason: 'rate-limit',
+              });
+              continue;
+            }
+          }
+          if (!isPlainObject(item) || Object.keys(item).some((field) => !allowedItemFields.has(field))) {
+            errors[ref] = { status: 400, error: 'bad request' };
+            emitSecurityEvent('archx.denied', req, { phase, status: 400, reason: 'batch-item' });
+            continue;
+          }
+          const itemId = item.id;
+          if (!validateImageId(itemId) || !index.has(itemId)) {
+            errors[ref] = { status: 404, error: 'not found' };
+            emitSecurityEvent('archx.denied', req, {
+              id: validateImageId(itemId) ? itemId : null,
+              phase, status: 404, reason: 'unknown-or-invalid-id',
+            });
+            continue;
+          }
+          try {
+            tokens[ref] = await mintTokenResponse(req, itemId, item, proofThumbprint);
+          } catch (err) {
+            if (err instanceof MintDenied) {
+              errors[ref] = { status: err.status, error: err.error };
+              emitSecurityEvent('archx.denied', req, {
+                id: itemId,
+                phase,
+                viewerId: err.details.viewerId || null,
+                status: err.status,
+                reason: err.details.reason || err.error,
+              });
+              continue;
+            }
+            if (err?.code === 'ARCHX_STATE_STORE_UNAVAILABLE') {
+              hardFailure = { status: 503, error: 'service unavailable' };
+              errors[ref] = hardFailure;
+              emitSecurityEvent('archx.denied', req, {
+                id: itemId, phase, status: 503, reason: 'state-store-unavailable',
+              });
+              continue;
+            }
+            const status = err?.code === 'ARCHX_CALLBACK_TIMEOUT' ? 503 : 500;
+            errors[ref] = {
+              status,
+              error: status === 503 ? 'service unavailable' : 'image processing failed',
+            };
+            emitSecurityEvent('archx.processing_error', req, {
+              id: itemId, phase, status, reason: err?.code || 'batch-mint',
+            });
+          }
+        }
+        return sendJson(req, res, 200, { tokens, errors });
+      }
+
       let id;
       try { id = decodeURIComponent(rawId || ''); }
       catch { return deny(req, res, 400, 'bad request', { phase, reason: 'bad-id-encoding' }); }
@@ -2061,237 +2834,26 @@ export function createArchxMiddleware(options = {}) {
             return deny(req, res, 403, 'forbidden', { id, phase, reason: 'proof-key-required' });
           }
         }
-        const entitlement = await authorizeRequest(req, id, 'token');
-        if (!entitlement) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'authorization' });
-        const viewerId = authorizationViewerId(entitlement);
-        const trace = authorizationTrace(entitlement, viewerId);
-        const quota = await quotaExceeded(req, id, viewerId, 'token');
-        if (quota) {
-          return deny(req, res, 429, 'quota exceeded', {
-            id, phase, viewerId, reason: `quota:${quota.name}`,
-            headers: { 'Retry-After': String(quota.retryAfterSec || 60) },
-          });
-        }
-        const abuse = await abusePattern(req, id, viewerId);
-        if (abuse.crossed) {
-          emitSecurityEvent('archx.suspicious_scraping', req, {
-            id, phase, viewerId, status: 200, reason: `distinct-images:${abuse.distinct}`,
-          });
-        }
-        if (abuse.suspicious && cfg.abuseDetection.action === 'deny') {
-          return deny(req, res, 429, 'too many requests', {
-            id, phase, viewerId, reason: 'distinct-image-abuse', headers: { 'Retry-After': '600' },
-          });
-        }
-        // The BROWSER asks for a width; the SERVER's entitlement caps it.
-        // A tampered client can no longer "just ask for 1920px" beyond policy.
-        const entitlementWidth = entitlement.maxWidth == null ? maxWidthCap : Number(entitlement.maxWidth);
-        if (!Number.isFinite(entitlementWidth) || entitlementWidth < 64) {
-          return deny(req, res, 403, 'forbidden', { id, phase, viewerId, reason: 'invalid-entitlement-width' });
-        }
-        const widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
-        const rawRequested = url.searchParams.get('w') || url.searchParams.get('bw') || '1200';
-        let requestedW = parseStrictInt(rawRequested);
-        const boxW = url.searchParams.has('bw') ? parseStrictInt(url.searchParams.get('bw')) : null;
-        const boxH = url.searchParams.has('bh') ? parseStrictInt(url.searchParams.get('bh')) : null;
-        const rawFit = String(url.searchParams.get('fit') || 'cover').toLowerCase();
-        if (requestedW == null || requestedW < 1 || requestedW > 100000 ||
-            (url.searchParams.has('bw') && (boxW == null || boxW < 1 || boxW > 100000)) ||
-            (url.searchParams.has('bh') && (boxH == null || boxH < 1 || boxH > 100000)) ||
-            !['cover', 'contain', 'fill'].includes(rawFit)) {
-          return deny(req, res, 400, 'bad request', { id, phase, viewerId, reason: 'bad-sizing' });
-        }
-        if (boxW > 0 && boxH > 0) {
-          try {
-            const dims = await imageDimensions(id);
-            if (dims) {
-              const aspect = dims.width / dims.height;
-              const fit = String(url.searchParams.get('fit') || 'cover').toLowerCase();
-              // For cover, derivative width must satisfy BOTH box dimensions.
-              // Width-only sizing crops a landscape source and then upscales
-              // it in a squarer/taller host, visibly softening detail.
-              requestedW = fit === 'contain'
-                ? Math.min(boxW, boxH * aspect)
-                : fit === 'fill'
-                  ? boxW
-                  : Math.max(boxW, boxH * aspect);
-            }
-          } catch { /* fall back to width-only sizing */ }
-        }
-        const w = Math.max(64, Math.min(widthCap, Math.ceil(requestedW)));
-        const nonce = crypto.randomBytes(18).toString('base64url');
-        const iat = Date.now();
-        const exp = iat + ttlMs;
-        const watermark = await resolveWatermark(
-          entitlement.watermark ?? serverWatermark,
-          { req, id, nonce, viewerId, trace, exp },
-        );
-        const tokenPayload = {
-          v: 2,
-          kid: activeSecretId,
-          aud: TOKEN_AUDIENCE,
-          scope: TOKEN_SCOPE,
-          id, w, iat, exp, n: nonce,
-        };
-        const viewerHash = viewerId ? hmacShort('viewer', viewerId, 20) : '';
-        if (viewerId) tokenPayload.vh = viewerHash;
-        if (trace.hash) tokenPayload.th = trace.hash;
-        if (proofThumbprint) tokenPayload.jkt = proofThumbprint;
-        if (watermark) tokenPayload.wm = watermark;
-
-        // Direct delivery-quality control. Your authorize() entitlement wins;
-        // the browser's q=… request is honoured only when you opt in.
-        const clientQuality = allowClientQuality ? url.searchParams.get('q') : null;
-        const rawQuality = entitlement.quality ?? clientQuality ?? quality;
-        let deliveryLossless = entitlement.lossless ?? (lossless || rawQuality === 'lossless');
-        let deliveryQuality = deliveryLossless
-          ? 'lossless'
-          : Math.max(1, Math.min(100, Math.round(Number(rawQuality) || 95)));
-        const rawFormat = entitlement.format || format;
-        const deliveryFormat = ['webp', 'png', 'jpeg'].includes(rawFormat) ? rawFormat : 'webp';
-        tokenPayload.q = deliveryQuality;
-        if (deliveryLossless) tokenPayload.ls = 1;
-        if (deliveryFormat !== format) tokenPayload.fmt = deliveryFormat;
-
-        // StegoMark issuance: derive (but do not expose) the fingerprint that
-        // will be baked into this view's pixels, and let the host persist the
-        // fingerprint -> image/viewer/order mapping via onStegoIssue.
-        const effectiveStego = entitlement.steganography ?? steganography;
-        let issuedFingerprint = null;
-        let issuedStegoProfile = null;
-        if (effectiveStego) {
-          tokenPayload.sge = 1;
-          const entStegoCfg = typeof effectiveStego === 'object' ? effectiveStego : {};
-          const stegoPerToken = entStegoCfg.perToken ?? stegoGlobalCfg.perToken ?? true;
-          issuedStegoProfile = entStegoCfg.profile ?? stegoGlobalCfg.profile ?? 'standard';
-          if (issuedStegoProfile === 'robust') tokenPayload.sgv = 2;
-          const fingerprintSubjectHash = trace.hash || viewerHash;
-          if (entitlement.stegoFingerprint) {
-            tokenPayload.sg = String(entitlement.stegoFingerprint);
-            issuedFingerprint = resolveStegoFingerprint(entitlement.stegoFingerprint);
-          } else {
-            if (!stegoPerToken) tokenPayload.sgp = 0;
-            issuedFingerprint = deriveStegoFingerprint({
-              id, nonce, viewerHash: fingerprintSubjectHash, secret, perToken: stegoPerToken,
+        let out;
+        try {
+          out = await mintTokenResponse(
+            req,
+            id,
+            Object.fromEntries(url.searchParams.entries()),
+            proofThumbprint,
+          );
+        } catch (err) {
+          if (err instanceof MintDenied) {
+            return deny(req, res, err.status, err.error, {
+              id,
+              phase,
+              viewerId: err.details.viewerId || null,
+              reason: err.details.reason || err.error,
+              headers: err.details.headers || {},
             });
           }
-          const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
-          if (strength != null) tokenPayload.sgs = strength;
-          const stegoGridX = entStegoCfg.gridX ?? stegoGlobalCfg.gridX;
-          const stegoGridY = entStegoCfg.gridY ?? stegoGlobalCfg.gridY;
-          if (stegoGridX != null) tokenPayload.sgx = stegoGridX;
-          if (stegoGridY != null) tokenPayload.sgy = stegoGridY;
-          if (onStegoIssue) {
-            try {
-              await withCallbackTimeout(onStegoIssue, [{
-                req,
-                id,
-                viewerId,
-                buyerId: trace.buyerId,
-                orderId: trace.orderId,
-                deliveryId: trace.deliveryId,
-                traceId: trace.traceId,
-                traceHash: trace.hash || null,
-                nonce,
-                exp,
-                issuedAt: new Date(iat).toISOString(),
-                fingerprint: issuedFingerprint,
-                profile: issuedStegoProfile,
-                keyId: activeSecretId,
-              }], 'onStegoIssue callback');
-            } catch {
-              emitSecurityEvent('archx.stego_registry_failed', req, { id, phase, viewerId, status: 503 });
-              if (cfg.stegoRegistryFailure !== 'allow') {
-                return sendJson(req, res, 503, { error: 'service unavailable' });
-              }
-            }
-          }
-        } else if (steganography) {
-          tokenPayload.nsg = 1; // entitlement explicitly opted this view out
+          throw err;
         }
-        if (onProvenanceIssue) {
-          // C2PA-ready extension point: the host may create/sign/store a
-          // Content Credentials manifest (or another provenance record) and
-          // bind it to these soft-binding identifiers. Archx does not claim
-          // to implement C2PA signing itself, and this record contains no
-          // bearer token, scramble key, AES key, or proof material.
-          try {
-            await withCallbackTimeout(onProvenanceIssue, [Object.freeze({
-              schemaVersion: 1,
-              type: 'archx.provenance_issued',
-              req,
-              id,
-              viewerId,
-              viewerHash: viewerHash || null,
-              buyerId: trace.buyerId,
-              orderId: trace.orderId,
-              deliveryId: trace.deliveryId,
-              traceId: trace.traceId,
-              traceHash: trace.hash || null,
-              nonce,
-              exp,
-              issuedAt: new Date(iat).toISOString(),
-              keyId: activeSecretId,
-              width: w,
-              quality: deliveryQuality,
-              format: deliveryFormat,
-              stegoFingerprint: issuedFingerprint,
-              stegoProfile: issuedStegoProfile,
-            })], 'onProvenanceIssue callback');
-          } catch {
-            emitSecurityEvent('archx.provenance_failed', req, { id, phase, viewerId, status: 503 });
-            if (cfg.provenanceFailure !== 'allow') {
-              return sendJson(req, res, 503, { error: 'service unavailable' });
-            }
-          }
-        }
-        if (bindTokenTo.session === true && !viewerId) {
-          return deny(req, res, 403, 'forbidden', { id, phase, reason: 'session-binding-unavailable' });
-        }
-        const bindings = {};
-        try {
-          const bindingValue = (setting, fallback) => resolveBindingValue(setting, req, fallback);
-          const ipBinding = await bindingValue(bindTokenTo.ip, requestIp(req));
-          if (ipBinding != null) bindings.ip = hmacShort('bind-ip', ipBinding, 16);
-          const uaBinding = await bindingValue(bindTokenTo.userAgent, req.headers?.['user-agent'] || '');
-          if (uaBinding != null) bindings.ua = hmacShort('bind-ua', uaBinding, 16);
-          const sessionBinding = await bindingValue(bindTokenTo.session, viewerId);
-          if (sessionBinding != null) bindings.sess = hmacShort('bind-session', sessionBinding, 16);
-        } catch {
-          return deny(req, res, 403, 'forbidden', { id, phase, viewerId, reason: 'binding-unavailable' });
-        }
-        if (Object.keys(bindings).length) tokenPayload.b = bindings;
-        const token = signToken(tokenPayload, secret);
-        const imagePath = `${basePath}/i/${encodeURIComponent(id)}`;
-        const out = {
-          // `url` is the clean URL by default. Only an explicit
-          // allowQueryTokens compatibility opt-in appends ?t=. New clients
-          // use `token` in X-Archx-Token with cleanUrl, keeping bearer
-          // material out of URLs, browser history, Referer headers, and
-          // proxy logs. Header transport does NOT hide token/key/aesKey from
-          // JavaScript or a viewer controlling the authorized browser: that
-          // browser must receive them to redeem, unscramble, and decrypt.
-          // Never log this response object.
-          url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
-          cleanUrl: imagePath,
-          token,
-          key: deriveScrambleKey(id, nonce),
-          grid,
-          exp,
-        };
-        if (encrypt) out.aesKey = deriveAesKey(id, nonce);
-        emitDeliveryEvent('archx.token_issued', {
-          id,
-          phase,
-          viewerHash: viewerHash || null,
-          traceHash: trace.hash || null,
-          keyId: activeSecretId,
-          width: w,
-          quality: deliveryQuality,
-          format: deliveryFormat,
-          stegoFingerprint: issuedFingerprint,
-          stegoProfile: issuedStegoProfile,
-        });
         return sendJson(req, res, 200, out);
       }
 
@@ -2425,9 +2987,11 @@ export function createArchxMiddleware(options = {}) {
 
         const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret);
         const forensicSeed = forensic
-          ? hmacShort('forensic', forensicPerToken
-              ? `${id}:${payload.n}:${payload.th || payload.vh || ''}`
-              : `${id}:static:${payload.th || payload.vh || ''}`, 32, issuingSecret)
+          ? hmacShort('forensic', forensicScope === 'image'
+              ? `${id}:image`
+              : forensicPerToken
+                ? `${id}:${payload.n}:${payload.th || payload.vh || ''}`
+                : `${id}:static:${payload.th || payload.vh || ''}`, 32, issuingSecret)
           : null;
         const deliveryQuality = effectiveQuality;
         const deliveryLossless = effectiveLossless;
@@ -2451,9 +3015,9 @@ export function createArchxMiddleware(options = {}) {
           ? (payload.sg || deriveStegoFingerprint({
               id,
               nonce: payload.n,
-              viewerHash: payload.th || payload.vh || '',
+              viewerHash: payload.sgi === 1 ? '' : (payload.th || payload.vh || ''),
               secret: issuingSecret,
-              perToken: payload.sgp !== 0,
+              perToken: payload.sgi === 1 ? false : payload.sgp !== 0,
             }))
           : null;
         const effectiveStegoProfile = payload.sgv === 2 ? 'robust' : 'standard';
@@ -2464,20 +3028,48 @@ export function createArchxMiddleware(options = {}) {
         const stegoCachePart = stegoPayload
           ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}`
           : 'nosg';
+        // Cache identity contains only inputs that can change the delivered
+        // bytes. Viewer/trace hashes are not added unconditionally: when a
+        // watermark, forensic seed, or StegoMark is viewer-specific, that
+        // material is already represented by its own cache fragment below.
+        // This is what allows an ordinary catalog derivative to be generated
+        // once and reused by every authorized viewer.
+        const aesKey = encrypt ? deriveAesKey(id, payload.n, issuingSecret) : null;
+        const forensicCachePart = forensicSeed
+          ? hmacShort('fxseed', `${forensicSeed}:${typeof forensic === 'object' ? JSON.stringify(forensic) : ''}`, 16, issuingSecret)
+          : 'nofx';
+        const processingCachePart = [
+          `we${cfg.processing.webpEffort}`,
+          cfg.processing.webpSmartSubsample ? 'wss1' : 'wss0',
+          `rk:${cfg.processing.resizeKernel}`,
+          `png${cfg.processing.pngCompressionLevel}`,
+          `jpg:${cfg.processing.jpegChromaSubsampling}`,
+          `op${cfg.processing.maxOutputPixels}`,
+        ].join(':');
         const cacheKey = [
-          id, masterVersion, `kid:${payload.kid}`, effectiveWidth,
-          scrambleKeyMode === 'per-token' ? payload.n : 's',
-          encrypt ? 'e' : 'p', wmCachePart,
-          forensicSeed ? (forensicPerToken ? payload.n : 'fx') : 'nofx',
-          `${payload.vh || ''}:${payload.th || ''}`,
-          `q${deliveryQuality}`, deliveryLossless ? 'ls' : 'lq', deliveryFormat, stegoCachePart,
+          'v2', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`,
+          hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
+          aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
+          wmCachePart, forensicCachePart,
+          `q${deliveryQuality}`, deliveryLossless ? 'ls' : 'lq', deliveryFormat,
+          stegoCachePart, processingCachePart,
         ].join('|');
         const sharedCacheKey = `cache:${hmacShort('output-cache', cacheKey, 43, issuingSecret)}`;
         let bytes = getOutputCache(cacheKey);
+        if (bytes) derivativeCacheStats.memoryHits++;
         if (!bytes) {
-          bytes = await getSharedOutputCache(sharedCacheKey);
+          bytes = await getDiskOutputCache(sharedCacheKey);
           if (bytes) setOutputCache(cacheKey, bytes);
         }
+        if (!bytes) {
+          bytes = await getSharedOutputCache(sharedCacheKey);
+          if (bytes) {
+            derivativeCacheStats.sharedHits++;
+            setOutputCache(cacheKey, bytes);
+            await setDiskOutputCache(sharedCacheKey, bytes);
+          }
+        }
+        if (!bytes) derivativeCacheStats.misses++;
         if (!bytes) {
           let pending = outputInFlight.get(cacheKey);
           if (!pending) {
@@ -2517,7 +3109,19 @@ export function createArchxMiddleware(options = {}) {
                 };
                 const master = await loadMaster();
                 // Lazy import so token-only deployments don't need sharp wired early.
-                const { scrambleImage } = await import('./scramble-image.js');
+                const { scrambleImage, configureSharpPerformance } = await import('./scramble-image.js');
+                if (!sharpPerformanceConfigured &&
+                    (cfg.processing.sharpConcurrency > 0 || cfg.processing.sharpCache !== undefined)) {
+                  configureSharpPerformance({
+                    ...(cfg.processing.sharpConcurrency > 0
+                      ? { concurrency: cfg.processing.sharpConcurrency }
+                      : {}),
+                    ...(cfg.processing.sharpCache !== undefined
+                      ? { cache: cfg.processing.sharpCache }
+                      : {}),
+                  });
+                  sharpPerformanceConfigured = true;
+                }
                 const result = await processingSemaphore.run(() => scrambleImage(master.bytes, {
                   grid,
                   key: scrambleKey,
@@ -2525,7 +3129,7 @@ export function createArchxMiddleware(options = {}) {
                   quality: deliveryQuality,
                   lossless: deliveryLossless,
                   format: deliveryFormat,
-                  aesKey: encrypt ? deriveAesKey(id, payload.n, issuingSecret) : null,
+                  aesKey,
                   watermark: payload.wm || null,
                   forensicSeed,
                   forensic: typeof forensic === 'object' ? forensic : {},
@@ -2551,6 +3155,7 @@ export function createArchxMiddleware(options = {}) {
                 }));
                 if (master.current) {
                   setOutputCache(cacheKey, result.bytes);
+                  await setDiskOutputCache(sharedCacheKey, result.bytes);
                   await setSharedOutputCache(sharedCacheKey, result.bytes);
                 }
                 return result.bytes;
@@ -2642,6 +3247,7 @@ export function createArchxMiddleware(options = {}) {
       sharedCacheBytes: statNumber(storeStats.sharedCacheBytes),
       outputCacheEntries: outputCache.size,
       outputCacheBytes,
+      derivativeCache: Object.freeze({ ...derivativeCacheStats }),
       masterCacheEntries: masterCache.size,
       masterCacheBytes,
       processingActive: processingSemaphore.active,

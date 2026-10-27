@@ -18,7 +18,7 @@ not a claim that every browser/OS combination below has been certified.
 
 | Browser / platform | Status | Expected behavior |
 | --- | --- | --- |
-| Chromium (headless, repository test build) | **Automated: 82 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, and guard behavior are exercised. |
+| Chromium (headless, repository test build) | **Automated: 89 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, and guard behavior are exercised. |
 | Google Chrome, current stable and previous major | Expected | Same Chromium platform family. Test your exact site CSP, cookies, CDN, and extensions before release. |
 | Microsoft Edge, current stable and previous major | Expected | Chromium-based; same caveats as Chrome. |
 | Brave and other Chromium browsers | Expected with site testing | Privacy/network defaults or extension policies can affect fetch, WebGL, storage, and proof-key behavior. |
@@ -39,8 +39,9 @@ not a claim that every browser/OS combination below has been certified.
 | Temporal interlace shader | WebGL fragment shader | `frames` uses pre-rendered Canvas phase frames; `auto` selects an available engine. |
 | Temporal interlace phases | Two phases for a 60 Hz-safe default | More phases are clamped by refresh assumptions; reduced-motion settings should disable flicker-oriented presentation. |
 | Token transport | `X-Archx-Token` header + clean URL | Query-token compatibility is off by default and requires an explicit server opt-in; it exposes bearer material to URL-logging surfaces. |
-| Token mint method | `POST` + `X-Archx-Request` | A temporary GET bridge exists for legacy clients; it is not the preferred production posture. |
-| Output cache | Local L1 plus optional shared L2 | Shared-cache failure falls back to authorized reprocessing. Replay/quota state never falls back locally in multi-instance mode. |
+| Token mint method | `POST` + `X-Archx-Request` | A temporary GET bridge exists for legacy clients; it is not the preferred production posture. Optional batch minting uses `POST {basePath}/tokens` and the bundled client falls back to single POST mints only when that endpoint is absent (404/405/501). |
+| Output cache | Local L1, optional persistent disk L2, and optional shared L2 | Disk/shared derivative-cache failure falls back to authorized reprocessing. Replay/quota state never falls back locally in multi-instance mode. |
+| Precomputed assets | Version-1 `archx-build` manifest + immutable `.archx` variants | Any static host/CDN can serve public variants. Private catalogs must authorize/sign the key-bearing manifest and URLs; there is no dynamic token fallback unless the host also deploys the middleware. |
 | StegoMark | Server-side pixel embedding through Sharp | `standard` remains backward-compatible. `robust` uses larger cells, a dual-CRC/marker codeword, median voting, and bounded correction; detection remains empirical and format/geometry dependent, so test it on your catalog and preserve the issued profile. |
 
 ## CSP and viewer construction

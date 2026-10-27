@@ -3,6 +3,53 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.6.0] — Unreleased
+
+### Added
+
+- A scale path for image-heavy catalogs: canonical server/client width
+  buckets, a `catalog` browser quality profile and preset, batch token
+  minting at `POST {basePath}/tokens`, and gallery mint coalescing ahead of
+  the bounded payload/decode limiter.
+- Persistent derivative reuse after the normal authorization/replay checks:
+  process memory, an optional bounded private disk cache, and the optional
+  shared state-store cache, with secret-free derivative-cache statistics.
+- `withCatalogThroughputDefaults()` for reusable catalog derivatives:
+  WebP q88, canonical widths, faster encoder/resampling settings, larger
+  bounded caches, image-scoped baked marks when marks are enabled, and
+  explicit Sharp job/thread controls.
+- A precomputed responsive-asset builder at
+  `@archnemix/image-protection/build` and an `archx-build` CLI. It emits
+  incremental, immutable `.archx` variants plus a version-1 manifest for
+  static/CDN hosting; the browser can load them with `{ assetId }`,
+  `Archx.load.gallery()`, or `<archx-image asset-id>`.
+- Browser `httpCache`, `assetHttpCache`, `fetchPriority`, canonical
+  `sourceWidthBuckets`, and bounded shared manifest caching for static and
+  catalog delivery.
+
+### Changed
+
+- Gallery/catalog defaults now use device-pixel sampling, canonical widths,
+  static rendering, decoded-bitmap unloading with retained payloads, batch
+  minting, and no resize reminting.
+- Server image processing exposes WebP effort/smart-subsample, resize-kernel,
+  PNG/JPEG encoder, and Sharp performance controls without changing the
+  historical quality-first defaults.
+- Batch mint items each consume token-rate budget, including malformed or
+  unknown IDs, so the batch envelope cannot amplify enumeration for free.
+- The static asset builder fails closed without a usable scramble key and
+  keeps encrypted repeat builds incremental by reusing the manifest AES key
+  when `ARCHX_AES_KEY` is not supplied.
+
+### Performance notes
+
+On the repository's 1408×768 demo master, catalog q88/effort-2 produced a
+960 px derivative in about 57 ms/170 KiB versus about 144 ms/249 KiB for
+quality-first q95 in the local benchmark. The Chromium gallery regression
+paints 100 images using two batch mint requests and no single mints. These
+are local regression measurements, not a substitute for staging capacity
+tests with the host authorization database, state store, TLS, and CDN.
+
 ## [1.5.0] — Unreleased
 
 ### Added

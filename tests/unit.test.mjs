@@ -16,11 +16,16 @@ import {
   perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
-import { scrambleImage, unscrambleImage } from '../server/scramble-image.js';
-import { TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace } from '../src/archx.js';
+import { inspectImageMetadata, scrambleImage, unscrambleImage } from '../server/scramble-image.js';
+import { buildArchxAssets } from '../server/build-assets.js';
+import {
+  DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS,
+  TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace,
+} from '../src/archx.js';
 import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
   auditArchxServerConfig, auditArchxProductionConfig, withHardenedProductionDefaults,
+  withCatalogThroughputDefaults, canonicalDerivativeWidth, DEFAULT_WIDTH_BUCKETS,
   validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
@@ -1608,4 +1613,243 @@ test('Redis state-store adapter uses atomic client operations and preserves the 
   assert.ok(calls.some((call) => call[0] === 'eval' && call[4] === 'window'));
   assert.ok(calls.some((call) => call[0] === 'eval' && call[4] === 'distinct'));
   assert.throws(() => createRedisStateStore({ client: {}, prefix: 'x' }), /eval|call|sendCommand/);
+});
+
+test('catalog scale helpers canonicalize widths and expose throughput trade-offs', () => {
+  assert.deepEqual(DEFAULT_SOURCE_WIDTH_BUCKETS, DEFAULT_WIDTH_BUCKETS);
+  assert.equal(canonicalDerivativeWidth(641, 1920), 800);
+  assert.equal(canonicalDerivativeWidth(100, 500), 160);
+  assert.equal(canonicalDerivativeWidth(1200, 1100), 960);
+  assert.equal(canonicalDerivativeWidth(2000, 180), 160, 'canonicalization never exceeds the entitlement cap');
+  assert.equal(canonicalDerivativeWidth(2000, 32), 32, 'even a sub-bucket cap remains a hard cap');
+  assert.equal(canonicalDerivativeWidth(333, 1920, []), 333, 'empty bucket list preserves exact widths');
+
+  const base = {
+    secret: 'catalog-throughput-secret-for-unit-tests-32',
+    imagesDir: '/tmp/archx-catalog-images',
+    authorize: async () => true,
+    forensic: true,
+    steganography: true,
+  };
+  const catalog = withCatalogThroughputDefaults(base);
+  assert.equal(catalog.quality, 88);
+  assert.deepEqual(catalog.widthBuckets, DEFAULT_WIDTH_BUCKETS);
+  assert.equal(catalog.forensicScope, 'image');
+  assert.deepEqual(catalog.steganography, { perToken: false, scope: 'image' });
+  assert.equal(catalog.processing.webpEffort, 2);
+  assert.equal(catalog.processing.webpSmartSubsample, false);
+  assert.equal(catalog.processing.resizeKernel, 'lanczos2');
+  assert.equal(catalog.processing.sharpConcurrency, 1);
+  const summary = auditArchxServerConfig(catalog).summary;
+  assert.deepEqual(summary.widthBuckets, DEFAULT_WIDTH_BUCKETS);
+  assert.equal(summary.batchTokenMaxItems, 100);
+  assert.equal(summary.diskOutputCache, false);
+  assert.equal(PRESETS.catalog.qualityProfile, 'catalog');
+  assert.equal(PRESETS.catalog.tokenBatch, true);
+  assert.equal(PRESETS.gallery.sourceOversample, 1);
+
+  for (const bad of [
+    { widthBuckets: [63] },
+    { forensicScope: 'session' },
+    { batchTokenMaxItems: 501 },
+    { outputCacheDiskMaxEntries: -1 },
+    { processing: { webpEffort: 7 } },
+    { processing: { resizeKernel: 'nearest-neighbor' } },
+  ]) {
+    assert.equal(auditArchxServerConfig({ ...base, ...bad }).ok, false, JSON.stringify(bad));
+  }
+});
+
+test('catalog HTTP path: canonical widths, batch minting, and persistent cross-viewer derivative reuse', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-catalog-http-'));
+  const mastersDir = path.join(root, 'masters');
+  const cacheDir = path.join(root, 'derivative-cache');
+  fs.mkdirSync(mastersDir);
+  const master = await syntheticMaster(640, 420);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), master);
+  const stegoIssues = [];
+  const makeHandler = () => createArchxMiddleware({
+    secret: 'catalog-http-secret-for-unit-tests-32chars',
+    imagesDir: mastersDir,
+    ttlSec: 120,
+    quality: 88,
+    widthBuckets: [160, 320, 640],
+    outputCacheMax: 0,
+    outputCacheMaxBytes: 0,
+    outputCacheDir: cacheDir,
+    forensic: true,
+    forensicPerToken: false,
+    forensicScope: 'image',
+    steganography: { scope: 'image', perToken: false, strength: 6 },
+    onStegoIssue: async (record) => { stegoIssues.push(record); },
+    processing: {
+      webpEffort: 0,
+      webpSmartSubsample: false,
+      resizeKernel: 'lanczos2',
+      sharpConcurrency: 1,
+    },
+    authorize: async (req) => ({ viewerId: String(req.headers['x-viewer'] || 'viewer-a') }),
+  });
+  const start = async (handler) => {
+    const server = http.createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, base: `http://127.0.0.1:${server.address().port}` };
+  };
+
+  let handler = makeHandler();
+  let running = await start(handler);
+  t.after(async () => {
+    await new Promise((resolve) => running.server.close(resolve));
+    handler.close();
+  });
+  const redeemAs = (base, tokenResponse, viewer) => redeemToken(base, tokenResponse, {
+    headers: { 'x-viewer': viewer },
+  });
+
+  const tokenA = await (await postToken(running.base + '/archx/token/cat?w=300', {
+    headers: { 'x-viewer': 'viewer-a' },
+  })).json();
+  const responseA = await redeemAs(running.base, tokenA, 'viewer-a');
+  assert.equal(responseA.status, 200);
+  const bytesA = new Uint8Array(await responseA.arrayBuffer());
+  assert.equal(decodeContainer(bytesA).header.w, 320, '300px request uses the canonical 320px derivative');
+  let stats = handler.stats();
+  assert.equal(stats.derivativeCache.misses, 1);
+  assert.equal(stats.derivativeCache.diskWrites, 1);
+  assert.equal(stats.outputCacheEntries, 0, 'memory cache is disabled so reuse must come from disk');
+
+  const tokenB = await (await postToken(running.base + '/archx/token/cat?w=301', {
+    headers: { 'x-viewer': 'viewer-b' },
+  })).json();
+  const responseB = await redeemAs(running.base, tokenB, 'viewer-b');
+  assert.equal(responseB.status, 200);
+  const bytesB = new Uint8Array(await responseB.arrayBuffer());
+  assert.deepEqual(bytesB, bytesA, 'image-scoped marks make the catalog derivative byte-identical across viewers');
+  stats = handler.stats();
+  assert.equal(stats.derivativeCache.diskHits, 1);
+  assert.equal(stats.derivativeCache.misses, 1, 'second viewer does not pay another Sharp transform');
+  assert.equal(new Set(stegoIssues.map((record) => record.fingerprint)).size, 1);
+
+  const batchRes = await fetch(running.base + '/archx/tokens', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-archx-request': 'token',
+      'x-viewer': 'viewer-batch',
+    },
+    body: JSON.stringify({
+      items: [
+        { ref: 'hero', id: 'cat', w: 319 },
+        { ref: 'missing', id: 'nope', w: 320 },
+      ],
+    }),
+  });
+  assert.equal(batchRes.status, 200);
+  const batch = await batchRes.json();
+  assert.ok(batch.tokens.hero.token, 'batch returns an ordinary one-time token per authorized item');
+  assert.equal(batch.errors.missing.status, 404);
+  const batchImage = await redeemAs(running.base, batch.tokens.hero, 'viewer-batch');
+  assert.equal(batchImage.status, 200);
+  assert.deepEqual(new Uint8Array(await batchImage.arrayBuffer()), bytesA);
+  assert.equal(handler.stats().derivativeCache.diskHits, 2);
+
+  await new Promise((resolve) => running.server.close(resolve));
+  handler.close();
+  handler = makeHandler();
+  running = await start(handler);
+  const tokenC = await (await postToken(running.base + '/archx/token/cat?w=319', {
+    headers: { 'x-viewer': 'viewer-c' },
+  })).json();
+  const responseC = await redeemAs(running.base, tokenC, 'viewer-c');
+  assert.equal(responseC.status, 200);
+  assert.deepEqual(new Uint8Array(await responseC.arrayBuffer()), bytesA);
+  stats = handler.stats();
+  assert.equal(stats.derivativeCache.diskHits, 1, 'a restarted process reuses the persistent derivative');
+  assert.equal(stats.derivativeCache.misses, 0);
+});
+
+test('precomputed asset builder is incremental, canonical, and emits a usable manifest', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-build-assets-'));
+  const mastersDir = path.join(root, 'masters');
+  const outputDir = path.join(root, 'protected');
+  fs.mkdirSync(mastersDir);
+  const cat = await syntheticMaster(640, 420);
+  const dog = await syntheticMaster(480, 320);
+  fs.writeFileSync(path.join(mastersDir, 'cat.png'), cat);
+  fs.writeFileSync(path.join(mastersDir, 'dog.png'), dog);
+  assert.deepEqual(await inspectImageMetadata(cat), {
+    format: 'png', width: 640, height: 420, orientation: 1,
+    hasAlpha: true, channels: 4, pages: 1,
+  });
+
+  const buildOptions = {
+    inputDir: mastersDir,
+    outputDir,
+    baseUrl: '/protected/',
+    widths: [160, 320],
+    maxWidth: 320,
+    key: 'build-test-key',
+    quality: 82,
+    jobs: 2,
+    processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
+  };
+  await assert.rejects(buildArchxAssets({ ...buildOptions, key: '' }), /key must be a non-empty string/);
+  const first = await buildArchxAssets(buildOptions);
+  assert.equal(first.assets, 2);
+  assert.equal(first.variants, 4);
+  assert.equal(first.generated, 4);
+  assert.equal(first.skipped, 0);
+  const manifest = JSON.parse(fs.readFileSync(first.manifestPath, 'utf8'));
+  assert.deepEqual(Object.keys(manifest.assets).sort(), ['cat', 'dog']);
+  assert.equal(manifest.assets.cat.key, 'build-test-key');
+  assert.deepEqual(manifest.assets.cat.variants.map((variant) => variant.width), [160, 320]);
+  assert.ok(manifest.assets.cat.variants.every((variant) => variant.url.startsWith('/protected/cat-')));
+  for (const asset of Object.values(manifest.assets)) {
+    for (const variant of asset.variants) {
+      const file = path.join(outputDir, decodeURIComponent(path.basename(variant.url)));
+      assert.ok(isArchxContainer(fs.readFileSync(file)), file);
+    }
+  }
+  const catVariant = manifest.assets.cat.variants[1];
+  const catBytes = fs.readFileSync(path.join(outputDir, decodeURIComponent(path.basename(catVariant.url))));
+  const decoded = decodeContainer(catBytes);
+  const restored = await unscrambleImage(Buffer.from(decoded.payload), {
+    grid: decoded.header.grid,
+    key: manifest.assets.cat.key,
+    w: decoded.header.w,
+    h: decoded.header.h,
+  });
+  assert.ok((await meanAbsDiff(cat, restored, 160, 105)) < 22);
+
+  const second = await buildArchxAssets(buildOptions);
+  assert.equal(second.generated, 0, 'unchanged masters/options reuse every variant');
+  assert.equal(second.skipped, 4);
+
+  const tamperedPath = path.join(outputDir, decodeURIComponent(path.basename(catVariant.url)));
+  const tampered = fs.readFileSync(tamperedPath);
+  tampered[tampered.length - 1] ^= 0xff;
+  fs.writeFileSync(tamperedPath, tampered);
+  const repaired = await buildArchxAssets(buildOptions);
+  assert.equal(repaired.generated, 1, 'a same-size hash mismatch regenerates only the damaged variant');
+  assert.equal(repaired.skipped, 3);
+
+  const narrowed = await buildArchxAssets({ ...buildOptions, widths: [160], maxWidth: 160 });
+  assert.equal(narrowed.variants, 2);
+  assert.ok(narrowed.removed >= 2, 'stale versioned variants are cleaned from prior state');
+});
+
+test('StegoMark in-place server path is byte-identical to the copying public path', async () => {
+  const master = await syntheticMaster(256, 192);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const original = new Uint8Array(data);
+  for (const profile of ['standard', 'robust']) {
+    const copied = embedStegoFingerprint(original, info.width, info.height, 'INPLACE', { key: 'k', profile });
+    const inPlaceInput = new Uint8Array(original);
+    const inPlace = embedStegoFingerprint(inPlaceInput, info.width, info.height, 'INPLACE', {
+      key: 'k', profile, inPlace: true,
+    });
+    assert.equal(inPlace, inPlaceInput);
+    assert.deepEqual(inPlace, copied, `${profile} profile must be byte-identical in-place`);
+  }
+  assert.deepEqual(original, new Uint8Array(data), 'default public path still does not mutate its input');
 });

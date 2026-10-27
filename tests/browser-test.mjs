@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { buildArchxAssets } from '../server/build-assets.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 4179;
@@ -29,6 +30,25 @@ function check(name, cond, detail = '') {
 if (!fs.existsSync(path.join(root, 'demo-masters/gallery/gallery-001.jpg'))) {
   execSync('node tools/generate-test-images.mjs', { cwd: root, stdio: 'inherit' });
 }
+
+/* Build a tiny precomputed catalog for the manifest/CDN-path checks. The
+ * generated directory is removed in the finally block below. */
+const protectedTestDir = path.join(root, 'demo', 'protected-test');
+fs.rmSync(protectedTestDir, { recursive: true, force: true });
+await buildArchxAssets({
+  images: {
+    'aurora-valley': path.join(root, 'demo-masters', 'aurora-valley.jpg'),
+    'neon-portrait': path.join(root, 'demo-masters', 'neon-portrait.jpg'),
+  },
+  outputDir: protectedTestDir,
+  baseUrl: '/demo/protected-test/',
+  widths: [320, 640, 960],
+  maxWidth: 960,
+  key: 'browser-manifest-test-key',
+  quality: 88,
+  jobs: 2,
+  processing: { webpEffort: 0, webpSmartSubsample: false, resizeKernel: 'lanczos2', sharpConcurrency: 1 },
+});
 
 /* boot server */
 const server = spawn('node', ['server/demo-server.js'], {
@@ -80,9 +100,14 @@ const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push('pageerror: ' + e.message));
 page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('console: ' + m.text()); });
 const proofTraffic = { mintProofKeys: 0, payloadProofs: 0, payloadRequests: 0 };
+const scaleTraffic = { batchMints: 0, singleMints: 0, manifests: 0, assetPayloads: 0 };
 page.on('request', (request) => {
   const url = request.url();
   const headers = request.headers();
+  if (url.includes('/archx/tokens')) scaleTraffic.batchMints++;
+  else if (url.includes('/archx/token/')) scaleTraffic.singleMints++;
+  if (url.includes('/demo/protected-test/archx-manifest.json')) scaleTraffic.manifests++;
+  if (url.includes('/demo/protected-test/') && url.includes('.archx')) scaleTraffic.assetPayloads++;
   if (url.includes('/archx/token/') && headers['x-archx-proof-key']) proofTraffic.mintProofKeys++;
   if (url.includes('/archx/i/')) {
     proofTraffic.payloadRequests++;
@@ -1061,7 +1086,71 @@ try {
   const wrongBrowser = await fetch(BASE + token2.cleanUrl, { headers: { 'user-agent': 'Browser-B', 'x-archx-token': token2.token } });
   check('signed token presented by a different browser/User-Agent is rejected', wrongBrowser.status === 403, `HTTP ${wrongBrowser.status}`);
 
+  console.log('\n[8b] Scale delivery — precomputed manifest assets and catalog profile');
+  scaleTraffic.manifests = 0;
+  scaleTraffic.assetPayloads = 0;
+  const scaleAssets = await page.evaluate(async () => {
+    window.Archx.config({ assetManifest: '/demo/protected-test/archx-manifest.json' });
+    const makeHost = (id) => {
+      const host = document.createElement('div');
+      host.id = id;
+      host.style.cssText = 'width:340px;height:220px';
+      document.body.appendChild(host);
+      return host;
+    };
+    const aurora = window.Archx.load.image(makeHost('t-asset-aurora'), { assetId: 'aurora-valley' }, {
+      ...window.Archx.preset('catalog'), lazy: false, debug: true, shadow: 'open',
+    });
+    const neon = window.Archx.load.image(makeHost('t-asset-neon'), { asset: 'neon-portrait' }, {
+      ...window.Archx.preset('catalog'), lazy: false, debug: true, shadow: 'open',
+    });
+    const element = document.createElement('archx-image');
+    element.id = 't-asset-element';
+    element.setAttribute('asset-id', 'aurora-valley');
+    element.setAttribute('asset-manifest', '/demo/protected-test/archx-manifest.json');
+    element.setAttribute('preset', 'catalog');
+    element.style.cssText = 'width:340px;height:220px';
+    document.body.appendChild(element);
+    await Promise.all([aurora.ready, neon.ready, element.ready]);
+    window.__scaleInstances = [aurora, neon];
+    return {
+      auroraLoaded: aurora.loaded,
+      neonLoaded: neon.loaded,
+      auroraWidth: aurora._debug()?.meta?.origW,
+      neonWidth: neon._debug()?.meta?.origW,
+      catalog: window.Archx.preset('catalog'),
+      buckets: window.Archx.sourceWidthBuckets,
+    };
+  });
+  check('precomputed manifest assets render through the normal protected viewer',
+    scaleAssets.auroraLoaded && scaleAssets.neonLoaded, JSON.stringify(scaleAssets));
+  check('manifest responsive selection picks the 640px variant for a 340×220 cover box',
+    scaleAssets.auroraWidth === 640, `aurora=${scaleAssets.auroraWidth}`);
+  const assetShot = await boxStats('#t-asset-aurora');
+  check('manifest asset screenshot is a real picture, not the scrambled payload',
+    assetShot.std > 18 && assetShot.mean > 12, `mean=${assetShot.mean.toFixed(1)} std=${assetShot.std.toFixed(1)}`);
+  const elementShot = await boxStats('#t-asset-element');
+  check('<archx-image asset-id> uses the same manifest path',
+    elementShot.std > 18 && elementShot.mean > 12, `mean=${elementShot.mean.toFixed(1)} std=${elementShot.std.toFixed(1)}`);
+  check('one shared manifest fetch serves every asset instance',
+    scaleTraffic.manifests === 1, `manifest requests=${scaleTraffic.manifests}`);
+  check('catalog preset uses device-pixel sampling, buckets, HTTP cache, and batch minting',
+    scaleAssets.catalog.qualityProfile === 'catalog' &&
+      scaleAssets.catalog.sourceOversample === 1 &&
+      scaleAssets.catalog.tokenBatch === true &&
+      scaleAssets.catalog.httpCache === 'default' &&
+      scaleAssets.buckets.includes(640),
+    JSON.stringify(scaleAssets.catalog));
+  await page.evaluate(() => {
+    for (const inst of window.__scaleInstances || []) inst.destroy();
+    document.querySelector('#t-asset-aurora')?.remove();
+    document.querySelector('#t-asset-neon')?.remove();
+    document.querySelector('#t-asset-element')?.remove();
+  });
+
   console.log('\n[9] Performance — 100-image protected gallery');
+  scaleTraffic.batchMints = 0;
+  scaleTraffic.singleMints = 0;
   const gallery = await page.evaluate(() => window.__loadGallery(100));
   const galleryDom = await page.evaluate(() => ({
     imgs: document.querySelectorAll('#gallery img').length,
@@ -1070,6 +1159,9 @@ try {
   check('100 gallery images all loaded', galleryDom.loaded === 100, `${galleryDom.loaded}/100 in ${(gallery.ms / 1000).toFixed(1)}s`);
   check('100 gallery images created 0 <img> tags', galleryDom.imgs === 0);
   check('gallery load completes within a sane budget (<90s in headless CI, ~seconds in a real browser)', gallery.ms < 90000, `${(gallery.ms / 1000).toFixed(1)}s`);
+  check('100-image gallery coalesces token mints instead of issuing 100 mint requests',
+    scaleTraffic.batchMints > 0 && scaleTraffic.batchMints <= 25 && scaleTraffic.singleMints === 0,
+    `batch=${scaleTraffic.batchMints} single=${scaleTraffic.singleMints}`);
 
   check('no page errors during the whole run', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 } catch (err) {
@@ -1078,6 +1170,7 @@ try {
 } finally {
   await browser.close().catch(() => {});
   server.kill('SIGTERM');
+  fs.rmSync(protectedTestDir, { recursive: true, force: true });
 }
 
 console.log(`\n${failures === 0 ? '🟢 ALL BROWSER CHECKS PASSED' : '🔴 FAILURES: ' + failures}  (${checks} checks)`);

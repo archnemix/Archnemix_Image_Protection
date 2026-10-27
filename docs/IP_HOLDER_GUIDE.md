@@ -90,6 +90,19 @@ your evidence; it cannot repeal the "analog hole."
 - Keep an audit trail of which account viewed which image and when, subject
   to your privacy policy.
 
+### Large public catalogs and marketplaces
+
+- Prepare protected sizes when images are uploaded or the site is deployed,
+  rather than making the live server recreate the same thumbnail for every
+  visitor. Ask your developer about the `archx-build` precomputed option.
+- Use a small set of standard widths for listings and reserve the largest,
+  highest-quality, individually traced views for product-detail or paid
+  pages. This keeps ordinary browsing fast while preserving stronger
+  evidence where a leak matters most.
+- If the catalog is private, the list of prepared files and their keys must
+  be protected too. A public prepared catalog is appropriate only when you
+  are comfortable that anyone can obtain those capped, marked derivatives.
+
 ## If you find a suspected copy
 
 1. Save the suspect file exactly as found. Do not edit, resize, or re-save

@@ -46,17 +46,35 @@ if (fs.existsSync(masterPath)) {
   const master = fs.readFileSync(masterPath);
   const meta = await sharp(master).metadata();
   console.log(`\n  master: aurora-valley.jpg ${meta.width}×${meta.height}, ${(master.length / 1024).toFixed(0)} kB`);
-  for (const maxWidth of [480, 900, 1600]) {
-    let out;
-    await bench(`scrambleImage -> ${maxWidth}px .archx (downscale+scramble+WebP)`, async () => {
-      out = await scrambleImage(master, { key: 'bench-key', grid: 8, maxWidth, quality: 82 });
-    }, 4);
-    console.log(`      -> payload ${(out.bytes.length / 1024).toFixed(0)} kB (served from server cache after first hit)`);
+  const profiles = [
+    {
+      name: 'quality-first q95',
+      options: { quality: 95 },
+    },
+    {
+      name: 'catalog q88',
+      options: {
+        quality: 88,
+        processing: { webpEffort: 2, webpSmartSubsample: false, resizeKernel: 'lanczos2' },
+      },
+    },
+  ];
+  for (const profile of profiles) {
+    for (const maxWidth of [640, 960, 1600]) {
+      let out;
+      await bench(`scrambleImage ${profile.name} -> ${maxWidth}px .archx`, async () => {
+        out = await scrambleImage(master, { key: 'bench-key', grid: 8, maxWidth, ...profile.options });
+      }, 4);
+      console.log(`      -> payload ${(out.bytes.length / 1024).toFixed(0)} kB (cold transform; cached/precomputed thereafter)`);
+    }
   }
   const { generateKeyBase64 } = await import('../src/scramble.js');
   const aesKey = generateKeyBase64();
-  await bench('scrambleImage -> 900px .archx + AES-GCM encryption', async () => {
-    await scrambleImage(master, { key: 'bench-key', grid: 8, maxWidth: 900, quality: 82, aesKey });
+  await bench('scrambleImage catalog q88 -> 960px .archx + AES-GCM encryption', async () => {
+    await scrambleImage(master, {
+      key: 'bench-key', grid: 8, maxWidth: 960, quality: 88, aesKey,
+      processing: { webpEffort: 2, webpSmartSubsample: false, resizeKernel: 'lanczos2' },
+    });
   }, 4);
 }
 

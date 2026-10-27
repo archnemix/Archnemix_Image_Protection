@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -26,6 +26,7 @@
       "default": "./dist/archx.esm.js"
     },
     "./server": "./server/middleware.js",
+    "./build": "./server/build-assets.js",
     "./redis": "./server/redis-state-store.js",
     "./scramble": "./src/scramble.js"
   },
@@ -39,6 +40,8 @@
     "src/index.js",
     "src/scramble.js",
     "server/middleware.js",
+    "server/build-assets.js",
+    "server/build-assets-cli.js",
     "server/redis-state-store.js",
     "server/scramble-image.js",
     "server/scramble-cli.js",
@@ -50,6 +53,7 @@
   ],
   "bin": {
     "archx-protect": "./server/scramble-cli.js",
+    "archx-build": "./server/build-assets-cli.js",
     "archx-detect": "./server/detect-stego-cli.js"
   },
   "scripts": {

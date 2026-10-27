@@ -736,6 +736,60 @@ also stays specific: the tested policy avoids scripts/blob/workers, but
 `style-src 'self' 'unsafe-inline'` remains the compatibility baseline until
 a deployment proves a tighter style policy across its browser matrix.
 
+### 2.14 Scale review: make the expensive derivative, then stop remaking it
+
+The scale pass started by separating the costs. On this repository's photo
+masters, the JavaScript tile scramble is only a few milliseconds even at
+multi-megapixel sizes; Sharp decode/resize and especially lossy WebP encoding
+of high-entropy scrambled pixels dominate a cold derivative. A warm
+mint+redeem number for one already-cached image therefore says almost
+nothing about a cold thousand-image catalog. The design that follows is the
+ordinary image-CDN lesson applied without weakening the token boundary:
+
+1. **Canonicalize the variant space.** Thousands of CSS box, DPR, zoom, and
+   viewport combinations should land on a small ladder of widths. The
+   client and server now share a 160–2560 px ladder, but the server applies
+   it only inside the signed entitlement cap. Cache identity includes only
+   fields that can change output bytes; adding a viewer hash unconditionally
+   would quietly turn an otherwise identical public thumbnail into a
+   per-viewer Sharp job.
+2. **Reuse after authorization, not instead of it.** Dynamic payloads remain
+   private/no-store and are not CDN-shared. After signature/proof checks,
+   redemption authorization, replay claims, and quotas, the middleware may
+   reuse scrambled bytes from memory, a bounded private disk cache, or a
+   shared store. That ordering matters: a cache hit is a CPU optimization,
+   never an entitlement.
+3. **Move static catalogs to ingest time.** `archx-build` generates a few
+   versioned responsive `.archx` variants and a manifest once, incrementally
+   reuses unchanged variants, and lets a CDN serve immutable files. This is
+   the cheapest request path because it has no per-view mint or Sharp work.
+   Its trust boundary is explicit: the manifest contains the keys a browser
+   needs, so a public manifest is for a deliberately public derivative;
+   private catalogs must authorize/sign manifest and asset delivery and
+   should keep paid/revocable views on the token server.
+4. **Batch round trips, not security checks.** `POST {basePath}/tokens`
+   lets a gallery page mint many images in a few HTTP requests. It does not
+   batch away authorization, rate, quota, abuse, entitlement, callback, or
+   signing work, and malformed/unknown items still spend token-rate budget.
+   The browser starts batch enqueue before its payload/decode limiter so a
+   visible pageful can coalesce while decode concurrency remains bounded.
+5. **Ask for fewer, better-matched pixels.** The catalog browser profile
+   uses 1× device-pixel sampling and a DPR cap of 2 for listings instead of
+   the quality-first 2× oversampling used for detail views. Lazy loading
+   remains below the fold; Fetch Priority is reserved for a genuine hero/LCP
+   image rather than marking every thumbnail high priority.
+6. **Tune Sharp as a job system.** Encoder effort/smart-subsample, resize
+   kernel, PNG/JPEG settings, concurrent image jobs, and libvips threads per
+   job are separate knobs. Sharp's own performance guidance also makes the
+   libuv thread pool part of capacity planning on larger machines. The
+   catalog defaults favor several bounded jobs with one libvips thread each;
+   operators still need staging measurements on their instance type.
+
+The resulting trade-off is intentionally tiered: precomputed public assets
+for volume, shared dynamic derivatives for private browsing, and unique
+per-viewer marks/keys only where attribution value justifies cold CPU on
+every view.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -885,7 +939,7 @@ error — see the README checklist).
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 39 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 43 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -948,8 +1002,15 @@ error — see the README checklist).
   fake-client `SET NX PX` plus single-key Lua contract. The robust
   StegoMark unit fixture recovers exactly after resize/JPEG, ordinary
   photometric editing, and a photographic center crop while the unmarked
-  control remains negative.
-- **Real browser (headless Chromium, 82 checks):** a page with 7 protected
+  control remains negative. The scale regressions additionally prove that
+  canonicalization never exceeds an entitlement cap, a 641 px request is
+  signed for the 800 px bucket, batch minting returns independent per-item
+  successes/failures, different authorized viewers receive byte-identical
+  reusable catalog derivatives, a restarted handler gets a persistent disk
+  hit with no new miss, the asset builder reuses every unchanged variant and
+  regenerates only a damaged one, and the in-place server Stego path is
+  byte-identical to the copying public API.
+- **Real browser (headless Chromium, 89 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have
@@ -1005,17 +1066,25 @@ error — see the README checklist).
   compositor presented different incomplete phases, not merely that
   configuration state changed.
 - **Performance/quality tradeoff:** 100/100 gallery images loaded+painted in
-  **about 3.7–4.0 s** in recent deliberately non-lazy headless tests with
-  high-quality derivatives and 0 `<img>` tags; browser bundle **102.5 KiB
-  minified / 33.0 KiB gzipped**. The latest local benchmark measured
-  `scramblePixels` at 170–224 MP/s and the 900 px q95 Sharp pipeline at
-  169.9 ms one-time per cached variant (70.8 ms at 480 px and 358.1 ms at
-  1600 px). Static/per-image server outputs remain cacheable; per-token
-  marks/keys and lossless payloads intentionally trade bytes/cache hits for
-  attribution and exactness, while the client spends a delivered payload once
-  and then repaints locally. Proof signing uses one page key and one ECDSA
-  signature per uncached payload; perceptual fingerprinting is opt-in ingest
-  work, not a per-view server cost.
+  **2.1 s** in the latest deliberately non-lazy headless run with catalog
+  derivatives, 0 `<img>` tags, **2 batch mint requests and 0 single mints**;
+  browser bundle **114.4 KiB minified / 37.1 KiB gzipped**. The browser
+  fixture also builds two real precomputed assets, renders them through both
+  the JS and custom-element manifest paths, selects the 640 px variant for a
+  340×220 cover box, and proves one shared manifest request serves the page.
+  In `npm run bench`, the 1408×768 master at 960 px took 144 ms/249 KiB for
+  quality-first q95 versus 57 ms/170 KiB for catalog q88/effort-2. In a
+  separate loopback HTTP fixture with anonymous authorization and no proof
+  header, six cold canonical flows measured p50 87 ms; after a handler
+  restart the same six flows were all disk-cache hits at p50 2.8 ms, and one
+  50-item batch mint completed in 11.3 ms versus 59 ms for 50 parallel
+  single mints. Those loopback figures deliberately exclude a real
+  authorization database, TLS/network latency, Redis, and browser proof
+  signing, so they are regression evidence—not a production throughput
+  claim. Static/per-image server outputs remain cacheable; per-token or
+  viewer-scoped marks/keys and lossless payloads intentionally trade
+  bytes/cache hits for attribution and exactness, while the client spends a
+  delivered payload once and then repaints locally.
 
 - **StegoMark transform matrix (three 800 px photo masters, strength 6,
   geometry search on):** direct PNG, resize to 560 px + JPEG q70, blur 0.8 +
@@ -1165,3 +1234,14 @@ error — see the README checklist).
   client-IP selection must count trusted proxies from the right, and the
   header is untrustworthy when the origin is directly reachable) —
   https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For
+
+- Sharp, *Performance* (libuv thread-pool sizing, per-operation libvips
+  concurrency, allocator/cache tuning, and codec I/O as the throughput
+  ceiling) — https://sharp.pixelplumbing.com/performance/
+- MDN, *Fix your website's Largest Contentful Paint by optimizing image
+  loading* (responsive candidates, modern formats, lazy loading below the
+  fold, and reserving Fetch Priority for the key image) —
+  https://developer.mozilla.org/en-US/blog/fix-image-lcp/
+- Vercel, *Cache-Control headers* (long immutable caching only for
+  versioned/content-addressed assets; personalized responses remain
+  private/no-store) — https://vercel.com/docs/caching/cache-control-headers

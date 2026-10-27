@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the latest 1.5.x release and the current development
+Security fixes target the latest 1.6.x release and the current development
 branch. Older releases should be upgraded, especially because image decoding
 depends on current Sharp/libvips security fixes.
 
@@ -47,6 +47,15 @@ Rotate signing keys with the versioned keyring described in
 `docs/OPERATIONS.md`, verify that the CDN bypasses shared caching for
 token/payload routes, and treat a state-store outage as a fail-closed `503`
 rather than weakening replay controls.
+
+Derivative caches and precomputed assets do not change that boundary. A
+memory/disk/shared derivative cache is consulted only for scrambled bytes
+after the dynamic token, proof, authorization, replay, and quota checks; keep
+any disk cache private, bounded, outside public roots, and outside the master
+tree. An `archx-build` manifest contains browser scramble/AES delivery keys,
+so a public manifest is appropriate only for a deliberately public capped
+derivative. Private static catalogs must authorize or sign manifest/asset
+delivery, and build state and masters must never be deployed.
 
 Payload tokens belong in `X-Archx-Token` by default. Enabling
 `allowQueryTokens` is a legacy compatibility exception, not an equivalent

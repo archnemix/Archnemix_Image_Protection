@@ -902,7 +902,7 @@ function robustStegoLayout(cellCount, key) {
 }
 
 export function embedStegoFingerprint(rgba, w, h, payload, {
-  key = '', strength = 6, gridX, gridY, profile = 'standard',
+  key = '', strength = 6, gridX, gridY, profile = 'standard', inPlace = false,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
@@ -919,7 +919,10 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const { order, polarity, segmentPolarity } = robust
     ? robustStegoLayout(cellCount, key)
     : stegoLayout(cellCount, key);
-  const out = new Uint8Array(src);
+  // The server pipeline owns a disposable Sharp buffer, so it may opt out of
+  // this full-frame copy. Cell statistics are computed before that cell is
+  // written, which makes the in-place path byte-for-byte equivalent.
+  const out = inPlace ? src : new Uint8Array(src);
   const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
   const amp = robust ? Math.min(16, baseAmp * 1.35) : baseAmp;
 

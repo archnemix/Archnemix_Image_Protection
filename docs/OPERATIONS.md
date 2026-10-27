@@ -29,8 +29,10 @@ State that must agree across instances:
 
 Master-file caches, processed-output L1 caches, dimension caches, and Sharp
 semaphores may remain process-local. They affect performance, not the
-one-time-use security invariant. An optional shared output cache can be used
-as L2 through the same store object.
+one-time-use security invariant. Derivative reuse can add two more layers
+after authorization: a persistent, private on-disk L2 (`outputCacheDir`) and
+an optional shared state-store cache. Neither layer is an authorization or
+replay record, and neither may be placed in a public web root.
 
 Run both non-throwing audits in deployment tests or a readiness check:
 
@@ -262,7 +264,7 @@ should bypass shared caching entirely.
 
 ### CloudFront reference behavior
 
-Create behaviors for `/archx/token/*` and `/archx/i/*` (adjust `basePath`):
+Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, and `/archx/i/*` (adjust `basePath`):
 
 - Viewer protocol: redirect HTTP to HTTPS or HTTPS only.
 - Allowed methods: token behavior must allow the configured token methods
@@ -286,7 +288,7 @@ Create behaviors for `/archx/token/*` and `/archx/i/*` (adjust `basePath`):
 Create a Cache Rule for the token and payload paths:
 
 - Expression based on URI path, for example:
-  `(starts_with(http.request.uri.path, "/archx/token/")) or (starts_with(http.request.uri.path, "/archx/i/"))`
+  `(starts_with(http.request.uri.path, "/archx/token/")) or (http.request.uri.path eq "/archx/tokens") or (starts_with(http.request.uri.path, "/archx/i/"))`
 - Cache eligibility: **Bypass cache**.
 - Do not apply "Cache Everything", APO, Cache Reserve, Polish, Mirage, image
   resizing, or a Worker cache to these paths.
@@ -294,6 +296,18 @@ Create a Cache Rule for the token and payload paths:
   add a permissive `Cache-Control` response header.
 - Disable any generic rule that caches based on file extension or a
   static-looking URL for these routes.
+
+### Precomputed static assets are a separate behavior
+
+Versioned files produced by `archx-build` are not dynamic token payloads.
+When the catalog is intentionally public, serve the immutable
+`{id}-{width}w-{version}.archx` files through the CDN with a long cache
+lifetime (for example `public, max-age=31536000, immutable`) and an opaque
+content type. Do not run image resizing/optimization on them. The manifest
+needs a different policy: version it per deploy or use short/revalidating
+cache headers, and put it behind your normal signed-URL/authorization layer
+for a private catalog because it contains the browser scramble key (and AES
+key when enabled). Never publish masters or `.archx-build-state.json`.
 
 ### Post-deployment CDN verification
 
@@ -444,7 +458,39 @@ files have different timestamps/inodes, regional L1/shared-cache efficiency
 may drop, but authorization remains per-request. A changed master must not
 reuse an ambiguous in-place path during a rolling deployment.
 
-## 7. Load and capacity testing
+## 7. Image-heavy capacity architecture and load testing
+
+Choose the delivery tier per image class instead of paying the strongest
+per-viewer cost for every thumbnail:
+
+| Tier | Request-path work | Use for |
+| --- | --- | --- |
+| Precomputed `archx-build` + manifest | Static/CDN file fetch; no mint and no Sharp per view | Large public catalogs, listings, feeds, and other upload-time-known derivatives |
+| Dynamic catalog token server | Authorization/token work per view; Sharp only on a canonical derivative-cache miss | Private/revocable catalogs where most views can share image-scoped derivatives |
+| Dynamic per-viewer token server | Authorization plus potentially unique watermark/forensic/Stego/scramble material per view | Paid detail views, client proofs, licensed downloads/previews, and leak tracing |
+
+For the dynamic catalog tier, use canonical `widthBuckets`, static or
+image-scoped baked marks, a persistent non-public `outputCacheDir`, and/or a
+shared derivative cache. `withCatalogThroughputDefaults()` is a starting
+point, not a capacity proof. Keep `processingConcurrency` (concurrent Sharp
+jobs admitted by Archx) separate from `processing.sharpConcurrency`
+(libvips threads per job, process-global and last-call-wins). A common
+starting point is several single-threaded jobs rather than every job fanning
+out across all cores; benchmark on the actual instance type. If the host has
+more than four physical cores, evaluate setting `UV_THREADPOOL_SIZE` before
+Node starts, because Sharp operations also use libuv work. Disk-cache
+capacity/TTL and cache-hit ratio are capacity controls: alert on
+`handler.stats().derivativeCache` misses, disk errors/prunes, shared-cache
+errors, Sharp queue depth/timeouts, and authorization/state-store latency.
+
+Batch minting (`POST {basePath}/tokens`) reduces HTTP round trips for a page
+of thumbnails, but it intentionally does not skip per-item authorization,
+rate, quota, abuse, entitlement, callback, or signing work. Size the token
+rate and quotas for items, not batch envelopes. A slow authorization database
+will still dominate a 100-item page; index/cache entitlement lookups in the
+host application without weakening redemption-time reauthorization.
+
+### Load-test procedure
 
 The repository includes a bounded mint+redeem load tool:
 
@@ -463,13 +509,16 @@ npm run load-test -- \
 ```
 
 Record with every result: Git commit, image dimensions/formats, derivative
-width/quality, proof mode, watermark/Stego profile and registry latency,
-instance count and CPU,
-Sharp concurrency/queue settings, authorization database latency, state-store
-type/region/latency, cache state (cold/warm), CDN behavior, and error counts.
-Test at least:
+width/quality, canonical bucket count, proof mode, single versus batch
+minting, watermark/Stego scope/profile and registry latency, instance count
+and CPU, Sharp job/thread concurrency and queue settings, authorization
+database latency, state-store type/region/latency, derivative-cache state
+(cold memory, cold process with warm disk/shared cache, warm memory, or
+precomputed CDN), CDN behavior, and error counts. Test at least:
 
-- warm output cache and cold/unique derivatives;
+- warm output cache, cold-process/warm-disk derivatives, and cold/unique derivatives;
+- a realistic catalog page that measures batch-mint latency separately from payload bytes;
+- precomputed manifest/variant CDN hit ratio and manifest invalidation behavior, when using `archx-build`;
 - many viewers versus one viewer (quota behavior differs);
 - token mint and redemption routed to different instances;
 - state-store latency, timeout, and failover;

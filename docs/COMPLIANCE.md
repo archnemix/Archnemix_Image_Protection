@@ -30,7 +30,7 @@ privacy retention, and contractual commitments.
 | Image processing | Sharp budgets, format checks, timeouts, bounded queues | Current Node/Sharp/libvips, malware/content policy for masters, resource isolation |
 | Network/CDN | Private/no-store origin headers and runbook | CDN bypass rules, WAF/TLS, log redaction, deployed verification |
 | Monitoring | Versioned security events, metadata-only successful-delivery events, sanitized browser telemetry/plugins, and handler stats | SIEM ingestion, reverse-image-search/monitoring alert ownership, retention, privacy review, incident response |
-| Availability | Fail-closed state-store behavior and load-test tool | Capacity, redundancy, backups, regional failover exercises |
+| Availability | Fail-closed state-store behavior, canonical/persistent derivative reuse, batch minting, optional precomputed CDN assets, and load-test tool | Capacity, redundancy, backups, cache/CDN hit-ratio evidence, regional failover exercises |
 | Watermark evidence | Standard/robust StegoMark, forensic issuance hooks, buyer/order/delivery registry fields, detector tooling, and an external provenance hook | Durable registry, key/profile retention, C2PA signing service if used, chain of custody, investigation/legal process |
 | Compliance evidence | Source, tests, CI, SBOM process, this map | Organization policies, audits, vendor review, customer contracts |
 
@@ -72,7 +72,7 @@ support technical controls in a larger system; the library alone cannot be
 | CC7.3 incident evaluation | Replay/quota/state-store event reasons and key-rotation runbook | Incident policy, ticketing, post-incident reviews |
 | CC7.4 recovery | Fail-closed store behavior and active/passive guidance | Backups, restore tests, failover exercises, RTO/RPO |
 | CC8.1 change management | Git history, CI checks, lockfile, changelog | Approval workflow, segregation of duties, production release records |
-| A1 availability/capacity | Processing bounds and load-test tool | Capacity forecasts, load-test reports, autoscaling and SLOs |
+| A1 availability/capacity | Processing bounds, derivative-cache statistics, batch/static scale paths, and load-test tool | Capacity forecasts, cold/warm load-test reports, autoscaling and SLOs |
 | C1 confidentiality | Never serves masters through the protected route; keyed marks/tokens | Data classification, encryption at rest, vendor/subprocessor management |
 | P privacy criteria (if selected) | Viewer hashes in structured events; no tokens in event route | Privacy notices, lawful basis, IP/viewer retention and deletion process |
 
@@ -94,7 +94,8 @@ Before engaging an auditor or penetration tester, provide:
    replay across instances, proof theft/replay, client attempts to widen
    width/quality, authorization and buyer/order trace changes inside the TTL,
    quota bypass, malformed/oversized images, Sharp resource limits,
-   registry/provenance-hook failure, CDN shared-cache behavior,
+   registry/provenance-hook failure, batch-item isolation, derivative-cache
+   placement/bounds, static-manifest authorization, CDN shared-cache behavior,
    state-store outage/failover, patched browser/WebGL API behavior and the
    chosen Fortress-versus-Vault policy, and key retirement.
 6. Load-test results and the environment details listed in
