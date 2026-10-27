@@ -130,9 +130,13 @@ function serveStatic(req, res) {
     let filePath;
     try { filePath = fs.realpathSync(candidate); } catch { break; }
     if (!isInsideDir(dir, filePath) || !fs.statSync(filePath).isFile()) break;
+    const ext = path.extname(filePath).toLowerCase();
     res.writeHead(200, {
-      'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      // Content-hashed .archx variants are immutable by construction and may
+      // be cached forever (the documented CDN policy); the manifest and all
+      // other files must revalidate so rebuilds are picked up immediately.
+      'Cache-Control': ext === '.archx' ? 'public, max-age=31536000, immutable' : 'no-cache',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
     });

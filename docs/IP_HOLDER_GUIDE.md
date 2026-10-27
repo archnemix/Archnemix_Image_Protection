@@ -102,6 +102,12 @@ your evidence; it cannot repeal the "analog hole."
 - If the catalog is private, the list of prepared files and their keys must
   be protected too. A public prepared catalog is appropriate only when you
   are comfortable that anyone can obtain those capped, marked derivatives.
+- Ask your developer to "seal" the prepared catalog: Archx can check a
+  fingerprint of the catalog list and of every prepared file before showing
+  it, so a hosting mistake or substituted file is rejected instead of
+  displayed. Visitors on slow or data-saving connections can also be served
+  a smaller prepared size automatically, which cuts your bandwidth bill
+  without changing what well-connected visitors see.
 
 ## If you find a suspected copy
 

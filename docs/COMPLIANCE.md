@@ -95,7 +95,8 @@ Before engaging an auditor or penetration tester, provide:
    width/quality, authorization and buyer/order trace changes inside the TTL,
    quota bypass, malformed/oversized images, Sharp resource limits,
    registry/provenance-hook failure, batch-item isolation, derivative-cache
-   placement/bounds, static-manifest authorization, CDN shared-cache behavior,
+   placement/bounds, cold-stampede coalescing evidence, static-manifest
+   authorization and integrity-pin deployment/rotation, CDN shared-cache behavior,
    state-store outage/failover, patched browser/WebGL API behavior and the
    chosen Fortress-versus-Vault policy, and key retirement.
 6. Load-test results and the environment details listed in

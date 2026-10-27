@@ -18,7 +18,7 @@ not a claim that every browser/OS combination below has been certified.
 
 | Browser / platform | Status | Expected behavior |
 | --- | --- | --- |
-| Chromium (headless, repository test build) | **Automated: 89 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, and guard behavior are exercised. |
+| Chromium (headless, repository test build) | **Automated: 98 browser checks** | Canvas/WebGL rendering, protected token flow, proof of possession, WebGL draw-hook tripwires, Fortress fail-closed behavior, degraded decoys, temporal shader/frames modes including `fortress60`, gallery lifecycle, sanitized telemetry/plugin events, guard behavior, manifest integrity pinning/tamper rejection, network-aware sampling, and asset preload cache warming are exercised. |
 | Google Chrome, current stable and previous major | Expected | Same Chromium platform family. Test your exact site CSP, cookies, CDN, and extensions before release. |
 | Microsoft Edge, current stable and previous major | Expected | Chromium-based; same caveats as Chrome. |
 | Brave and other Chromium browsers | Expected with site testing | Privacy/network defaults or extension policies can affect fetch, WebGL, storage, and proof-key behavior. |
@@ -42,6 +42,8 @@ not a claim that every browser/OS combination below has been certified.
 | Token mint method | `POST` + `X-Archx-Request` | A temporary GET bridge exists for legacy clients; it is not the preferred production posture. Optional batch minting uses `POST {basePath}/tokens` and the bundled client falls back to single POST mints only when that endpoint is absent (404/405/501). |
 | Output cache | Local L1, optional persistent disk L2, and optional shared L2 | Disk/shared derivative-cache failure falls back to authorized reprocessing. Replay/quota state never falls back locally in multi-instance mode. |
 | Precomputed assets | Version-1 `archx-build` manifest + immutable `.archx` variants | Any static host/CDN can serve public variants. Private catalogs must authorize/sign the key-bearing manifest and URLs; there is no dynamic token fallback unless the host also deploys the middleware. |
+| Asset integrity | Per-variant SHA-256 digests in the manifest; optional whole-manifest pin (`assetManifestIntegrity`) | Verification uses WebCrypto `SubtleCrypto` (secure contexts). `assetIntegrity:'auto'` skips verification only when no digest or no WebCrypto exists; `'require'` and a configured manifest pin fail closed in that situation. |
+| Network-aware sampling | Network Information API (`navigator.connection.saveData` / `effectiveType`), Chromium-family | Firefox/Safari do not expose the API; `networkAware` is then a no-op and the configured DPR/oversample/quality sampling applies unchanged. It is a performance hint, never a security input. |
 | StegoMark | Server-side pixel embedding through Sharp | `standard` remains backward-compatible. `robust` uses larger cells, a dual-CRC/marker codeword, median voting, and bounded correction; detection remains empirical and format/geometry dependent, so test it on your catalog and preserve the issued profile. |
 
 ## CSP and viewer construction

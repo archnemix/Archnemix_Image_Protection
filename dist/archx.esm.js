@@ -1285,7 +1285,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.6.0";
+var VERSION = "1.7.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1553,6 +1553,10 @@ var DEFAULTS = {
   assetManifestMaxBytes: 8 * 1024 * 1024,
   assetHttpCache: "default",
   // manifest/variant fetches may use browser/CDN HTTP caching
+  assetIntegrity: "auto",
+  // 'auto' | 'require' | 'off' — verify per-variant SHA-256 digests from the manifest
+  assetManifestIntegrity: null,
+  // optional 'sha256-<hex>' pin for a fetched manifest (archx-build prints it)
   httpCache: "no-store",
   // direct URL sources; token mint/payload requests always remain no-store
   fetchPriority: null,
@@ -1586,6 +1590,8 @@ var DEFAULTS = {
   // 'original' | 'high' | 'balanced' | 'catalog' | 'fast' (sets requestQuality + sampling unless overridden)
   requestQuality: null,
   // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
+  networkAware: false,
+  // honour Save-Data / slow effectiveType with a smaller derivative (Network Information API)
   cacheBitmap: true,
   // reuse a decoded bitmap for the same source in this page session
   bitmapCacheMaxEntries: 40,
@@ -1872,6 +1878,7 @@ var PRESETS = Object.freeze({
     tokenBatchMaxDelayMs: 150,
     sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
     httpCache: "default",
+    networkAware: true,
     bitmapCacheMaxEntries: 24,
     bitmapCacheMaxBytes: 128 * 1024 * 1024,
     guards: Object.freeze({ blurOnBlur: false })
@@ -1892,6 +1899,7 @@ var PRESETS = Object.freeze({
     tokenBatchMaxDelayMs: 150,
     sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
     httpCache: "default",
+    networkAware: true,
     assetHttpCache: "default",
     bitmapCacheMaxEntries: 24,
     bitmapCacheMaxBytes: 128 * 1024 * 1024,
@@ -2341,6 +2349,38 @@ function canonicalSourceWidth(value, bucketsValue, maxWidth) {
   const atOrBelowMax = buckets.filter((bucket) => bucket <= max);
   return atOrBelowMax.length ? atOrBelowMax[atOrBelowMax.length - 1] : requested;
 }
+function networkConnectionInfo() {
+  try {
+    const conn = typeof navigator !== "undefined" ? navigator.connection : null;
+    if (!conn || typeof conn !== "object") return null;
+    return {
+      saveData: conn.saveData === true,
+      effectiveType: typeof conn.effectiveType === "string" ? conn.effectiveType : ""
+    };
+  } catch {
+    return null;
+  }
+}
+function effectiveSampling(o) {
+  let dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
+  let oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+  let requestQuality = o.requestQuality === "lossless" || Number.isInteger(o.requestQuality) && o.requestQuality >= 1 && o.requestQuality <= 100 ? o.requestQuality : null;
+  if (o.networkAware === true) {
+    const conn = networkConnectionInfo();
+    const constrained = !!conn && (conn.saveData || conn.effectiveType === "slow-2g" || conn.effectiveType === "2g");
+    const moderate = !!conn && !constrained && conn.effectiveType === "3g";
+    if (constrained) {
+      dprCap = Math.min(dprCap, 1);
+      oversample = Math.min(oversample, 1);
+      if (Number.isInteger(requestQuality)) requestQuality = Math.min(requestQuality, 72);
+    } else if (moderate) {
+      dprCap = Math.min(dprCap, 1.5);
+      oversample = Math.min(oversample, 1);
+      if (Number.isInteger(requestQuality)) requestQuality = Math.min(requestQuality, 82);
+    }
+  }
+  return { dprCap, oversample, requestQuality };
+}
 function normalizedHttpCache(value, fallback = "no-store") {
   const mode = String(value ?? fallback).toLowerCase();
   return ["default", "no-store", "reload", "no-cache", "force-cache", "only-if-cached"].includes(mode) ? mode : fallback;
@@ -2352,6 +2392,47 @@ function fetchPriorityInit(options = {}) {
 var ASSET_MANIFEST_CACHE_MAX = 8;
 var assetManifestCache = /* @__PURE__ */ new Map();
 var assetManifestObjectCache = /* @__PURE__ */ new WeakMap();
+async function sha256Hex(bytes) {
+  try {
+    if (typeof crypto === "undefined" || !crypto.subtle?.digest) return null;
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const digest = await crypto.subtle.digest("SHA-256", view);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+function normalizeManifestIntegrityPin(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
+  const hex = value.startsWith("sha256-") ? value.slice("sha256-".length) : value;
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
+  return hex;
+}
+function normalizeAssetIntegrityMode(value) {
+  if (value === true) return "require";
+  if (value === false || value === "off") return "off";
+  if (value === "require") return "require";
+  return "auto";
+}
+async function verifyAssetVariantIntegrity(variant, bytes, options) {
+  const mode = normalizeAssetIntegrityMode(options.assetIntegrity);
+  if (mode === "off") return;
+  if (!variant.sha256) {
+    if (mode === "require") throw nonRetryableError("Archx: asset variant has no integrity digest");
+    return;
+  }
+  const digest = await sha256Hex(bytes);
+  if (!digest) {
+    if (mode === "require") {
+      throw nonRetryableError("Archx: asset integrity cannot be verified in this browser");
+    }
+    return;
+  }
+  if (digest !== variant.sha256) {
+    throw nonRetryableError("Archx: asset variant integrity check failed");
+  }
+}
 function normalizeAssetManifest(raw, baseUrl) {
   if (!isPlainClientObject(raw) || raw.version !== 1 || !isPlainClientObject(raw.assets)) {
     throw nonRetryableError("Archx: asset manifest is invalid");
@@ -2389,12 +2470,16 @@ function normalizeAssetManifest(raw, baseUrl) {
       if (!isPlainClientObject(variantRaw) || !Number.isSafeInteger(variantRaw.width) || !Number.isSafeInteger(variantRaw.height) || variantRaw.width < 1 || variantRaw.height < 1 || variantRaw.width > 65536 || variantRaw.height > 65536 || typeof variantRaw.url !== "string" || !variantRaw.url || variantRaw.url.length > 16384) {
         throw nonRetryableError("Archx: asset manifest contains an invalid variant");
       }
+      if (variantRaw.sha256 !== void 0 && variantRaw.sha256 !== null && (typeof variantRaw.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(variantRaw.sha256))) {
+        throw nonRetryableError("Archx: asset manifest contains an invalid variant digest");
+      }
       const url = resolveHttpUrl(variantRaw.url, { base: baseUrl?.href, label: "asset variant URL" });
       return Object.freeze({
         width: variantRaw.width,
         height: variantRaw.height,
         url,
-        bytes: Number.isSafeInteger(variantRaw.bytes) && variantRaw.bytes > 0 ? variantRaw.bytes : null
+        bytes: Number.isSafeInteger(variantRaw.bytes) && variantRaw.bytes > 0 ? variantRaw.bytes : null,
+        sha256: typeof variantRaw.sha256 === "string" ? variantRaw.sha256 : null
       });
     }).sort((a, b) => a.width - b.width || a.height - b.height);
     assets.set(id, Object.freeze({
@@ -2410,7 +2495,9 @@ function normalizeAssetManifest(raw, baseUrl) {
   return Object.freeze({ version: 1, assets });
 }
 async function loadAssetManifest(manifestSource, options, controls) {
+  const pin = normalizeManifestIntegrityPin(options.assetManifestIntegrity);
   if (isPlainClientObject(manifestSource)) {
+    if (pin) throw nonRetryableError("Archx: assetManifestIntegrity requires a fetched manifest URL");
     let normalized = assetManifestObjectCache.get(manifestSource);
     if (!normalized) {
       const base = typeof document !== "undefined" ? new URL(document.baseURI) : new URL("http://archx.local/");
@@ -2437,7 +2524,8 @@ async function loadAssetManifest(manifestSource, options, controls) {
     cacheMode,
     maxBytes,
     controls.fetchTimeoutMs,
-    controls.retries
+    controls.retries,
+    pin || ""
   ]);
   let pending = assetManifestCache.get(cacheKey);
   if (pending) {
@@ -2458,6 +2546,13 @@ async function loadAssetManifest(manifestSource, options, controls) {
         timeoutMs: controls.fetchTimeoutMs,
         validateResponse: (res) => assertResponseFinalOrigin(res, /* @__PURE__ */ new Set([manifestUrl.origin]))
       });
+      if (pin) {
+        const digest = await sha256Hex(response.bytes);
+        if (!digest) {
+          throw nonRetryableError("Archx: asset manifest integrity cannot be verified in this browser");
+        }
+        if (digest !== pin) throw nonRetryableError("Archx: asset manifest integrity check failed");
+      }
       return normalizeAssetManifest(parseBoundedJson(response.bytes), manifestUrl);
     })();
     assetManifestCache.set(cacheKey, pending);
@@ -3537,8 +3632,7 @@ var ProtectedImage = class {
       const rect = __privateGet(this, _host).getBoundingClientRect?.();
       const cssWidth = rect?.width || __privateGet(this, _host).clientWidth || 800;
       const cssHeight = rect?.height || __privateGet(this, _host).clientHeight || cssWidth * 0.75;
-      const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
-      const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+      const { dprCap, oversample } = effectiveSampling(o);
       const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
       const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
       const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
@@ -3555,11 +3649,13 @@ var ProtectedImage = class {
       const assetCacheMode = normalizedHttpCache(o.assetHttpCache, "default");
       const assetCacheKey = cacheDigest([
         "asset",
-        1,
+        2,
         o.cacheScope || "",
         assetId,
         variant.url.href,
         variant.width,
+        variant.sha256 || "",
+        normalizeAssetIntegrityMode(o.assetIntegrity),
         asset.key,
         asset.grid,
         asset.aesKey || "",
@@ -3600,6 +3696,7 @@ var ProtectedImage = class {
             }
           }
         });
+        await verifyAssetVariantIntegrity(variant, buf, o);
         if (o.cachePayload !== false) {
           __privateSet(this, _cachedBytes, buf);
           __privateSet(this, _cachedExtra, assetExtra);
@@ -5314,14 +5411,12 @@ tokenMintContext_fn = async function(controls) {
   const rect = __privateGet(this, _host).getBoundingClientRect?.();
   const cssWidth = rect?.width || __privateGet(this, _host).clientWidth || 800;
   const cssHeight = rect?.height || __privateGet(this, _host).clientHeight || cssWidth * 0.75;
-  const dprCap = Number.isFinite(Number(o.dprCap)) && Number(o.dprCap) > 0 ? Number(o.dprCap) : DEFAULTS.dprCap;
-  const oversample = Number.isFinite(Number(o.sourceOversample)) && Number(o.sourceOversample) > 0 ? Number(o.sourceOversample) : 1;
+  const { dprCap, oversample, requestQuality } = effectiveSampling(o);
   const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
   const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
   const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
   const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
   const fit = ["cover", "contain", "fill"].includes(o.fit) ? o.fit : "cover";
-  const requestQuality = o.requestQuality === "lossless" || Number.isInteger(o.requestQuality) && o.requestQuality >= 1 && o.requestQuality <= 100 ? o.requestQuality : null;
   const tokenMethod = String(o.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
   const tokenTransport = ["header", "query", "auto"].includes(String(o.tokenTransport || "header").toLowerCase()) ? String(o.tokenTransport || "header").toLowerCase() : "header";
   const proofSetting = o.proofOfPossession;
@@ -5760,6 +5855,78 @@ function loadImage(target, source, options) {
   const inst = new ProtectedImage(target, source, options);
   return inst;
 }
+async function preloadAssets(assetIds, options = {}) {
+  if (!Array.isArray(assetIds)) throw new Error("Archx: preloadAssets requires an array of asset ids");
+  const ids = [...new Set(assetIds.filter(
+    (id) => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)
+  ))].slice(0, 500);
+  const o = mergeOptions(options);
+  const controls = fetchControls(o);
+  if (o.networkAware === true && networkConnectionInfo()?.saveData) {
+    return Object.freeze({
+      preloaded: Object.freeze([]),
+      failed: Object.freeze([]),
+      skipped: "save-data"
+    });
+  }
+  const manifestSource = options.assetManifest || o.assetManifest;
+  if (!manifestSource) throw new Error("Archx: assetManifest required for preloadAssets");
+  const manifest = await loadAssetManifest(manifestSource, o, controls);
+  const { dprCap } = effectiveSampling(o);
+  const viewportWidth = typeof window !== "undefined" ? window.innerWidth || 1280 : 1280;
+  const deviceRatio = typeof devicePixelRatio !== "undefined" ? devicePixelRatio || 1 : 1;
+  const defaultWidth = Math.ceil(Math.min(viewportWidth * Math.min(deviceRatio, dprCap), 2560));
+  const wantedWidth = canonicalSourceWidth(
+    boundedInteger(options.width, defaultWidth, 1, 16384),
+    o.sourceWidthBuckets,
+    boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384)
+  );
+  const cacheMode = normalizedHttpCache(o.assetHttpCache, "default");
+  const preloaded = [];
+  const failed = [];
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+    while (cursor < ids.length) {
+      const id = ids[cursor++];
+      try {
+        const asset = manifest.assets.get(id);
+        if (!asset) throw new Error("asset id is not present in the manifest");
+        const variant = chooseAssetVariant(asset, wantedWidth);
+        const { bytes } = await fetchBounded(variant.url.href, {
+          method: "GET",
+          credentials: controls.credentials,
+          cache: cacheMode,
+          ...fetchPriorityInit({ ...o, fetchPriority: o.fetchPriority || "low" })
+        }, {
+          retries: controls.retries,
+          maxBytes: controls.maxResponseBytes,
+          timeoutMs: controls.fetchTimeoutMs,
+          validateResponse: (res) => {
+            if (!res.url) return;
+            let finalUrl;
+            try {
+              finalUrl = new URL(res.url);
+            } catch {
+              throw nonRetryableError("Archx: asset response URL is invalid");
+            }
+            if (!["http:", "https:"].includes(finalUrl.protocol) || finalUrl.username || finalUrl.password) {
+              throw nonRetryableError("Archx: asset response URL is disallowed");
+            }
+          }
+        });
+        await verifyAssetVariantIntegrity(variant, bytes, o);
+        preloaded.push(id);
+      } catch (err) {
+        failed.push(Object.freeze({ id, error: String(err?.message || err).slice(0, 200) }));
+      }
+    }
+  });
+  await Promise.all(workers);
+  return Object.freeze({
+    preloaded: Object.freeze(preloaded),
+    failed: Object.freeze(failed)
+  });
+}
 function loadGallery(container, items, options = {}) {
   const host = $(container);
   if (!host) throw new Error("Archx: gallery container not found");
@@ -5775,6 +5942,7 @@ function loadGallery(container, items, options = {}) {
     tokenBatchDelayMs: 20,
     tokenBatchMaxDelayMs: 150,
     sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    networkAware: true,
     httpCache: "default",
     bitmapCacheMaxEntries: 24,
     bitmapCacheMaxBytes: 128 * 1024 * 1024
@@ -5883,6 +6051,9 @@ function defineElement() {
         tokenTransport: this.getAttribute("token-transport") || void 0,
         tokenBatch: this.hasAttribute("token-batch") ? this.getAttribute("token-batch") !== "false" : presetOptions.tokenBatch,
         assetManifest: this.getAttribute("asset-manifest") || presetOptions.assetManifest,
+        assetIntegrity: this.getAttribute("asset-integrity") || presetOptions.assetIntegrity,
+        assetManifestIntegrity: this.getAttribute("asset-manifest-integrity") || presetOptions.assetManifestIntegrity,
+        networkAware: this.hasAttribute("network-aware") ? this.getAttribute("network-aware") !== "false" : presetOptions.networkAware,
         fetchPriority: this.getAttribute("fetch-priority") || presetOptions.fetchPriority,
         proofOfPossession: this.getAttribute("proof-of-possession") || void 0,
         cacheScope: this.getAttribute("cache-scope") || void 0
@@ -5927,6 +6098,8 @@ var Archx = {
   image: loadImage,
   gallery: loadGallery,
   protectAll,
+  /** Warm manifest + HTTP caches for {assetId} sources without mounting viewers. */
+  preloadAssets,
   defineElement,
   /** Number of live protected images (the registry itself stays private). */
   get instanceCount() {
@@ -6000,6 +6173,7 @@ export {
   paddedSize,
   perceptualFingerprint,
   perceptualFingerprintDistance,
+  preloadAssets,
   preset,
   scramblePixels,
   sniffImageFormat,

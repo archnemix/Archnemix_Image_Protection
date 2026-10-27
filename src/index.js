@@ -15,6 +15,7 @@ import Archx, {
   usePlugin,
   listPlugins,
   detectAutomation,
+  preloadAssets,
 } from './archx.js';
 export {
   ProtectedImage,
@@ -33,6 +34,7 @@ export {
   usePlugin,
   listPlugins,
   detectAutomation,
+  preloadAssets,
 };
 export * from './scramble.js';
 export default Archx;

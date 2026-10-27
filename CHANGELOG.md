@@ -3,6 +3,48 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.7.0] — Unreleased
+
+### Added
+
+- Static-catalog integrity pinning: `archx-build` now prints (and
+  `buildArchxAssets()` returns) the SHA-256 of the exact manifest bytes, and
+  the browser gained `assetManifestIntegrity: 'sha256-<hex>'` to reject a
+  substituted manifest before any key or variant URL is trusted, plus
+  `assetIntegrity: 'auto' | 'require' | 'off'` to verify each fetched
+  variant against the per-variant SHA-256 recorded in the manifest. This
+  detects CDN/object-store tampering or mixed deployments between build
+  and browser; it does not make a public manifest confidential.
+- `Archx.preloadAssets(ids, options)` (also exported as `preloadAssets`):
+  warms the manifest and browser HTTP caches for `{ assetId }` sources
+  without mounting viewers, so hero images and next-slide detail views skip
+  the network at first paint. Per-id outcomes are reported instead of
+  throwing, and Save-Data connections are skipped when `networkAware` is on.
+- Network-aware sampling: with `networkAware: true` (now in the
+  `catalog`/`gallery` presets and gallery loader defaults), a Save-Data
+  preference or a slow `effectiveType` (Network Information API,
+  Chromium-family) caps DPR/oversampling and numeric request quality so
+  constrained users receive a materially smaller derivative. Browsers
+  without the API keep the configured sampling; an explicit `lossless`
+  request is never silently downgraded.
+- `<archx-image>` attributes for the new options: `network-aware`,
+  `asset-integrity`, and `asset-manifest-integrity`.
+- Build hygiene: `npm run build` now emits `dist/archx.min.js.sri`
+  (a `sha384-…` Subresource Integrity pin for CDN-hosted bundles), a new
+  `npm run lint` syntax gate runs `node --check` over all shipped/test
+  sources (wired into `npm run verify` and CI), and Dependabot groups
+  minor/patch updates.
+
+### Changed
+
+- Derivative-cache accounting is more precise: `handler.stats().derivativeCache`
+  now reports `coalesced` (requests that joined an in-flight cold transform
+  through singleflight stampede protection) separately from `misses`, which
+  counts only the request that actually ran the Sharp job.
+- The demo server serves content-hashed `.archx` files with
+  `Cache-Control: public, max-age=31536000, immutable` (the documented CDN
+  policy); manifests and all other files still revalidate.
+
 ## [1.6.0] — Unreleased
 
 ### Added

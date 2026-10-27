@@ -427,10 +427,15 @@ export async function buildArchxAssets(options = {}) {
     assets,
   });
   await writeJsonAtomic(manifestPath, manifest);
+  // Hash the exact manifest bytes on disk so hosts can pin them in the
+  // browser (`assetManifestIntegrity`) and detect CDN/object-store tampering
+  // or stale-manifest mix-ups before any key or variant URL is trusted.
+  const manifestSha256 = sha256(await fs.promises.readFile(manifestPath));
   await writeJsonAtomic(statePath, { version: 1, variants: variantsState });
 
   return Object.freeze({
     manifest,
+    manifestSha256,
     manifestPath,
     statePath,
     assets: entries.length,

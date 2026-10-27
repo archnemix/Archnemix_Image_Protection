@@ -1684,6 +1684,7 @@ export function createArchxMiddleware(options = {}) {
     diskHits: 0,
     sharedHits: 0,
     misses: 0,
+    coalesced: 0,
     diskWrites: 0,
     sharedWrites: 0,
     diskEntries: 0,
@@ -3069,9 +3070,14 @@ export function createArchxMiddleware(options = {}) {
             await setDiskOutputCache(sharedCacheKey, bytes);
           }
         }
-        if (!bytes) derivativeCacheStats.misses++;
         if (!bytes) {
           let pending = outputInFlight.get(cacheKey);
+          // Singleflight: the first cold request for a derivative runs the
+          // one Sharp job; concurrent waiters join the same promise instead
+          // of stampeding the origin with duplicate transforms. Only the
+          // leader counts as a cache miss; waiters count as coalesced.
+          if (pending) derivativeCacheStats.coalesced++;
+          else derivativeCacheStats.misses++;
           if (!pending) {
             pending = (async () => {
               try {

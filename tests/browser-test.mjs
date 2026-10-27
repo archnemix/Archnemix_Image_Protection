@@ -35,7 +35,7 @@ if (!fs.existsSync(path.join(root, 'demo-masters/gallery/gallery-001.jpg'))) {
  * generated directory is removed in the finally block below. */
 const protectedTestDir = path.join(root, 'demo', 'protected-test');
 fs.rmSync(protectedTestDir, { recursive: true, force: true });
-await buildArchxAssets({
+const browserCatalogBuild = await buildArchxAssets({
   images: {
     'aurora-valley': path.join(root, 'demo-masters', 'aurora-valley.jpg'),
     'neon-portrait': path.join(root, 'demo-masters', 'neon-portrait.jpg'),
@@ -100,7 +100,7 @@ const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push('pageerror: ' + e.message));
 page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('console: ' + m.text()); });
 const proofTraffic = { mintProofKeys: 0, payloadProofs: 0, payloadRequests: 0 };
-const scaleTraffic = { batchMints: 0, singleMints: 0, manifests: 0, assetPayloads: 0 };
+const scaleTraffic = { batchMints: 0, singleMints: 0, manifests: 0, assetPayloads: 0, assetPayloadNetwork: 0 };
 page.on('request', (request) => {
   const url = request.url();
   const headers = request.headers();
@@ -112,6 +112,13 @@ page.on('request', (request) => {
   if (url.includes('/archx/i/')) {
     proofTraffic.payloadRequests++;
     if (headers['x-archx-proof']) proofTraffic.payloadProofs++;
+  }
+});
+page.on('response', (response) => {
+  const url = response.url();
+  if (url.includes('/demo/protected-test/') && url.includes('.archx') &&
+      response.status() === 200 && !response.fromCache()) {
+    scaleTraffic.assetPayloadNetwork++;
   }
 });
 
@@ -1147,6 +1154,154 @@ try {
     document.querySelector('#t-asset-neon')?.remove();
     document.querySelector('#t-asset-element')?.remove();
   });
+
+  console.log('\n[8c] Integrity pinning, network-aware sampling, and asset preload');
+  const browserManifest = JSON.parse(fs.readFileSync(path.join(protectedTestDir, 'archx-manifest.json'), 'utf8'));
+  const auroraVariantWidths = browserManifest.assets['aurora-valley'].variants.map((v) => v.width);
+  const neonMaxWidth = Math.max(...browserManifest.assets['neon-portrait'].variants.map((v) => v.width));
+  const networkBeforePreload = scaleTraffic.assetPayloadNetwork;
+  const preloadOutcome = await page.evaluate(async () => {
+    const result = await window.Archx.preloadAssets(['neon-portrait', 'missing-asset'], {
+      ...window.Archx.preset('catalog'),
+      assetManifest: '/demo/protected-test/archx-manifest.json',
+      width: 960,
+    });
+    return {
+      preloaded: [...result.preloaded],
+      failed: result.failed.map((f) => f.id),
+      skipped: result.skipped || null,
+    };
+  });
+  check('preloadAssets warms the requested variant and reports unknown ids without throwing',
+    preloadOutcome.preloaded.includes('neon-portrait') &&
+      preloadOutcome.failed.includes('missing-asset') && preloadOutcome.skipped === null,
+    JSON.stringify(preloadOutcome));
+  check('preloading fetches the largest variant from the network exactly once',
+    scaleTraffic.assetPayloadNetwork === networkBeforePreload + 1,
+    `network 200s before=${networkBeforePreload} after=${scaleTraffic.assetPayloadNetwork}`);
+  const warmLoad = await page.evaluate(async () => {
+    const host = document.createElement('div');
+    host.id = 't-preload-warm';
+    host.style.cssText = 'width:900px;height:500px';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { assetId: 'neon-portrait' }, {
+      ...window.Archx.preset('catalog'), lazy: false, cacheBitmap: false, debug: true, shadow: 'open',
+    });
+    await inst.ready;
+    const out = { loaded: inst.loaded, width: inst._debug()?.meta?.origW };
+    inst.destroy();
+    host.remove();
+    return out;
+  });
+  check('a preloaded variant then renders at the preloaded width',
+    warmLoad.loaded && warmLoad.width === neonMaxWidth, JSON.stringify(warmLoad));
+  check('the warmed variant is served from the HTTP cache, not refetched',
+    scaleTraffic.assetPayloadNetwork === networkBeforePreload + 1,
+    `network 200s=${scaleTraffic.assetPayloadNetwork}`);
+
+  const integrityOutcomes = await page.evaluate(async (manifestPin) => {
+    const manifestUrl = '/demo/protected-test/archx-manifest.json';
+    const makeHost = (id) => {
+      const host = document.createElement('div');
+      host.id = id;
+      host.style.cssText = 'width:340px;height:220px';
+      document.body.appendChild(host);
+      return host;
+    };
+    const attempt = (host, source, options) => new Promise((resolve) => {
+      const inst = window.Archx.load.image(host, source, {
+        ...window.Archx.preset('catalog'), lazy: false, debug: true, shadow: 'open',
+        ...options,
+        onError: (err) => resolve({ loaded: false, error: String(err?.message || err) }),
+      });
+      inst.ready.catch(() => {});
+      const iv = setInterval(() => {
+        if (inst.loaded) {
+          clearInterval(iv);
+          resolve({ loaded: true, width: inst._debug()?.meta?.origW });
+        }
+      }, 50);
+      setTimeout(() => { clearInterval(iv); resolve({ loaded: inst.loaded, error: 'timeout' }); }, 20000);
+      window.__integrityInstances = [...(window.__integrityInstances || []), inst];
+    });
+
+    const outcomes = {};
+    outcomes.pinned = await attempt(makeHost('t-pin-ok'), { assetId: 'aurora-valley' },
+      { assetManifestIntegrity: manifestPin });
+    outcomes.wrongPin = await attempt(makeHost('t-pin-bad'), { assetId: 'aurora-valley' },
+      { assetManifestIntegrity: 'sha256-' + '0'.repeat(64) });
+
+    const originalConnection = navigator.connection;
+    const setConnection = (value) => Object.defineProperty(navigator, 'connection',
+      { configurable: true, value });
+    try {
+      outcomes.full = await attempt(makeHost('t-net-full'), { assetId: 'aurora-valley' },
+        { sourceOversample: 2, cacheBitmap: false });
+      setConnection({ saveData: true, effectiveType: '2g' });
+      outcomes.constrained = await attempt(makeHost('t-net-slow'), { assetId: 'aurora-valley' },
+        { sourceOversample: 2, cacheBitmap: false });
+      const skipped = await window.Archx.preloadAssets(['aurora-valley'], {
+        assetManifest: manifestUrl, networkAware: true,
+      });
+      outcomes.preloadSkipped = skipped.skipped || null;
+    } finally {
+      setConnection(originalConnection);
+    }
+
+    for (const inst of window.__integrityInstances || []) inst.destroy();
+    for (const id of ['t-pin-ok', 't-pin-bad', 't-net-full', 't-net-slow']) {
+      document.querySelector('#' + id)?.remove();
+    }
+    return outcomes;
+  }, 'sha256-' + browserCatalogBuild.manifestSha256);
+  check('a correct manifest integrity pin loads normally',
+    integrityOutcomes.pinned.loaded === true, JSON.stringify(integrityOutcomes.pinned));
+  check('a wrong manifest integrity pin is rejected before any key or variant is trusted',
+    integrityOutcomes.wrongPin.loaded === false && /integrity/.test(integrityOutcomes.wrongPin.error || ''),
+    JSON.stringify(integrityOutcomes.wrongPin));
+  check('network-aware sampling serves a smaller derivative on Save-Data/2g',
+    integrityOutcomes.full.width === auroraVariantWidths.at(-1) &&
+      integrityOutcomes.constrained.width === auroraVariantWidths[1],
+    JSON.stringify({ full: integrityOutcomes.full, constrained: integrityOutcomes.constrained }));
+  check('preloadAssets refuses to spend data on Save-Data connections',
+    integrityOutcomes.preloadSkipped === 'save-data', JSON.stringify(integrityOutcomes));
+
+  const tamperVariant = browserManifest.assets['aurora-valley'].variants.find((v) => v.width === 640);
+  const tamperPath = path.join(protectedTestDir, decodeURIComponent(path.basename(tamperVariant.url)));
+  const tamperOriginal = fs.readFileSync(tamperPath);
+  const tamperBytes = Buffer.from(tamperOriginal);
+  tamperBytes[tamperBytes.length - 1] ^= 0xff;
+  fs.writeFileSync(tamperPath, tamperBytes);
+  let tamperOutcome;
+  try {
+    tamperOutcome = await page.evaluate(async () => {
+      const host = document.createElement('div');
+      host.id = 't-tampered';
+      host.style.cssText = 'width:340px;height:220px';
+      document.body.appendChild(host);
+      const outcome = await new Promise((resolve) => {
+        const inst = window.Archx.load.image(host, { assetId: 'aurora-valley' }, {
+          ...window.Archx.preset('catalog'), lazy: false, debug: true, shadow: 'open',
+          cacheBitmap: false, cachePayload: false, assetHttpCache: 'no-store',
+          onError: (err) => resolve({ loaded: false, error: String(err?.message || err) }),
+        });
+        inst.ready.catch(() => {});
+        const iv = setInterval(() => {
+          if (inst.loaded) { clearInterval(iv); resolve({ loaded: true }); }
+        }, 50);
+        setTimeout(() => { clearInterval(iv); resolve({ loaded: inst.loaded, error: 'timeout' }); }, 20000);
+        window.__tamperInstance = inst;
+      });
+      window.__tamperInstance?.destroy();
+      host.remove();
+      return outcome;
+    });
+  } finally {
+    fs.writeFileSync(tamperPath, tamperOriginal);
+  }
+  check('a tampered CDN variant fails its manifest SHA-256 check and never renders',
+    tamperOutcome.loaded === false && /integrity/.test(tamperOutcome.error || ''),
+    JSON.stringify(tamperOutcome));
 
   console.log('\n[9] Performance — 100-image protected gallery');
   scaleTraffic.batchMints = 0;

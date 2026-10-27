@@ -790,6 +790,43 @@ for volume, shared dynamic derivatives for private browsing, and unique
 per-viewer marks/keys only where attribution value justifies cold CPU on
 every view.
 
+### 2.15 Follow-up: stampedes, integrity-pinned manifests, adaptive bytes
+
+Three smaller scale/integrity gaps remained after §2.14:
+
+1. **Cold-cache stampedes.** Caching a derivative after its first transform
+   does nothing for the burst that arrives *while* that transform runs;
+   request coalescing (singleflight) is the standard fix, and CDN request
+   collapsing cannot do it for Archx because token payloads are
+   authorization-scoped, `private, no-store` responses rather than shared
+   cacheable objects [3](https://iotdigitaltwinplm.com/cache-stampede-thundering-herd-request-coalescing-ttl-jitter-caching-patterns-2026/)
+   [2](https://rednafi.com/go/request-coalescing/). The middleware already
+   kept an in-flight promise per derivative identity; v1.7 makes the effect
+   observable (`derivativeCache.coalesced` vs `misses`) and regression-tests
+   an eight-way concurrent redemption producing exactly one Sharp transform
+   and byte-identical responses.
+2. **Static-path integrity.** Moving delivery to a CDN moves trust to the
+   CDN/object store: whoever can replace the manifest controls keys and
+   variant URLs, and whoever can replace a variant controls pixels. The
+   builder already content-hashed variant filenames and recorded
+   per-variant SHA-256 digests in the manifest; the browser now *verifies*
+   them (`assetIntegrity`), and can pin the manifest's own SHA-256
+   (`assetManifestIntegrity`, printed by `archx-build`) so a substituted
+   manifest is rejected before any of its material is trusted. The
+   minified browser bundle likewise ships a `sha384-…` Subresource
+   Integrity value (`dist/archx.min.js.sri`). Pinning is tamper evidence,
+   not confidentiality: a public manifest remains public.
+3. **Adaptive delivery.** The Network Information API exposes a user's
+   Save-Data preference and an effective-connection estimate, and the
+   established fallback-first pattern is to degrade resource weight where
+   the signal exists and keep defaults where it does not
+   [1](https://botbrowser.io/en/blog/network-information-api-for-adaptive-content/)
+   [4](https://web.dev/articles/adaptive-serving-based-on-network-quality).
+   `networkAware` applies that pattern to derivative selection (DPR,
+   oversampling, numeric quality) for both token and manifest flows, and
+   `Archx.preloadAssets()` removes first-paint network latency for known
+   hero assets while refusing to spend bytes on Save-Data connections.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |
@@ -939,7 +976,7 @@ error — see the README checklist).
 
 ## 5. Evidence (this repo's measurements)
 
-- **Unit/integration (Node, 43 tests):** scramble plans are deterministic,
+- **Unit/integration (Node, 44 tests):** scramble plans are deterministic,
   key-sensitive permutations; pixel scramble round-trips exactly; scrambled
   payloads are visually unrecognisable (mean absolute pixel difference vs
   master ≈ 55/255 on photo content) while un-scrambling restores them;
@@ -1010,7 +1047,7 @@ error — see the README checklist).
   hit with no new miss, the asset builder reuses every unchanged variant and
   regenerates only a damaged one, and the in-place server Stego path is
   byte-identical to the copying public API.
-- **Real browser (headless Chromium, 89 checks):** a page with 7 protected
+- **Real browser (headless Chromium, 98 checks):** a page with 7 protected
   images + 1 normal `<img>` exposes exactly **1** downloadable image (the
   normal one) — 0 canvases reachable from the document, 0 URLs in any
   protected element's HTML, closed root invisible to JS; protected hosts have

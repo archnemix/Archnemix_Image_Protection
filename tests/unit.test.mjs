@@ -1768,6 +1768,60 @@ test('catalog HTTP path: canonical widths, batch minting, and persistent cross-v
   assert.equal(stats.derivativeCache.misses, 0);
 });
 
+test('cold derivative stampede: concurrent redemptions coalesce into one Sharp transform', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-stampede-'));
+  const mastersDir = path.join(root, 'masters');
+  fs.mkdirSync(mastersDir);
+  fs.writeFileSync(path.join(mastersDir, 'cat.jpg'), await syntheticMaster(640, 420));
+  const handler = createArchxMiddleware({
+    secret: 'stampede-secret-for-unit-tests-32chars!',
+    imagesDir: mastersDir,
+    ttlSec: 120,
+    quality: 88,
+    widthBuckets: [160, 320, 640],
+    // Full-effort WebP keeps the leader busy long enough that the whole
+    // herd provably arrives while the first transform is still in flight.
+    processing: { webpEffort: 4, webpSmartSubsample: true, resizeKernel: 'lanczos3', sharpConcurrency: 1 },
+    authorize: async () => true,
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  // Eight distinct one-time tokens that all canonicalize to the same 320px derivative.
+  const batchRes = await fetch(base + '/archx/tokens', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-archx-request': 'token' },
+    body: JSON.stringify({
+      items: Array.from({ length: 8 }, (_, i) => ({ ref: `r${i}`, id: 'cat', w: 300 + i })),
+    }),
+  });
+  assert.equal(batchRes.status, 200);
+  const batch = await batchRes.json();
+  const tokenResponses = Object.values(batch.tokens);
+  assert.equal(tokenResponses.length, 8);
+
+  const responses = await Promise.all(tokenResponses.map((tokenResponse) => redeemToken(base, tokenResponse)));
+  const payloads = [];
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    payloads.push(new Uint8Array(await response.arrayBuffer()));
+  }
+  for (const payload of payloads) assert.deepEqual(payload, payloads[0]);
+
+  const cache = handler.stats().derivativeCache;
+  assert.equal(cache.misses, 1, 'an eight-way stampede runs exactly one cold transform');
+  assert.equal(
+    cache.coalesced + cache.memoryHits, 7,
+    'every other request joined the in-flight derivative or the just-filled cache',
+  );
+  assert.ok(cache.coalesced >= 1, 'waiters are reported as coalesced, not hidden inside misses');
+});
+
 test('precomputed asset builder is incremental, canonical, and emits a usable manifest', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-build-assets-'));
   const mastersDir = path.join(root, 'masters');
@@ -1799,7 +1853,13 @@ test('precomputed asset builder is incremental, canonical, and emits a usable ma
   assert.equal(first.variants, 4);
   assert.equal(first.generated, 4);
   assert.equal(first.skipped, 0);
-  const manifest = JSON.parse(fs.readFileSync(first.manifestPath, 'utf8'));
+  const manifestBytes = fs.readFileSync(first.manifestPath);
+  assert.equal(
+    first.manifestSha256,
+    crypto.createHash('sha256').update(manifestBytes).digest('hex'),
+    'build summary reports the exact manifest digest browsers can pin',
+  );
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
   assert.deepEqual(Object.keys(manifest.assets).sort(), ['cat', 'dog']);
   assert.equal(manifest.assets.cat.key, 'build-test-key');
   assert.deepEqual(manifest.assets.cat.variants.map((variant) => variant.width), [160, 320]);
@@ -1807,7 +1867,13 @@ test('precomputed asset builder is incremental, canonical, and emits a usable ma
   for (const asset of Object.values(manifest.assets)) {
     for (const variant of asset.variants) {
       const file = path.join(outputDir, decodeURIComponent(path.basename(variant.url)));
-      assert.ok(isArchxContainer(fs.readFileSync(file)), file);
+      const variantBytes = fs.readFileSync(file);
+      assert.ok(isArchxContainer(variantBytes), file);
+      assert.equal(
+        variant.sha256,
+        crypto.createHash('sha256').update(variantBytes).digest('hex'),
+        'manifest records a verifiable digest for every variant',
+      );
     }
   }
   const catVariant = manifest.assets.cat.variants[1];

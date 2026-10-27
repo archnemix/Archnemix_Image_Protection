@@ -136,8 +136,11 @@ try {
   console.log(`\nBuilt ${summary.assets} asset(s), ${summary.variants} variant(s): ` +
     `${summary.generated} generated, ${summary.skipped} reused, ${summary.removed} stale removed.`);
   console.log(`Manifest: ${summary.manifestPath}`);
+  console.log(`Manifest SHA-256: ${summary.manifestSha256}`);
   console.log('Browser: Archx.config({ assetManifest: "/protected/archx-manifest.json" }); ' +
     'Archx.load.image(el, { assetId: "<id>" }, Archx.preset("catalog"));');
+  console.log('Optional integrity pin: Archx.config({ assetManifestIntegrity: "sha256-' +
+    `${summary.manifestSha256}" }) makes browsers reject a substituted manifest.`);
   if (aesKey) console.log('Note: the manifest contains the AES key needed by authorized browsers; protect/sign it according to your catalog policy.');
 } catch (err) {
   console.error(`Archx build failed: ${err?.message || err}`);

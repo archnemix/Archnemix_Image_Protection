@@ -354,6 +354,18 @@ normal authorization/CDN layer. This static path has no per-view token,
 one-time redemption, proof of possession, revocation, or server quota—use
 the token middleware for paid or revocable detail views.
 
+Two integrity layers harden this route against CDN/object-store mistakes:
+`archx-build` prints a `Manifest SHA-256`, and passing it as
+`assetManifestIntegrity: 'sha256-<hex>'` makes the browser reject a
+substituted or stale manifest before trusting any key or variant URL;
+`assetIntegrity: 'auto'` (the default) additionally verifies each fetched
+variant against the SHA-256 recorded for it in the manifest (`'require'`
+fails closed when a digest or WebCrypto is unavailable). Pinning detects
+tampering and mixed deployments—it does not make a public manifest
+confidential. For LCP-critical pages, `Archx.preloadAssets(['watch-01'], {
+assetManifest: '/protected/archx-manifest.json' })` warms the manifest and
+HTTP caches ahead of mounting the viewer, so first paint skips the network.
+
 For one-off files or a simple directory conversion, the original CLI remains
 available:
 
@@ -462,6 +474,8 @@ Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `
 | `tokenMethod` | `'POST'` | `'POST' \| 'GET'`. POST sends `X-Archx-Request: token`, `cache:'no-store'`, and works with the server's POST-only default. GET is only a legacy bridge when the server explicitly enables it |
 | `tokenBatch` / `tokenBatchEndpoint` / `tokenBatchSize` / `tokenBatchDelayMs` / `tokenBatchMaxDelayMs` | `false` / derived / `50` / `8` / `50` (`catalog`/`gallery`: enabled, `20`/`150`) | Coalesces simultaneous first-attempt POST mints into `POST {basePath}/tokens`. The endpoint is derived by replacing a trailing `/token` segment unless explicitly supplied. A non-item 404/405/501 from an older server falls back to single minting; per-item authorization/rate/quota failures do not. Batching reduces HTTP round trips, not the server's per-item authorization work |
 | `assetManifest` / `assetManifestMaxBytes` / `assetHttpCache` | `null` / 8 MiB / `'default'` | Version-1 `archx-build` manifest URL or host-supplied object for `{assetId}` sources. URL manifests are byte-bounded, schema-normalized, shared by all instances, and retained in a bounded 8-entry LRU; `Archx.clearCaches()` drops them. The manifest is delivery-key material, not a public secret boundary |
+| `assetIntegrity` / `assetManifestIntegrity` | `'auto'` / `null` | `assetIntegrity:'auto'\|'require'\|'off'` verifies each fetched variant against the SHA-256 recorded in the manifest (auto = verify when a digest and WebCrypto exist; require = fail closed). `assetManifestIntegrity:'sha256-<hex>'` pins the exact fetched manifest bytes (`archx-build` prints the value); a substituted manifest is rejected before any key or URL is trusted |
+| `networkAware` | `false` (`catalog`/`gallery`: `true`) | Honours the Network Information API (Chromium-family): Save-Data or `slow-2g`/`2g` caps DPR at 1, drops oversampling, and clamps numeric request quality to 72; `3g` caps DPR at 1.5/quality 82. Browsers without the API keep the configured sampling; explicit `lossless` is never downgraded |
 | `httpCache` / `fetchPriority` | `'no-store'` / `null` | `httpCache` controls direct URL fetches (token mint/payload traffic always remains `no-store`); `catalog` uses `'default'` so immutable static variants can use browser/CDN caching when response headers allow it. `fetchPriority:'high'|'low'|'auto'` is forwarded where Fetch Priority is supported—reserve `high` for one hero/LCP image, not a whole grid |
 | `key` / `aesKey` / `grid` / `scrambled` | — | for `.archx` / statically scrambled assets |
 | `fit` | `'cover'` | `'cover' \| 'contain' \| 'fill'` (like CSS `object-fit`) |
@@ -562,6 +576,7 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 - `Archx.presets` / `Archx.preset(name, overrides?)` / exported `PRESETS` + `preset()` — frozen, inspectable direct-parameter bundles (`gallery`, `editorial`, `commerce`, `screenshotResistant`)
 - `Archx.temporalInterlaceProfiles` / `Archx.normalizeTemporalInterlace(value)` / exported `TEMPORAL_INTERLACE_PROFILES` + `normalizeTemporalInterlace()` — inspect and bound the 60 Hz-first subset-frame profiles before passing them to an image
 - `Archx.clearCaches()` — clears shared decoded-bitmap/token promises and rotates the page-session scope; call it on logout, tenant switch, or entitlement downgrade. Already-painted instances keep their current private frame until reload/destroy
+- `Archx.preloadAssets(ids, options)` — warms the `archx-build` manifest and browser HTTP caches for `{assetId}` sources without mounting viewers (hero/next-slide prefetch); resolves with per-id `{preloaded, failed}` outcomes, verifies variant integrity like a real load, and skips entirely on Save-Data when `networkAware` is on
 - `Archx.config({...})` — set global defaults (endpoint, token method, cache scope, session id, brand text…). Calling it with no useful update returns a sanitized view; configured `key`/`aesKey` values are shown only as `[redacted]`
 - `Archx.instanceCount` — number of live instances, without exposing the instance registry itself
 - `Archx.auditIntegrity()` / `auditIntegrity()` — names of sensitive browser APIs that currently differ from the native references captured when the module loaded
@@ -576,7 +591,7 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 - Server: `createArchxMiddleware(options)` needs `sharp` (optional peer; pinned examples use Sharp 0.35). Important direct controls:
   - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec`, `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens` (default `false`), `proofOfPossession:'optional'|'required'|'off'` (bare default `'optional'`; hardened defaults select `'required'`), `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
   - **Delivery:** `grid`, `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `maxWidthCap`, `widthBuckets` (canonical widths, or `null` for exact widths), `batchTokenMaxItems`, `batchTokenMaxBytes`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'`, `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `forensicScope:'viewer'|'image'`, `steganography` (including `scope:'viewer'|'image'`), `onStegoIssue`, `stegoRegistryFailure:'deny'|'allow'`, `onProvenanceIssue`, `provenanceFailure:'deny'|'allow'`, `onDelivery`.
-  - **Abuse/CPU/memory:** `rateLimitPerMinute`, `tokenRateLimitPerMinute`, `rateLimitMaxClients`/`maxTrackedClients`, `oneTimeTokenMaxEntries`, `quotas:{windowMs,perIp,perViewer,perIpImage,perViewerImage}`, `abuseDetection:{distinctImages,windowMs,action:'event'|'deny'}`, `onSecurityEvent` (or legacy `onAbuse`), `processing:{maxInputBytes,maxInputPixels,maxInputWidth,maxInputHeight,maxOutputPixels,processingTimeoutSec,allowedInputFormats}`, `processingConcurrency`, `processingQueueMax`, `processingQueueTimeoutMs`, `outputCacheMax`, `outputCacheMaxBytes`, persistent `outputCacheDir` + `outputCacheDiskMaxBytes`/`outputCacheDiskMaxEntries`/`outputCacheDiskTtlMs`, `sharedCacheTtlMs`, `masterCacheMaxBytes`, `cacheMasters`, and `processing:{webpEffort,webpSmartSubsample,resizeKernel,pngCompressionLevel,jpegChromaSubsampling,sharpConcurrency,sharpCache}`. `withCatalogThroughputDefaults()` supplies the catalog starting point described above; `handler.stats().derivativeCache` reports memory/disk/shared hits, misses, writes, prunes, and errors without exposing keys.
+  - **Abuse/CPU/memory:** `rateLimitPerMinute`, `tokenRateLimitPerMinute`, `rateLimitMaxClients`/`maxTrackedClients`, `oneTimeTokenMaxEntries`, `quotas:{windowMs,perIp,perViewer,perIpImage,perViewerImage}`, `abuseDetection:{distinctImages,windowMs,action:'event'|'deny'}`, `onSecurityEvent` (or legacy `onAbuse`), `processing:{maxInputBytes,maxInputPixels,maxInputWidth,maxInputHeight,maxOutputPixels,processingTimeoutSec,allowedInputFormats}`, `processingConcurrency`, `processingQueueMax`, `processingQueueTimeoutMs`, `outputCacheMax`, `outputCacheMaxBytes`, persistent `outputCacheDir` + `outputCacheDiskMaxBytes`/`outputCacheDiskMaxEntries`/`outputCacheDiskTtlMs`, `sharedCacheTtlMs`, `masterCacheMaxBytes`, `cacheMasters`, and `processing:{webpEffort,webpSmartSubsample,resizeKernel,pngCompressionLevel,jpegChromaSubsampling,sharpConcurrency,sharpCache}`. `withCatalogThroughputDefaults()` supplies the catalog starting point described above; `handler.stats().derivativeCache` reports memory/disk/shared hits, misses, coalesced singleflight waiters (concurrent cold requests that shared one Sharp job instead of stampeding), writes, prunes, and errors without exposing keys.
   - `authorize(req, id, { phase, token })` may return `true`/`false` or `{ allow, viewerId|userId|subject|sessionId, buyerId, orderId, deliveryId, traceId, permissions|scopes|scope, maxWidth, watermark, quality, lossless, format, steganography, stegoFingerprint }`. If scopes are supplied, one of `image:view`, `archx:image:view`, or `*` is required. It runs before minting and again before bytes are served; current entitlements can tighten width/quality/format but cannot widen signed claims. Viewer IDs and the buyer/order/delivery/trace subject are HMAC-hashed before token/cache/forensic/Stego derivation; the raw trace fields are supplied only to your server-side registry/provenance callbacks, never to browser delivery events. `allowClientQuality:true` only lets the browser request `q=` when no entitlement quality overrides it.
   - Token requests include the display box (`bw`, `bh`, `fit`, optional `q`); the server validates them as strict integers/enums and uses source aspect to sign a cover-safe derivative width before entitlement caps. Responses use `Cache-Control: private,no-store`, CDN/surrogate `no-store` controls, credential/token/proof-sensitive `Vary`, `nosniff`, `Referrer-Policy:no-referrer`, same-origin/cross-origin CORP as configured, exact-origin credentialled CORS only, a sandboxed CSP on payloads, `Retry-After` on 429s, and generic error bodies that do not leak paths/stacks/decoder/token details.
   - `auditArchxServerConfig(options)` gives a frozen, secret-free validity result; `auditArchxProductionConfig(options, { expectedInstances })` adds named production blockers/recommendations, and `withHardenedProductionDefaults(options)` fills safer defaults without overwriting explicit host choices. A live handler exposes only `handler.configAudit`, `handler.stats()`, and `handler.close()` for graceful shutdown/cache/limiter cleanup; there is no public live index, test hook, generic token signer, or generic token verifier. `validateImageId()`, `validateTokenClaims()`, and `computeJwkThumbprint()` are exported for host-side validation/tests.
@@ -630,7 +645,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - [ ] Verify every CDN/WAF/reverse-proxy rule honors origin `private,no-store`/`CDN-Cache-Control`/`Surrogate-Control`; bypass shared caching for `{basePath}/token/*`, the exact batch route `{basePath}/tokens`, and `{basePath}/i/*`, and never add a cache rule based only on a static-looking URL
 - [ ] Exact `allowedOrigins` only; treat Origin/Referer/User-Agent/IP as signals. Enable session binding where a stable viewer ID exists; use IP binding cautiously for mobile/VPN users. Set `trustProxy:true` only with the exact `trustedProxyHops` count behind proxies that strip/set `X-Forwarded-For`; otherwise the socket IP remains authoritative
 - [ ] Tune token/image rate limits, per-viewer/IP/image quotas, distinct-image abuse alerting, `onSecurityEvent`, bounded cache/store sizes, and Sharp bytes/pixels/dimensions/formats/timeout/concurrency to your catalog and CPU budget. For browsing catalogs, enable canonical `widthBuckets`, a persistent non-public `outputCacheDir` and/or shared derivative cache, image-scoped marks, and alert on derivative-cache hit ratio, disk errors/prunes, and Sharp queue saturation
-- [ ] If you use `archx-build`, keep masters and `.archx-build-state.json` out of the deployment, give versioned public variants immutable caching only when the catalog is intentionally public, and authorize/sign or short-cache the key-bearing manifest according to the catalog's privacy model
+- [ ] If you use `archx-build`, keep masters and `.archx-build-state.json` out of the deployment, give versioned public variants immutable caching only when the catalog is intentionally public, authorize/sign or short-cache the key-bearing manifest according to the catalog's privacy model, and pin it in the browser with `assetManifestIntegrity` (rotating the pin with each manifest deploy) while keeping `assetIntegrity` at `'auto'` or `'require'`
 - [ ] Negative-test the deployed routes: direct master path, traversal/double-encoding/malformed `%`, extra path segments, wrong method, duplicate/oversized tokens, sizing abuse, replay race, revoked session, corrupt/oversized master, and quota exhaustion
 - [ ] Server-side watermark + forensic marking on for valuable derivatives; client `{session}` watermarks alone do not survive offline payload reconstruction
 - [ ] If StegoMark is enabled, persist every `onStegoIssue` fingerprint with image/user/buyer/order/delivery/profile/key context, alert on registry failures, and test your `archx-detect` investigation path on resized/recompressed/edited/cropped samples from your own catalog; an unregistered fingerprint is only a number. Register perceptual soft bindings at ingest if you want a second discovery path, and calibrate the distance threshold on your own catalog/false-positive tolerance
@@ -642,21 +657,24 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 ## Tests
 
 ```bash
-npm test            # 43 unit/integration tests (scramble/crypto, delivery quality,
+npm run lint        # node --check over every shipped/test source file
+npm test            # 44 unit/integration tests (scramble/crypto, delivery quality,
                     # cover-aware sizing, server marks, standard/robust StegoMark survival + crop geometry,
                     # perceptual soft bindings, strict config/claims, hardened production defaults/audit,
                     # buyer/order hooks, malformed HTTP, replay races, reauthorization, sender-constrained proofs,
                     # bounded stores/quotas/abuse, trusted-hop proxy parsing, Sharp processing limits,
                     # 60 Hz interlace normalization, cross-instance shared state, Redis adapter contract,
                     # signing-key rotation, fail-closed store errors, canonical widths,
-                    # batch minting, persistent derivative reuse, and incremental asset builds)
-npm run test:browser  # 89 checks in real headless Chromium (encapsulation, decoys,
+                    # batch minting, persistent derivative reuse, cold-stampede coalescing,
+                    # and incremental asset builds with manifest/variant digests)
+npm run test:browser  # 98 checks in real headless Chromium (encapsulation, decoys,
                       # native detail retention, WebGL black read-back, post-load and pre-load draw-hook
                       # Fortress/Vault policy regressions, sanitized plugin telemetry,
                       # Fortress Lens/camera + shader/frames temporal-interlace patterns/capture trace/strikes/integrity,
                       # POST + clean-header + proof-bound token flow, cache scopes, no-reload lifecycle,
                       # draw-on-demand GPU, token replay, guards, print, precomputed manifest assets,
-                      # catalog sizing, batch-minted 100-image gallery…)
+                      # manifest pinning + tampered-variant rejection, network-aware sampling,
+                      # asset preload cache warming, catalog sizing, batch-minted 100-image gallery…)
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
                     # bounded local mint+redeem regression load; see docs/OPERATIONS.md

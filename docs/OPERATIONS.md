@@ -309,6 +309,15 @@ cache headers, and put it behind your normal signed-URL/authorization layer
 for a private catalog because it contains the browser scramble key (and AES
 key when enabled). Never publish masters or `.archx-build-state.json`.
 
+Deploy order matters when browsers pin the manifest with
+`assetManifestIntegrity`: upload the new versioned variants first, then the
+new manifest, then the page/config carrying the new `sha256-…` pin (the
+value `archx-build` prints as `Manifest SHA-256`). Reversing that order
+makes correctly-pinned browsers reject the not-yet-deployed manifest.
+Keep `assetIntegrity: 'auto'` (or `'require'`) so a corrupted or
+substituted variant object fails its manifest SHA-256 check in the browser
+instead of rendering garbage or attacker-chosen pixels.
+
 ### Post-deployment CDN verification
 
 With an authorized test account and a disposable image:
@@ -482,6 +491,12 @@ Node starts, because Sharp operations also use libuv work. Disk-cache
 capacity/TTL and cache-hit ratio are capacity controls: alert on
 `handler.stats().derivativeCache` misses, disk errors/prunes, shared-cache
 errors, Sharp queue depth/timeouts, and authorization/state-store latency.
+Concurrent cold requests for the same derivative are coalesced by a
+singleflight promise (one Sharp job per derivative per process, even during
+a viral stampede); the `coalesced` counter shows how much duplicate work
+that absorbed. Coalescing is per-process, so the worst case across N
+instances is N cold transforms per derivative—another reason to prefer the
+shared/persistent derivative cache or `archx-build` at fleet scale.
 
 Batch minting (`POST {basePath}/tokens`) reduces HTTP round trips for a page
 of thumbnails, but it intentionally does not skip per-item authorization,
