@@ -1348,18 +1348,33 @@ function buildLumaIntegral(src, w, h) {
   return { luma, integral };
 }
 
-function flipPixelsHorizontal(src, w, h) {
+function flipPixels(src, w, h, flipX, flipY) {
   const flipped = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) {
-    const row = y * w * 4;
+    const sy = flipY ? h - 1 - y : y;
+    const srow = sy * w * 4;
+    const drow = y * w * 4;
     for (let x = 0; x < w; x++) {
-      const si = row + x * 4;
-      const di = row + (w - 1 - x) * 4;
+      const sx = flipX ? w - 1 - x : x;
+      const si = srow + sx * 4;
+      const di = drow + x * 4;
       flipped[di] = src[si]; flipped[di + 1] = src[si + 1];
       flipped[di + 2] = src[si + 2]; flipped[di + 3] = src[si + 3];
     }
   }
   return flipped;
+}
+
+// Lazily materialized mirror variants of a source buffer, cached on the
+// shared planes entry: 'x' (horizontal mirror), 'y' (vertical flip),
+// 'xy' (both = 180° rotation). Red-team testing showed fy-only suspects
+// (a one-click editor operation) evaded detection completely when only
+// the horizontal mirror was probed.
+const MIRROR_AXES = [['x', true, false], ['y', false, true], ['xy', true, true]];
+function mirroredVariant(entry, srcTop, w, h, axis, flipX, flipY) {
+  const slot = axis === 'x' ? 'flipped' : axis === 'y' ? 'flippedY' : 'flippedXY';
+  if (!entry[slot]) entry[slot] = flipPixels(srcTop, w, h, flipX, flipY);
+  return entry[slot];
 }
 
 export function detectStegoFingerprint(rgba, w, h, {
@@ -1431,21 +1446,29 @@ export function detectStegoFingerprint(rgba, w, h, {
     if (searchMirror && !_mirrorProbe) try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
-        const flipped = entry.flipped;
-        for (const candidateProfile of ['standard', 'robust']) {
-          const fast = detectStegoFingerprint(flipped, w, h, {
-            key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
-          });
-          if (fast?.found) return { ...fast, mirrored: true };
+        // Fast (offset-only) probes across every mirror axis are cheap;
+        // geometry probes for the y/xy axes are gated on the caller's
+        // searchGeometry so unmarked auto-detects stay bounded.
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          for (const candidateProfile of ['standard', 'robust']) {
+            const fast = detectStegoFingerprint(variant, w, h, {
+              key, gridX, gridY, profile: candidateProfile, searchOffsets,
+              searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            });
+            if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
+          }
         }
-        for (const candidateProfile of ['standard', 'robust']) {
-          const mirrored = detectStegoFingerprint(flipped, w, h, {
-            key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
-          });
-          if (mirrored?.found) return { ...mirrored, mirrored: true };
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          if (axis !== 'x' && !searchGeometry) continue;
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          for (const candidateProfile of ['standard', 'robust']) {
+            const mirrored = detectStegoFingerprint(variant, w, h, {
+              key, gridX, gridY, profile: candidateProfile, searchOffsets,
+              searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            });
+            if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+          }
         }
       }
     } catch { /* mirror probe is best-effort */ }
@@ -1814,6 +1837,28 @@ export function detectStegoFingerprint(rgba, w, h, {
         }
       }
     }
+    // Stage 2 (only when stage 1 found nothing): deeper retained-area
+    // scales for aggressive crops — 65–75% kept, or equivalently an
+    // 88% corner crop whose scale (~1.14) fell between table entries
+    // often enough that grid drift killed every candidate. Independent
+    // X/Y values keep aspect-changing crops reachable; the origin
+    // refinement below polishes whichever pair leads.
+    if (!best?.found) {
+      const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1 / 0.7, 1 / 0.65];
+      for (const scaleX of deepScales) {
+        const rangeX = originRange(gx * cw * scaleX, w);
+        for (const scaleY of deepScales) {
+          const rangeY = originRange(gy * ch * scaleY, h);
+          for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+            for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+              scaleCandidates.push(consider(evaluate({
+                scaleX, scaleY, originX, originY,
+              })));
+            }
+          }
+        }
+      }
+    }
 
     // Then try edge/center origins for the strongest scale pairs.
     const originCandidates = [];
@@ -1911,12 +1956,14 @@ export function detectStegoFingerprint(rgba, w, h, {
     try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
-        const mirrored = detectStegoFingerprint(entry.flipped, w, h, {
-          key, gridX, gridY, profile, searchOffsets, searchGeometry,
-          searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
-        });
-        if (mirrored?.found) return { ...mirrored, mirrored: true };
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          const mirrored = detectStegoFingerprint(variant, w, h, {
+            key, gridX, gridY, profile, searchOffsets, searchGeometry,
+            searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+          });
+          if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+        }
       }
     } catch { /* mirror probe is best-effort */ }
   }
@@ -2356,6 +2403,11 @@ export function perceptualFingerprint(rgba, w, h) {
       coefficients[v * 8 + u] = sum;
     }
   }
+  // Median over AC terms only (DC excluded). The DC coefficient itself
+  // is then always > median, so the top hash bit is a constant 1 —
+  // 63 effective bits, the long-standing fingerprint format. Changing
+  // it would orphan every stored registry print for one bit of dedup
+  // entropy; documented instead (thresholds were calibrated with it).
   const sorted = [...coefficients.slice(1)].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
   let bits = 0n;

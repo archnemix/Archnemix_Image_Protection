@@ -81,8 +81,8 @@ export interface ArchxForensicOptions {
 
 export interface ArchxStegoOptions {
   perToken?: boolean;
-  scope?: 'image' | 'viewer' | 'token';
-  keyScope?: 'image' | 'viewer' | 'token' | 'global';
+  scope?: 'image' | 'viewer';
+  keyScope?: 'image' | 'viewer';
   profile?: 'standard' | 'robust';
   strength?: number;
   gridX?: number;
@@ -108,20 +108,26 @@ export interface ArchxServerOptions {
   publicDirs?: string[];
   /** Base route prefix (default `/archx`). */
   basePath?: string;
-  deploymentMode?: 'development' | 'production';
+  deploymentMode?: 'single-instance' | 'multi-instance';
   ttlSec?: number;
   tokenMethods?: Array<'POST' | 'GET'>;
   requireSameSiteTokenRequests?: boolean;
   requireTokenRequestHeader?: boolean;
   allowedOrigins?: string[];
   allowQueryTokens?: boolean;
-  bindTokenTo?: Array<'ip' | 'user-agent' | 'session' | string> | false;
+  bindTokenTo?:
+    | {
+        ip?: boolean | string | ((req: IncomingMessage) => string | Promise<string>);
+        userAgent?: boolean | string | ((req: IncomingMessage) => string | Promise<string>);
+        session?: boolean | string | ((req: IncomingMessage) => string | Promise<string>);
+      }
+    | Array<'ip' | 'userAgent' | 'ua' | 'user-agent' | 'session'>;
   oneTimeTokens?: boolean;
   oneTimeTokenMaxEntries?: number;
   proofOfPossession?: 'off' | 'optional' | 'required';
   grid?: number;
-  /** 1 = legacy 32-bit plan seed (default), 2 = 128-bit seed. Clients must
-   *  support `pv:2` (v1.10+) before enabling. */
+  /** 1 = legacy 32-bit plan seed, 2 = 128-bit seed (default since 1.15).
+   *  Clients older than v1.10 cannot read `pv:2` payloads. */
   scramblePlanVersion?: 1 | 2;
   scrambleKeyMode?: 'per-image' | 'per-token';
   encrypt?: boolean;
@@ -284,6 +290,18 @@ export function configureSharpPerformance(options?: { concurrency?: number; cach
 export function acquireSharpSecurityLease(allowedFormats?: readonly string[]): () => void;
 export function ensureUntrustedSharpLoadersBlocked(): boolean;
 export function generateKeyBase64(bytes?: number): string;
+/**
+ * Run StegoMark forensic detection in a worker thread. The synchronous
+ * core detector blocks for seconds on unmarked images under
+ * auto/geometry search; never call it on an HTTP request path.
+ */
+export function detectStegoFingerprintInWorker(
+  rgba: Uint8Array,
+  w: number,
+  h: number,
+  options?: Record<string, unknown>,
+): Promise<Record<string, unknown>>;
+export function closeStegoDetectWorker(): void;
 export default createArchxMiddleware;
 
 export const DEFAULT_WIDTH_BUCKETS: readonly number[];
@@ -319,7 +337,7 @@ export function createMemoryStateStore(options?: {
   [key: string]: unknown;
 }): ArchxStateStore;
 
-export function validateWatermarkValue(value: unknown): string | null;
+export function validateWatermarkValue(value: unknown): boolean;
 export function validateTokenClaims(
   payload: unknown,
   options?: {

@@ -35,6 +35,7 @@ import {
   prepareDerivativeBase, finishDerivative,
   configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
   acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
+  detectStegoFingerprintInWorker, closeStegoDetectWorker,
 } from './scramble-image.js';
 
 // The documented /server public surface includes the image-processing
@@ -46,6 +47,7 @@ export {
   prepareDerivativeBase, finishDerivative,
   configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
   acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
+  detectStegoFingerprintInWorker, closeStegoDetectWorker,
 };
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -229,8 +231,26 @@ export class BoundedTtlSet {
   claim(key, exp, now = Date.now()) {
     if (!key || !Number.isFinite(exp) || exp <= now) return false;
     if (this.#map.has(key)) return false;
-    if (this.#map.size >= this.maxEntries) this.cleanup(now);
-    if (this.#map.size >= this.maxEntries) return false; // fail closed when saturated
+    if (this.#map.size >= this.maxEntries) {
+      // Amortized front eviction: Map insertion order tracks claim time
+      // and one deployment shares one TTL, so the front of the map is
+      // (approximately) expiry order. Drop expired entries first; if
+      // STILL saturated, evict the oldest live entries — the ones with
+      // the smallest remaining replay window — instead of the old
+      // behavior: an O(N) full-map scan on every claim followed by a
+      // global fail-closed rejection of every legitimate viewer (a
+      // self-DoS once maxEntries unexpired JTIs accumulated). Evicting
+      // one near-expiry JTI re-opens replay for that single signed,
+      // PoP-bound, re-authorized token only; failing everyone is worse.
+      let budget = 1024 + (this.maxEntries >> 6);
+      for (const [k, e] of this.#map) {
+        if (budget-- <= 0) break;
+        if (e <= now) { this.#map.delete(k); continue; }
+        if (this.#map.size < this.maxEntries) break;
+        this.#map.delete(k);
+      }
+      if (this.#map.size >= this.maxEntries) return false; // pathological disorder only
+    }
     this.#map.set(key, exp);
     return true;
   }
@@ -743,6 +763,22 @@ function verifyProofOfPossession({ header, token, expectedJkt, method, target, n
   } catch { return null; }
 }
 
+// Accept both the object form ({ ip, userAgent, session }) and the
+// array form (['ip', 'ua', ...]) that shipped type declarations long
+// promised; unknown entries are dropped (validation rejects them first).
+function normalizeBindTokenTo(value) {
+  if (Array.isArray(value)) {
+    const out = {};
+    for (const entry of value) {
+      if (entry === 'ip') out.ip = true;
+      else if (entry === 'userAgent' || entry === 'ua' || entry === 'user-agent') out.userAgent = true;
+      else if (entry === 'session') out.session = true;
+    }
+    return out;
+  }
+  return isPlainObject(value) ? value : {};
+}
+
 function validateStegoConfig(value) {
   try {
     if (typeof value === 'boolean') return true;
@@ -792,7 +828,7 @@ export function normalizeAuthorizationResult(auth) {
       'allow', 'allowed', 'authorized', 'viewerId', 'userId', 'subject', 'sessionId',
       'buyerId', 'orderId', 'deliveryId', 'traceId',
       'permissions', 'scopes', 'scope', 'maxWidth', 'quality', 'lossless', 'format',
-      'watermark', 'steganography', 'stegoFingerprint',
+      'watermark', 'steganography', 'stegoFingerprint', 'ttlSec',
     ];
     if (!knownFields.some((field) => field in auth && auth[field] !== undefined)) return null;
 
@@ -818,6 +854,8 @@ export function normalizeAuthorizationResult(auth) {
         (!Number.isInteger(auth.quality) || auth.quality < 1 || auth.quality > 100)) return null;
     if ('lossless' in auth && auth.lossless !== undefined && typeof auth.lossless !== 'boolean') return null;
     if ('format' in auth && auth.format !== undefined && !['webp', 'png', 'jpeg', 'avif'].includes(auth.format)) return null;
+    if ('ttlSec' in auth && auth.ttlSec !== undefined &&
+        (!Number.isInteger(auth.ttlSec) || auth.ttlSec < 5 || auth.ttlSec > 900)) return null;
     if ('watermark' in auth && auth.watermark != null && typeof auth.watermark !== 'function' &&
         !validateWatermarkValue(auth.watermark)) return null;
     if ('steganography' in auth && auth.steganography !== undefined && !validateStegoConfig(auth.steganography)) return null;
@@ -1167,7 +1205,11 @@ function inspectServerConfig(options = {}) {
     fail('steganography must be boolean or a bounded { perToken, scope, keyScope, profile, strength, gridX, gridY, layoutVersion, legacyCode } object');
   }
   if (options.bindTokenTo !== undefined) {
-    if (!isPlainObject(options.bindTokenTo)) fail('bindTokenTo must be an object');
+    if (Array.isArray(options.bindTokenTo)) {
+      if (options.bindTokenTo.some((entry) => !['ip', 'userAgent', 'ua', 'user-agent', 'session'].includes(entry))) {
+        fail("bindTokenTo array entries must be 'ip', 'userAgent'/'ua', or 'session'");
+      }
+    } else if (!isPlainObject(options.bindTokenTo)) fail('bindTokenTo must be an object or an array of binding names');
     else {
       checkUnknownKeys('bindTokenTo', options.bindTokenTo, new Set(['ip', 'userAgent', 'session']));
       for (const [field, value] of Object.entries(options.bindTokenTo)) {
@@ -1225,7 +1267,7 @@ function inspectServerConfig(options = {}) {
     oneTimeTokenMaxEntries: options.oneTimeTokenMaxEntries ?? 100000,
     processing: Object.freeze({
       maxInputBytes: pick('maxInputBytes') ?? 50 * 1024 * 1024,
-      maxInputPixels: pick('maxInputPixels') ?? 40000000,
+      maxInputPixels: pick('maxInputPixels') ?? 50000000,
       maxInputWidth: pick('maxInputWidth') ?? 12000,
       maxInputHeight: pick('maxInputHeight') ?? 12000,
       maxOutputPixels: pick('maxOutputPixels') ?? 16777216,
@@ -1278,7 +1320,9 @@ function inspectServerConfig(options = {}) {
     // in cross-origin deployments (see TAINT_PNG). Disable only if the host
     // route policy forbids any unauthenticated route under basePath.
     taintImage: options.taintImage !== false,
-    scramblePlanVersion: options.scramblePlanVersion ?? 1,
+    scramblePlanVersion: options.scramblePlanVersion ?? 2,
+    encrypt: options.encrypt === true,
+    scrambleKeyMode: options.scrambleKeyMode || 'per-image',
     proofOfPossession: options.proofOfPossession === true ? 'required'
       : options.proofOfPossession === false ? 'off'
         : (options.proofOfPossession ?? 'optional'),
@@ -1307,7 +1351,11 @@ function inspectServerConfig(options = {}) {
   if (!config.outputCacheDir && !suppliedStateStore) warn('no persistent outputCacheDir or shared state-store cache is configured: derivative reuse is limited to this process memory and is lost on restart');
   if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
   if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only and can be reassembled keylessly by tile-edge continuity (jigsaw) solvers — enable encrypt:true for payload secrecy');
-  if ((options.scramblePlanVersion ?? 1) !== 2) warn('scramblePlanVersion 1 uses a 32-bit plan seed (brute-forceable permutation); deploy pv-aware clients and switch to scramblePlanVersion:2');
+  const avifEffortWarn = options.processing?.avifEffort ?? options.avifEffort;
+  if (options.format === 'avif' && (avifEffortWarn ?? 4) > 2) {
+    warn(`dynamic AVIF encoding at effort ${avifEffortWarn ?? 4} costs multiple CPU-seconds per image and can exceed processingTimeoutSec at large sizes; keep avifEffort <= 2 on request paths or pre-build AVIF offline`);
+  }
+  if (options.scramblePlanVersion === 1) warn('scramblePlanVersion 1 uses a 32-bit plan seed (brute-forceable permutation, ~17 s on a 64-core host); v2 (128-bit) has been the default since 1.15 — v1 remains only for pre-1.10 cached clients');
   if (options.forensic && config.forensicScope !== 'image') warn('viewer-scoped forensic marks make derivatives viewer-specific and reduce output-cache sharing; use forensicScope image for reusable catalog derivatives');
   const stegoCfgForWarning = typeof options.steganography === 'object' && options.steganography ? options.steganography : {};
   if (options.steganography && stegoCfgForWarning.scope !== 'image') warn('viewer/token-scoped StegoMark makes derivatives hard to share across viewers; use steganography { scope: "image", perToken: false } for reusable catalog derivatives');
@@ -1354,6 +1402,8 @@ export function auditArchxServerConfig(options = {}) {
       securityEventHookConfigured: typeof (options.onSecurityEvent || options.onAbuse) === 'function',
       trustProxy: config.trustProxy,
       trustedProxyHops: config.trustedProxyHops,
+      encrypt: config.encrypt,
+      scrambleKeyMode: config.scrambleKeyMode,
     }) : null,
   });
 }
@@ -1380,6 +1430,11 @@ export function withHardenedProductionDefaults(options = {}) {
     ttlSec: 120,
     callbackTimeoutMs: 10000,
     scramblePlanVersion: 2, // 128-bit permutation seed (see buildScramblePlan)
+    // Per-token keys: a captured payload + the key from someone else's
+    // cheaper/faster view must never combine. Costs cross-viewer
+    // derivative caching (the catalog preset keeps per-image keys,
+    // which since 1.15 are variant-scoped w/q/fmt).
+    scrambleKeyMode: 'per-token',
     // Scrambling alone is obfuscation: tile-edge continuity solvers can
     // reassemble unencrypted payloads without any key. AES-256-GCM is the
     // actual secrecy layer, so the hardened preset turns it on.
@@ -1478,6 +1533,8 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (summary.allowQueryTokens) blockers.push('allowQueryTokens must be false so bearer tokens stay out of URLs, history, Referer headers, and logs');
     if (summary.proofOfPossession !== 'required') blockers.push("proofOfPossession must be explicitly set to 'required' for the hardened baseline, after confirming every supported client can present proofs");
     if (!summary.oneTimeTokens) blockers.push('oneTimeTokens must be enabled');
+    if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are reassembled keylessly by tile-edge (jigsaw) solvers in well under a second');
+    if (summary.scramblePlanVersion !== 2) blockers.push('scramblePlanVersion must be 2: the v1 plan seed is 32-bit and brute-forceable');
     if (summary.tokenMethods.some((method) => method !== 'POST')) blockers.push("tokenMethods must be ['POST'] for the hardened baseline");
     if (!summary.requireTokenRequestHeader) blockers.push('requireTokenRequestHeader must be enabled');
     if (!summary.requireSameSiteTokenRequests) blockers.push('requireSameSiteTokenRequests must be enabled');
@@ -1564,7 +1621,7 @@ export function createArchxMiddleware(options = {}) {
   const rateMax = options.rateLimitPerMinute ?? 600;
   const tokenRateMax = options.tokenRateLimitPerMinute ?? 300;
   const oneTimeTokens = cfg.oneTimeTokens;
-  const bindTokenTo = options.bindTokenTo || {}; // { ip?:boolean, userAgent?:boolean, session?:boolean }
+  const bindTokenTo = normalizeBindTokenTo(options.bindTokenTo); // { ip?:boolean, userAgent?:boolean, session?:boolean }
   const allowedOrigins = options.allowedOrigins || null; // exact origins; supplemental, never authentication
   const serverWatermark = options.serverWatermark ?? null;
   const forensic = options.forensic ?? false; // true | { blockSize, delta }
@@ -1685,14 +1742,25 @@ export function createArchxMiddleware(options = {}) {
     return { filePath: real, stat };
   }
 
-  // per-image scramble key + aes key derivation (stable => output cacheable)
-  const deriveScrambleKey = (id, nonce, keySecret = secret) =>
+  // Per-image keys are scoped to the DERIVATIVE VARIANT pinned in the
+  // signed token claims (w/q/fmt): a key minted for a 160px/q45 free
+  // preview must never open a captured 1408px lossless payload of the
+  // same image (pre-1.15 keys were image-global, so any tier's key
+  // opened every tier's bytes). Both phases already pin w/q/fmt in the
+  // claims, so no new claim field is needed; the output cache key
+  // carries the same scope, so an entitlement that narrows a
+  // redemption can never cross-serve bytes encrypted under a wider
+  // scope's key. Tokens minted before this change still redeem (the
+  // payload fetch succeeds) but their legacy keys will not unscramble
+  // post-upgrade derivatives — a one-TTL migration window.
+  const variantKeyScope = (wClaim, qClaim, fmtClaim) => `w${wClaim}:q${qClaim}:f${fmtClaim}`;
+  const deriveScrambleKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
     scrambleKeyMode === 'per-token'
       ? nonce
-      : crypto.createHmac('sha256', keySecret).update('scramble:' + id).digest('hex').slice(0, 32);
-  const deriveAesKey = (id, nonce, keySecret = secret) =>
+      : crypto.createHmac('sha256', keySecret).update(`scramble:${id}:${keyScope}`).digest('hex').slice(0, 32);
+  const deriveAesKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
     crypto.createHmac('sha256', keySecret)
-      .update('aes:' + id + ':' + (scrambleKeyMode === 'per-token' ? nonce : 'static'))
+      .update('aes:' + id + ':' + (scrambleKeyMode === 'per-token' ? nonce : keyScope))
       .digest().toString('base64');
 
   const masterCache = new Map(); // id -> {mtimeMs,size,bytes}; byte-bounded LRU
@@ -2206,7 +2274,13 @@ export function createArchxMiddleware(options = {}) {
         // MDN/OWASP rule: select from the right by the number of proxies you
         // actually control. The leftmost value is attacker-controlled unless
         // every hop in front of this process overwrites/appends correctly.
-        const candidate = chain[chain.length - cfg.trustedProxyHops] || (chain.length ? chain[0] : '');
+        // A chain SHORTER than the trusted hop count means the request did
+        // not traverse the expected proxies (direct origin hit, stripped
+        // header, miscounted depth): never fall back to chain[0] (fully
+        // attacker-controlled) — ignore XFF and use the socket peer.
+        const candidate = chain.length >= cfg.trustedProxyHops
+          ? chain[chain.length - cfg.trustedProxyHops]
+          : '';
         const canon = canonicalIp(candidate);
         if (canon) return canon;
       }
@@ -2705,7 +2779,9 @@ export function createArchxMiddleware(options = {}) {
       : exactW;
     const nonce = crypto.randomBytes(18).toString('base64url');
     const iat = Date.now();
-    const exp = iat + ttlMs;
+    // authorize() may tighten (or modestly extend) this token's lifetime;
+    // normalizeAuthorizationResult has already bounded it to 5..900 s.
+    const exp = iat + (Number.isInteger(entitlement.ttlSec) ? entitlement.ttlSec * 1000 : ttlMs);
     const watermark = await resolveWatermark(
       entitlement.watermark ?? serverWatermark,
       { req, id, nonce, viewerId, trace, exp },
@@ -2893,11 +2969,11 @@ export function createArchxMiddleware(options = {}) {
       url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
       cleanUrl: imagePath,
       token,
-      key: deriveScrambleKey(id, nonce),
+      key: deriveScrambleKey(id, nonce, secret, variantKeyScope(w, deliveryQuality, deliveryFormat)),
       grid,
       exp,
     };
-    if (encrypt) out.aesKey = deriveAesKey(id, nonce);
+    if (encrypt) out.aesKey = deriveAesKey(id, nonce, secret, variantKeyScope(w, deliveryQuality, deliveryFormat));
     emitDeliveryEvent('archx.token_issued', {
       id,
       phase: 'token',
@@ -3447,7 +3523,8 @@ export function createArchxMiddleware(options = {}) {
           effectiveFormat = entitlement.format;
         }
 
-        const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret);
+        const keyScope = variantKeyScope(payload.w, payload.q ?? quality, payload.fmt || format);
+        const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret, keyScope);
         const forensicSeed = forensic
           ? hmacShort('forensic', forensicScope === 'image'
               ? `${id}:image`
@@ -3500,7 +3577,7 @@ export function createArchxMiddleware(options = {}) {
         // material is already represented by its own cache fragment below.
         // This is what allows an ordinary catalog derivative to be generated
         // once and reused by every authorized viewer.
-        const aesKey = encrypt ? deriveAesKey(id, payload.n, issuingSecret) : null;
+        const aesKey = encrypt ? deriveAesKey(id, payload.n, issuingSecret, keyScope) : null;
         const forensicCachePart = forensicSeed
           ? hmacShort('fxseed', `${forensicSeed}:${typeof forensic === 'object' ? JSON.stringify(forensic) : ''}`, 16, issuingSecret)
           : 'nofx';
@@ -3520,8 +3597,10 @@ export function createArchxMiddleware(options = {}) {
           // replicate (v1.11); v4 reflection->keyed shifted-wrap padding
           // + 128-bit stego layouts (v1.13); v5 coherent DC-anchored
           // padding + v3 SHA-256-seeded layouts/signs + staggered
-          // watermark rows + JS overlay blend (v1.14).
-          'v5', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
+          // watermark rows + JS overlay blend (v1.14); v6 variant-scoped
+          // per-image keys + planVersion 2 default (v1.15). The ks part
+          // pins bytes to the key scope they were scrambled under.
+          'v6', id, masterVersion, `kid:${payload.kid}`, `ks:${keyScope}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,

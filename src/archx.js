@@ -86,6 +86,29 @@ const NATIVES = (() => {
     linkProgram: grab(gl2Proto, 'linkProgram') || grab(gl1Proto, 'linkProgram'),
     useProgram: grab(gl2Proto, 'useProgram') || grab(gl1Proto, 'useProgram'),
     getContextAttributes: grab(gl2Proto, 'getContextAttributes') || grab(gl1Proto, 'getContextAttributes'),
+    // Uniform setters + draw-setup (red-team C1): these were called
+    // directly, so a post-load prototype hook on uniform1f could
+    // silently zero the temporal/lens modulation mid-draw and
+    // microtask-read a clean frame. All render-path GL calls now go
+    // through the captured functions (glNative).
+    uniform1f: grab(gl2Proto, 'uniform1f') || grab(gl1Proto, 'uniform1f'),
+    uniform2f: grab(gl2Proto, 'uniform2f') || grab(gl1Proto, 'uniform2f'),
+    uniform1i: grab(gl2Proto, 'uniform1i') || grab(gl1Proto, 'uniform1i'),
+    viewport: grab(gl2Proto, 'viewport') || grab(gl1Proto, 'viewport'),
+    activeTexture: grab(gl2Proto, 'activeTexture') || grab(gl1Proto, 'activeTexture'),
+    texParameteri: grab(gl2Proto, 'texParameteri') || grab(gl1Proto, 'texParameteri'),
+    pixelStorei: grab(gl2Proto, 'pixelStorei') || grab(gl1Proto, 'pixelStorei'),
+    generateMipmap: grab(gl2Proto, 'generateMipmap') || grab(gl1Proto, 'generateMipmap'),
+    getUniformLocation: grab(gl2Proto, 'getUniformLocation') || grab(gl1Proto, 'getUniformLocation'),
+    attachShader: grab(gl2Proto, 'attachShader') || grab(gl1Proto, 'attachShader'),
+    getShaderParameter: grab(gl2Proto, 'getShaderParameter') || grab(gl1Proto, 'getShaderParameter'),
+    getProgramParameter: grab(gl2Proto, 'getProgramParameter') || grab(gl1Proto, 'getProgramParameter'),
+    createBuffer: grab(gl2Proto, 'createBuffer') || grab(gl1Proto, 'createBuffer'),
+    bindBuffer: grab(gl2Proto, 'bindBuffer') || grab(gl1Proto, 'bindBuffer'),
+    bufferData: grab(gl2Proto, 'bufferData') || grab(gl1Proto, 'bufferData'),
+    enableVertexAttribArray: grab(gl2Proto, 'enableVertexAttribArray') || grab(gl1Proto, 'enableVertexAttribArray'),
+    vertexAttribPointer: grab(gl2Proto, 'vertexAttribPointer') || grab(gl1Proto, 'vertexAttribPointer'),
+    getExtension: grab(gl2Proto, 'getExtension') || grab(gl1Proto, 'getExtension'),
   };
   const elementProto = typeof Element !== 'undefined' ? Element.prototype : null;
   const streamProto = typeof ReadableStream !== 'undefined' ? ReadableStream.prototype : null;
@@ -137,6 +160,16 @@ const NATIVES = (() => {
     canvasToBlob: grab(canvasProto, 'toBlob'),
     ctxDrawImage: grab(ctx2dProto, 'drawImage'),
     ctxGetImageData: grab(ctx2dProto, 'getImageData'),
+    // 2D transform/state (red-team C2): save/restore/translate/scale
+    // were called directly on the OFF-DOM unscramble buffer's context,
+    // so a post-load restore() hook received `this.canvas` — the full
+    // clean padded frame. Sensitive paths use ctxNative() now.
+    ctxSave: grab(ctx2dProto, 'save'),
+    ctxRestore: grab(ctx2dProto, 'restore'),
+    ctxTranslate: grab(ctx2dProto, 'translate'),
+    ctxScale: grab(ctx2dProto, 'scale'),
+    ctxRotate: grab(ctx2dProto, 'rotate'),
+    ctxSetTransform: grab(ctx2dProto, 'setTransform'),
     docCreateElement: grab(docProto, 'createElement'),
     glTexImage2D: glMethods.texImage2D,
     glReadPixels: glMethods.readPixels,
@@ -196,6 +229,11 @@ const AUDIT_WEBGL_METHODS = [
   'createTexture', 'bindTexture', 'bindFramebuffer', 'createFramebuffer',
   'framebufferTexture2D', 'createShader', 'shaderSource', 'compileShader',
   'createProgram', 'linkProgram', 'useProgram', 'getContextAttributes',
+  'uniform1f', 'uniform2f', 'uniform1i', 'viewport', 'activeTexture',
+  'texParameteri', 'pixelStorei', 'generateMipmap', 'getUniformLocation',
+  'attachShader', 'getShaderParameter', 'getProgramParameter', 'createBuffer',
+  'bindBuffer', 'bufferData', 'enableVertexAttribArray', 'vertexAttribPointer',
+  'getExtension',
 ];
 // The reader PROTOTYPE object is identity-stable, so probe it once and
 // re-read `.read` off it per audit (still detects later replacement)
@@ -222,6 +260,10 @@ export function auditIntegrity() {
     ['HTMLCanvasElement.prototype.toBlob', typeof HTMLCanvasElement !== 'undefined' ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
     ['CanvasRenderingContext2D.prototype.drawImage', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ['CanvasRenderingContext2D.prototype.getImageData', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
+    ['CanvasRenderingContext2D.prototype.save', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.save : null, NATIVES.ctxSave],
+    ['CanvasRenderingContext2D.prototype.restore', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.restore : null, NATIVES.ctxRestore],
+    ['CanvasRenderingContext2D.prototype.translate', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.translate : null, NATIVES.ctxTranslate],
+    ['CanvasRenderingContext2D.prototype.scale', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.scale : null, NATIVES.ctxScale],
     ['Document.prototype.createElement', typeof Document !== 'undefined' ? Document.prototype.createElement : null, NATIVES.docCreateElement],
     ['JSON.parse', typeof JSON !== 'undefined' ? JSON.parse : null, NATIVES.jsonParse],
     ['Element.prototype.attachShadow', typeof Element !== 'undefined' ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
@@ -401,6 +443,21 @@ function nativeGlDrawArrays(gl, mode, first, count) {
   return NATIVES.glDrawArrays
     ? NATIVES.glDrawArrays.call(gl, mode, first, count)
     : gl.drawArrays(mode, first, count);
+}
+// Captured-method dispatch for every other render-path GL call: a
+// post-load hook on WebGL2RenderingContext.prototype can no longer
+// observe or alter our uniform values, texture setup, or draws.
+function glNative(gl, name, ...args) {
+  const fn = NATIVES.webgl?.[name];
+  return fn ? fn.call(gl, ...args) : gl[name](...args);
+}
+const CTX_NATIVE = {
+  save: 'ctxSave', restore: 'ctxRestore', translate: 'ctxTranslate',
+  scale: 'ctxScale', rotate: 'ctxRotate', setTransform: 'ctxSetTransform',
+};
+function ctxNative(ctx, name, ...args) {
+  const fn = NATIVES[CTX_NATIVE[name]];
+  return fn ? fn.call(ctx, ...args) : ctx[name](...args);
 }
 
 /* ================================================================== */
@@ -1432,6 +1489,9 @@ function normalizeAssetManifest(raw, baseUrl) {
     if (!Number.isInteger(assetRaw.grid) || assetRaw.grid < 2 || assetRaw.grid > 32) {
       throw nonRetryableError('Archx: asset manifest contains an invalid grid');
     }
+    if (assetRaw.planVersion !== undefined && assetRaw.planVersion !== 1 && assetRaw.planVersion !== 2) {
+      throw nonRetryableError('Archx: asset manifest contains an invalid plan version');
+    }
     if (assetRaw.aesKey !== undefined &&
         !validTokenString(assetRaw.aesKey, { min: 16, max: 256 })) {
       throw nonRetryableError('Archx: asset manifest contains an invalid AES key');
@@ -1466,6 +1526,7 @@ function normalizeAssetManifest(raw, baseUrl) {
       height,
       key: assetRaw.key,
       grid: assetRaw.grid,
+      ...(assetRaw.planVersion !== undefined ? { planVersion: assetRaw.planVersion } : {}),
       ...(assetRaw.aesKey !== undefined ? { aesKey: assetRaw.aesKey } : {}),
       variants: Object.freeze(variants),
     }));
@@ -2150,13 +2211,13 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
     const dx = (orig % plan.grid) * tileW;
     const dy = Math.floor(orig / plan.grid) * tileH;
     const { fx, fy } = plan.flips[scrambledPos];
-    pctx.save();
-    pctx.translate(dx + (fx ? tileW : 0), dy + (fy ? tileH : 0));
-    pctx.scale(fx ? -1 : 1, fy ? -1 : 1);
+    ctxNative(pctx, 'save', );
+    ctxNative(pctx, 'translate', dx + (fx ? tileW : 0), dy + (fy ? tileH : 0));
+    ctxNative(pctx, 'scale', fx ? -1 : 1, fy ? -1 : 1);
     nativeDrawImage(pctx, bitmap,
       s.x + insetX, s.y + insetY, s.w - insetX * 2, s.h - insetY * 2,
       0, 0, tileW, tileH);
-    pctx.restore();
+    ctxNative(pctx, 'restore', );
   }
   // Crop away the padding strip and scale once to the exact requested size.
   drawImageHighQuality(ctx, padded,
@@ -2212,22 +2273,22 @@ function scrambleCanvasLocally(source, grid, key) {
     }
   };
   if (pw > w && w > 0) {
-    cctx.save();
+    ctxNative(cctx, 'save', );
     cctx.fillStyle = '#000'; cctx.fillRect(w, 0, pw - w, h);
     cctx.globalAlpha = 0.96; wrapCols(shiftFor(0, w));
     cctx.globalAlpha = 0.45; wrapCols(shiftFor(1, w));
     cctx.globalAlpha = 0.35;
     nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, Math.min(3, pw - w), h);
-    cctx.restore();
+    ctxNative(cctx, 'restore', );
   }
   if (ph > h && h > 0) {
-    cctx.save();
+    ctxNative(cctx, 'save', );
     cctx.fillStyle = '#000'; cctx.fillRect(0, h, pw, ph - h);
     cctx.globalAlpha = 0.96; wrapRows(shiftFor(plan.count - 1, h));
     cctx.globalAlpha = 0.45; wrapRows(shiftFor(plan.count - 2, h));
     cctx.globalAlpha = 0.35;
     nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, Math.min(3, ph - h));
-    cctx.restore();
+    ctxNative(cctx, 'restore', );
   }
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
@@ -2239,11 +2300,11 @@ function scrambleCanvasLocally(source, grid, key) {
     const s = tileRect(orig, plan.grid, tw, th);
     const d = tileRect(dest, plan.grid, tw, th);
     const { fx, fy } = plan.flips[dest];
-    ctx.save();
-    ctx.translate(d.x + (fx ? tw : 0), d.y + (fy ? th : 0));
-    ctx.scale(fx ? -1 : 1, fy ? -1 : 1);
+    ctxNative(ctx, 'save', );
+    ctxNative(ctx, 'translate', d.x + (fx ? tw : 0), d.y + (fy ? th : 0));
+    ctxNative(ctx, 'scale', fx ? -1 : 1, fy ? -1 : 1);
     nativeDrawImage(ctx, cleanPadded, s.x, s.y, tw, th, 0, 0, tw, th);
-    ctx.restore();
+    ctxNative(ctx, 'restore', );
   }
   cleanPadded.width = 0; cleanPadded.height = 0;
   return { canvas: scrambled, meta: { plan, origW: w, origH: h, padW: pw, padH: ph } };
@@ -2976,6 +3037,7 @@ export class ProtectedImage {
       const assetExtra = {
         key: asset.key,
         grid: asset.grid,
+        ...(asset.planVersion !== undefined ? { planVersion: asset.planVersion } : {}),
         ...(asset.aesKey !== undefined ? { aesKey: asset.aesKey } : {}),
       };
       const assetCacheMode = normalizedHttpCache(o.assetHttpCache, 'default');
@@ -3473,7 +3535,7 @@ export class ProtectedImage {
     if (this.#gl) {
       this._stopGlLoop();
       try {
-        const lose = this.#gl.getExtension && this.#gl.getExtension('WEBGL_lose_context');
+        const lose = this.#gl.getExtension && glNative(this.#gl, 'getExtension', 'WEBGL_lose_context');
         if (lose?.loseContext) { this.#glReleasing = true; lose.loseContext(); }
       } catch { /* context stays; budget slot returns on natural loss */ }
     }
@@ -4282,7 +4344,7 @@ export class ProtectedImage {
       this._stopGlLoop();
       if (this.#gl) {
         try {
-          const lose = this.#gl.getExtension && this.#gl.getExtension('WEBGL_lose_context');
+          const lose = this.#gl.getExtension && glNative(this.#gl, 'getExtension', 'WEBGL_lose_context');
           if (lose?.loseContext) { this.#glReleasing = true; lose.loseContext(); }
         } catch { /* best-effort */ }
       }
@@ -4385,6 +4447,7 @@ export class ProtectedImage {
         this.#host.dispatchEvent(new CustomEvent('archx-webgl-budget', {
           detail: { inUse: glContextsInUse, budget: GL_CONTEXT_BUDGET }, bubbles: true,
         }));
+        emitClientEvent('archx.webgl_budget', { outcome: 'canvas2d-fallback' }, this);
       }
       return false;
     }
@@ -4409,9 +4472,9 @@ export class ProtectedImage {
       try {
         const attrs = NATIVES.glGetContextAttributes
           ? NATIVES.glGetContextAttributes.call(gl)
-          : gl.getContextAttributes();
+          : glNative(gl, 'getContextAttributes', );
         if (attrs && attrs.preserveDrawingBuffer === true) {
-          const lose = gl.getExtension && gl.getExtension('WEBGL_lose_context');
+          const lose = gl.getExtension && glNative(gl, 'getExtension', 'WEBGL_lose_context');
           try { lose && lose.loseContext && lose.loseContext(); } catch { /* best-effort */ }
           this.#flagPreserveRewrite('attributes');
           this.#fresh2dCanvas();
@@ -4670,18 +4733,18 @@ export class ProtectedImage {
         frag = vec4(c.rgb, 1.0);
       }`;
     const compile = (type, srcText) => {
-      const s = gl.createShader(type);
-      gl.shaderSource(s, srcText); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) return null;
+      const s = glNative(gl, 'createShader', type);
+      glNative(gl, 'shaderSource', s, srcText); glNative(gl, 'compileShader', s);
+      if (!glNative(gl, 'getShaderParameter', s, gl.COMPILE_STATUS)) return null;
       return s;
     };
     const v = compile(gl.VERTEX_SHADER, vs);
     const f = compile(gl.FRAGMENT_SHADER, fs);
     if (!v || !f) return false;
-    const prog = gl.createProgram();
-    gl.attachShader(prog, v); gl.attachShader(prog, f); gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
-    gl.useProgram(prog);
+    const prog = glNative(gl, 'createProgram', );
+    glNative(gl, 'attachShader', prog, v); glNative(gl, 'attachShader', prog, f); glNative(gl, 'linkProgram', prog);
+    if (!glNative(gl, 'getProgramParameter', prog, gl.LINK_STATUS)) return false;
+    glNative(gl, 'useProgram', prog);
     this.#glProg = prog;
     this.#glLoc = {};
     ['uTex','uMap','uWm','uGrid','uCrop','uFitScale','uFitOffset','uScrambled','uSeed','uWmOn',
@@ -4690,15 +4753,15 @@ export class ProtectedImage {
      'uTemporalDuty','uTemporalBias','uBiasSeed',
      'uInterlaceOn','uInterlacePhase','uInterlacePhases','uInterlaceLayout','uInterlaceCell','uInterlaceAxis',
      'uInterlaceFill','uInterlaceFillBlock','uInterlaceFillStrength','uInterlaceHiddenScale','uInterlaceActiveGain','uInterlaceNoiseStrength','uInterlaceBias']
-      .forEach((n) => { this.#glLoc[n] = gl.getUniformLocation(prog, n); });
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    this.#glTex = gl.createTexture();
-    this.#glMap = gl.createTexture();
-    this.#glWm = gl.createTexture();
+      .forEach((n) => { this.#glLoc[n] = glNative(gl, 'getUniformLocation', prog, n); });
+    const buf = glNative(gl, 'createBuffer', );
+    glNative(gl, 'bindBuffer', gl.ARRAY_BUFFER, buf);
+    glNative(gl, 'bufferData', gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    glNative(gl, 'enableVertexAttribArray', 0);
+    glNative(gl, 'vertexAttribPointer', 0, 2, gl.FLOAT, false, 0, 0);
+    this.#glTex = glNative(gl, 'createTexture', );
+    this.#glMap = glNative(gl, 'createTexture', );
+    this.#glWm = glNative(gl, 'createTexture', );
     return true;
   }
 
@@ -4707,31 +4770,31 @@ export class ProtectedImage {
     const source = this.#glSource || this.#bitmap;
     const texImage = (...args) => (NATIVES.glTexImage2D
       ? NATIVES.glTexImage2D.call(gl, ...args)
-      : gl.texImage2D(...args));
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.#glTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      : glNative(gl, 'texImage2D', ...args));
+    glNative(gl, 'activeTexture', gl.TEXTURE0);
+    glNative(gl, 'bindTexture', gl.TEXTURE_2D, this.#glTex);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    glNative(gl, 'pixelStorei', gl.UNPACK_FLIP_Y_WEBGL, false);
     texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     if (!meta.plan) {
       // A clean (unscrambled) texture can use real trilinear mipmaps. A
       // scrambled texture deliberately cannot: mip levels would blend across
       // neighbouring shuffled tiles; sampleImage() supersamples instead.
       try {
-        gl.generateMipmap(gl.TEXTURE_2D);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        glNative(gl, 'generateMipmap', gl.TEXTURE_2D);
+        glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       } catch {}
     }
     // Tile map: for each ORIGINAL tile -> scrambled source tile + flips
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.#glMap);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'activeTexture', gl.TEXTURE1);
+    glNative(gl, 'bindTexture', gl.TEXTURE_2D, this.#glMap);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (meta.plan) {
       const g = meta.plan.grid;
       const data = new Uint8Array(g * g * 4);
@@ -4745,12 +4808,12 @@ export class ProtectedImage {
       texImage(gl.TEXTURE_2D, 0, gl.RGBA, g, g, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
     }
     // Watermark texture rendered once on a 2D canvas
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, this.#glWm);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    glNative(gl, 'activeTexture', gl.TEXTURE2);
+    glNative(gl, 'bindTexture', gl.TEXTURE_2D, this.#glWm);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    glNative(gl, 'texParameteri', gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     const wm = this.#options.watermark;
     this.#glWmOn = 0;
     if (wm) {
@@ -4840,13 +4903,13 @@ export class ProtectedImage {
         this.#canvas.width = w; this.#canvas.height = h;
       }
       this.#renderedW = w; this.#renderedH = h;
-      gl.viewport(0, 0, w, h);
-      gl.useProgram(this.#glProg);
+      glNative(gl, 'viewport', 0, 0, w, h);
+      glNative(gl, 'useProgram', this.#glProg);
       const L = this.#glLoc;
       const meta = this.#glMeta || this.#meta;
-      gl.uniform1i(L.uTex, 0); gl.uniform1i(L.uMap, 1); gl.uniform1i(L.uWm, 2);
-      gl.uniform1f(L.uGrid, meta.plan ? meta.plan.grid : 1);
-      gl.uniform2f(L.uCrop, meta.origW / meta.padW, meta.origH / meta.padH);
+      glNative(gl, 'uniform1i', L.uTex, 0); glNative(gl, 'uniform1i', L.uMap, 1); glNative(gl, 'uniform1i', L.uWm, 2);
+      glNative(gl, 'uniform1f', L.uGrid, meta.plan ? meta.plan.grid : 1);
+      glNative(gl, 'uniform2f', L.uCrop, meta.origW / meta.padW, meta.origH / meta.padH);
       // fit
       const srcRatio = meta.origW / meta.origH;
       const dstRatio = w / h;
@@ -4859,24 +4922,24 @@ export class ProtectedImage {
         if (srcRatio > dstRatio) { const s = srcRatio / dstRatio; sy = s; oy = -(s - 1) / 2; sx = 1; ox = 0; }
         else { const s = dstRatio / srcRatio; sx = s; ox = -(s - 1) / 2; }
       }
-      gl.uniform2f(L.uFitScale, sx, sy);
-      gl.uniform2f(L.uFitOffset, ox, oy);
-      gl.uniform1f(L.uScrambled, meta.plan ? 1 : 0);
+      glNative(gl, 'uniform2f', L.uFitScale, sx, sy);
+      glNative(gl, 'uniform2f', L.uFitOffset, ox, oy);
+      glNative(gl, 'uniform1f', L.uScrambled, meta.plan ? 1 : 0);
       // Per-frame noise seed: with a session-constant seed the temporal
       // delta for a block is the same value every cycle, so a 6-frame
       // capture's multiset is {c, c+d, c-d}x2 and the median IS c exactly.
       // Re-seeding every presented frame makes deltas independent draws —
       // short-window medians land off-target and recovery needs long
       // averaging (which remains possible; this raises cost, not a wall).
-      gl.uniform1f(L.uSeed, (hashSeed(sessionId()) % 1000) / 37.0 + Math.random() * 997.0);
-      gl.uniform1f(L.uWmOn, this.#glWmOn || 0);
+      glNative(gl, 'uniform1f', L.uSeed, (hashSeed(sessionId()) % 1000) / 37.0 + Math.random() * 997.0);
+      glNative(gl, 'uniform1f', L.uWmOn, this.#glWmOn || 0);
       const lensCfg = typeof this.#options.lens === 'object' && this.#options.lens ? this.#options.lens : {};
-      gl.uniform1f(L.uLensOn, this.#options.lens ? 1 : 0);
-      gl.uniform1f(L.uLensActive, this.#lensPoint ? 1 : 0);
-      gl.uniform2f(L.uLensCenter, this.#lensPoint?.x ?? -10, this.#lensPoint?.y ?? -10);
-      gl.uniform1f(L.uLensRadius, this.#lensRadiusPx(w, h, lensCfg.radius ?? 0.30));
-      gl.uniform2f(L.uResolution, w, h);
-      gl.uniform1f(L.uLocked, Date.now() < this.#lockedUntil ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uLensOn, this.#options.lens ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uLensActive, this.#lensPoint ? 1 : 0);
+      glNative(gl, 'uniform2f', L.uLensCenter, this.#lensPoint?.x ?? -10, this.#lensPoint?.y ?? -10);
+      glNative(gl, 'uniform1f', L.uLensRadius, this.#lensRadiusPx(w, h, lensCfg.radius ?? 0.30));
+      glNative(gl, 'uniform2f', L.uResolution, w, h);
+      glNative(gl, 'uniform1f', L.uLocked, Date.now() < this.#lockedUntil ? 1 : 0);
       const temporal = this.#temporalConfig();
       // Idle throttle: after 5 s without pointer activity over this
       // instance, a continuous temporal loop draws 1 frame in 3 (~20 Hz).
@@ -4894,36 +4957,36 @@ export class ProtectedImage {
       const interlace = temporal?.interlace || null;
       const interlacePhases = interlace?.phases || 2;
       const interlacePhase = ((this.#temporalPhase % interlacePhases) + interlacePhases) % interlacePhases;
-      gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
-      gl.uniform1f(L.uTemporalSign, this.#temporalSign);
-      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
-      gl.uniform1f(L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][this.#dutyIndex % 3]);
-      gl.uniform1f(L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
-      gl.uniform1f(L.uBiasSeed, this.#biasSeed);
-      gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
-      gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
-      gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
-      gl.uniform1f(L.uInterlaceOn, interlace ? 1 : 0);
-      gl.uniform1f(L.uInterlacePhase, interlacePhase);
-      gl.uniform1f(L.uInterlacePhases, interlacePhases);
-      gl.uniform1f(L.uInterlaceLayout,
+      glNative(gl, 'uniform1f', L.uTemporalOn, temporal?.noise ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uTemporalSign, this.#temporalSign);
+      glNative(gl, 'uniform1f', L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
+      glNative(gl, 'uniform1f', L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][this.#dutyIndex % 3]);
+      glNative(gl, 'uniform1f', L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
+      glNative(gl, 'uniform1f', L.uBiasSeed, this.#biasSeed);
+      glNative(gl, 'uniform1f', L.uTemporalBlock, temporal ? temporal.block : 1);
+      glNative(gl, 'uniform1f', L.uTemporalPattern, temporal ? temporal.patternCode : 0);
+      glNative(gl, 'uniform1f', L.uTemporalChroma, temporal?.chroma ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uInterlaceOn, interlace ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uInterlacePhase, interlacePhase);
+      glNative(gl, 'uniform1f', L.uInterlacePhases, interlacePhases);
+      glNative(gl, 'uniform1f', L.uInterlaceLayout,
         interlace?.layout === 'pixels' ? 0
           : interlace?.layout === 'strips' ? 1
             : interlace?.layout === 'blocks' ? 2
               : 3);
-      gl.uniform1f(L.uInterlaceCell, interlace?.cellSize || 1);
-      gl.uniform1f(L.uInterlaceAxis, interlace?.axis === 'columns' ? 1 : 0);
-      gl.uniform1f(L.uInterlaceFill,
+      glNative(gl, 'uniform1f', L.uInterlaceCell, interlace?.cellSize || 1);
+      glNative(gl, 'uniform1f', L.uInterlaceAxis, interlace?.axis === 'columns' ? 1 : 0);
+      glNative(gl, 'uniform1f', L.uInterlaceFill,
         interlace?.fill === 'dim' ? 1
           : interlace?.fill === 'black' ? 2
             : interlace?.fill === 'noise' ? 3
               : 0);
-      gl.uniform1f(L.uInterlaceFillBlock, interlace?.fillBlock || 12);
-      gl.uniform1f(L.uInterlaceFillStrength, interlace?.fillStrength ?? 1);
-      gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
-      gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
-      gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
-      gl.uniform1f(L.uInterlaceBias, interlace ? (interlace.noiseStrength ?? 0.16) * 0.55 : 0);
+      glNative(gl, 'uniform1f', L.uInterlaceFillBlock, interlace?.fillBlock || 12);
+      glNative(gl, 'uniform1f', L.uInterlaceFillStrength, interlace?.fillStrength ?? 1);
+      glNative(gl, 'uniform1f', L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
+      glNative(gl, 'uniform1f', L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
+      glNative(gl, 'uniform1f', L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
+      glNative(gl, 'uniform1f', L.uInterlaceBias, interlace ? (interlace.noiseStrength ?? 0.16) * 0.55 : 0);
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
       if (!this.#canaryDone && !this.#canaryPause && this.#glFrames >= this.#canaryNextTry) {
@@ -5058,7 +5121,7 @@ export class ProtectedImage {
     this.#cachedExtra = null;
     this._stopGlLoop();
     if (this.#gl) {
-      try { this.#gl.getExtension('WEBGL_lose_context')?.loseContext(); } catch {}
+      try { glNative(this.#gl, 'getExtension', 'WEBGL_lose_context')?.loseContext(); } catch {}
       glContextsInUse = Math.max(0, glContextsInUse - 1);
       this.#gl = null;
     }

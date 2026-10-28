@@ -5,6 +5,7 @@
  * inside an .archx container. The master file itself is never sent.
  */
 import { createRequire } from 'node:module';
+import { Worker } from 'node:worker_threads';
 import {
   buildScramblePlan, paddedSize, scramblePixels, scramblePixelsPadded,
   encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
@@ -266,7 +267,7 @@ function normalizeProcessingOptions(opts = {}) {
   }
   return Object.freeze({
     maxInputBytes: integer('maxInputBytes', pick('maxInputBytes'), 50 * 1024 * 1024, 1024, 500 * 1024 * 1024),
-    maxInputPixels: integer('maxInputPixels', pick('maxInputPixels'), 40000000, 10000, 268402689),
+    maxInputPixels: integer('maxInputPixels', pick('maxInputPixels'), 50000000, 10000, 268402689),
     maxInputWidth: integer('maxInputWidth', pick('maxInputWidth'), 12000, 64, 65536),
     maxInputHeight: integer('maxInputHeight', pick('maxInputHeight'), 12000, 64, 65536),
     maxOutputPixels: integer('maxOutputPixels', pick('maxOutputPixels'), 16777216, 10000, 268402689),
@@ -491,7 +492,7 @@ function blendOverlayInPlace(dst, overlay) {
 function validateScrambleOpts(opts) {
   const grid = opts.grid ?? 8;
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
-  const planVersion = opts.planVersion ?? 1;
+  const planVersion = opts.planVersion ?? 2; // 128-bit seed; v1 (32-bit) stays available explicitly
   if (planVersion !== 1 && planVersion !== 2) {
     throw new TypeError('Archx image processing: planVersion must be 1 or 2');
   }
@@ -786,7 +787,7 @@ export async function scrambleImage(input, opts = {}) {
 }
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */
-export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, planVersion = 1, ...processingOpts } = {}) {
+export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, planVersion = 2, ...processingOpts } = {}) {
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
   if (planVersion !== 1 && planVersion !== 2) throw new TypeError('Archx image processing: planVersion must be 1 or 2');
   if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');
@@ -813,4 +814,79 @@ export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h
   }
   try { return await out.png().toBuffer(); }
   catch (err) { throw mapSharpError(err); }
+}
+
+/* ---------------- off-thread StegoMark detection ----------------
+ * `detectStegoFingerprint` with auto profile/layout + geometry search
+ * evaluates thousands of hypotheses synchronously — measured at ~6 s
+ * of blocked event loop on unmarked images. That is an offline
+ * forensic cost; on a server it is a self-inflicted stall. This
+ * wrapper runs the identical detector in a single reusable
+ * worker_threads worker (lazily spawned, respawned after crashes). */
+let detectWorker = null;
+let detectSeq = 0;
+const detectPending = new Map();
+
+function failDetectWorker(err) {
+  const pending = [...detectPending.values()];
+  detectPending.clear();
+  if (detectWorker) {
+    try { detectWorker.terminate(); } catch { /* already gone */ }
+    detectWorker = null;
+  }
+  for (const entry of pending) entry.reject(err);
+}
+
+function ensureDetectWorker() {
+  if (detectWorker) return detectWorker;
+  const worker = new Worker(new URL('./detect-worker.js', import.meta.url), { type: 'module' });
+  worker.unref();
+  worker.on('message', (msg) => {
+    const entry = detectPending.get(msg?.id);
+    if (!entry) return;
+    detectPending.delete(msg.id);
+    if (msg.ok) entry.resolve(msg.result);
+    else entry.reject(new Error(`Archx stego detection failed: ${msg.error || 'worker error'}`));
+  });
+  worker.on('error', (err) => failDetectWorker(err));
+  worker.on('exit', (code) => {
+    if (code !== 0 && detectPending.size) {
+      failDetectWorker(new Error(`Archx stego detection worker exited (${code})`));
+    } else if (detectWorker === worker) detectWorker = null;
+  });
+  detectWorker = worker;
+  return worker;
+}
+
+/**
+ * Run StegoMark detection off the main thread. Same options/results
+ * as `detectStegoFingerprint` from the core; calls are serialized
+ * through one worker (the detector is CPU-bound — parallel workers
+ * would multiply RAM per plane set).
+ */
+export function detectStegoFingerprintInWorker(rgba, w, h, options = {}) {
+  const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || bytes.length < w * h * 3) {
+    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent'));
+  }
+  const worker = ensureDetectWorker();
+  const id = ++detectSeq;
+  return new Promise((resolve, reject) => {
+    detectPending.set(id, { resolve, reject });
+    try {
+      // Copy into a standalone buffer so caller mutation cannot race
+      // the worker; keeps the transfer list free of SharedArrayBuffer
+      // edge cases across runtimes.
+      const copy = new Uint8Array(bytes.length);
+      copy.set(bytes);
+      worker.postMessage({ id, rgba: copy, w, h, options });
+    } catch (err) {
+      detectPending.delete(id);
+      reject(err);
+    }
+  });
+}
+
+export function closeStegoDetectWorker() {
+  if (detectWorker) failDetectWorker(new Error('Archx stego detection worker closed'));
 }

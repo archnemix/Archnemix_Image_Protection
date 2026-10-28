@@ -22,21 +22,31 @@ import {
 import { deriveStegoKey } from './middleware.js';
 import { configureSharpSecurity } from './scramble-image.js';
 
-function parseArgs(argv) {
+function parseArgs(argv, booleanFlags = new Set()) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith('--')) {
-      const name = a.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const eq = a.indexOf('=');
+    if (eq !== -1) {
+      const name = a.slice(2, eq); const value = a.slice(eq + 1);
+      out[name] = booleanFlags.has(name) && (value === 'true' || value === 'false') ? value === 'true' : value;
+      continue;
+    }
+    const name = a.slice(2);
+    const next = argv[i + 1];
+    if (booleanFlags.has(name)) {
+      // Boolean flags never swallow the next positional (the file path);
+      // an explicit 'true'/'false' literal is honoured as the value.
+      if (next === 'true' || next === 'false') { out[name] = next === 'true'; i++; }
       else out[name] = true;
-    } else out._.push(a);
+    } else if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    else out[name] = true;
   }
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2));
+const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'help']));
 const input = args._[0];
 if (!input || args.help) {
   console.log(`Usage: archx-detect <suspect image> [options]

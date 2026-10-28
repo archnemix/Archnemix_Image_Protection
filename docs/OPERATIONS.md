@@ -515,6 +515,25 @@ rate and quotas for items, not batch envelopes. A slow authorization database
 will still dominate a 100-item page; index/cache entitlement lookups in the
 host application without weakening redemption-time reauthorization.
 
+### RAM and worst-case sizing
+
+Budget request-path memory as approximately
+`processingConcurrency × 4 bytes × maxInputPixels` for decoded RGBA working
+buffers, plus the libvips operation cache (`processing.cacheMb`, default
+100 MB) and Node/V8 overhead. With the unified 50 MP `maxInputPixels`
+default, one in-flight maximum-size derivative can transiently hold
+~200 MB of raw pixels (plus a padded copy), so a 512 MB container should
+keep `processingConcurrency: 1` and lower `maxInputPixels` to match its
+real masters; a 2 GB instance at concurrency 4 is comfortable for
+≤ 12 MP masters. Derivative/disk-cache buffers are additional and
+bounded by their own byte caps. Keep AVIF (`processing.avifEffort > 2`
+warns at construction) on the offline `archx-build` path: at high effort
+it is seconds-per-image CPU that no cache-hit ratio fixes on a cold tier.
+Forensic detection is several seconds of single-core CPU on unmarked
+images under auto/geometry search — run it offline via
+`detectStegoFingerprintInWorker()` or the `archx-detect` CLI, never in a
+request handler.
+
 ### Load-test procedure
 
 The repository includes a bounded mint+redeem load tool:

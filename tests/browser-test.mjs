@@ -987,6 +987,62 @@ try {
   check('WebGL integrity audit is clean after restoring draw methods',
     webglIntegrity.auditIssues.length === 0, JSON.stringify(webglIntegrity.auditIssues));
 
+  /* Post-load uniform/restore hooks (red-team C1/C2): render-path GL and
+     off-DOM 2D transform calls go through captured natives, so hooks
+     installed AFTER Archx loads see nothing and cannot neuter the
+     temporal modulation or steal the uncropped padded buffer. */
+  const postLoadHooks = await page.evaluate(async () => {
+    const gl2 = window.WebGL2RenderingContext?.prototype;
+    const ctx2d = window.CanvasRenderingContext2D?.prototype;
+    const origUniform1f = gl2?.uniform1f;
+    const origRestore = ctx2d?.restore;
+    let uniformCalls = 0;
+    const stolen = [];
+    if (gl2 && origUniform1f) {
+      gl2.uniform1f = function (loc, v) { uniformCalls++; return origUniform1f.call(this, loc, 0); };
+    }
+    if (ctx2d && origRestore) {
+      ctx2d.restore = function () {
+        try { stolen.push({ w: this.canvas.width, h: this.canvas.height, attached: this.canvas.isConnected }); } catch {}
+        return origRestore.call(this);
+      };
+    }
+    const host = document.createElement('div');
+    host.style.cssText = 'width:300px;height:200px';
+    host.id = 'hook-hook';
+    document.body.appendChild(host);
+    const inst = window.Archx.load.image(host, { id: 'gallery-009' },
+      { mode: 'vault', debug: true, lazy: false, automation: 'monitor' });
+    await inst.ready;
+    const framesBefore = inst._debug()?.glFrames ?? 0;
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline && ((inst._debug()?.glFrames ?? 0) - framesBefore) <= 2) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const dbg = inst._debug();
+    const out = {
+      loaded: inst.loaded,
+      uniformCalls,
+      glDelta: (dbg?.glFrames ?? 0) - framesBefore,
+      stolenOffDom: stolen.filter((c) => !c.attached),
+      audit: window.Archx.auditIntegrityDetails().issues,
+    };
+    if (gl2 && origUniform1f) gl2.uniform1f = origUniform1f;
+    if (ctx2d && origRestore) ctx2d.restore = origRestore;
+    inst.destroy(); host.remove();
+    return out;
+  });
+  check('post-load uniform1f hook observes zero Archx uniform writes (C1)',
+    postLoadHooks.uniformCalls === 0, JSON.stringify(postLoadHooks));
+  check('vault temporal rendering continues under the uniform hook',
+    postLoadHooks.loaded === true && postLoadHooks.glDelta >= 2, JSON.stringify(postLoadHooks));
+  check('post-load restore() hook never receives an off-DOM (uncropped) canvas (C2)',
+    postLoadHooks.stolenOffDom.length === 0, JSON.stringify(postLoadHooks.stolenOffDom));
+  check('integrity audit now names uniform1f and 2D restore hooks',
+    postLoadHooks.audit.some((n) => n.endsWith('.uniform1f')) &&
+      postLoadHooks.audit.some((n) => n.endsWith('.restore')),
+    JSON.stringify(postLoadHooks.audit));
+
   // Reproduce the userscript ordering from the external review: this wrapper
   // is installed before /src/index.js is evaluated, so Archx captures the
   // wrapper itself as its drawArrays reference. The wrapper performs the

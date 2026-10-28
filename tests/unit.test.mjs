@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { execFileSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import {
@@ -31,6 +31,7 @@ import {
   validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
+  detectStegoFingerprintInWorker, closeStegoDetectWorker,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -426,7 +427,7 @@ test('HTTP middleware: token flow serves scrambled container, blocks everything 
   // syntheticMaster was PNG bytes saved as .jpg — sharp sniffs content, fine.
   assert.ok((await meanAbsDiff(master, Buffer.from(payload), 150, 112)) > 25);
   // ...but unscramble with the token key restores it
-  const restored = await unscrambleImage(Buffer.from(payload), { grid: header.grid, key: token.key, w: header.w, h: header.h });
+  const restored = await unscrambleImage(Buffer.from(payload), { grid: header.grid, key: token.key, w: header.w, h: header.h, planVersion: header.pv ?? 1 });
   assert.ok((await meanAbsDiff(master, restored, 150, 112)) < 22, 'high-quality WebP tolerance');
 
   // Cover-aware sizing: a 320x240 source in a 120x120 box needs a 160px-wide
@@ -526,7 +527,7 @@ test('middleware direct controls: entitlement quality/format wins and StegoMark 
   assert.equal(header.mime, 'image/png');
 
   const restored = await unscrambleImage(Buffer.from(payload), {
-    grid: header.grid, key: token.key, w: header.w, h: header.h,
+    grid: header.grid, key: token.key, w: header.w, h: header.h, planVersion: header.pv ?? 1,
   });
   const { data, info } = await sharp(restored).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const found = detectStegoFingerprint(new Uint8Array(data), info.width, info.height, {
@@ -646,10 +647,13 @@ test('bounded security stores expire/evict and processing semaphore fails predic
   const nonces = new BoundedTtlSet({ maxEntries: 1, cleanupIntervalMs: 0 });
   assert.equal(nonces.claim('one', 2000, 1000), true);
   assert.equal(nonces.claim('one', 2000, 1000), false, 'synchronous duplicate claim loses');
-  assert.equal(nonces.claim('two', 2000, 1000), false, 'saturated nonce store fails closed');
+  // v1.15: saturation evicts the OLDEST live entry (smallest remaining
+  // replay window) instead of failing every legitimate claim globally.
+  assert.equal(nonces.claim('two', 2000, 1000), true, 'saturated store evicts oldest instead of global fail-closed');
+  assert.equal(nonces.claim('two', 2000, 1000), false, 'live duplicate still loses');
   assert.equal(nonces.claim('expired', 999, 1000), false);
   nonces.cleanup(2001);
-  assert.equal(nonces.claim('two', 3000, 2001), true);
+  assert.equal(nonces.claim('three', 3000, 2001), true);
   nonces.close();
 
   const semaphore = new AsyncSemaphore({ maxConcurrent: 1, maxQueue: 0, queueTimeoutMs: 0 });
@@ -1036,7 +1040,7 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
   const { header, payload } = decodeContainer(stegoBytes);
   assert.equal(header.sg, 1);
   const restored = await unscrambleImage(Buffer.from(payload), {
-    grid: header.grid, key: stegoToken.key, w: header.w, h: header.h,
+    grid: header.grid, key: stegoToken.key, w: header.w, h: header.h, planVersion: header.pv ?? 1,
   });
   const raw = await sharp(restored).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const found = detectStegoFingerprint(new Uint8Array(raw.data), raw.info.width, raw.info.height, {
@@ -1369,6 +1373,7 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
   const oldDecoded = decodeContainer(oldBytes);
   const restored = await unscrambleImage(Buffer.from(oldDecoded.payload), {
     grid: oldDecoded.header.grid, key: oldToken.key, w: oldDecoded.header.w, h: oldDecoded.header.h,
+    planVersion: oldDecoded.header.pv ?? 1,
   });
   assert.ok((await meanAbsDiff(fs.readFileSync(path.join(dir, 'cat.jpg')), restored, 80, 60)) < 22,
     'redemption derivations use the issuing secret received by the client at mint time');
@@ -2306,7 +2311,7 @@ test('middleware scramblePlanVersion 2 issues pv=2 payloads that only unscramble
     return { token, bytes: new Uint8Array(await response.arrayBuffer()) };
   };
 
-  const v1 = await start({});
+  const v1 = await start({ scramblePlanVersion: 1 });
   t.after(async () => { await new Promise((r) => v1.server.close(r)); v1.handler.close(); });
   const one = await redeem(v1.base);
   const oneHeader = decodeContainer(one.bytes).header;
@@ -2628,7 +2633,7 @@ test('hardened defaults now encrypt; config audit warns on unencrypted or v1-pla
   const hardened = withHardenedProductionDefaults({ secret: 'x'.repeat(40), authorize: () => true, images: [] });
   assert.equal(hardened.encrypt, true);
   const audit = auditArchxServerConfig({
-    secret: 'x'.repeat(40), authorize: () => true, images: [],
+    secret: 'x'.repeat(40), authorize: () => true, images: [], scramblePlanVersion: 1,
   });
   assert.ok(audit.warnings.some((w) => /encrypt is off/.test(w)), 'audit must call out jigsaw-solvable unencrypted payloads');
   assert.ok(audit.warnings.some((w) => /scramblePlanVersion 1/.test(w)), 'audit must call out the 32-bit plan seed');
@@ -3140,4 +3145,146 @@ test('v1.14: per-token derivatives share one stage-1 base (S1 base-first + singl
   const stats = fx.handler.stats();
   assert.equal(stats.baseInFlight, 0, 'singleflight map drains');
   assert.ok((stats.baseCacheEntries ?? 0) >= 1, 'stage-1 base cached for reuse');
+});
+test('variant-scoped per-image keys: a free-tier key cannot open the paid-tier derivative (S1)', async (t) => {
+  let tier = 'free';
+  const { base } = await startArchxFixture(t, {
+    encrypt: true,
+    scrambleKeyMode: 'per-image',
+    authorize: () => tier === 'free'
+      ? { maxWidth: 120, quality: 40 }
+      : { maxWidth: 320, lossless: true },
+  }, { consult: [320, 240] });
+  const freeToken = await (await postToken(`${base}/archx/token/consult?w=120`)).json();
+  tier = 'vip';
+  const vipToken = await (await postToken(`${base}/archx/token/consult?w=320`)).json();
+  assert.notEqual(freeToken.key, vipToken.key, 'different tiers derive different scramble keys');
+  const res = await redeemToken(base, vipToken);
+  assert.equal(res.status, 200);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  const { header, payload } = decodeContainer(bytes);
+  // The free-tier AES key cannot open the paid payload at all…
+  await assert.rejects(
+    () => decryptPayload(Buffer.from(payload), freeToken.aesKey, header.iv),
+    'free-tier AES key must not decrypt the lossless derivative',
+  );
+  const plain = await decryptPayload(Buffer.from(payload), vipToken.aesKey, header.iv);
+  const wrong = await unscrambleImage(plain, { key: freeToken.key, grid: header.grid, format: 'webp', lossless: true, planVersion: header.pv ?? 1 });
+  const right = await unscrambleImage(plain, { key: vipToken.key, grid: header.grid, format: 'webp', lossless: true, planVersion: header.pv ?? 1 });
+  assert.ok((await meanAbsDiff(right, wrong, header.origW, header.origH)) > 20,
+    'free-tier scramble key leaves the paid derivative scrambled');
+});
+
+test('short X-Forwarded-For chains fall back to the socket identity (S2)', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    allowAnonymous: true,
+    trustProxy: true,
+    trustedProxyHops: 2,
+    quotas: { perIp: 1, windowMs: 60000 },
+  });
+  const mintWith = (xff) => postToken(`${base}/archx/token/cat?w=100`, { headers: { 'x-forwarded-for': xff } });
+  assert.equal((await mintWith('198.51.100.10')).status, 200);
+  // A too-short chain cannot select the identity: a DIFFERENT first hop
+  // still lands in the socket bucket and is now over quota.
+  assert.equal((await mintWith('203.0.113.99')).status, 429,
+    'single-hop XFF must not mint a fresh identity per spoofed value');
+  // A complete chain (length === trusted hops) still selects chain[0].
+  assert.equal((await mintWith('198.51.100.10, 10.0.0.1')).status, 200);
+});
+
+test('saturated BoundedTtlSet evicts the oldest entries instead of failing closed globally', () => {
+  const set = new BoundedTtlSet({ maxEntries: 64, cleanupIntervalMs: 0 });
+  const exp = Date.now() + 60_000;
+  for (let i = 0; i < 64; i++) assert.equal(set.claim(`k-${i}`, exp), true);
+  assert.equal(set.claim('fresh-viewer', exp), true, 'new viewers are not locked out by saturation');
+  assert.ok(set.size <= 64, 'the store stays bounded');
+  assert.equal(set.claim('k-63', exp), false, 'recent entries remain claimed');
+  assert.equal(set.claim('k-0', exp), true, 'the oldest entry was evicted to make room');
+});
+
+test('array bindTokenTo and authorize-provided ttlSec are honoured', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    bindTokenTo: ['ip', 'ua'],
+    authorize: () => ({ ttlSec: 5 }),
+  });
+  const token = await (await postToken(`${base}/archx/token/cat?w=100`)).json();
+  const payload = tokenPayloadForTest(token.token);
+  assert.equal(payload.exp - payload.iat, 5_000, 'ttlSec from authorize controls token lifetime');
+  const ok = await redeemToken(base, token);
+  assert.equal(ok.status, 200);
+  const token2 = await (await postToken(`${base}/archx/token/cat?w=100`)).json();
+  const foreign = await redeemToken(base, token2, { headers: { 'user-agent': 'archx-agent/2' } });
+  assert.equal(foreign.status, 403, 'array-form ua binding rejects a different user agent');
+});
+
+test('plan v2 is the default everywhere; builder manifest is web-servable', async (t) => {
+  const master = await syntheticMaster(96, 64);
+  const packed = await scrambleImage(master, { key: 'pv-default', format: 'webp' });
+  assert.equal(decodeContainer(packed.bytes).header.pv, 2, 'scrambleImage defaults to plan v2');
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-pv15-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const inputDir = path.join(root, 'in'); const outputDir = path.join(root, 'out');
+  fs.mkdirSync(inputDir);
+  fs.writeFileSync(path.join(inputDir, 'a.png'), master);
+  const built = await buildArchxAssets({ inputDir, outputDir, key: 'pv-build', encrypt: true, widths: [96] });
+  assert.equal(built.manifest.assets.a.planVersion, 2, 'builder defaults to plan v2');
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(path.join(outputDir, 'archx-manifest.json')).mode & 0o777;
+    assert.equal(mode & 0o044, 0o044, `manifest must be readable by the web server user (got 0${mode.toString(8)})`);
+    const stateMode = fs.statSync(path.join(outputDir, '.archx-build-state.json')).mode & 0o777;
+    assert.equal(stateMode & 0o077, 0, 'build state stays owner-only');
+  }
+});
+
+test('detector recovers vertical flips and moderate corner crops; worker API round-trips', async () => {
+  const w = 480, h = 320;
+  const gradient = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    gradient[i] = (x * 255 / w) | 0; gradient[i + 1] = (y * 255 / h) | 0;
+    gradient[i + 2] = (x ^ y) % 256; gradient[i + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(gradient, w, h, 'buyer-9', { key: 'g15-key', profile: 'robust', strength: 8, layoutVersion: 3 });
+  const flippedY = new Uint8Array(marked.length);
+  for (let y = 0; y < h; y++) flippedY.set(marked.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+  const vflip = detectStegoFingerprint(flippedY, w, h, { key: 'g15-key', profile: 'robust' });
+  assert.equal(vflip.found, true, 'vertical flip no longer evades detection');
+  assert.equal(vflip.mirrorAxis, 'y');
+
+  const cropW = Math.round(w * 0.88), cropH = Math.round(h * 0.88);
+  const cropped = await sharp(Buffer.from(marked), { raw: { width: w, height: h, channels: 4 } })
+    .extract({ left: 0, top: 0, width: cropW, height: cropH }).resize(w, h)
+    .ensureAlpha().raw().toBuffer();
+  const cropHit = detectStegoFingerprint(new Uint8Array(cropped), w, h, { key: 'g15-key', profile: 'robust', searchGeometry: true });
+  assert.equal(cropHit.found, true, '88% corner crop recovered by geometry stage 2');
+
+  const viaWorker = await detectStegoFingerprintInWorker(marked, w, h, { key: 'g15-key', profile: 'robust' });
+  assert.equal(viaWorker.found, true, 'worker-thread detection round-trips');
+  closeStegoDetectWorker();
+});
+
+test('CLI parsers never eat positional paths and honour --flag=value', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-cli15-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const input = path.join(root, 'in.png');
+  const output = path.join(root, 'out.archx');
+  fs.writeFileSync(input, await syntheticMaster(64, 48));
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  execFileSync(process.execPath, [
+    path.join(repoRoot, 'server/scramble-cli.js'), input, output,
+    '--key', 'cli-key', '--grid=4', '--encrypt=false',
+  ], { cwd: repoRoot, stdio: 'pipe' });
+  const packed = fs.readFileSync(output);
+  const { header } = decodeContainer(packed);
+  assert.equal(header.grid, 4, '--grid=4 sets the grid');
+  assert.equal(header.encrypted, false, '--encrypt=false disables encryption');
+  assert.equal(header.pv, 2);
+  // --json before the positional must not consume the file path
+  const detectRun = spawnSync(process.execPath, [
+    path.join(repoRoot, 'server/detect-stego-cli.js'), '--json', input, '--key', 'k',
+  ], { cwd: repoRoot, encoding: 'utf8' });
+  const detectOut = detectRun.stdout; // exit code 1 = 'not found' is fine here
+  const parsed = JSON.parse(detectOut);
+  assert.equal(parsed.file, input, 'detect CLI saw the real suspect path');
 });

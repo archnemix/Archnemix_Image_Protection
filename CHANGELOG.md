@@ -3,6 +3,67 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.15.0] — Unreleased
+
+Fifth external adversarial-review response (claim-by-claim verification
+in `docs/RESEARCH.md` §2.23). Repository integration note: six of the
+review's concrete details did not exist in the shipped code; everything
+below was reproduced locally before it was changed.
+
+### Security
+
+- **Per-tier cryptographic isolation (S1).** `per-image` scramble/AES keys
+  are now derived per delivered variant (`w:q:fmt` scope from the signed
+  token claims), so a free-tier viewer's key cannot decrypt or
+  unscramble the lossless/paid derivative. Output cache namespace `v6`.
+  Per-image tokens minted just before upgrade fail until re-minted
+  (bounded by token TTL).
+- **XFF short chains no longer trust the leftmost hop (S2).** When the
+  forwarded chain is shorter than `trustedProxyHops`, identity falls
+  back to the canonical socket IP instead of the spoofable `chain[0]`.
+- **One-time-token store no longer self-DoSes (S4).** Saturated
+  `BoundedTtlSet` claims evict expired/oldest entries within a bounded
+  budget instead of an O(N) scan + global fail-closed for all viewers.
+- **Post-load prototype hooks are bypassed (C1/C2).** All WebGL
+  draw-path methods (`uniform1f/2f/1i`, viewport, texture setup, …) and
+  Canvas2D transform calls on off-DOM buffers now go through natives
+  captured at module load; the integrity audit names them.
+- **Plan v2 is now the default everywhere (M1).** Middleware,
+  `scrambleImage`/`unscrambleImage`, builder, and CLIs. Raw stored v1
+  payloads require explicit `planVersion: 1`; containers stay
+  header-authoritative. `encrypt: false` and plan v1 are
+  production-audit blockers (M2); hardened preset pins per-token keys.
+
+### Fixed
+
+- CLI parsers: boolean flags no longer swallow positional paths;
+  `--flag=value` works with boolean coercion (S5). Build manifest is
+  written `0644` (state stays `0600`).
+- Type/runtime drift (S6): `deploymentMode` union corrected;
+  `bindTokenTo` accepts the documented array form at runtime too;
+  stego `scope/keyScope` unions corrected; `validateWatermarkValue`
+  returns `boolean`; `authorize` results may set `ttlSec` (5–900 s),
+  now implemented end-to-end.
+- Detector: vertical-flip and 180°-rotated suspects are recovered
+  (`mirrorAxis` reported); geometry stage 2 recovers moderate corner
+  crops (e.g. 88% retained) that previously evaded (M3). Deep crops
+  and rotation remain documented non-goals pending sync-template v2.
+- `maxInputPixels` default unified at 50 MP; AVIF effort > 2 warns at
+  middleware construction. Browser asset manifests now carry
+  `planVersion` through to the client (header stays authoritative).
+
+### Added
+
+- `detectStegoFingerprintInWorker()` / `closeStegoDetectWorker()` on
+  `/server`: forensic detection on a worker thread, never on a
+  request path.
+- `archx.webgl_budget` telemetry event alongside the existing
+  `archx-webgl-budget` DOM event (the fallback was never silent).
+- Tests: 98 Node (+7: S1 cross-tier, S2 short-XFF, S4 eviction, array
+  binding + `ttlSec`, pv2 defaults + manifest mode, mirror/geometry
+  recovery + worker, CLI parsing) and 118 Chromium checks (+4
+  post-load hook resistance).
+
 ## [1.14.0] — Unreleased
 
 Fourth external adversarial-review response (claim-by-claim verification

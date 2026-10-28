@@ -10,6 +10,7 @@ import Archx, {
 import {
   createArchxMiddleware, withHardenedProductionDefaults,
   scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
+  validateWatermarkValue, detectStegoFingerprintInWorker, closeStegoDetectWorker,
   type ArchxDerivativeResult,
 } from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
@@ -46,6 +47,8 @@ const layoutVintage: 0 | 1 | 2 | 3 = detection.layoutVersion;
 void layoutVintage;
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;
+const mirrorAxis: 'x' | 'y' | 'xy' | undefined = detection.mirrorAxis;
+void mirrorAxis;
 const tagScheme: 'mac' | 'crc' | null = detection.tagScheme;
 void found; void mirrored; void tagScheme;
 useJsonParser(JSON.parse);
@@ -67,7 +70,9 @@ const handler = createArchxMiddleware(withHardenedProductionDefaults({
   format: 'avif',
   steganography: { scope: 'viewer', keyScope: 'viewer', profile: 'robust', layoutVersion: 3, legacyCode: false },
   forensic: { blockSize: 32, delta: 2, signsVersion: 3 },
-  processing: { avifEffort: 6, avifChromaSubsampling: '4:4:4' },
+  processing: { avifEffort: 2, avifChromaSubsampling: '4:4:4' },
+  deploymentMode: 'single-instance',
+  bindTokenTo: ['ip', 'ua'],
   authorize: async (_req, _id, { phase }) => phase === 'token',
 }));
 const server = http.createServer((req, res) => { void handler(req, res); });
@@ -84,6 +89,10 @@ void inspectImageMetadata(bytes);
 configureSharpSecurity(['jpeg', 'png']);
 const releaseLease: () => void = acquireSharpSecurityLease(['png']);
 releaseLease();
+const wmOk: boolean = validateWatermarkValue('CONFIDENTIAL');
+void wmOk;
+void detectStegoFingerprintInWorker(bytes, 8, 8, { key: 'k' });
+closeStegoDetectWorker();
 
 // --- builder + redis ---
 void buildArchxAssets({

@@ -66,10 +66,10 @@ function pathsOverlap(a, b) {
   return isPathInside(a, b) || isPathInside(b, a);
 }
 
-async function writeJsonAtomic(filePath, value) {
+async function writeJsonAtomic(filePath, value, { mode = 0o600 } = {}) {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode });
   await fs.promises.rename(tmp, filePath);
 }
 
@@ -189,7 +189,7 @@ export async function buildArchxAssets(options = {}) {
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) {
     throw new TypeError('Archx asset build: grid must be an integer from 2 to 32');
   }
-  const planVersion = options.planVersion ?? 1;
+  const planVersion = options.planVersion ?? 2; // 128-bit seed; containers carry pv for clients
   if (planVersion !== 1 && planVersion !== 2) {
     throw new TypeError('Archx asset build: planVersion must be 1 or 2');
   }
@@ -252,7 +252,7 @@ export async function buildArchxAssets(options = {}) {
     // and watermark rasterization all change output bytes without
     // changing any user option, so incremental builds must count a
     // vintage bump as an options change and regenerate.
-    derivativeFormatVersion: 'v5',
+    derivativeFormatVersion: 'v6',
     grid,
     planVersion,
     keyHash: sha256(key),
@@ -451,7 +451,10 @@ export async function buildArchxAssets(options = {}) {
     version: 1,
     assets,
   });
-  await writeJsonAtomic(manifestPath, manifest);
+  // The manifest is a PUBLIC web asset (its keys are delivered to every
+  // browser by design); 0600 would make it unreadable by the web-server
+  // user on typical nginx/Caddy deployments. Build state stays 0600.
+  await writeJsonAtomic(manifestPath, manifest, { mode: 0o644 });
   // Hash the exact manifest bytes on disk so hosts can pin them in the
   // browser (`assetManifestIntegrity`) and detect CDN/object-store tampering
   // or stale-manifest mix-ups before any key or variant URL is trusted.

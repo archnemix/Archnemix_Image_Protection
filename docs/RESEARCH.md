@@ -1614,6 +1614,193 @@ relied on a middleware constructor permanently blocking loaders
 process-wide should call `configureSharpSecurity()` explicitly
 (it remains permanent by design).
 
+### 2.23 Fifth adversarial review — verification and response (v1.15)
+
+Review #5 was a self-described "independent full-depth red-team audit"
+of v1.14.0: five client-side attacks (C1–C5), six server/CLI/type
+defects (S1–S6), four crypto/stego findings (M1–M4), a CPU/RAM
+feasibility evaluation, and a verdict of "Conditional Near
+Industry-Standard." As with the previous four, every claim was
+reproduced against the shipped code before any fix was designed. The
+report's root causes were largely real; several of its concrete
+details were invented (documented below so future readers do not chase
+them). Confirmed issues are fixed in 1.15.0 with regression tests;
+residuals are stated plainly.
+
+**S1 — cross-quality key reuse in `per-image` mode (CONFIRMED, fixed).**
+The per-image scramble/AES keys were derived from the image id and the
+deployment secret only, so every authorized viewer of an image received
+the *same* key pair regardless of the quality tier their entitlement
+allowed. A free-tier account could request the lossless derivative
+(where `authorize` granted it to another class of viewer) or simply
+hold a key that opened any derivative of that image ever served —
+tiered quality was enforced per-request but not cryptographically.
+Keys are now scoped to the delivered variant: `w` (canonical width),
+`q` (quality), and `fmt` (format) — all of which were *already* pinned
+in the signed token claims, so no token format change was needed. The
+mint path derives with `variantKeyScope(w, quality, format)` and
+redemption re-derives from the *claims* (never from request
+parameters), and the derivative output-cache key carries the same
+scope (cache namespace bumped to `v6`). A free-tier key now fails
+AES-GCM authentication on the paid derivative and leaves it scrambled
+even in unencrypted mode (regression test 92). Migration note:
+per-image tokens minted in the last TTL window before an upgrade carry
+legacy-scoped keys and will not unscramble post-upgrade derivatives;
+the client recovers by re-minting. There is no reliable discriminator
+for dual-derivation fallback, and silently trying two keys would halve
+the protection, so the one-TTL convergence window is accepted and
+documented. `per-token` mode (now also the hardened preset's explicit
+choice) was unaffected by the flaw.
+
+**S2 — X-Forwarded-For short-chain spoofing (CONFIRMED, fixed).** With
+`trustedProxyHops: n`, the client IP was selected as
+`chain[chain.length - n] || chain[0]`. For chains *shorter* than `n`,
+the index was negative and the fallback selected `chain[0]` — the most
+spoofable value in the header — letting a direct attacker mint one
+fresh quota identity per invented IP. MDN's guidance (count trusted
+proxies from the right; the header is untrustworthy when the origin is
+directly reachable) applies with full force here. Short chains now
+fall back to the canonical socket identity. A chain of exactly `n`
+entries legitimately selects index 0 *under the operator's stated
+trust assumption* (those entries were appended by proxies the operator
+controls); deployments that cannot make that guarantee should not
+enable `trustProxy` at all (regression test 93).
+
+**S3 — authorized headless clients (CONFIRMED as a limit, not a bug).**
+A scraper holding a legitimate session can request tokens and
+derivatives at whatever rate the operator's `authorize` and quotas
+allow. Archx constrains (sender-constrained one-time tokens, per-IP /
+per-viewer quotas, abuse-pattern scoring, cache-bounded CPU) but
+cannot distinguish "paying customer with a script" from "paying
+customer with a browser" without becoming a bot-management product.
+Operators who need that must layer a real bot/WAF product in front;
+the `authorize` hook is the integration point. Documented residual.
+
+**S4 — `BoundedTtlSet` saturation behaviour (CONFIRMED, fixed).** On
+saturation the one-time-token store scanned the whole map (O(N) per
+claim) and then failed *closed for everyone* — a self-DoS once
+`maxEntries` unexpired JTIs accumulated under load or attack. `claim()`
+now performs bounded front eviction in insertion (≈ expiry) order:
+expired entries first, then the oldest live entries, within a budget of
+`1024 + maxEntries/64` deletions. Evicting one near-expiry JTI re-opens
+replay for that single signed, sender-constrained, re-authorized token
+in its final seconds; rejecting every legitimate viewer is strictly
+worse. Fail-closed remains only for pathological map disorder that the
+bounded scan cannot resolve (regression test 94). The in-memory
+`claimOnce` store inherits the behaviour.
+
+**S5 — CLI argument parsing and manifest permissions (CONFIRMED, fixed).**
+All three CLIs shared a parser whose flags greedily consumed the next
+argument: `archx-detect --json suspect.png` treated `suspect.png` as
+the *value of `--json`* and then reported on a missing file; `--x=y`
+forms were unsupported. Parsers now take an explicit boolean-flag set,
+support `--flag=value` (with boolean coercion for known booleans), and
+never let a boolean swallow a positional path. Separately, the
+build-manifest was written `0600`, which routinely 403s when the build
+runs as one user and the web server reads as another; the manifest
+(whose contents are public by design) is now `0644` while the build
+state file stays `0600` (regression tests 97–98).
+
+**S6 — type/runtime declaration drift (PARTLY CONFIRMED, fixed).** Real
+drift: `deploymentMode` was declared `'development' | 'production'`
+but the runtime accepts `'single-instance' | 'multi-instance'`;
+`bindTokenTo` was typed as an array but implemented as an object map —
+the runtime now *also* accepts the declared array form
+(`['ip', 'ua', …]`, normalized to the same binding shape) so both
+spellings work and the type is a union; stego `scope/keyScope` types
+advertised `'token'`/`'global'` values the validator rejects (they
+were never "silently ignored" as the report claimed — strict
+validation throws); `validateWatermarkValue` was typed `string | null`
+but returns `boolean` (and returns `false` for function inputs rather
+than throwing, contra the report). The declared-but-unimplemented
+`ttlSec` on the `authorize` result is now implemented: an integer in
+[5, 900] from `authorize` overrides the minted token lifetime
+(regression test 95). Invented details in the report, none of which
+exist in either the types or the runtime: `deploymentMode: 'hardened'`,
+a `tokenTtlSec` option, an `onAuditEvent` hook, and a server-side
+`presets` option.
+
+**C1/C2 — post-load prototype hooks on uncaptured methods (CONFIRMED,
+fixed).** The render path called `gl.uniform1f/2f/1i` (and the rest of
+the draw-setup family) directly, and the off-DOM unscramble used
+`save/restore/translate/scale` directly. A userscript/extension that
+patched `WebGL2RenderingContext.prototype.uniform1f` *after* Archx
+loaded could zero the temporal/lens modulation mid-draw; a hooked
+`CanvasRenderingContext2D.prototype.restore` received `this.canvas` —
+the uncropped padded intermediate. Both families are now captured at
+module load and every render/sensitive call goes through
+`glNative()`/`ctxNative()`; the integrity audit names the new methods
+too. Browser regression [8g] proves a post-load `uniform1f` hook
+observes *zero* Archx calls while vault temporal rendering continues,
+and a `restore` stealer never receives an off-DOM canvas. (The
+report's specific uniform names — `u_traceAlpha` and friends — do not
+exist in the shipped shader; the technique class was nevertheless
+real.) **C3** (pre-load realm compromise: hooks installed before the
+captures run are indistinguishable from natives) is an accepted
+residual of any in-page defence; SRI-pinned self-hosted bundles,
+extension-free kiosk browsers, and first-party-only script policy are
+the mitigations. **C4** claimed the WebGL context-budget fallback was
+silent; it already dispatched `archx-webgl-budget` before falling back
+to Canvas2D — 1.15 additionally emits the `archx.webgl_budget`
+telemetry event. **C5** (multi-frame averaging of temporal interlace by
+a determined capture attacker) is the documented physics of the
+feature: it raises cost and injects traceable per-viewer fingerprints,
+it does not make displayed pixels unrecoverable.
+
+**M1 — plan-v1 default (CONFIRMED, flipped).** Plan v2 (128-bit seed)
+shipped in 1.10 but every producer still defaulted to the 32-bit-seed
+v1, whose seed space is brute-forceable against known plaintext.
+Defaults now: middleware, `scrambleImage`, `unscrambleImage`, the
+static builder, and both CLIs all plan-v2 (containers remain
+header-authoritative for stored assets; raw pre-1.15 v1 payloads need
+explicit `planVersion: 1`). Cache/derivative namespaces bumped to `v6`
+so no v1-keyed derivative is served under a v2 header. **M2**
+(unencrypted payloads are one known-plaintext away from key recovery
+under v1) was already warned at construction; `encrypt: false` and
+explicit `scramblePlanVersion: 1` are now production-audit *blockers*,
+and the hardened preset pins `scrambleKeyMode: 'per-token'`.
+
+**M3 — detector geometry gaps (PARTLY CONFIRMED, improved).** The
+report's geometry mental model (centre-shift percent) did not match
+the implemented search (independent X/Y scales over explicit origin
+ranges, quarter-origin refinement, sub-cell fractions), but two
+concrete evasions reproduced: a *vertical* flip (only the horizontal
+mirror was probed) and moderate corner crops whose scale fell between
+table entries. The mirror search now probes x, y, and xy (180°)
+variants and reports `mirrorAxis`; a failure-only geometry stage 2 adds
+deep retained-area scales (0.65–0.75 and reciprocals), which recovers
+e.g. 88% corner crops at full confidence. Deep crops (≤ 75% retained
+on an axis, 1:1 reframes) and arbitrary rotation/perspective remain
+outside the evidence envelope: at that point too few marked cells
+survive for any search breadth to help — that requires the
+sync-template mark v2 scoped in §2.20, and 1.15 does not claim it.
+Forensic detection also gained `detectStegoFingerprintInWorker()` so
+the multi-second worst case never runs on a request path.
+
+**M4 — pHash DC bit (CONFIRMED, documented).** The median excludes the
+DC coefficient, but the DC term participates in bit 63 and exceeds any
+AC median in practice, so registries hold 63 effective bits.
+Redefining the bit would orphan every stored 16-hex print for one bit
+of dedup entropy; thresholds were calibrated with the constant bit
+present. Documented in code, deliberately not changed.
+
+**Feasibility notes (CONFIRMED in direction).** The report's CPU/RAM
+cautions were directionally right: default `maxInputPixels` is raised
+to an explicit, consistent 50 MP (middleware was 40 MP, the direct API
+already 50 MP — an inconsistency worth more than the value), AVIF at
+effort > 2 now warns at construction (it is an offline/batch codec
+setting, not a request-path one), and `OPERATIONS.md` gained explicit
+RAM sizing (`sharpConcurrency × in-flight derivatives × ~4 bytes ×
+input pixels`, with the unref'd worker excluded from request paths).
+Per-request AVIF encoding at high effort remains the operator's footgun
+to avoid; the static builder + CDN guide is the recommended shape for
+catalogues.
+
+Nothing in this review changed the fundamental limits stated since
+§2.1: displayed pixels can be photographed, client-side checks are
+defence-in-depth, and attribution is probabilistic forensic evidence —
+not proof on its own.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

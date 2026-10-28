@@ -15,21 +15,29 @@ import path from 'node:path';
 import { buildArchxAssets } from './build-assets.js';
 import { generateKeyBase64 } from './scramble-image.js';
 
-function parseArgs(argv) {
+function parseArgs(argv, booleanFlags = new Set()) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg.startsWith('--')) {
-      const name = arg.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    const a = argv[i];
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const eq = a.indexOf('=');
+    if (eq !== -1) {
+      const name = a.slice(2, eq); const value = a.slice(eq + 1);
+      out[name] = booleanFlags.has(name) && (value === 'true' || value === 'false') ? value === 'true' : value;
+      continue;
+    }
+    const name = a.slice(2);
+    const next = argv[i + 1];
+    if (booleanFlags.has(name)) {
+      if (next === 'true' || next === 'false') { out[name] = next === 'true'; i++; }
       else out[name] = true;
-    } else out._.push(arg);
+    } else if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    else out[name] = true;
   }
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2));
+const args = parseArgs(process.argv.slice(2), new Set(['encrypt', 'lossless', 'force', 'no-clean', 'help']));
 const [inputDir, outputDir] = args._;
 if (!inputDir || !outputDir || args.help) {
   console.log(`Usage: archx-build <masters folder> <output folder> [options]
@@ -40,7 +48,7 @@ if (!inputDir || !outputDir || args.help) {
   --widths <list>         canonical widths, comma-separated (default responsive ladder)
   --max-width <px>        largest derivative width (default 1920; never enlarges)
   --grid <n>              scramble tiles per side (default 8)
-  --plan-version <1|2>    scramble plan seed strength (1 = legacy 32-bit, 2 = 128-bit; default 1)
+  --plan-version <1|2>    scramble plan seed strength (1 = legacy 32-bit, 2 = 128-bit; default 2)
   --quality <1-100>       WebP/JPEG quality (default 88; use --lossless for exact pixels)
   --lossless              lossless WebP/PNG at delivered sizes
   --format <fmt>          webp (default), png, jpeg, or avif

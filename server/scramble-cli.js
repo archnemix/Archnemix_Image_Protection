@@ -15,27 +15,37 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { scrambleImage, generateKeyBase64 } from './scramble-image.js';
 
-function parseArgs(argv) {
+function parseArgs(argv, booleanFlags = new Set()) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith('--')) {
-      const name = a.slice(2);
-      const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const eq = a.indexOf('=');
+    if (eq !== -1) {
+      const name = a.slice(2, eq); const value = a.slice(eq + 1);
+      out[name] = booleanFlags.has(name) && (value === 'true' || value === 'false') ? value === 'true' : value;
+      continue;
+    }
+    const name = a.slice(2);
+    const next = argv[i + 1];
+    if (booleanFlags.has(name)) {
+      // Boolean flags never swallow the next positional (the file path);
+      // an explicit 'true'/'false' literal is honoured as the value.
+      if (next === 'true' || next === 'false') { out[name] = next === 'true'; i++; }
       else out[name] = true;
-    } else out._.push(a);
+    } else if (next !== undefined && !next.startsWith('--')) { out[name] = next; i++; }
+    else out[name] = true;
   }
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2));
+const args = parseArgs(process.argv.slice(2), new Set(['encrypt', 'lossless', 'help']));
 const [input, output] = args._;
 if (!input || !output || args.help) {
   console.log(`Usage: archx-protect <input image|folder> <output .archx|folder> [options]
   --key <secret>       scramble key (prefer ARCHX_SCRAMBLE_KEY; argv secrets can leak)
   --grid <n>           tiles per side (default 8)
-  --plan-version <1|2> scramble plan seed strength (1 = legacy, 2 = 128-bit; default 1)
+  --plan-version <1|2> scramble plan seed strength (1 = legacy, 2 = 128-bit; default 2)
   --max-width <px>     down-scale master to this width first (default 1600)
   --quality <1-100>    WebP/JPEG quality (default 95; use --lossless for exact pixels)
   --lossless           lossless WebP/PNG at the delivered size (larger payload)
@@ -78,7 +88,7 @@ if (args.stego && !(process.env.ARCHX_STEGO_KEY || args['stego-key'])) {
 const opts = {
   key,
   grid: args.grid ? Number(args.grid) : 8,
-  planVersion: args['plan-version'] ? Number(args['plan-version']) : 1,
+  planVersion: args['plan-version'] ? Number(args['plan-version']) : 2,
   maxWidth: args['max-width'] ? Number(args['max-width']) : 1600,
   quality: args.quality === 'lossless' ? 'lossless' : (args.quality ? Number(args.quality) : 95),
   lossless: !!args.lossless,

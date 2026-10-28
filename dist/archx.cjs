@@ -1242,13 +1242,16 @@ function buildLumaIntegral(src, w, h) {
   }
   return { luma, integral };
 }
-function flipPixelsHorizontal(src, w, h) {
+function flipPixels(src, w, h, flipX, flipY) {
   const flipped = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) {
-    const row = y * w * 4;
+    const sy = flipY ? h - 1 - y : y;
+    const srow = sy * w * 4;
+    const drow = y * w * 4;
     for (let x = 0; x < w; x++) {
-      const si = row + x * 4;
-      const di = row + (w - 1 - x) * 4;
+      const sx = flipX ? w - 1 - x : x;
+      const si = srow + sx * 4;
+      const di = drow + x * 4;
       flipped[di] = src[si];
       flipped[di + 1] = src[si + 1];
       flipped[di + 2] = src[si + 2];
@@ -1256,6 +1259,12 @@ function flipPixelsHorizontal(src, w, h) {
     }
   }
   return flipped;
+}
+var MIRROR_AXES = [["x", true, false], ["y", false, true], ["xy", true, true]];
+function mirroredVariant(entry, srcTop, w, h, axis, flipX, flipY) {
+  const slot = axis === "x" ? "flipped" : axis === "y" ? "flippedY" : "flippedXY";
+  if (!entry[slot]) entry[slot] = flipPixels(srcTop, w, h, flipX, flipY);
+  return entry[slot];
 }
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
@@ -1354,37 +1363,42 @@ function detectStegoFingerprint(rgba, w, h, {
     if (searchMirror && !_mirrorProbe) try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
-        const flipped = entry.flipped;
-        for (const candidateProfile of ["standard", "robust"]) {
-          const fast = detectStegoFingerprint(flipped, w, h, {
-            key,
-            gridX,
-            gridY,
-            profile: candidateProfile,
-            searchOffsets,
-            searchGeometry: false,
-            searchMirror: false,
-            _mirrorProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-          if (fast?.found) return { ...fast, mirrored: true };
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          for (const candidateProfile of ["standard", "robust"]) {
+            const fast = detectStegoFingerprint(variant, w, h, {
+              key,
+              gridX,
+              gridY,
+              profile: candidateProfile,
+              searchOffsets,
+              searchGeometry: false,
+              searchMirror: false,
+              _mirrorProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache
+            });
+            if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
+          }
         }
-        for (const candidateProfile of ["standard", "robust"]) {
-          const mirrored = detectStegoFingerprint(flipped, w, h, {
-            key,
-            gridX,
-            gridY,
-            profile: candidateProfile,
-            searchOffsets,
-            searchGeometry: true,
-            searchMirror: false,
-            _mirrorProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-          if (mirrored?.found) return { ...mirrored, mirrored: true };
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          if (axis !== "x" && !searchGeometry) continue;
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          for (const candidateProfile of ["standard", "robust"]) {
+            const mirrored = detectStegoFingerprint(variant, w, h, {
+              key,
+              gridX,
+              gridY,
+              profile: candidateProfile,
+              searchOffsets,
+              searchGeometry: true,
+              searchMirror: false,
+              _mirrorProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache
+            });
+            if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+          }
         }
       }
     } catch {
@@ -1642,6 +1656,25 @@ function detectStegoFingerprint(rgba, w, h, {
         }
       }
     }
+    if (!best?.found) {
+      const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1 / 0.7, 1 / 0.65];
+      for (const scaleX of deepScales) {
+        const rangeX = originRange(gx * cw * scaleX, w);
+        for (const scaleY of deepScales) {
+          const rangeY = originRange(gy * ch * scaleY, h);
+          for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+            for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+              scaleCandidates.push(consider(evaluate({
+                scaleX,
+                scaleY,
+                originX,
+                originY
+              })));
+            }
+          }
+        }
+      }
+    }
     const originCandidates = [];
     const seenPairs = /* @__PURE__ */ new Set();
     for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
@@ -1721,20 +1754,22 @@ function detectStegoFingerprint(rgba, w, h, {
     try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
-        const mirrored = detectStegoFingerprint(entry.flipped, w, h, {
-          key,
-          gridX,
-          gridY,
-          profile,
-          searchOffsets,
-          searchGeometry,
-          searchMirror: false,
-          _mirrorProbe: true,
-          _layoutVersion: concreteLayout,
-          _planes: planesCache
-        });
-        if (mirrored?.found) return { ...mirrored, mirrored: true };
+        for (const [axis, fx, fy] of MIRROR_AXES) {
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          const mirrored = detectStegoFingerprint(variant, w, h, {
+            key,
+            gridX,
+            gridY,
+            profile,
+            searchOffsets,
+            searchGeometry,
+            searchMirror: false,
+            _mirrorProbe: true,
+            _layoutVersion: concreteLayout,
+            _planes: planesCache
+          });
+          if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+        }
       }
     } catch {
     }
@@ -2178,7 +2213,30 @@ var NATIVES = (() => {
     createProgram: grab(gl2Proto, "createProgram") || grab(gl1Proto, "createProgram"),
     linkProgram: grab(gl2Proto, "linkProgram") || grab(gl1Proto, "linkProgram"),
     useProgram: grab(gl2Proto, "useProgram") || grab(gl1Proto, "useProgram"),
-    getContextAttributes: grab(gl2Proto, "getContextAttributes") || grab(gl1Proto, "getContextAttributes")
+    getContextAttributes: grab(gl2Proto, "getContextAttributes") || grab(gl1Proto, "getContextAttributes"),
+    // Uniform setters + draw-setup (red-team C1): these were called
+    // directly, so a post-load prototype hook on uniform1f could
+    // silently zero the temporal/lens modulation mid-draw and
+    // microtask-read a clean frame. All render-path GL calls now go
+    // through the captured functions (glNative).
+    uniform1f: grab(gl2Proto, "uniform1f") || grab(gl1Proto, "uniform1f"),
+    uniform2f: grab(gl2Proto, "uniform2f") || grab(gl1Proto, "uniform2f"),
+    uniform1i: grab(gl2Proto, "uniform1i") || grab(gl1Proto, "uniform1i"),
+    viewport: grab(gl2Proto, "viewport") || grab(gl1Proto, "viewport"),
+    activeTexture: grab(gl2Proto, "activeTexture") || grab(gl1Proto, "activeTexture"),
+    texParameteri: grab(gl2Proto, "texParameteri") || grab(gl1Proto, "texParameteri"),
+    pixelStorei: grab(gl2Proto, "pixelStorei") || grab(gl1Proto, "pixelStorei"),
+    generateMipmap: grab(gl2Proto, "generateMipmap") || grab(gl1Proto, "generateMipmap"),
+    getUniformLocation: grab(gl2Proto, "getUniformLocation") || grab(gl1Proto, "getUniformLocation"),
+    attachShader: grab(gl2Proto, "attachShader") || grab(gl1Proto, "attachShader"),
+    getShaderParameter: grab(gl2Proto, "getShaderParameter") || grab(gl1Proto, "getShaderParameter"),
+    getProgramParameter: grab(gl2Proto, "getProgramParameter") || grab(gl1Proto, "getProgramParameter"),
+    createBuffer: grab(gl2Proto, "createBuffer") || grab(gl1Proto, "createBuffer"),
+    bindBuffer: grab(gl2Proto, "bindBuffer") || grab(gl1Proto, "bindBuffer"),
+    bufferData: grab(gl2Proto, "bufferData") || grab(gl1Proto, "bufferData"),
+    enableVertexAttribArray: grab(gl2Proto, "enableVertexAttribArray") || grab(gl1Proto, "enableVertexAttribArray"),
+    vertexAttribPointer: grab(gl2Proto, "vertexAttribPointer") || grab(gl1Proto, "vertexAttribPointer"),
+    getExtension: grab(gl2Proto, "getExtension") || grab(gl1Proto, "getExtension")
   };
   const elementProto = typeof Element !== "undefined" ? Element.prototype : null;
   const streamProto = typeof ReadableStream !== "undefined" ? ReadableStream.prototype : null;
@@ -2257,6 +2315,16 @@ var NATIVES = (() => {
     canvasToBlob: grab(canvasProto, "toBlob"),
     ctxDrawImage: grab(ctx2dProto, "drawImage"),
     ctxGetImageData: grab(ctx2dProto, "getImageData"),
+    // 2D transform/state (red-team C2): save/restore/translate/scale
+    // were called directly on the OFF-DOM unscramble buffer's context,
+    // so a post-load restore() hook received `this.canvas` — the full
+    // clean padded frame. Sensitive paths use ctxNative() now.
+    ctxSave: grab(ctx2dProto, "save"),
+    ctxRestore: grab(ctx2dProto, "restore"),
+    ctxTranslate: grab(ctx2dProto, "translate"),
+    ctxScale: grab(ctx2dProto, "scale"),
+    ctxRotate: grab(ctx2dProto, "rotate"),
+    ctxSetTransform: grab(ctx2dProto, "setTransform"),
     docCreateElement: grab(docProto, "createElement"),
     glTexImage2D: glMethods.texImage2D,
     glReadPixels: glMethods.readPixels,
@@ -2332,7 +2400,25 @@ var AUDIT_WEBGL_METHODS = [
   "createProgram",
   "linkProgram",
   "useProgram",
-  "getContextAttributes"
+  "getContextAttributes",
+  "uniform1f",
+  "uniform2f",
+  "uniform1i",
+  "viewport",
+  "activeTexture",
+  "texParameteri",
+  "pixelStorei",
+  "generateMipmap",
+  "getUniformLocation",
+  "attachShader",
+  "getShaderParameter",
+  "getProgramParameter",
+  "createBuffer",
+  "bindBuffer",
+  "bufferData",
+  "enableVertexAttribArray",
+  "vertexAttribPointer",
+  "getExtension"
 ];
 var readerProtoCache;
 function currentReaderRead() {
@@ -2356,6 +2442,10 @@ function auditIntegrity() {
     ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
     ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
     ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
+    ["CanvasRenderingContext2D.prototype.save", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null, NATIVES.ctxSave],
+    ["CanvasRenderingContext2D.prototype.restore", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null, NATIVES.ctxRestore],
+    ["CanvasRenderingContext2D.prototype.translate", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.translate : null, NATIVES.ctxTranslate],
+    ["CanvasRenderingContext2D.prototype.scale", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.scale : null, NATIVES.ctxScale],
     ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
     ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
     ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
@@ -2513,6 +2603,22 @@ function nativeDrawImage(ctx, ...args) {
 }
 function nativeGlDrawArrays(gl, mode, first, count) {
   return NATIVES.glDrawArrays ? NATIVES.glDrawArrays.call(gl, mode, first, count) : gl.drawArrays(mode, first, count);
+}
+function glNative(gl, name, ...args) {
+  const fn = NATIVES.webgl?.[name];
+  return fn ? fn.call(gl, ...args) : gl[name](...args);
+}
+var CTX_NATIVE = {
+  save: "ctxSave",
+  restore: "ctxRestore",
+  translate: "ctxTranslate",
+  scale: "ctxScale",
+  rotate: "ctxRotate",
+  setTransform: "ctxSetTransform"
+};
+function ctxNative(ctx, name, ...args) {
+  const fn = NATIVES[CTX_NATIVE[name]];
+  return fn ? fn.call(ctx, ...args) : ctx[name](...args);
 }
 var DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
   160,
@@ -3555,6 +3661,9 @@ function normalizeAssetManifest(raw, baseUrl) {
     if (!Number.isInteger(assetRaw.grid) || assetRaw.grid < 2 || assetRaw.grid > 32) {
       throw nonRetryableError("Archx: asset manifest contains an invalid grid");
     }
+    if (assetRaw.planVersion !== void 0 && assetRaw.planVersion !== 1 && assetRaw.planVersion !== 2) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid plan version");
+    }
     if (assetRaw.aesKey !== void 0 && !validTokenString(assetRaw.aesKey, { min: 16, max: 256 })) {
       throw nonRetryableError("Archx: asset manifest contains an invalid AES key");
     }
@@ -3583,6 +3692,7 @@ function normalizeAssetManifest(raw, baseUrl) {
       height,
       key: assetRaw.key,
       grid: assetRaw.grid,
+      ...assetRaw.planVersion !== void 0 ? { planVersion: assetRaw.planVersion } : {},
       ...assetRaw.aesKey !== void 0 ? { aesKey: assetRaw.aesKey } : {},
       variants: Object.freeze(variants)
     }));
@@ -4269,9 +4379,9 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
     const dx = orig % plan.grid * tileW;
     const dy = Math.floor(orig / plan.grid) * tileH;
     const { fx, fy } = plan.flips[scrambledPos];
-    pctx.save();
-    pctx.translate(dx + (fx ? tileW : 0), dy + (fy ? tileH : 0));
-    pctx.scale(fx ? -1 : 1, fy ? -1 : 1);
+    ctxNative(pctx, "save");
+    ctxNative(pctx, "translate", dx + (fx ? tileW : 0), dy + (fy ? tileH : 0));
+    ctxNative(pctx, "scale", fx ? -1 : 1, fy ? -1 : 1);
     nativeDrawImage(
       pctx,
       bitmap,
@@ -4284,7 +4394,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
       tileW,
       tileH
     );
-    pctx.restore();
+    ctxNative(pctx, "restore");
   }
   drawImageHighQuality(
     ctx,
@@ -4334,7 +4444,7 @@ function scrambleCanvasLocally(source, grid, key) {
     }
   };
   if (pw > w && w > 0) {
-    cctx.save();
+    ctxNative(cctx, "save");
     cctx.fillStyle = "#000";
     cctx.fillRect(w, 0, pw - w, h);
     cctx.globalAlpha = 0.96;
@@ -4343,10 +4453,10 @@ function scrambleCanvasLocally(source, grid, key) {
     wrapCols(shiftFor(1, w));
     cctx.globalAlpha = 0.35;
     nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, Math.min(3, pw - w), h);
-    cctx.restore();
+    ctxNative(cctx, "restore");
   }
   if (ph > h && h > 0) {
-    cctx.save();
+    ctxNative(cctx, "save");
     cctx.fillStyle = "#000";
     cctx.fillRect(0, h, pw, ph - h);
     cctx.globalAlpha = 0.96;
@@ -4355,7 +4465,7 @@ function scrambleCanvasLocally(source, grid, key) {
     wrapRows(shiftFor(plan.count - 2, h));
     cctx.globalAlpha = 0.35;
     nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, Math.min(3, ph - h));
-    cctx.restore();
+    ctxNative(cctx, "restore");
   }
   const scrambled = makeCanvas();
   scrambled.width = pw;
@@ -4369,11 +4479,11 @@ function scrambleCanvasLocally(source, grid, key) {
     const s = tileRect(orig, plan.grid, tw, th);
     const d = tileRect(dest, plan.grid, tw, th);
     const { fx, fy } = plan.flips[dest];
-    ctx.save();
-    ctx.translate(d.x + (fx ? tw : 0), d.y + (fy ? th : 0));
-    ctx.scale(fx ? -1 : 1, fy ? -1 : 1);
+    ctxNative(ctx, "save");
+    ctxNative(ctx, "translate", d.x + (fx ? tw : 0), d.y + (fy ? th : 0));
+    ctxNative(ctx, "scale", fx ? -1 : 1, fy ? -1 : 1);
     nativeDrawImage(ctx, cleanPadded, s.x, s.y, tw, th, 0, 0, tw, th);
-    ctx.restore();
+    ctxNative(ctx, "restore");
   }
   cleanPadded.width = 0;
   cleanPadded.height = 0;
@@ -4824,6 +4934,7 @@ var ProtectedImage = class {
       const assetExtra = {
         key: asset.key,
         grid: asset.grid,
+        ...asset.planVersion !== void 0 ? { planVersion: asset.planVersion } : {},
         ...asset.aesKey !== void 0 ? { aesKey: asset.aesKey } : {}
       };
       const assetCacheMode = normalizedHttpCache(o.assetHttpCache, "default");
@@ -5311,7 +5422,7 @@ var ProtectedImage = class {
     if (__privateGet(this, _gl)) {
       this._stopGlLoop();
       try {
-        const lose = __privateGet(this, _gl).getExtension && __privateGet(this, _gl).getExtension("WEBGL_lose_context");
+        const lose = __privateGet(this, _gl).getExtension && glNative(__privateGet(this, _gl), "getExtension", "WEBGL_lose_context");
         if (lose?.loseContext) {
           __privateSet(this, _glReleasing, true);
           lose.loseContext();
@@ -5777,6 +5888,7 @@ var ProtectedImage = class {
           detail: { inUse: glContextsInUse, budget: GL_CONTEXT_BUDGET },
           bubbles: true
         }));
+        emitClientEvent("archx.webgl_budget", { outcome: "canvas2d-fallback" }, this);
       }
       return false;
     }
@@ -5795,9 +5907,9 @@ var ProtectedImage = class {
       });
       if (!gl) return false;
       try {
-        const attrs = NATIVES.glGetContextAttributes ? NATIVES.glGetContextAttributes.call(gl) : gl.getContextAttributes();
+        const attrs = NATIVES.glGetContextAttributes ? NATIVES.glGetContextAttributes.call(gl) : glNative(gl, "getContextAttributes");
         if (attrs && attrs.preserveDrawingBuffer === true) {
-          const lose = gl.getExtension && gl.getExtension("WEBGL_lose_context");
+          const lose = gl.getExtension && glNative(gl, "getExtension", "WEBGL_lose_context");
           try {
             lose && lose.loseContext && lose.loseContext();
           } catch {
@@ -6059,21 +6171,21 @@ var ProtectedImage = class {
         frag = vec4(c.rgb, 1.0);
       }`;
     const compile = (type, srcText) => {
-      const s = gl.createShader(type);
-      gl.shaderSource(s, srcText);
-      gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) return null;
+      const s = glNative(gl, "createShader", type);
+      glNative(gl, "shaderSource", s, srcText);
+      glNative(gl, "compileShader", s);
+      if (!glNative(gl, "getShaderParameter", s, gl.COMPILE_STATUS)) return null;
       return s;
     };
     const v = compile(gl.VERTEX_SHADER, vs);
     const f = compile(gl.FRAGMENT_SHADER, fs);
     if (!v || !f) return false;
-    const prog = gl.createProgram();
-    gl.attachShader(prog, v);
-    gl.attachShader(prog, f);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
-    gl.useProgram(prog);
+    const prog = glNative(gl, "createProgram");
+    glNative(gl, "attachShader", prog, v);
+    glNative(gl, "attachShader", prog, f);
+    glNative(gl, "linkProgram", prog);
+    if (!glNative(gl, "getProgramParameter", prog, gl.LINK_STATUS)) return false;
+    glNative(gl, "useProgram", prog);
     __privateSet(this, _glProg, prog);
     __privateSet(this, _glLoc, {});
     [
@@ -6116,43 +6228,43 @@ var ProtectedImage = class {
       "uInterlaceNoiseStrength",
       "uInterlaceBias"
     ].forEach((n) => {
-      __privateGet(this, _glLoc)[n] = gl.getUniformLocation(prog, n);
+      __privateGet(this, _glLoc)[n] = glNative(gl, "getUniformLocation", prog, n);
     });
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    __privateSet(this, _glTex, gl.createTexture());
-    __privateSet(this, _glMap, gl.createTexture());
-    __privateSet(this, _glWm, gl.createTexture());
+    const buf = glNative(gl, "createBuffer");
+    glNative(gl, "bindBuffer", gl.ARRAY_BUFFER, buf);
+    glNative(gl, "bufferData", gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    glNative(gl, "enableVertexAttribArray", 0);
+    glNative(gl, "vertexAttribPointer", 0, 2, gl.FLOAT, false, 0, 0);
+    __privateSet(this, _glTex, glNative(gl, "createTexture"));
+    __privateSet(this, _glMap, glNative(gl, "createTexture"));
+    __privateSet(this, _glWm, glNative(gl, "createTexture"));
     return true;
   }
   _uploadGlTexture(gl) {
     const meta = __privateGet(this, _glMeta) || __privateGet(this, _meta);
     const source = __privateGet(this, _glSource) || __privateGet(this, _bitmap);
-    const texImage = (...args) => NATIVES.glTexImage2D ? NATIVES.glTexImage2D.call(gl, ...args) : gl.texImage2D(...args);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glTex));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    const texImage = (...args) => NATIVES.glTexImage2D ? NATIVES.glTexImage2D.call(gl, ...args) : glNative(gl, "texImage2D", ...args);
+    glNative(gl, "activeTexture", gl.TEXTURE0);
+    glNative(gl, "bindTexture", gl.TEXTURE_2D, __privateGet(this, _glTex));
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    glNative(gl, "pixelStorei", gl.UNPACK_FLIP_Y_WEBGL, false);
     texImage(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     if (!meta.plan) {
       try {
-        gl.generateMipmap(gl.TEXTURE_2D);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        glNative(gl, "generateMipmap", gl.TEXTURE_2D);
+        glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
       } catch {
       }
     }
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glMap));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, "activeTexture", gl.TEXTURE1);
+    glNative(gl, "bindTexture", gl.TEXTURE_2D, __privateGet(this, _glMap));
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (meta.plan) {
       const g = meta.plan.grid;
       const data = new Uint8Array(g * g * 4);
@@ -6165,12 +6277,12 @@ var ProtectedImage = class {
       }
       texImage(gl.TEXTURE_2D, 0, gl.RGBA, g, g, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
     }
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, __privateGet(this, _glWm));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    glNative(gl, "activeTexture", gl.TEXTURE2);
+    glNative(gl, "bindTexture", gl.TEXTURE_2D, __privateGet(this, _glWm));
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    glNative(gl, "texParameteri", gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     const wm = __privateGet(this, _options).watermark;
     __privateSet(this, _glWmOn, 0);
     if (wm) {
@@ -6251,15 +6363,15 @@ var ProtectedImage = class {
       }
       __privateSet(this, _renderedW, w);
       __privateSet(this, _renderedH, h);
-      gl.viewport(0, 0, w, h);
-      gl.useProgram(__privateGet(this, _glProg));
+      glNative(gl, "viewport", 0, 0, w, h);
+      glNative(gl, "useProgram", __privateGet(this, _glProg));
       const L = __privateGet(this, _glLoc);
       const meta = __privateGet(this, _glMeta) || __privateGet(this, _meta);
-      gl.uniform1i(L.uTex, 0);
-      gl.uniform1i(L.uMap, 1);
-      gl.uniform1i(L.uWm, 2);
-      gl.uniform1f(L.uGrid, meta.plan ? meta.plan.grid : 1);
-      gl.uniform2f(L.uCrop, meta.origW / meta.padW, meta.origH / meta.padH);
+      glNative(gl, "uniform1i", L.uTex, 0);
+      glNative(gl, "uniform1i", L.uMap, 1);
+      glNative(gl, "uniform1i", L.uWm, 2);
+      glNative(gl, "uniform1f", L.uGrid, meta.plan ? meta.plan.grid : 1);
+      glNative(gl, "uniform2f", L.uCrop, meta.origW / meta.padW, meta.origH / meta.padH);
       const srcRatio = meta.origW / meta.origH;
       const dstRatio = w / h;
       let sx = 1, sy = 1, ox = 0, oy = 0;
@@ -6284,18 +6396,18 @@ var ProtectedImage = class {
           ox = -(s - 1) / 2;
         }
       }
-      gl.uniform2f(L.uFitScale, sx, sy);
-      gl.uniform2f(L.uFitOffset, ox, oy);
-      gl.uniform1f(L.uScrambled, meta.plan ? 1 : 0);
-      gl.uniform1f(L.uSeed, hashSeed(sessionId()) % 1e3 / 37 + Math.random() * 997);
-      gl.uniform1f(L.uWmOn, __privateGet(this, _glWmOn) || 0);
+      glNative(gl, "uniform2f", L.uFitScale, sx, sy);
+      glNative(gl, "uniform2f", L.uFitOffset, ox, oy);
+      glNative(gl, "uniform1f", L.uScrambled, meta.plan ? 1 : 0);
+      glNative(gl, "uniform1f", L.uSeed, hashSeed(sessionId()) % 1e3 / 37 + Math.random() * 997);
+      glNative(gl, "uniform1f", L.uWmOn, __privateGet(this, _glWmOn) || 0);
       const lensCfg = typeof __privateGet(this, _options).lens === "object" && __privateGet(this, _options).lens ? __privateGet(this, _options).lens : {};
-      gl.uniform1f(L.uLensOn, __privateGet(this, _options).lens ? 1 : 0);
-      gl.uniform1f(L.uLensActive, __privateGet(this, _lensPoint) ? 1 : 0);
-      gl.uniform2f(L.uLensCenter, __privateGet(this, _lensPoint)?.x ?? -10, __privateGet(this, _lensPoint)?.y ?? -10);
-      gl.uniform1f(L.uLensRadius, __privateMethod(this, _ProtectedImage_instances, lensRadiusPx_fn).call(this, w, h, lensCfg.radius ?? 0.3));
-      gl.uniform2f(L.uResolution, w, h);
-      gl.uniform1f(L.uLocked, Date.now() < __privateGet(this, _lockedUntil) ? 1 : 0);
+      glNative(gl, "uniform1f", L.uLensOn, __privateGet(this, _options).lens ? 1 : 0);
+      glNative(gl, "uniform1f", L.uLensActive, __privateGet(this, _lensPoint) ? 1 : 0);
+      glNative(gl, "uniform2f", L.uLensCenter, __privateGet(this, _lensPoint)?.x ?? -10, __privateGet(this, _lensPoint)?.y ?? -10);
+      glNative(gl, "uniform1f", L.uLensRadius, __privateMethod(this, _ProtectedImage_instances, lensRadiusPx_fn).call(this, w, h, lensCfg.radius ?? 0.3));
+      glNative(gl, "uniform2f", L.uResolution, w, h);
+      glNative(gl, "uniform1f", L.uLocked, Date.now() < __privateGet(this, _lockedUntil) ? 1 : 0);
       const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
       if (temporal && performance.now() - __privateGet(this, _lastInteractAt) > 5e3) {
         if (__privateWrapper(this, _idleSkip)._++ % 3 !== 0) {
@@ -6308,34 +6420,38 @@ var ProtectedImage = class {
       const interlace = temporal?.interlace || null;
       const interlacePhases = interlace?.phases || 2;
       const interlacePhase = (__privateGet(this, _temporalPhase) % interlacePhases + interlacePhases) % interlacePhases;
-      gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
-      gl.uniform1f(L.uTemporalSign, __privateGet(this, _temporalSign));
-      gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
-      gl.uniform1f(L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][__privateGet(this, _dutyIndex) % 3]);
-      gl.uniform1f(L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
-      gl.uniform1f(L.uBiasSeed, __privateGet(this, _biasSeed));
-      gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
-      gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
-      gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
-      gl.uniform1f(L.uInterlaceOn, interlace ? 1 : 0);
-      gl.uniform1f(L.uInterlacePhase, interlacePhase);
-      gl.uniform1f(L.uInterlacePhases, interlacePhases);
-      gl.uniform1f(
+      glNative(gl, "uniform1f", L.uTemporalOn, temporal?.noise ? 1 : 0);
+      glNative(gl, "uniform1f", L.uTemporalSign, __privateGet(this, _temporalSign));
+      glNative(gl, "uniform1f", L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
+      glNative(gl, "uniform1f", L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][__privateGet(this, _dutyIndex) % 3]);
+      glNative(gl, "uniform1f", L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
+      glNative(gl, "uniform1f", L.uBiasSeed, __privateGet(this, _biasSeed));
+      glNative(gl, "uniform1f", L.uTemporalBlock, temporal ? temporal.block : 1);
+      glNative(gl, "uniform1f", L.uTemporalPattern, temporal ? temporal.patternCode : 0);
+      glNative(gl, "uniform1f", L.uTemporalChroma, temporal?.chroma ? 1 : 0);
+      glNative(gl, "uniform1f", L.uInterlaceOn, interlace ? 1 : 0);
+      glNative(gl, "uniform1f", L.uInterlacePhase, interlacePhase);
+      glNative(gl, "uniform1f", L.uInterlacePhases, interlacePhases);
+      glNative(
+        gl,
+        "uniform1f",
         L.uInterlaceLayout,
         interlace?.layout === "pixels" ? 0 : interlace?.layout === "strips" ? 1 : interlace?.layout === "blocks" ? 2 : 3
       );
-      gl.uniform1f(L.uInterlaceCell, interlace?.cellSize || 1);
-      gl.uniform1f(L.uInterlaceAxis, interlace?.axis === "columns" ? 1 : 0);
-      gl.uniform1f(
+      glNative(gl, "uniform1f", L.uInterlaceCell, interlace?.cellSize || 1);
+      glNative(gl, "uniform1f", L.uInterlaceAxis, interlace?.axis === "columns" ? 1 : 0);
+      glNative(
+        gl,
+        "uniform1f",
         L.uInterlaceFill,
         interlace?.fill === "dim" ? 1 : interlace?.fill === "black" ? 2 : interlace?.fill === "noise" ? 3 : 0
       );
-      gl.uniform1f(L.uInterlaceFillBlock, interlace?.fillBlock || 12);
-      gl.uniform1f(L.uInterlaceFillStrength, interlace?.fillStrength ?? 1);
-      gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
-      gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
-      gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
-      gl.uniform1f(L.uInterlaceBias, interlace ? (interlace.noiseStrength ?? 0.16) * 0.55 : 0);
+      glNative(gl, "uniform1f", L.uInterlaceFillBlock, interlace?.fillBlock || 12);
+      glNative(gl, "uniform1f", L.uInterlaceFillStrength, interlace?.fillStrength ?? 1);
+      glNative(gl, "uniform1f", L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
+      glNative(gl, "uniform1f", L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
+      glNative(gl, "uniform1f", L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
+      glNative(gl, "uniform1f", L.uInterlaceBias, interlace ? (interlace.noiseStrength ?? 0.16) * 0.55 : 0);
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
       if (!__privateGet(this, _canaryDone) && !__privateGet(this, _canaryPause) && __privateGet(this, _glFrames) >= __privateGet(this, _canaryNextTry)) {
@@ -6470,7 +6586,7 @@ var ProtectedImage = class {
     this._stopGlLoop();
     if (__privateGet(this, _gl)) {
       try {
-        __privateGet(this, _gl).getExtension("WEBGL_lose_context")?.loseContext();
+        glNative(__privateGet(this, _gl), "getExtension", "WEBGL_lose_context")?.loseContext();
       } catch {
       }
       glContextsInUse = Math.max(0, glContextsInUse - 1);
@@ -7332,7 +7448,7 @@ flagPreserveRewrite_fn = function(source) {
     this._stopGlLoop();
     if (__privateGet(this, _gl)) {
       try {
-        const lose = __privateGet(this, _gl).getExtension && __privateGet(this, _gl).getExtension("WEBGL_lose_context");
+        const lose = __privateGet(this, _gl).getExtension && glNative(__privateGet(this, _gl), "getExtension", "WEBGL_lose_context");
         if (lose?.loseContext) {
           __privateSet(this, _glReleasing, true);
           lose.loseContext();

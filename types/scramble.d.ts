@@ -198,6 +198,7 @@ export interface StegoDetection {
   confidence: number;
   /** True when the mark was recovered from a horizontally flipped suspect (mirror probe, all profiles). */
   mirrored?: boolean;
+  mirrorAxis?: 'x' | 'y' | 'xy';
   agreement: number;
   meanSignal: number;
   cells: number;
