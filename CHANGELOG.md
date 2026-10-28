@@ -3,6 +3,103 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.14.0] — Unreleased
+
+Fourth external adversarial-review response (claim-by-claim verification
+in `docs/RESEARCH.md` §2.22). Thirteen problems, seven server
+optimizations, and six browser optimizations were raised against
+1.13.0; confirmed items are fixed with regression tests, two proposed
+patches were corrected before landing, one item was already shipped,
+and one was rejected with evidence.
+
+### Security
+
+- **Stego/forensic seed derivation is now a real KDF.** New
+  `layoutVersion: 3` / `signsVersion: 3` seed the layout/sign PRNG
+  from SHA-256(key material) (`sha256SeededPrng()`) instead of a fast
+  string hash. Embed defaults moved to v3; detectors triple-read
+  v1/v2/v3 bit-exactly and report the matched vintage. Pre-1.14
+  detectors cannot read v3 marks — pin `layoutVersion: 2` during
+  migration.
+- **Canonical IP identity unwraps transition mechanisms.** NAT64
+  (both prefixes), 6to4, Teredo, and v4-compatible forms collapse to
+  the embedded IPv4 for token binding, quotas, and abuse accounting,
+  closing both the carrier-NAT64 shared-bucket lockout and the
+  one-IPv4-many-IPv6-identities evasion. Zone IDs are validated and
+  stripped; IPv6 parsing is strict.
+- **Scramble padding no longer confesses boundary tiles.** Core
+  padding rebuilt on a keyed best-match toroidal wrap with DC
+  anchoring, block-coherent noise, and an edge feather (photo seam
+  gradients 4.8×→1.25× interior, displayed pixels exact); the
+  client's local scramble uses a dual-wrap blend plus edge taper.
+- **Temporal-median recovery is biased off-target.** Interlace
+  noise fill gains a cycle-zero-mean per-block bias in both engines,
+  so short screen recordings no longer median-recover ~50% of pixels
+  exactly; the `fortress60` profile also stops being silently
+  clamped (0.55 now honored, clamp 0.65).
+- **Sharp loader policy is scoped and restorable.** Middleware
+  instances hold refcounted loader leases released on
+  `handler.close()`; `configureSharpSecurity()` remains available as
+  an explicit permanent policy. Server watermark rows are
+  brick-staggered.
+
+### Fixed
+
+- The `/server` entry now exports the image-processing API
+  (`scrambleImage`, `unscrambleImage`, `inspectImageMetadata`,
+  `prepareDerivativeBase`/`finishDerivative`,
+  `configureSharpSecurity`/`configureSharpPerformance`,
+  `generateKeyBase64`, lease helpers) plus a
+  `./server/scramble-image` subpath — previously unreachable through
+  the package exports and undeclared in types. Sharp loads lazily,
+  so this costs token-only processes nothing.
+- Type/runtime drift reconciled: `{ imageId }` token sources work,
+  `preset('marketplace')` exists, `renderer: 'canvas2d'` means
+  canvas, and the declared enums for mode/qualityProfile/onExtract/
+  renderLoop/tokenTransport/memory/strikes now match the runtime.
+- Middleware accepts and plumbs `processing.avifEffort`,
+  `avifChromaSubsampling`, `forensic.signsVersion`, and stego
+  `layoutVersion`/`legacyCode` (all previously rejected), with
+  cache-key identity updated to match.
+- `<archx-image>` boolean attributes parse values
+  (`scrambled="false"` no longer enables scrambling), absent
+  booleans no longer clobber presets, and all observed attributes
+  now react (source attributes hot-reload; others re-mount).
+- Build summaries report `totalBytes`, manifest variants carry
+  `file`, and incremental builds regenerate on derivative-format
+  changes (`derivativeFormatVersion: 'v5'`; middleware cache
+  namespace likewise `v5`). CLI help lists AVIF and stops claiming a
+  scramble-key stego default; the demo server handles aborted
+  static streams; the load tester writes real JPEG bytes.
+
+### Performance
+
+- Per-token views resolve the cached stage-1 base before touching
+  the master (no 5–50 MB master read/re-cache per view), and
+  concurrent first-views share one stage-1 decode via singleflight.
+- `finishDerivative` is copy-on-write; watermark rasterization is
+  cached as a raw overlay and blended in JS (~37 ms → ~2 ms per
+  derivative at 960px, ≤1 LSB vs libvips). `handler.stats()` gains
+  `baseInFlight`.
+- Detector hypotheses share one luma/integral plane set per image
+  (bit-identical results; the win is allocation, honestly not the
+  reviewer's claimed wall-clock cut).
+- Browser: black-policy decoys build lazily on first readback
+  attempt, temporal frames reuse one scratch buffer with column
+  LUTs, the GL watermark texture right-sizes to the backing store,
+  and the dynamic-trace timer idles while hidden/off-screen.
+- Hardened/catalog server presets default `sharpConcurrency: 1`
+  and `sharpCache: false`.
+
+### Tests
+
+- 91 Node tests (7 new: export surface + config acceptance,
+  transition-mechanism IP identity, padding coherence,
+  copy-on-write, build summary shape, Sharp lazy-load/leases in a
+  child process, stage-1 sharing), 114 Chromium checks (6 new:
+  `{imageId}` alias, marketplace preset, `canvas2d` alias, element
+  boolean/reload semantics), fuzz + type suites in `npm run verify`.
+
 ## [1.13.0] — Unreleased
 
 Third external adversarial-review response (claim-by-claim verification

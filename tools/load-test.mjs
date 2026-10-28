@@ -103,7 +103,7 @@ async function syntheticMaster() {
     ${Array.from({ length: 80 }, (_, i) => `<circle cx="${(i * 173) % 1600}" cy="${(i * 211) % 1000}" r="${18 + (i % 7) * 9}" fill="rgba(255,255,255,0.30)"/>`).join('')}
     <text x="70" y="910" font-family="sans-serif" font-size="110" font-weight="bold" fill="white">ARCHX LOAD TEST</text>
   </svg>`;
-  return sharp(Buffer.from(svg)).png().toBuffer();
+  return sharp(Buffer.from(svg)).jpeg({ quality: 92 }).toBuffer(); // file is saved as load.jpg — bytes must be JPEG
 }
 
 async function startLocalServer() {

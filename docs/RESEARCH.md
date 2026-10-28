@@ -1331,6 +1331,289 @@ scoped in §2.20. The reviewer's 0/400 phantom-framing collusion
 result confirms the v1.12 MAC tag holds the line that matters for
 attribution: marks can be destroyed, not forged onto a third party.
 
+### 2.22 Fourth adversarial review — verification and response (v1.14)
+
+A fourth adversarial pass audited v1.13.0 and filed thirteen problems
+(P1–P13), seven server optimizations (S1–S7), and six browser
+optimizations (C1–C6), each with a proposed patch. As before, no claim
+was taken on faith — including the reviewer's own "zero regression"
+assurances: every item was reproduced, read against the code, or
+measured before acting. Two of their patches were right in spirit but
+unsafe as written (one would have redefined a shipped wire format);
+one optimization was already shipped; one rested on a misreading of
+the shader. Everything else confirmed is fixed with regression tests.
+
+**Packaging and public surface (P1, P2, S5, P13 subset).**
+
+- *P1 — confirmed with a correction.* The image-processing entry
+  points (`scrambleImage`, `unscrambleImage`, `inspectImageMetadata`,
+  `prepareDerivativeBase`/`finishDerivative`, `configureSharpSecurity`,
+  `configureSharpPerformance`, `generateKeyBase64`) existed only in
+  `server/scramble-image.js`, which the exports map did not expose and
+  the type declarations did not declare — unreachable through the
+  documented package surface. (The README examples the reviewer cited
+  in fact import only the middleware, so no shipped example was
+  broken; the *capability* was nevertheless private by accident.)
+  Fixed on the reviewer's preferred shape: middleware now statically
+  re-exports them from `/server`, a `./server/scramble-image` subpath
+  was added, and both are fully declared in `types/server.d.ts`. The
+  static re-export is safe only because of S5: Sharp itself now loads
+  lazily (`createRequire` on first actual image operation), so
+  importing `/server` in a token-only process loads zero native
+  modules — asserted in a child-process regression test via the
+  require cache. Both import paths resolve to one module singleton
+  (identity-asserted), so loader policy state cannot fork.
+- *P2 — confirmed.* The type surface documented `{ imageId }` token
+  sources and a `marketplace` preset; the runtime accepted only
+  `{ id }` and threw on `preset('marketplace')` — and the type-smoke
+  test exercised exactly those two dead shapes, so it compiled green
+  against a runtime that would have rejected the code. The runtime now
+  accepts `{ imageId }` as an alias everywhere `{ id }` works (mint
+  context, batch prefetch, byte resolution), the `marketplace` preset
+  exists (vault/high-quality/batch/forensic/dynamic-trace), and the
+  smoke test covers both shapes plus the new `/server` functions.
+- *P13 — verified subset fixed.* Every enum in `types/index.d.ts` was
+  diffed against the runtime's normalization: `mode`
+  (`lite` was missing; `lens`/`trace`/`catalog` were not modes),
+  `qualityProfile` (declared `quality|balanced|throughput`; runtime
+  implements `original|high|balanced|catalog|fast`), `onExtract`
+  (declared `blank|decoy|none`; runtime implements
+  `black|lowres|scrambled`), `renderLoop`, `tokenTransport`,
+  `renderer`, `memory`, `strikes`, `brand`, `cacheScope`, and the
+  interlace `fill` union were all stale and are now exact. One drift
+  cut the other way: types had long promised `renderer: 'canvas2d'`,
+  which the runtime silently treated as `auto` — the runtime now
+  accepts `'canvas2d'` as an alias of `'canvas'` so existing typed
+  code starts meaning what it says (browser-checked). Index
+  signatures are deliberately retained: the option surface is the
+  customization API, and unknown-key strictness lives server-side
+  where typos are security-relevant.
+
+**Server correctness (P3, P4, P8, P10–P12).**
+
+- *P3 — confirmed, fixed as scoped leases.* `configureSharpSecurity`
+  was eternal and narrowing-only: any caller (including two
+  middleware instances of differing strictness) permanently
+  intersected the process loader set, and there was no way back.
+  Loader policy is now two-tier: *permanent* configurations (the old
+  function, kept for hosts who mean it forever) and refcounted
+  *leases* (`acquireSharpSecurityLease` → idempotent release). The
+  effective block set is permanents ∩ live leases, reconciled on
+  every change. Each middleware instance acquires a lease for its
+  `allowedInputFormats` at construction and releases it in
+  `handler.close()`, so a strict temporary handler no longer poisons
+  the process. Per-request code only calls the cheap
+  `ensureUntrustedSharpLoadersBlocked()` baseline. Child-process
+  regression covers block-under-lease, restore-on-release,
+  double-release, and middleware acquire/close wiring.
+- *P4 — confirmed and extended.* v1.13's canonical IP collapsed
+  v4-mapped/translated forms but left transition mechanisms as
+  separate identities: every NAT64 carrier customer shared one /64
+  abuse bucket (mass false-positive lockout), while one 6to4 or
+  Teredo IPv4 controlled a whole /48+/32 of fresh identities (quota
+  evasion). `canonicalIp` now also unwraps NAT64 `64:ff9b::/96` and
+  `64:ff9b:1::/96`, 6to4 `2002::/16`, Teredo `2001:0000::/32`
+  (XOR-decoded client address), and deprecated v4-compatible `::/96`,
+  validates then strips `%zone` IDs, and `ipv6Groups` is strict
+  (rejects bad octets and under-length uncompressed forms instead of
+  `parseInt`-forgiving them). HTTP regression mints through all five
+  spellings of one IPv4 and asserts a single quota bucket.
+- *P8 — confirmed, and wider than reported.* The middleware rejected
+  options its own types and engine implemented: not only
+  `processing.avifEffort`/`avifChromaSubsampling` and
+  `forensic.signsVersion`, but also stego `layoutVersion`/
+  `legacyCode`. All five are now validated, plumbed (including
+  `legacyCode` forwarding into the embed call, which was missing in
+  `finishDerivative`), and included in output-cache identity so
+  changing them cannot serve stale-vintage derivatives.
+- *P10 — confirmed.* Build results omitted the typed `file` per
+  variant and reported `bytes` where types promised `totalBytes`;
+  both are emitted now (`bytes` kept for compatibility). While here:
+  incremental build state ignored library-side derivative-byte
+  changes entirely, so upgrading the package would have left stale
+  pad/mark bytes on disk forever; `optionsMaterial` now carries a
+  `derivativeFormatVersion` that rides the same bumps as the
+  middleware cache namespace.
+- *P11 — confirmed.* The server's tiled watermark repeated on a grid
+  whose columns aligned every row (the client painters already
+  staggered). Server rows now brick-stagger by half a step, raising
+  the inpainting cost of periodic-pattern estimation.
+- *P12 — confirmed.* Both CLIs omitted `avif` from the format list
+  and falsely claimed the scramble key as the stego-key default (the
+  engine rightly refuses that); help text now tells the truth. The
+  demo static file server leaked a file descriptor per aborted
+  request and had no stream error handler; the load-test tool wrote
+  PNG bytes into `load.jpg`.
+
+**Marks and padding (P5, P7).**
+
+- *P7 — real weakness; the proposed patch was not safe to land as
+  written.* v1.13's "128-bit" v2 layout/sign seeds derive four sfc32
+  state words from a fast string hash (cyrb128): wide, but not a
+  cryptographic KDF. The reviewer's patch *redefined v2* to a
+  SHA-256 derivation, which would silently orphan every v2 mark
+  embedded by 1.13. Instead v1.14 adds **layout/signs v3**:
+  `sha256SeededPrng()` seeds sfc32 from the first 128 bits of
+  SHA-256(key material) with 12 warm-up rounds. Embeds default to
+  v3; detectors and forensic scoring triple-read v3→v2→v1 and report
+  the matched vintage. v1/v2 derivations are bit-exact untouched —
+  the 16-case pinned detector baseline (direct/crop/mirror/geometry
+  searches over both profiles) is byte-identical before and after.
+  One crop fixture that passed under v2 failed under v3-standard by
+  shuffle variance (verified: v1/v2-standard and v3-robust recover
+  the same crop), so that regression test now pins the layout it was
+  calibrated on instead of pretending layouts are interchangeable.
+- *P5 — confirmed with a fuller root cause.* v1.13's shifted wrap
+  still let keyless tile solvers find boundary tiles: not (only) the
+  values, but the *statistics*. Per-row phase jumps plus independent
+  per-pixel noise destroyed texture coherence across the pad strip,
+  and DC-only anchoring left visible seams on photographic texture.
+  The core padding is rewritten: coherent toroidal wrap; a keyed
+  best-match search over 24 candidate source rows/columns scored by
+  mean-removed subsampled MAD (so the wrapped texture *fits* its new
+  neighbours); ±16px box-mean DC anchoring; 8×8-block-coherent noise
+  (texture-like, never zero); and a 3-step feather toward the true
+  edge. On a real photo the strip-internal gradient ratios are
+  0.45/0.85× interior and seam gradients 1.25/2.35× (v1.13:
+  1.34/1.01 internal with 4.84/4.18 seams on the same image; the
+  original mirror scheme measured ~9–18× seams on smooth content).
+  On a deliberately ultra-smooth synthetic the seam *ratio* stays
+  elevated (≈2.0 absolute MAD against a ≈0.2–0.5 interior) — with
+  zero duplicated content that residual is information-theoretic:
+  a flat image's pad must invent texture or confess flatness, and
+  either is a (much weaker) tell. Displayed pixels remain exact by
+  construction (padding is never sampled), asserted per-pixel. The
+  browser's local-scramble padding gets the 2D analog (two keyed
+  wraps composited at partial alpha — a near-copy of neither source
+  region — plus a 3px true-edge taper, no readback).
+
+**Temporal median (P6) — half a misreading, half a real leak.**
+The reviewer claimed the interlace noise fill is symmetric around the
+clean value, so a one-cycle recording's temporal median *is* the
+clean pixel. The shader hash in fact re-seeds every presented frame
+(`uSeed` is randomized per draw precisely to defeat short-window
+statistics, and sign is randomized balance-corrected), so cycle
+multisets are not the fixed `{c, c+d, c−d}` claimed. But the core
+leak survives the correction: at 3 phases a 3-frame window contains
+`{c, c+d₁, c+d₂}` with independent symmetric deltas, and the median
+is exactly `c` whenever the deltas straddle zero — about half of all
+pixels, recoverable from a <50 ms screen recording while
+`fortress60`'s noise shield is off. Two reviewer corollaries were
+exactly right: `fortress60` ships `noiseStrength: 0.55` into a 0.45
+clamp, so the flagship profile silently ran weaker than specified
+(clamp now 0.65, regression-asserted). And the fix shape is theirs,
+mirroring the duty bias already used by the noise shield: a
+cycle-zero-mean per-24px-block bias `b`, applied `+b·(P−1)/P` on a
+cell's active phase and `−b/P` hidden (scaled by fill strength), in
+both the shader (via the existing 90-frame re-seeded `biasHash`, so
+long recordings chase a drifting offset) and the pre-rendered-frames
+engine (where frames are static, so the bias is what moves every
+cycle statistic off `c`). Cycle *mean* is unchanged — the eye sees
+the same image; the median no longer does. This raises multi-frame
+capture cost; it does not and cannot make displayed pixels
+uncopiable (see §3).
+
+**Server performance (S1–S7) — implemented where measured.**
+
+- *S1 — confirmed.* Every per-token view loaded (and re-cached) the
+  5–50 MB master before discovering the stage-1 base was already
+  cached, evicting bases from the shared RAM pool; and N concurrent
+  first-views each ran a full decode+resize because per-token output
+  keys defeat output singleflight. Derivative resolution is now
+  base-first (a warm base never touches disk or the master cache;
+  `masterVersion` in the base key keeps replaced masters correct)
+  with a `baseInFlight` singleflight around stage-1 creation,
+  drained on `close()` and exposed in `stats()`. (Their S3 targeted
+  the same duplicate stage-1 work; the singleflight is the
+  mechanism, shipped here.) The reviewer's companion suggestion to
+  hoist the singleflight entry creation was *not* taken literally:
+  `loadMaster` deliberately stays outside the processing semaphore
+  so disk latency doesn't consume codec slots.
+- *S2 — confirmed.* `finishDerivative` copied the shared base
+  unconditionally (an allocation of the full RGBA frame per
+  per-viewer derivative, watermark or not). It now copy-on-writes:
+  the copy happens only immediately before the first in-place
+  mutation (forensic/stego embed, watermark blend);
+  mark-free finishes encode straight from the shared base.
+  Regression asserts byte-identical `base.data` after watermark,
+  forensic, and stego finishes.
+- *S4 — implemented; benefit re-scoped by measurement.* Detector
+  fan-out (layouts × profiles × geometry × mirror hypotheses)
+  rebuilt luma/integral planes per hypothesis. Planes are now built
+  once per source buffer and threaded through the recursion
+  (bit-identical results on the pinned 16-case baseline). The
+  reviewer's 35–55% CPU claim did not reproduce here: on an
+  800px unmarked geometry search, probe scoring dominates plane
+  construction, and adding the v3 layout pass nets out to 8.4s
+  auto / 7.0s robust vs 6.0s/5.3s for two layouts in 1.13. The real
+  win is allocation churn (a full-size Float64 integral + luma per
+  hypothesis → one per image), which is what pressure-tested
+  detection workers feel. Claimed as such, not as a wall-clock cut.
+- *S6 — confirmed, and the reviewer's cheaper alternative won.*
+  Static-text watermarks re-parsed SVG and re-rasterized Pango text
+  inside a full libvips composite per derivative (~37 ms at
+  960×640 measured; ~21 ms of a ~205 ms full derivative).
+  Caching a rasterized PNG overlay only halved it (20 ms — the
+  composite pipeline itself dominates). The shipped path caches the
+  *raw RGBA* overlay (4-entry/32 MB LRU keyed by geometry+SVG hash)
+  and blends in JS (~2.3 ms, agreeing with libvips `over` to ≤1 LSB
+  on opaque and translucent bases — measured, not assumed). Repeat
+  watermarked derivatives now measure at parity with unwatermarked.
+- *S7 — confirmed.* `withHardenedProductionDefaults` never set the
+  processing defaults its catalog sibling (partly) had;
+  `sharpConcurrency: 1` and `sharpCache: false` are now defaults in
+  both presets, per-key overridable. (The reviewer credited the
+  catalog preset with `sharpCache: false`; it didn't have it
+  either — now it does.)
+
+**Browser performance (C1–C6).**
+
+- *C1 — confirmed for the default policy.* Every instance built a
+  full-size decoy canvas at paint time although the default (and
+  vault/fortress) `onExtract: 'black'` decoy needs no pixels.
+  Black decoys now materialize lazily on first intercepted readback
+  — most sessions never have one — saving the canvas and, on the GL
+  path, a 320px unscramble per instance. Real decoys
+  (`lowres`/`scrambled`) still build eagerly while clean pixels
+  exist; shield can never rebuild them later by design.
+- *C2 — already shipped (v1.12).* The GL upload source is zeroed
+  immediately after `texImage2D` and the decoded bitmap released;
+  verified in `#paintGl`, no change.
+- *C3 — confirmed.* The 2D temporal frame builder allocated a fresh
+  full-frame `ImageData` per phase and did two `Math.floor`
+  divisions per pixel per phase. One shared scratch buffer
+  (`putImageData` copies synchronously) and column lookup tables
+  now serve all phases.
+- *C4 — confirmed.* The GL watermark texture was a fixed 1024px
+  raster regardless of a 200px tile backing; it now right-sizes to
+  the current backing width (256–1024) and re-rasterizes on resize
+  re-uploads as before.
+- *C5 — rejected with evidence.* "Don't retain payload bytes under
+  one-time tokens / claim refresh" is not actionable client-side:
+  the token JSON deliberately carries no such server configuration,
+  so the client cannot know; and mechanically the suggestion
+  backfires — payload caching is precisely what lets a one-time
+  deployment repaint on resize *without* burning a second mint.
+  Hosts who want zero local retention already have
+  `cachePayload: false`, which gates every write.
+- *C6 — partially confirmed.* rAF loops already pause with the tab;
+  the one true offender was the dynamic-trace `setInterval`
+  repainting viewer text while hidden/off-screen. It now no-ops
+  unless the document is visible and the instance is on-screen.
+
+**Compatibility.** Derivative bytes change (v3 marks, new padding,
+staggered rows, JS blend): middleware output-cache namespace moves
+`v4`→`v5` and the asset builder stamps `derivativeFormatVersion:
+'v5'`, so warm caches and incremental builds regenerate instead of
+serving mixed vintages. Displayed pixels are unchanged. Detectors
+older than 1.14 cannot read v3-layout marks — upgrade detection
+tooling first, or pin `layoutVersion: 2` (now actually accepted by
+the middleware, per P8). One behavioral note: a middleware instance
+now *restores* Sharp loaders it narrowed when closed; hosts who
+relied on a middleware constructor permanently blocking loaders
+process-wide should call `configureSharpSecurity()` explicitly
+(it remains permanent by design).
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

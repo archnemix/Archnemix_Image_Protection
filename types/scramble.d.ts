@@ -14,6 +14,8 @@ export function hashSeed(str: string, seed?: number): number;
 export function mulberry32(seed: number): () => number;
 export function cyrb128(str: string): [number, number, number, number];
 export function sfc32(a: number, b: number, c: number, d: number): () => number;
+/** PRNG seeded from SHA-256(key material): the v3 stego-layout/forensic-sign seed. */
+export function sha256SeededPrng(material: string | Uint8Array): () => number;
 
 export interface ScramblePlan {
   grid: number;
@@ -108,7 +110,7 @@ export function encryptPayload(plainBytes: ArchxBytes, keyBase64: string):
 export function decryptPayload(cipherBytes: ArchxBytes, keyBase64: string, ivBase64: string):
   Promise<Uint8Array>;
 
-export function forensicBlockSigns(seed: string, count: number, signsVersion?: 1 | 2): Int8Array;
+export function forensicBlockSigns(seed: string, count: number, signsVersion?: 1 | 2 | 3): Int8Array;
 export function applyForensicBlocks(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, seed: string,
   options?: {
@@ -119,13 +121,13 @@ export function applyForensicBlocks(
      * (legacy 32-bit seed, for reproducing pre-v1.13 marks). Scoring
      * always dual-reads both vintages.
      */
-    signsVersion?: 1 | 2;
+    signsVersion?: 1 | 2 | 3;
   },
 ): Uint8Array;
 export function forensicScore(
   candidate: Uint8Array | Uint8ClampedArray, reference: Uint8Array | Uint8ClampedArray,
   w: number, h: number, seed: string, options?: { blockSize?: number },
-): { score: number; matched: number; total: number; signsVersion: 1 | 2 };
+): { score: number; matched: number; total: number; signsVersion: 1 | 2 | 3 };
 
 export function stegoFingerprint(value: string): string;
 /** Pre-1.13 payload->fingerprint derivation, for identity lookups against older marks. */
@@ -151,7 +153,7 @@ export interface StegoEmbedOptions {
    * (legacy 32-bit seed, for reproducing pre-v1.13 marks). Detectors
    * dual-read both vintages by default.
    */
-  layoutVersion?: 1 | 2;
+  layoutVersion?: 1 | 2 | 3;
 }
 export function embedStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, payload: string,
@@ -172,7 +174,7 @@ export interface StegoDetectOptions {
    * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
    * `layoutVersion` reports which vintage matched.
    */
-  layoutVersion?: 1 | 2 | 'auto';
+  layoutVersion?: 1 | 2 | 3 | 'auto';
 }
 export interface StegoDetection {
   found: boolean;
@@ -186,7 +188,7 @@ export interface StegoDetection {
    */
   tagScheme: 'mac' | 'crc' | null;
   /** Cell-layout vintage that matched (0 when neither layout was concrete). */
-  layoutVersion: 0 | 1 | 2;
+  layoutVersion: 0 | 1 | 2 | 3;
   observedBits: number;
   minBitRepetitions: number;
   /** Acceptance tag validated (MAC-16 for codeword v2, keyed CRC for legacy). Name kept for compatibility; see `tagScheme`. */

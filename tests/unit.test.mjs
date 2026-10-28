@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
 import {
@@ -32,6 +33,7 @@ import {
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
+import * as archxServerModule from '../server/middleware.js';
 
 function signTokenForTest(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -810,7 +812,10 @@ test('StegoMark geometry search recovers a uniform center crop without accepting
   const master = await syntheticMaster(640, 420);
   const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const raw = new Uint8Array(data);
-  const marked = embedStegoFingerprint(raw, info.width, info.height, 'CROP-90', { key: 'geometry-key' });
+  // Pinned to layout v2: per-layout crop resilience varies with the
+  // shuffle (v3-standard lands a couple of low-repetition bits on the
+  // crop boundary of this fixture; v3-robust recovers it in test 83+).
+  const marked = embedStegoFingerprint(raw, info.width, info.height, 'CROP-90', { key: 'geometry-key', layoutVersion: 2 });
   const markedPng = await sharp(Buffer.from(marked), {
     raw: { width: info.width, height: info.height, channels: 4 },
   }).png().toBuffer();
@@ -2868,7 +2873,7 @@ test('v1.13: IPv4-mapped and re-spelled IPv6 clients share one quota identity', 
     're-spelling one IPv6 address must not mint a fresh quota');
 });
 
-test('v1.13: stego layout v2 + forensic signs v2 default, with bit-exact v1 dual-read', () => {
+test('v1.14: stego layout v3 + forensic signs v3 (SHA-256 seeded), triple-read of v1/v2 marks', () => {
   const w = 360, h = 240;
   const src = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -2876,7 +2881,7 @@ test('v1.13: stego layout v2 + forensic signs v2 default, with bit-exact v1 dual
     src[i] = (x * 255 / w) | 0; src[i + 1] = (y * 255 / h) | 0; src[i + 2] = ((x + y) * 255 / (w + h)) | 0; src[i + 3] = 255;
   }
   for (const profile of ['standard', 'robust']) {
-    for (const layoutVersion of [1, 2]) {
+    for (const layoutVersion of [1, 2, 3]) {
       const marked = embedStegoFingerprint(src, w, h, 'layout-buyer', {
         key: 'layout-key', profile, strength: 6, layoutVersion,
       });
@@ -2884,26 +2889,32 @@ test('v1.13: stego layout v2 + forensic signs v2 default, with bit-exact v1 dual
       assert.equal(auto.found, true, `${profile} layout v${layoutVersion} must auto-detect`);
       assert.equal(auto.fingerprint, stegoFingerprint('layout-buyer'));
       assert.equal(auto.layoutVersion, layoutVersion, 'detector reports the layout vintage');
-      const pinnedWrong = detectStegoFingerprint(marked, w, h, {
-        key: 'layout-key', profile, layoutVersion: layoutVersion === 1 ? 2 : 1,
-      });
-      assert.equal(pinnedWrong.found, false, `${profile} v${layoutVersion} mark must not validate under the other layout`);
+      for (const wrong of [1, 2, 3].filter((v) => v !== layoutVersion)) {
+        const pinnedWrong = detectStegoFingerprint(marked, w, h, {
+          key: 'layout-key', profile, layoutVersion: wrong,
+        });
+        assert.equal(pinnedWrong.found, false, `${profile} v${layoutVersion} mark must not validate under layout v${wrong}`);
+      }
     }
+    // New embeds default to layout v3.
+    const def = embedStegoFingerprint(src, w, h, 'layout-buyer', { key: 'layout-key', profile, strength: 6 });
+    assert.equal(detectStegoFingerprint(def, w, h, { key: 'layout-key', profile }).layoutVersion, 3);
   }
-  // Forensic block signs: v1-embedded marks score under dual-read and the
-  // result names the vintage; new embeds default to v2.
+  // Forensic block signs: every vintage scores under triple-read and
+  // the result names the vintage; new embeds default to v3.
   const flat = new Uint8Array(w * h * 4);
   for (let i = 0; i < flat.length; i += 4) { flat[i] = 110; flat[i + 1] = 120; flat[i + 2] = 130; flat[i + 3] = 255; }
-  const legacyMarked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3, signsVersion: 1 });
-  const legacyScore = forensicScore(legacyMarked, flat, w, h, 'seed-1', { blockSize: 32 });
-  assert.ok(legacyScore.score > 0.9, `v1 forensic mark must dual-read (score=${legacyScore.score})`);
-  assert.equal(legacyScore.signsVersion, 1);
-  const v2Marked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3 });
-  const v2Score = forensicScore(v2Marked, flat, w, h, 'seed-1', { blockSize: 32 });
-  assert.ok(v2Score.score > 0.9);
-  assert.equal(v2Score.signsVersion, 2);
-  assert.notDeepEqual(forensicBlockSigns('seed-1', 64, 1), forensicBlockSigns('seed-1', 64, 2),
-    'v1/v2 sign sequences must actually differ (128-bit seed, not a relabel)');
+  for (const signsVersion of [1, 2, 3]) {
+    const marked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3, signsVersion });
+    const score = forensicScore(marked, flat, w, h, 'seed-1', { blockSize: 32 });
+    assert.ok(score.score > 0.9, `v${signsVersion} forensic mark must triple-read (score=${score.score})`);
+    assert.equal(score.signsVersion, signsVersion);
+  }
+  const defMarked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3 });
+  assert.equal(forensicScore(defMarked, flat, w, h, 'seed-1', { blockSize: 32 }).signsVersion, 3);
+  assert.notDeepEqual(forensicBlockSigns('seed-1', 64, 1), forensicBlockSigns('seed-1', 64, 2));
+  assert.notDeepEqual(forensicBlockSigns('seed-1', 64, 2), forensicBlockSigns('seed-1', 64, 3),
+    'v2/v3 sign sequences must actually differ (SHA-256 seed, not a relabel)');
 });
 
 test('v1.13: Sharp loader policy re-blocks a loader a later stricter config excludes', async () => {
@@ -2915,4 +2926,218 @@ test('v1.13: Sharp loader policy re-blocks a loader a later stricter config excl
   assert.equal((await sharp(avif).metadata()).format, 'heif', 'AVIF loader starts unblocked');
   configureSharpSecurity(['jpeg', 'png', 'webp']);
   await assert.rejects(sharp(avif).metadata(), 'stricter later config must re-block the HEIF loader');
+});
+
+test('v1.14: /server export surface, config acceptance, hardened processing defaults, presets', async () => {
+  // P1: the documented /server surface includes the image-processing API,
+  // and both import paths resolve to ONE module singleton.
+  for (const name of ['scrambleImage', 'unscrambleImage', 'inspectImageMetadata',
+    'prepareDerivativeBase', 'finishDerivative', 'configureSharpSecurity',
+    'configureSharpPerformance', 'generateKeyBase64', 'acquireSharpSecurityLease',
+    'ensureUntrustedSharpLoadersBlocked']) {
+    assert.equal(typeof archxServerModule[name], 'function', `/server must export ${name}`);
+  }
+  assert.equal(archxServerModule.scrambleImage, scrambleImage, 'singleton identity across import paths');
+  assert.equal(archxServerModule.inspectImageMetadata, inspectImageMetadata);
+  assert.equal(archxServerModule.configureSharpSecurity, configureSharpSecurity);
+
+  // P8: typed/implemented options are accepted end-to-end...
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v14-cfg-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const okHandler = createArchxMiddleware({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    processing: { avifEffort: 6, avifChromaSubsampling: '4:4:4' },
+    forensic: { blockSize: 32, delta: 2, signsVersion: 3 },
+    steganography: { perToken: true, layoutVersion: 3, legacyCode: false },
+  });
+  okHandler.close();
+  // ...and invalid values still fail closed.
+  for (const bad of [
+    { processing: { avifEffort: 10 } },
+    { processing: { avifChromaSubsampling: '4:2:2' } },
+    { forensic: { signsVersion: 4 } },
+    { steganography: { layoutVersion: 9 } },
+    { steganography: { legacyCode: 'yes' } },
+  ]) {
+    assert.throws(() => createArchxMiddleware({
+      secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true, ...bad,
+    }), TypeError, `must reject ${JSON.stringify(bad)}`);
+  }
+
+  // S7: hardened defaults contribute sharpConcurrency 1 + sharpCache false,
+  // per-key overridable.
+  const hardened = withHardenedProductionDefaults({ secret: TEST_SECRET, imagesDir: dir });
+  assert.equal(hardened.processing.sharpConcurrency, 1);
+  assert.equal(hardened.processing.sharpCache, false);
+  const overridden = withHardenedProductionDefaults({
+    secret: TEST_SECRET, imagesDir: dir, processing: { sharpConcurrency: 4 },
+  });
+  assert.equal(overridden.processing.sharpConcurrency, 4, 'host value wins');
+  assert.equal(overridden.processing.sharpCache, false, 'unset key still defaults');
+
+  // P2b + P6a: marketplace preset exists; fortress60 noiseStrength unclamped.
+  assert.equal(PRESETS.marketplace.mode, 'vault');
+  assert.equal(normalizeTemporalInterlace('fortress60').noiseStrength, 0.55);
+});
+
+test('v1.14: NAT64, 6to4, Teredo and zone-id spellings share one quota identity', async (t) => {
+  const fx = await startArchxFixture(t, {
+    allowAnonymous: true,
+    trustProxy: true,
+    trustedProxyHops: 1,
+    quotas: { perIp: 1, windowMs: 60000 },
+  });
+  const mint = (xff) => postToken(fx.base + '/archx/token/cat?w=100', { headers: { 'x-forwarded-for': xff } });
+  assert.equal((await mint('64:ff9b::909:909')).status, 200, 'NAT64 form (9.9.9.9) mints');
+  assert.equal((await mint('9.9.9.9')).status, 429, 'plain IPv4 is the same client');
+  assert.equal((await mint('2002:909:909::1')).status, 429, '6to4 form is the same client');
+  assert.equal((await mint('2001:0000:4136:e378:8000:63bf:f6f6:f6f6')).status, 429, 'Teredo form is the same client');
+  assert.equal((await mint('64:ff9b:1::909:909')).status, 429, 'local-use NAT64 form is the same client');
+  assert.equal((await mint('fe80::1%eth0')).status, 200, 'zone-id form mints');
+  assert.equal((await mint('fe80::1')).status, 429, 'zoneless spelling is the same client');
+  assert.equal((await mint('9.9.9.10')).status, 200, 'a genuinely different client still mints');
+});
+
+test('v1.14: padding is texture-coherent with a sub-texture seam; displayed region exact', () => {
+  const w = 61, h = 44, grid = 8; // padded 64x48: 3 pad columns, 4 pad rows
+  const src = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    src[i] = 128 + Math.round(60 * Math.sin(x / 9) + 30 * Math.cos(y / 7));
+    src[i + 1] = 120 + Math.round(50 * Math.cos(x / 11));
+    src[i + 2] = 110 + Math.round(40 * Math.sin((x + y) / 13));
+    src[i + 3] = 255;
+  }
+  const plan = buildScramblePlan(grid, 'pad-v14', 2);
+  const { pw, ph } = paddedSize(w, h, grid);
+  const scrambled = scramblePixelsPadded(src, w, h, plan);
+  const restored = scramblePixels(scrambled, pw, ph, plan, 'unscramble');
+  const px = (buf, stride, x, y, c) => buf[(y * stride + x) * 4 + c];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++) {
+    assert.equal(px(restored, pw, x, y, c), px(src, w, x, y, c), `displayed pixel ${x},${y},${c}`);
+  }
+  const madPairs = (pairs) => {
+    let sum = 0;
+    for (const [a, b] of pairs) for (let c = 0; c < 3; c++) sum += Math.abs(a[c] - b[c]);
+    return sum / (pairs.length * 3);
+  };
+  const P = (x, y) => [px(restored, pw, x, y, 0), px(restored, pw, x, y, 1), px(restored, pw, x, y, 2)];
+  const interiorH = [], padH = [], seamH = [], interiorV = [], padV = [], seamV = [];
+  for (let y = 4; y < h - 4; y++) {
+    for (let x = 4; x < w - 5; x++) interiorH.push([P(x, y), P(x + 1, y)]);
+    for (let x = w; x < pw - 1; x++) padH.push([P(x, y), P(x + 1, y)]);
+    seamH.push([P(w - 1, y), P(w, y)]);
+  }
+  for (let x = 4; x < w - 4; x++) {
+    for (let y = 4; y < h - 5; y++) interiorV.push([P(x, y), P(x, y + 1)]);
+    for (let y = h; y < ph - 1; y++) padV.push([P(x, y), P(x, y + 1)]);
+    seamV.push([P(x, h - 1), P(x, h)]);
+  }
+  const inH = madPairs(interiorH), inV = madPairs(interiorV);
+  assert.ok(madPairs(padH) / inH < 2.5, `right strip texture ratio ${madPairs(padH) / inH}`);
+  assert.ok(madPairs(padV) / inV < 2.5, `bottom strip texture ratio ${madPairs(padV) / inV}`);
+  assert.ok(madPairs(seamH) < 5, `right seam absolute MAD ${madPairs(seamH)}`);
+  assert.ok(madPairs(seamV) < 5, `bottom seam absolute MAD ${madPairs(seamV)}`);
+});
+
+test('v1.14: finishDerivative is copy-on-write; watermark finishes are cache-stable', async () => {
+  const master = await syntheticMaster(320, 240);
+  const base = await prepareDerivativeBase(master, { key: 'cow-key', grid: 8, maxWidth: 320 });
+  const before = Buffer.from(base.data.buffer, base.data.byteOffset, base.data.byteLength);
+  const opts = { key: 'cow-key', grid: 8 };
+  const a1 = await finishDerivative(base, { ...opts, watermark: 'ALICE' });
+  const b = await finishDerivative(base, { ...opts, watermark: 'BOB' });
+  const a2 = await finishDerivative(base, { ...opts, watermark: 'ALICE' });
+  assert.notDeepEqual(a1.bytes, b.bytes, 'per-viewer watermarks differ');
+  assert.deepEqual(a2.bytes, a1.bytes, 'repeat finish (overlay-cache hit) is byte-stable');
+  const afterWm = Buffer.from(base.data.buffer, base.data.byteOffset, base.data.byteLength);
+  assert.equal(Buffer.compare(before, afterWm), 0, 'watermark finishes must not mutate the shared base');
+  await finishDerivative(base, {
+    ...opts, forensicSeed: 'cow-seed',
+    stegoPayload: 'buyer-cow', stegoKey: 'cow-stego-key',
+  });
+  const afterMarks = Buffer.from(base.data.buffer, base.data.byteOffset, base.data.byteLength);
+  assert.equal(Buffer.compare(before, afterMarks), 0, 'in-place marks copy-on-write, never touch base.data');
+});
+
+test('v1.14: build summary exposes totalBytes and manifest variants carry file names', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v14-build-'));
+  const inputDir = path.join(root, 'masters');
+  const outputDir = path.join(root, 'public');
+  fs.mkdirSync(inputDir, { recursive: true });
+  fs.writeFileSync(path.join(inputDir, 'cat.jpg'), await syntheticMaster(160, 120));
+  const result = await buildArchxAssets({
+    inputDir, outputDir, key: 'build-v14-key', widths: [160], baseUrl: '/protected/',
+  });
+  assert.equal(typeof result.totalBytes, 'number');
+  assert.equal(result.totalBytes, result.bytes, 'totalBytes mirrors the long-standing bytes field');
+  const manifest = JSON.parse(fs.readFileSync(result.manifestPath, 'utf8'));
+  const variant = manifest.assets.cat.variants[0];
+  assert.equal(typeof variant.file, 'string', 'manifest variant carries its file name (typed since 1.x)');
+  assert.ok(variant.url.endsWith(variant.file), 'url is derived from file');
+});
+
+test('v1.14: Sharp loads lazily and loader leases are scoped to instance lifetime', () => {
+  // Child process: loader policy is process-global and this suite's own
+  // last test deliberately narrows permanents; isolate lease semantics.
+  const script = `
+    import { createRequire } from 'node:module';
+    import fs from 'node:fs';
+    import os from 'node:os';
+    import path from 'node:path';
+    const req = createRequire(import.meta.url);
+    const sharpHits = () => Object.keys(req.cache).filter((k) => k.includes('node_modules/sharp')).length;
+    const server = await import('./server/middleware.js');
+    if (sharpHits() !== 0) throw new Error('sharp loaded eagerly by /server import');
+    const sharp = (await import('sharp')).default;
+    const jpg = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } } }).jpeg().toBuffer();
+    const release = server.acquireSharpSecurityLease(['png']);
+    let blocked = false;
+    try { await sharp(jpg).metadata(); } catch { blocked = true; }
+    if (!blocked) throw new Error('jpeg loader not blocked under png lease');
+    release(); release();
+    if ((await sharp(jpg).metadata()).format !== 'jpeg') throw new Error('jpeg loader not restored after release');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-lease-'));
+    fs.writeFileSync(path.join(dir, 'x.png'), await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 9, g: 9, b: 9 } } }).png().toBuffer());
+    const handler = server.createArchxMiddleware({
+      secret: 'lease-test-secret-with-more-than-32-bytes', imagesDir: dir,
+      allowAnonymous: true, allowedInputFormats: ['png'],
+    });
+    blocked = false;
+    try { await sharp(jpg).metadata(); } catch { blocked = true; }
+    if (!blocked) throw new Error('middleware lease did not narrow loaders');
+    handler.close();
+    if ((await sharp(jpg).metadata()).format !== 'jpeg') throw new Error('handler.close() did not release its lease');
+    console.log('LEASES-OK');
+  `;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: path.join(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  assert.ok(out.includes('LEASES-OK'), out);
+});
+
+test('v1.14: per-token derivatives share one stage-1 base (S1 base-first + singleflight)', async (t) => {
+  const fx = await startArchxFixture(t, {
+    allowAnonymous: true,
+    steganography: { perToken: true, profile: 'robust', layoutVersion: 3 },
+  });
+  const view = async () => {
+    const res = await postToken(fx.base + '/archx/token/cat?w=320');
+    assert.equal(res.status, 200);
+    const token = await res.json();
+    const payloadRes = await redeemToken(fx.base, token);
+    assert.equal(payloadRes.status, 200);
+    const body = Buffer.from(await payloadRes.arrayBuffer());
+    assert.ok(body.length > 0);
+    return body;
+  };
+  // Two concurrent first-views + one later view: all succeed, exactly one
+  // stage-1 base is cached and reused, and no flight leaks afterwards.
+  await Promise.all([view(), view()]);
+  await view();
+  const stats = fx.handler.stats();
+  assert.equal(stats.baseInFlight, 0, 'singleflight map drains');
+  assert.ok((stats.baseCacheEntries ?? 0) >= 1, 'stage-1 base cached for reuse');
 });

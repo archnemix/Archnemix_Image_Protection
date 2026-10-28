@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -29,6 +29,10 @@
     "./server": {
       "types": "./types/server.d.ts",
       "default": "./server/middleware.js"
+    },
+    "./server/scramble-image": {
+      "types": "./types/server.d.ts",
+      "default": "./server/scramble-image.js"
     },
     "./build": {
       "types": "./types/build.d.ts",

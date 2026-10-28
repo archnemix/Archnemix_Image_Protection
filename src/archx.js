@@ -43,7 +43,7 @@ import {
   useJsonParser, useWebCrypto,
 } from './scramble.js';
 
-export const VERSION = '1.13.0';
+export const VERSION = '1.14.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -670,7 +670,8 @@ function mergeOptions(opts = {}) {
   // renderer plus every protection flag explicitly; internally we only map
   // that renderer choice onto the existing canvas/WebGL pipelines.
   const rendererValue = String(merged.renderer || 'auto').toLowerCase();
-  merged.renderer = (rendererValue === 'canvas' || rendererValue === 'webgl') ? rendererValue : 'auto';
+  merged.renderer = rendererValue === 'canvas2d' ? 'canvas'
+    : (rendererValue === 'canvas' || rendererValue === 'webgl') ? rendererValue : 'auto';
   const customRequested = merged.mode === 'custom' ||
     (clean.mode === undefined && clean.renderer !== undefined);
   if (customRequested) {
@@ -756,6 +757,12 @@ export const PRESETS = Object.freeze({
   commerce: Object.freeze({
     mode: 'vault', qualityProfile: 'original', onExtract: 'black', cacheBitmap: true,
     cachePayload: true, renderLoop: 'static', reloadOnResize: 'upscale', forensic: true,
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+  }),
+  marketplace: Object.freeze({
+    mode: 'vault', qualityProfile: 'high', onExtract: 'black', tokenBatch: true,
+    cacheBitmap: true, cachePayload: true, renderLoop: 'static',
+    reloadOnResize: 'upscale', forensic: true,
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
   }),
   screenshotResistant: Object.freeze({
@@ -942,7 +949,7 @@ export function normalizeTemporalInterlace(raw) {
     fillStrength,
     hiddenScale,
     activeGain,
-    noiseStrength: clampTemporalNumber(merged.noiseStrength ?? merged.strength, 0.16, 0, 0.45),
+    noiseStrength: clampTemporalNumber(merged.noiseStrength ?? merged.strength, 0.16, 0, 0.65),
     chroma: merged.chroma !== false,
     respectReducedMotion: merged.respectReducedMotion !== false,
   });
@@ -2173,50 +2180,54 @@ function scrambleCanvasLocally(source, grid, key) {
   const cctx = getNativeContext(cleanPadded, '2d');
   setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
   nativeDrawImage(cctx, source, 0, 0);
-  // Keyed SHIFTED toroidal wrap into the padding (matching the core
-  // scramblePixelsPadded): black/edge-duplicated padding identifies
-  // boundary tiles, and mirror reflection leaves a palindrome seam a
-  // keyless solver can lock onto. Wrapping from a plan-keyed mid-image
-  // offset gives pad tiles authentic texture with no seam signature;
-  // drawing at 96% alpha over black decorrelates the wrapped bytes from
-  // their interior originals so exact-match stitching finds no anchor.
-  const shiftX = w > 1 ? (w >> 1) + (plan.order[0] % Math.max(1, w >> 1)) : 0;
-  const shiftY = h > 1 ? (h >> 1) + (plan.order[plan.count - 1] % Math.max(1, h >> 1)) : 0;
-  const drawPadStrip = (draw) => {
-    cctx.save();
-    cctx.fillStyle = '#000';
-    cctx.globalAlpha = 1;
-    draw(true);
-    cctx.globalAlpha = 0.96;
-    draw(false);
-    cctx.restore();
+  // Keyed DOUBLE shifted toroidal wrap into the padding (the 2D analog
+  // of the core scramblePixelsPadded scheme): black/edge-duplicated
+  // padding identifies boundary tiles, and mirror reflection leaves a
+  // palindrome seam a keyless solver can lock onto. Two wraps from
+  // different plan-keyed offsets composited at partial alpha produce a
+  // blend that is a near-copy of NEITHER source region, so exact/NCC
+  // duplicate-hunting finds no anchor; a low-alpha true-edge taper over
+  // the first 3 px pulls the pad->image seam toward texture scale.
+  const shiftFor = (orderIdx, len) => (len > 1
+    ? (len >> 1) + (plan.order[((orderIdx % plan.count) + plan.count) % plan.count] % Math.max(1, len >> 1))
+    : 0);
+  const wrapCols = (shiftX) => {
+    let dx = w;
+    let sx = shiftX % Math.max(1, w);
+    while (dx < pw) {
+      const seg = Math.min(w - sx, pw - dx);
+      nativeDrawImage(cctx, source, sx, 0, seg, h, dx, 0, seg, h);
+      dx += seg; sx = 0;
+    }
   };
-  if (pw > w) {
-    drawPadStrip((fill) => {
-      if (fill) { cctx.fillRect(w, 0, pw - w, h); return; }
-      // pad column x (>= w) shows interior column (x + shiftX) % w
-      let dx = w;
-      let sx = shiftX;
-      while (dx < pw) {
-        const seg = Math.min(w - sx, pw - dx);
-        nativeDrawImage(cctx, source, sx, 0, seg, h, dx, 0, seg, h);
-        dx += seg; sx = 0;
-      }
-    });
+  const wrapRows = (shiftY) => {
+    // Rows are drawn from the padded frame itself (self-draw uses a
+    // snapshot, per canvas spec) so the corner inherits wrapped columns.
+    let dy = h;
+    let sy = shiftY % Math.max(1, h);
+    while (dy < ph) {
+      const seg = Math.min(h - sy, ph - dy);
+      nativeDrawImage(cctx, cleanPadded, 0, sy, pw, seg, 0, dy, pw, seg);
+      dy += seg; sy = 0;
+    }
+  };
+  if (pw > w && w > 0) {
+    cctx.save();
+    cctx.fillStyle = '#000'; cctx.fillRect(w, 0, pw - w, h);
+    cctx.globalAlpha = 0.96; wrapCols(shiftFor(0, w));
+    cctx.globalAlpha = 0.45; wrapCols(shiftFor(1, w));
+    cctx.globalAlpha = 0.35;
+    nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, Math.min(3, pw - w), h);
+    cctx.restore();
   }
-  if (ph > h) {
-    drawPadStrip((fill) => {
-      if (fill) { cctx.fillRect(0, h, pw, ph - h); return; }
-      // pad row y (>= h) shows row (y + shiftY) % h of the padded frame
-      // (self-draw uses a snapshot, per canvas spec)
-      let dy = h;
-      let sy = shiftY;
-      while (dy < ph) {
-        const seg = Math.min(h - sy, ph - dy);
-        nativeDrawImage(cctx, cleanPadded, 0, sy, pw, seg, 0, dy, pw, seg);
-        dy += seg; sy = 0;
-      }
-    });
+  if (ph > h && h > 0) {
+    cctx.save();
+    cctx.fillStyle = '#000'; cctx.fillRect(0, h, pw, ph - h);
+    cctx.globalAlpha = 0.96; wrapRows(shiftFor(plan.count - 1, h));
+    cctx.globalAlpha = 0.45; wrapRows(shiftFor(plan.count - 2, h));
+    cctx.globalAlpha = 0.35;
+    nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, Math.min(3, ph - h));
+    cctx.restore();
   }
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
@@ -2304,7 +2315,7 @@ export class ProtectedImage {
    * handle to the canvas, bitmap, options/secrets, or shadow internals. */
   #options; #host; #root; #wrap; #canvas; #tilesEl; #shieldEl;
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
-  #decoy = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
+  #decoy = null; #decoySize = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
   #glBudgetWarned = false; #taintWarned = false;
   #canaryDone = false; #canaryPause = false; #canaryProbe = null; #canaryWait = 0; #canaryNextTry = 1;
   #preserveFlagged = false; #integrityHardLock = false; #glReleasing = false;
@@ -2510,6 +2521,11 @@ export class ProtectedImage {
     this.#traceEl.style.setProperty('--trace-opacity', String(cfg.opacity ?? 0.08));
     const update = () => {
       if (this.#destroyed || !this.#traceEl) return;
+      // Hidden tab or scrolled off-screen: this instance cannot be
+      // captured right now; skip the text repaint (the next tick after
+      // it becomes visible refreshes within updateMs).
+      if (this.#host.ownerDocument?.hidden) return;
+      if (this.#loadedOnce && !this.#visible) return;
       const wm = this.#options.watermark;
       const wmText = typeof wm === 'string' ? wm : wm?.text;
       let template = cfg.text || wmText || `${this.#options.brand} · {session} · {time}`;
@@ -2626,10 +2642,17 @@ export class ProtectedImage {
     });
   }
 
-  #isTokenSource() {
+  // Token sources are { id }; { imageId } is accepted as an alias so the
+  // shape the TypeScript surface long documented keeps working.
+  #tokenSourceId() {
     const src = this.#source;
-    return !!(src && typeof src === 'object' && !(src instanceof Blob) &&
-      !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id);
+    if (!src || typeof src !== 'object' || src instanceof Blob ||
+        src instanceof ArrayBuffer || ArrayBuffer.isView(src)) return null;
+    return src.id ?? src.imageId ?? null;
+  }
+
+  #isTokenSource() {
+    return !!this.#tokenSourceId();
   }
 
   #isAssetSource() {
@@ -2821,7 +2844,8 @@ export class ProtectedImage {
 
   async #tokenMintContext(controls) {
     const o = this.#options;
-    const src = this.#source;
+    const src = this.#source || {};
+    const tokenId = this.#tokenSourceId();
     const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
     if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
     const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
@@ -2843,7 +2867,7 @@ export class ProtectedImage {
       : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
     const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
     const mintUrl = new URL(endpointUrl.href);
-    mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(src.id)}`;
+    mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(tokenId)}`;
     mintUrl.searchParams.set('w', String(boxW));
     mintUrl.searchParams.set('bw', String(boxW));
     mintUrl.searchParams.set('bh', String(boxH));
@@ -2851,7 +2875,7 @@ export class ProtectedImage {
     if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
 
     const tokenCacheKey = cacheDigest([
-      'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, src.id,
+      'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, tokenId,
       boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
       o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
       controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
@@ -2864,12 +2888,10 @@ export class ProtectedImage {
 
   async #prefetchTokenBatchMint(force = false) {
     const o = this.#options;
-    const src = this.#source;
     if (o.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
     if (!force && this.#cachedBytes) return;
-    if (!src || typeof src !== 'object' || src instanceof Blob ||
-        src instanceof ArrayBuffer || ArrayBuffer.isView(src) || !src.id) return;
-    if (typeof src.id !== 'string' || !src.id || src.id.length > 256 || /[\u0000-\u001f\u007f]/.test(src.id)) return;
+    const tokenId = this.#tokenSourceId();
+    if (!tokenId || typeof tokenId !== 'string' || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return;
     const controls = fetchControls(o);
     let context;
     try { context = await this.#tokenMintContext(controls); }
@@ -2885,7 +2907,7 @@ export class ProtectedImage {
     const promise = queueTokenBatchRequest({
       batchUrl,
       item: {
-        id: src.id,
+        id: tokenId,
         w: context.boxW,
         bw: context.boxW,
         bh: context.boxH,
@@ -3005,9 +3027,9 @@ export class ProtectedImage {
     // only the key/grid/AES fields needed for decoding are retained. Payload
     // URLs must stay on the endpoint origin (or an exact allowlisted origin),
     // redirects are refused, and only a payload 401/403 triggers one remint.
-    if (src && typeof src === 'object' && !(src instanceof Blob) &&
-        !(src instanceof ArrayBuffer) && !ArrayBuffer.isView(src) && src.id) {
-      if (typeof src.id !== 'string' || !src.id || src.id.length > 256 || /[\u0000-\u001f\u007f]/.test(src.id)) {
+    const tokenId = this.#tokenSourceId();
+    if (tokenId != null) {
+      if (typeof tokenId !== 'string' || !tokenId || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) {
         throw nonRetryableError('Archx: token image id is invalid');
       }
       const {
@@ -3038,7 +3060,7 @@ export class ProtectedImage {
             return await (prefetched || queueTokenBatchRequest({
               batchUrl,
               item: {
-                id: src.id,
+                id: tokenId,
                 w: boxW,
                 bw: boxW,
                 bh: boxH,
@@ -3397,7 +3419,7 @@ export class ProtectedImage {
       this.#bitmapReleased = false;
       this.#glSource = null;
       this.#glMeta = null;
-      this.#decoy = null; // regenerate poison for the (possibly new) source
+      this.#decoy = null; this.#decoySize = null; // regenerate poison for the (possibly new) source
       if (!this.#options.aspectRatio && !this.#options.height) {
         this.#host.style.aspectRatio = meta.origW + ' / ' + meta.origH;
       }
@@ -3556,7 +3578,7 @@ export class ProtectedImage {
         fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
         fit.dx, fit.dy, fit.dw, fit.dh);
       this._bakeOverlays(fctx, w, h);
-      this.#decoy = this._makeDecoy(full, w, h);
+      this.#prepareDecoy(full, w, h);
       full.width = 0; full.height = 0;
       if (this.#options.lens) {
         if (this.#frameCanvas) { this.#frameCanvas.width = 0; this.#frameCanvas.height = 0; }
@@ -3591,7 +3613,7 @@ export class ProtectedImage {
         fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
         fit.dx, fit.dy, fit.dw, fit.dh);
       this._bakeOverlays(fctx, w, h);
-      this.#decoy = this._makeDecoy(full, w, h);
+      this.#prepareDecoy(full, w, h);
       full.width = 0; full.height = 0;
       if (this.#frameCanvas) { this.#frameCanvas.width = 0; this.#frameCanvas.height = 0; }
       this.#frameCanvas = frame;
@@ -3615,7 +3637,7 @@ export class ProtectedImage {
       fit.sw * (full.width / this.#meta.origW), fit.sh * (full.height / this.#meta.origH),
       fit.dx, fit.dy, fit.dw, fit.dh);
     this._bakeOverlays(ctx, w, h);
-    this.#decoy = this._makeDecoy(full, w, h);
+    this.#prepareDecoy(full, w, h);
     full.width = 0; full.height = 0; // wipe the clean working copy immediately
     this._poison(canvas, ctx);
     this.#releaseSourceBitmap();
@@ -3717,6 +3739,28 @@ export class ProtectedImage {
       }
     }
 
+    // Cycle-zero-mean block bias (noise fill only): with static frames
+    // the per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
+    // MEDIAN is exactly c whenever the hidden deltas straddle it. A
+    // fixed per-block offset b applied +b*(P-1)/P on the active phase
+    // and -b/P on hidden phases keeps the cycle mean exact (no visible
+    // brightness flicker) while moving every cycle statistic off c —
+    // the same construction as the shader path and the duty bias.
+    const biasBlock = 24;
+    const bbw = Math.ceil(w / biasBlock), bbh = Math.ceil(h / biasBlock);
+    const biasAmp = (interlace?.noiseStrength || 0) * 255 * 0.55;
+    const biases = (interlace && interlace.fill === 'noise' && biasAmp > 0)
+      ? new Float32Array(bbw * bbh) : null;
+    if (biases) for (let i = 0; i < biases.length; i++) biases[i] = (Math.random() * 2 - 1) * biasAmp;
+    const colBias = biases ? new Int32Array(w) : null;
+    if (colBias) for (let x = 0; x < w; x++) colBias[x] = Math.min(bbw - 1, Math.floor(x / biasBlock));
+    // Column lookup tables replace two Math.floor divisions per pixel
+    // in the frame builder (~6M divisions per 4-phase 1600px build).
+    const colNoiseOi = offsets ? new Int32Array(w) : null;
+    if (colNoiseOi) for (let x = 0; x < w; x++) colNoiseOi[x] = Math.min(nbw - 1, Math.floor(x / noiseBlock)) * 3;
+    // One scratch ImageData for all phases (putImageData copies sync).
+    const scratch = fctx.createImageData(w, h);
+
     const mk = (phase) => {
       // Per-phase amplitude diversity: with identical |delta| every phase,
       // a short capture's per-pixel multiset is {c+d, c-d, ...} and its
@@ -3726,7 +3770,7 @@ export class ProtectedImage {
       const c = makeCanvas(this.#host.ownerDocument);
       c.width = w; c.height = h;
       const cctx = getNativeContext(c, '2d');
-      const out = cctx.createImageData(w, h);
+      const out = scratch;
       const s = src.data, d = out.data; // Uint8ClampedArray clamps assignments
 
       if (!interlace) {
@@ -3763,11 +3807,15 @@ export class ProtectedImage {
           for (let y = y0; y < y1; y++) {
             let p = (y * w + x0) * 4;
             const lowY = lowData ? Math.min(lowH - 1, Math.floor(y / lowBlock)) : 0;
+            const rowNoiseOi = offsets ? Math.min(nbh - 1, Math.floor(y / noiseBlock)) * nbw * 3 : 0;
+            const rowBiasOff = biases ? Math.min(bbh - 1, Math.floor(y / biasBlock)) * bbw : 0;
             for (let x = x0; x < x1; x++, p += 4) {
               const sr = s[p], sg = s[p + 1], sb = s[p + 2];
+              const bv = biases ? biases[rowBiasOff + colBias[x]] : 0;
               let r, g, b;
               if (active) {
-                r = sr * gain; g = sg * gain; b = sb * gain;
+                const ab = bv * fillMix * (phases - 1) / phases;
+                r = sr * gain + ab; g = sg * gain + ab; b = sb * gain + ab;
               } else {
                 let fr = sr, fg = sg, fb = sb;
                 if (interlace.fill === 'lowres' && lowData) {
@@ -3781,21 +3829,18 @@ export class ProtectedImage {
                 } else if (interlace.fill === 'black') {
                   fr = 0; fg = 0; fb = 0;
                 } else if (interlace.fill === 'noise' && offsets) {
-                  const nbx = Math.min(nbw - 1, Math.floor(x / noiseBlock));
-                  const nby = Math.min(nbh - 1, Math.floor(y / noiseBlock));
-                  const oi = (nby * nbw + nbx) * 3;
-                  fr = sr + sign * offsets[oi];
-                  fg = sg + sign * offsets[oi + 1];
-                  fb = sb + sign * offsets[oi + 2];
+                  const oi = rowNoiseOi + colNoiseOi[x];
+                  const hb = bv / phases;
+                  fr = sr - hb + sign * offsets[oi];
+                  fg = sg - hb + sign * offsets[oi + 1];
+                  fb = sb - hb + sign * offsets[oi + 2];
                 }
                 r = sr + (fr - sr) * fillMix;
                 g = sg + (fg - sg) * fillMix;
                 b = sb + (fb - sb) * fillMix;
               }
               if (cfg.noise && offsets) {
-                const nbx = Math.min(nbw - 1, Math.floor(x / noiseBlock));
-                const nby = Math.min(nbh - 1, Math.floor(y / noiseBlock));
-                const oi = (nby * nbw + nbx) * 3;
+                const oi = rowNoiseOi + colNoiseOi[x];
                 r += sign * offsets[oi];
                 g += sign * offsets[oi + 1];
                 b += sign * offsets[oi + 2];
@@ -3944,7 +3989,7 @@ export class ProtectedImage {
       this.#taintContext(tctx); // each tile canvas is tainted before its slice covers the pixel
       nativeDrawImage(tctx, composed, (i % g) * tw, Math.floor(i / g) * th, tw, th, 0, 0, tw, th);
       this.#tilesEl.appendChild(c);
-      this.#decoy = this.#decoy || this._makeDecoy(full, w, h);
+      this.#prepareDecoy(full, w, h);
       this._poison(c, tctx);
     }
     composed.width = 0;
@@ -4013,6 +4058,36 @@ export class ProtectedImage {
       }
       ctx.restore();
     }
+  }
+
+  // Record the decoy size and build REAL decoys (lowres/scrambled)
+  // eagerly while clean pixels exist; the default black policy defers
+  // to #getDecoy() on first intercepted readback (most sessions never
+  // have one, saving a full-size placeholder canvas per instance).
+  #prepareDecoy(cleanCanvas, w, h) {
+    this.#decoySize = { w, h };
+    if (this.#decoy || !cleanCanvas) return;
+    const kind = this.#options.onExtract;
+    if (kind === 'lowres' || kind === 'scrambled') {
+      this.#decoy = this._makeDecoy(cleanCanvas, w, h);
+    }
+  }
+
+  #getDecoy() {
+    if (this.#decoy) return this.#decoy;
+    let size = this.#decoySize;
+    if (!size) {
+      try { const { w, h } = this._backingSize(); size = { w, h }; }
+      catch { size = { w: 320, h: 200 }; }
+    }
+    try {
+      this.#decoy = this._makeDecoy(null, Math.max(1, size.w), Math.max(1, size.h));
+    } catch {
+      const c = makeCanvas(this.#host.ownerDocument);
+      c.width = 1; c.height = 1;
+      this.#decoy = c;
+    }
+    return this.#decoy;
   }
 
   _makeDecoy(cleanCanvas, w, h) {
@@ -4117,7 +4192,7 @@ export class ProtectedImage {
   }
 
   _poison(canvas, ctx) {
-    const decoy = () => this.#decoy;
+    const decoy = () => this.#getDecoy();
     // Captured at module load — a hook installed afterwards cannot hijack
     // the decoy-generation path by replacing the prototypes now.
     const realToDataURL = NATIVES.canvasToDataURL || HTMLCanvasElement.prototype.toDataURL;
@@ -4181,7 +4256,7 @@ export class ProtectedImage {
       const { w, h } = this._backingSize();
       const { full } = this._workingCanvas(w, h);
       const local = scrambleCanvasLocally(full, o.grid, 'local:' + sessionId());
-      if (!this.#decoy) this.#decoy = this._makeDecoy(full, full.width, full.height);
+      this.#prepareDecoy(full, full.width, full.height);
       full.width = 0; full.height = 0;
       this.#glSource = local.canvas;
       this.#glMeta = local.meta;
@@ -4378,12 +4453,18 @@ export class ProtectedImage {
       try { this.#glSource.width = 0; this.#glSource.height = 0; } catch {}
     }
     this.#glSource = null;
-    // Decoy for any instance-level grabbers (prototype calls return black anyway).
-    // Generated BEFORE strict release, while the decoded bitmap still exists.
-    if (!this.#decoy && this.#bitmap) {
-      const { full } = this._workingCanvas(320, Math.max(1, Math.round(320 * this.#meta.origH / this.#meta.origW)));
-      this.#decoy = this._makeDecoy(full, full.width, full.height);
+    // Decoy for any instance-level grabbers (prototype calls return black
+    // anyway). REAL decoys are generated BEFORE strict release, while the
+    // decoded bitmap still exists; the default black policy defers to
+    // #getDecoy() (saving this 320px unscramble per GL instance too).
+    const decoyH = Math.max(1, Math.round(320 * this.#meta.origH / this.#meta.origW));
+    const wantRealDecoy = this.#options.onExtract === 'lowres' || this.#options.onExtract === 'scrambled';
+    if (!this.#decoy && this.#bitmap && wantRealDecoy) {
+      const { full } = this._workingCanvas(320, decoyH);
+      this.#prepareDecoy(full, full.width, full.height);
       full.width = 0;
+    } else if (!this.#decoySize) {
+      this.#decoySize = { w: 320, h: decoyH };
     }
     this._startGlLoop();
     this.#releaseSourceBitmap();
@@ -4411,6 +4492,7 @@ export class ProtectedImage {
       uniform float uInterlaceFill; uniform float uInterlaceFillBlock;
       uniform float uInterlaceFillStrength; uniform float uInterlaceHiddenScale;
       uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
+      uniform float uInterlaceBias;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
       float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
@@ -4501,8 +4583,21 @@ export class ProtectedImage {
           } else {
             assigned = mod(interlaceCell.x + interlaceCell.y, uInterlacePhases);
           }
+          // Cycle-zero-mean block bias (noise fill only): without it the
+          // per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
+          // median of a short screen recording is exactly c whenever the
+          // hidden deltas straddle it (~50% of pixels at 3 phases). A
+          // per-24px-block offset b, +b*(P-1)/P on the active phase and
+          // -b/P hidden, keeps the cycle mean exact while moving every
+          // cycle statistic off c. biasHash re-seeds every 90 frames, so
+          // longer recordings face a drifting bias, not a fixed offset.
+          float iBias = 0.0;
+          if(uInterlaceFill>2.5 && uInterlaceFill<3.5){
+            vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
+            iBias = (biasHash(biasCell) * 2.0 - 1.0) * uInterlaceBias * uInterlaceFillStrength;
+          }
           if(abs(assigned-uInterlacePhase)<0.5){
-            c.rgb *= uInterlaceActiveGain;
+            c.rgb = c.rgb * uInterlaceActiveGain + vec3(iBias * (uInterlacePhases - 1.0) / max(uInterlacePhases, 1.0));
           } else {
             vec3 fillColor = c.rgb;
             if(uInterlaceFill<0.5){
@@ -4524,7 +4619,7 @@ export class ProtectedImage {
               } else {
                 delta = hash3(interlaceCell) - 0.5;
               }
-              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign;
+              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign - vec3(iBias / max(uInterlacePhases, 1.0) / max(uInterlaceFillStrength, 0.02));
             }
             c.rgb = mix(c.rgb, fillColor, uInterlaceFillStrength);
           }
@@ -4594,7 +4689,7 @@ export class ProtectedImage {
      'uTemporalOn','uTemporalSign','uTemporalStrength','uTemporalBlock','uTemporalPattern','uTemporalChroma',
      'uTemporalDuty','uTemporalBias','uBiasSeed',
      'uInterlaceOn','uInterlacePhase','uInterlacePhases','uInterlaceLayout','uInterlaceCell','uInterlaceAxis',
-     'uInterlaceFill','uInterlaceFillBlock','uInterlaceFillStrength','uInterlaceHiddenScale','uInterlaceActiveGain','uInterlaceNoiseStrength']
+     'uInterlaceFill','uInterlaceFillBlock','uInterlaceFillStrength','uInterlaceHiddenScale','uInterlaceActiveGain','uInterlaceNoiseStrength','uInterlaceBias']
       .forEach((n) => { this.#glLoc[n] = gl.getUniformLocation(prog, n); });
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -4663,7 +4758,12 @@ export class ProtectedImage {
       const text = String(cfg.text || '').replace('{session}', sessionId().slice(0, 6));
       if (text) {
         const c = makeCanvas();
-        c.width = 1024; c.height = Math.max(64, Math.round(1024 * meta.origH / meta.origW));
+        // Right-size the watermark texture to the current backing store
+        // (this re-runs on resize re-uploads): a fixed 1024px texture
+        // wasted raster time + VRAM on the small tiles that dominate
+        // galleries, for zero visible gain.
+        const texW = Math.max(256, Math.min(1024, this.#canvas?.width || 1024));
+        c.width = texW; c.height = Math.max(64, Math.round(texW * meta.origH / meta.origW));
         const ctx = getNativeContext(c, '2d');
         ctx.clearRect(0, 0, c.width, c.height);
         ctx.fillStyle = cfg.color || '#ffffff';
@@ -4823,6 +4923,7 @@ export class ProtectedImage {
       gl.uniform1f(L.uInterlaceHiddenScale, interlace?.hiddenScale ?? 0.3);
       gl.uniform1f(L.uInterlaceActiveGain, interlace?.activeGain ?? 1);
       gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
+      gl.uniform1f(L.uInterlaceBias, interlace ? (interlace.noiseStrength ?? 0.16) * 0.55 : 0);
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
       if (!this.#canaryDone && !this.#canaryPause && this.#glFrames >= this.#canaryNextTry) {
@@ -5131,6 +5232,16 @@ function defineElement() {
   if (typeof customElements === 'undefined' || customElements.get('archx-image')) return;
   // Element -> instance in a WeakMap: no public `_inst` handle on the DOM node.
   const elementInstances = new WeakMap();
+  const elementInners = new WeakMap();
+  // Boolean-ish attributes parse VALUES, not mere presence, so markup
+  // generated by frameworks (scrambled="false") cannot silently ENABLE
+  // a protection (or a cost) the author turned off. Absent = undefined,
+  // letting preset/global defaults apply.
+  const boolAttr = (el, name) => {
+    if (!el.hasAttribute(name)) return undefined;
+    const v = String(el.getAttribute(name) ?? '').trim().toLowerCase();
+    return !(v === 'false' || v === '0' || v === 'off' || v === 'no');
+  };
   class ArchxImage extends HTMLElement {
     static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope', 'taint-readback', 'taint-url', 'plan-version']; }
     connectedCallback() {
@@ -5139,6 +5250,7 @@ function defineElement() {
       const inner = document.createElement('div');
       inner.style.width = '100%'; inner.style.height = '100%';
       this.appendChild(inner);
+      elementInners.set(this, inner);
       const id = this.getAttribute('image-id');
       const assetId = this.getAttribute('asset-id');
       const src = assetId ? { assetId } : id ? { id } : this.getAttribute('src');
@@ -5172,6 +5284,7 @@ function defineElement() {
           temporalInterlace = Object.keys(details).length ? details : true;
         }
       }
+      const cameraAttr = boolAttr(this, 'camera-shield');
       const inst = new ProtectedImage(inner, src, {
         ...presetOptions,
         mode: this.getAttribute('mode') || presetOptions.mode,
@@ -5182,13 +5295,13 @@ function defineElement() {
         fit: this.getAttribute('fit') || undefined,
         grid: this.getAttribute('grid') ? Number(this.getAttribute('grid')) : undefined,
         key: this.getAttribute('key') || undefined,
-        scrambled: this.hasAttribute('scrambled'),
-        lens: this.hasAttribute('lens') ? true : presetOptions.lens,
-        captureShield: this.hasAttribute('capture-shield') ? true : presetOptions.captureShield,
-        temporalShield: this.hasAttribute('temporal-shield') ? true : presetOptions.temporalShield,
-        cameraShield: this.hasAttribute('camera-shield')
+        scrambled: boolAttr(this, 'scrambled'),
+        lens: boolAttr(this, 'lens') ?? presetOptions.lens,
+        captureShield: boolAttr(this, 'capture-shield') ?? presetOptions.captureShield,
+        temporalShield: boolAttr(this, 'temporal-shield') ?? presetOptions.temporalShield,
+        cameraShield: cameraAttr === true
           ? { pattern: 'checker', chroma: true }
-          : presetOptions.cameraShield,
+          : cameraAttr === false ? false : presetOptions.cameraShield,
         temporalInterlace,
         renderLoop: this.getAttribute('render-loop') || presetOptions.renderLoop,
         reloadOnResize: this.getAttribute('reload-on-resize') || presetOptions.reloadOnResize,
@@ -5219,12 +5332,24 @@ function defineElement() {
     }
     disconnectedCallback() {
       const inst = elementInstances.get(this);
-      if (inst) { inst.destroy(); elementInstances.delete(this); }
+      if (inst) { inst.destroy(); elementInstances.delete(this); elementInners.delete(this); }
     }
     attributeChangedCallback(name, oldV, newV) {
       const inst = elementInstances.get(this);
       if (!inst || oldV === newV) return;
-      if (name === 'src' && newV) inst.reload(newV);
+      // Source attributes hot-swap through the instance's reload path...
+      if (name === 'src') { if (newV) inst.reload(newV); return; }
+      if (name === 'image-id') { if (newV) inst.reload({ id: newV }); return; }
+      if (name === 'asset-id') { if (newV) inst.reload({ assetId: newV }); return; }
+      // ...every other observed attribute re-mounts the instance so the
+      // change actually takes effect (previously all were silently
+      // ignored despite being listed in observedAttributes).
+      try { inst.destroy(); } catch { /* remount best effort */ }
+      elementInstances.delete(this);
+      const inner = elementInners.get(this);
+      if (inner) inner.remove();
+      elementInners.delete(this);
+      this.connectedCallback();
     }
   }
   customElements.define('archx-image', ArchxImage);

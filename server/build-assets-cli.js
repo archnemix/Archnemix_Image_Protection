@@ -43,12 +43,12 @@ if (!inputDir || !outputDir || args.help) {
   --plan-version <1|2>    scramble plan seed strength (1 = legacy 32-bit, 2 = 128-bit; default 1)
   --quality <1-100>       WebP/JPEG quality (default 88; use --lossless for exact pixels)
   --lossless              lossless WebP/PNG at delivered sizes
-  --format <fmt>          webp (default), png, or jpeg
+  --format <fmt>          webp (default), png, jpeg, or avif
   --encrypt               AES-GCM encrypt payloads (ARCHX_AES_KEY, else reuse/generate the manifest key)
   --watermark <text>      bake visible watermark text before scrambling
   --forensic-seed <s>     shared forensic seed (prefer ARCHX_FORENSIC_SEED)
   --stego <payload>       StegoMark payload; {id} is replaced per image
-  --stego-key <s>         StegoMark key (prefer ARCHX_STEGO_KEY; default scramble key)
+  --stego-key <s>         StegoMark key (required with --stego; prefer ARCHX_STEGO_KEY; MUST differ from the scramble key)
   --stego-profile <p>     standard (default) or robust
   --jobs <n>              parallel masters (default up to 4)
   --force                 regenerate all variants

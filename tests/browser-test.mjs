@@ -1606,6 +1606,59 @@ try {
     });
   }
 
+  console.log('\n[8f] v1.14 client regressions — {imageId} alias, presets, element semantics');
+  const v14 = await page.evaluate(async () => {
+    const out = {};
+    const mkHost = () => {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:280px;height:180px';
+      document.body.appendChild(host);
+      return host;
+    };
+    // P2b: the preset the type surface long referenced now exists.
+    out.marketplaceMode = window.Archx.preset('marketplace').mode;
+    // P2a: { imageId } (the shape types documented) mounts like { id }.
+    const alias = window.Archx.load.image(mkHost(), { imageId: 'gallery-017' }, {
+      mode: 'shield', debug: true, lazy: false,
+    });
+    await alias.ready;
+    out.aliasLoaded = alias._debug().loadedOnce && alias._debug().canvas.width > 0;
+    alias.destroy();
+    // renderer:'canvas2d' (long shipped in types) must mean canvas, not auto.
+    const c2d = window.Archx.load.image(mkHost(), { id: 'gallery-018' }, {
+      mode: 'vault', renderer: 'canvas2d', debug: true, lazy: false,
+    });
+    await c2d.ready;
+    out.canvas2dGlFrames = c2d._debug().glFrames;
+    out.canvas2dLoaded = c2d._debug().loadedOnce;
+    c2d.destroy();
+    // P9: element boolean attributes parse values; observed attributes react.
+    const el = document.createElement('archx-image');
+    el.setAttribute('image-id', 'gallery-019');
+    el.setAttribute('mode', 'shield');
+    el.setAttribute('temporal-shield', 'false');
+    el.style.cssText = 'width:280px;height:180px;display:block';
+    document.body.appendChild(el);
+    const ready1 = el.ready;
+    await ready1;
+    out.elementReady1 = true;
+    el.setAttribute('image-id', 'gallery-020');
+    out.elementReloadKeptReady = el.ready === ready1; // hot reload, same promise
+    el.setAttribute('watermark', 'REMOUNTED');
+    const ready2 = el.ready;
+    out.elementRemountNewReady = ready2 !== ready1;
+    await ready2;
+    out.elementReady2 = true;
+    el.remove();
+    return out;
+  });
+  check("preset('marketplace') exists and is vault-mode", v14.marketplaceMode === 'vault', v14.marketplaceMode);
+  check('{ imageId } source mounts through the token flow (alias of { id })', v14.aliasLoaded === true);
+  check("renderer:'canvas2d' renders on 2D canvas (no WebGL frames)", v14.canvas2dLoaded === true && v14.canvas2dGlFrames === 0);
+  check('<archx-image image-id temporal-shield="false"> loads', v14.elementReady1 === true);
+  check('changing image-id hot-reloads the element source', v14.elementReloadKeptReady === true);
+  check('changing watermark re-mounts the element (new ready promise)', v14.elementRemountNewReady === true && v14.elementReady2 === true);
+
   console.log('\n[9] Performance — 100-image protected gallery');
   scaleTraffic.batchMints = 0;
   scaleTraffic.singleMints = 0;

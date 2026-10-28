@@ -7,7 +7,11 @@ import Archx, {
   buildScramblePlan, decodeContainer, detectStegoFingerprint, preset,
   type ArchxLoadOptions, type ProtectedImage,
 } from '../types/index.js';
-import { createArchxMiddleware, withHardenedProductionDefaults } from '../types/server.js';
+import {
+  createArchxMiddleware, withHardenedProductionDefaults,
+  scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
+  type ArchxDerivativeResult,
+} from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
 import { createRedisStateStore } from '../types/redis.js';
 import {
@@ -24,7 +28,8 @@ const options: ArchxLoadOptions = {
   temporalInterlace: { engine: 'shader', layout: 'pixels', phases: 2, targetHz: 60 },
 };
 declare const el: HTMLElement;
-const view: ProtectedImage = Archx.load.image(el, { imageId: 'cat' }, options);
+const view: ProtectedImage = Archx.load.image(el, { id: 'cat' }, options);
+void Archx.load.image(el, { imageId: 'cat-alias' }, options); // documented alias, accepted since 1.14
 void view.ready.then(() => view.destroy());
 Archx.config(preset('marketplace', { fetchPriority: 'high' }));
 
@@ -37,7 +42,7 @@ const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
 const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true, layoutVersion: 'auto' });
-const layoutVintage: 0 | 1 | 2 = detection.layoutVersion;
+const layoutVintage: 0 | 1 | 2 | 3 = detection.layoutVersion;
 void layoutVintage;
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;
@@ -51,7 +56,7 @@ const mac: Uint8Array = hmacSha256Bytes(bytes, digest);
 void mac;
 useWebCrypto(null);
 useWebCrypto({ subtle: {}, getRandomValues: (a: Uint8Array) => a });
-const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key: 'k', legacyCode: true, layoutVersion: 1 });
+const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key: 'k', legacyCode: true, layoutVersion: 3 });
 void marked;
 
 // --- server ---
@@ -60,7 +65,9 @@ const handler = createArchxMiddleware(withHardenedProductionDefaults({
   imagesDir: '/srv/masters',
   scramblePlanVersion: 2,
   format: 'avif',
-  steganography: { scope: 'viewer', keyScope: 'viewer', profile: 'robust' },
+  steganography: { scope: 'viewer', keyScope: 'viewer', profile: 'robust', layoutVersion: 3, legacyCode: false },
+  forensic: { blockSize: 32, delta: 2, signsVersion: 3 },
+  processing: { avifEffort: 6, avifChromaSubsampling: '4:4:4' },
   authorize: async (_req, _id, { phase }) => phase === 'token',
 }));
 const server = http.createServer((req, res) => { void handler(req, res); });
@@ -69,6 +76,14 @@ const auditOk: boolean = handler.configAudit.ok;
 void auditOk;
 const baseCacheEntries: number | undefined = handler.stats().baseCacheEntries;
 void baseCacheEntries;
+
+// --- scramble-image entry points (re-exported via /server since 1.14) ---
+const derivative: Promise<ArchxDerivativeResult> = scrambleImage(bytes, { key: 'k', format: 'webp' });
+void derivative;
+void inspectImageMetadata(bytes);
+configureSharpSecurity(['jpeg', 'png']);
+const releaseLease: () => void = acquireSharpSecurityLease(['png']);
+releaseLease();
 
 // --- builder + redis ---
 void buildArchxAssets({

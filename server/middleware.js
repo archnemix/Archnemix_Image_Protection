@@ -30,6 +30,23 @@ import {
   isArchxContainer,
   decodeContainer,
 } from '../src/scramble.js';
+import {
+  scrambleImage, unscrambleImage, inspectImageMetadata,
+  prepareDerivativeBase, finishDerivative,
+  configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
+  acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
+} from './scramble-image.js';
+
+// The documented /server public surface includes the image-processing
+// entry points. They live in scramble-image.js, where Sharp now loads
+// lazily, so re-exporting them here does not pull libvips into
+// token-only processes (and both paths share one module singleton).
+export {
+  scrambleImage, unscrambleImage, inspectImageMetadata,
+  prepareDerivativeBase, finishDerivative,
+  configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
+  acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
+};
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SECRET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -730,7 +747,7 @@ function validateStegoConfig(value) {
   try {
     if (typeof value === 'boolean') return true;
     if (!isPlainObject(value)) return false;
-    const fields = new Set(['perToken', 'scope', 'keyScope', 'profile', 'strength', 'gridX', 'gridY']);
+    const fields = new Set(['perToken', 'scope', 'keyScope', 'profile', 'strength', 'gridX', 'gridY', 'layoutVersion', 'legacyCode']);
     if (Object.keys(value).some((field) => !fields.has(field))) return false;
     if (value.perToken !== undefined && typeof value.perToken !== 'boolean') return false;
     if (value.scope !== undefined && !['viewer', 'image'].includes(value.scope)) return false;
@@ -739,6 +756,8 @@ function validateStegoConfig(value) {
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
     if (value.gridY !== undefined && (!Number.isInteger(value.gridY) || value.gridY < 4 || value.gridY > 64)) return false;
+    if (value.layoutVersion !== undefined && ![1, 2, 3].includes(value.layoutVersion)) return false;
+    if (value.legacyCode !== undefined && typeof value.legacyCode !== 'boolean') return false;
     return true;
   } catch { return false; }
 }
@@ -1081,7 +1100,7 @@ function inspectServerConfig(options = {}) {
     'maxConcurrentProcessing', 'processingQueueMax', 'processingQueueTimeoutMs',
     'blockUntrustedSharpLoaders', 'webpEffort', 'encoderEffort', 'webpSmartSubsample',
     'smartSubsample', 'resizeKernel', 'pngCompressionLevel', 'jpegChromaSubsampling',
-    'sharpConcurrency', 'sharpCache',
+    'sharpConcurrency', 'sharpCache', 'avifEffort', 'avifChromaSubsampling',
   ]));
   const pick = (...names) => {
     for (const name of names) {
@@ -1105,6 +1124,11 @@ function inspectServerConfig(options = {}) {
   checkInt('pngCompressionLevel', pick('pngCompressionLevel'), 0, 9);
   checkInt('sharpConcurrency', pick('sharpConcurrency'), 0, 1024);
   checkBoolean('sharpCache', pick('sharpCache'));
+  checkInt('avifEffort', pick('avifEffort'), 0, 9);
+  if (pick('avifChromaSubsampling') !== undefined &&
+      !['4:2:0', '4:4:4'].includes(pick('avifChromaSubsampling'))) {
+    fail("processing.avifChromaSubsampling must be '4:2:0' or '4:4:4'");
+  }
   if (pick('resizeKernel') !== undefined &&
       !['nearest', 'cubic', 'mitchell', 'lanczos2', 'lanczos3', 'mks2013', 'mks2021'].includes(pick('resizeKernel'))) {
     fail('processing.resizeKernel is invalid');
@@ -1133,13 +1157,14 @@ function inspectServerConfig(options = {}) {
     if (typeof options.forensic !== 'boolean' && !isPlainObject(options.forensic)) {
       fail('forensic must be boolean or an object');
     } else if (isPlainObject(options.forensic)) {
-      checkUnknownKeys('forensic', options.forensic, new Set(['blockSize', 'delta']));
+      checkUnknownKeys('forensic', options.forensic, new Set(['blockSize', 'delta', 'signsVersion']));
       checkInt('forensic.blockSize', options.forensic.blockSize, 4, 1024);
       checkNumber('forensic.delta', options.forensic.delta, 0, 16);
+      checkInt('forensic.signsVersion', options.forensic.signsVersion, 1, 3);
     }
   }
   if (options.steganography !== undefined && !validateStegoConfig(options.steganography)) {
-    fail('steganography must be boolean or a bounded { perToken, scope, keyScope, profile, strength, gridX, gridY } object');
+    fail('steganography must be boolean or a bounded { perToken, scope, keyScope, profile, strength, gridX, gridY, layoutVersion, legacyCode } object');
   }
   if (options.bindTokenTo !== undefined) {
     if (!isPlainObject(options.bindTokenTo)) fail('bindTokenTo must be an object');
@@ -1212,6 +1237,8 @@ function inspectServerConfig(options = {}) {
       resizeKernel: pick('resizeKernel') ?? 'lanczos3',
       pngCompressionLevel: pick('pngCompressionLevel') ?? 9,
       jpegChromaSubsampling: pick('jpegChromaSubsampling') ?? '4:4:4',
+      avifEffort: pick('avifEffort') ?? 4,
+      avifChromaSubsampling: pick('avifChromaSubsampling') ?? '4:2:0',
       sharpConcurrency: pick('sharpConcurrency') ?? 0,
       sharpCache: pick('sharpCache'),
     }),
@@ -1360,6 +1387,15 @@ export function withHardenedProductionDefaults(options = {}) {
     stegoRegistryFailure: 'deny',
     provenanceFailure: 'deny',
     ...options,
+    // One libvips thread per job (the middleware already parallelizes
+    // jobs; N_cores x N_jobs only oversubscribes) and no libvips
+    // operation cache (Archx has its own bounded master/base/output
+    // caches; vips' 50 MB arena is then pure steady-state RSS).
+    processing: {
+      sharpConcurrency: 1,
+      sharpCache: false,
+      ...(isPlainObject(options.processing) ? options.processing : {}),
+    },
     abuseDetection: {
       distinctImages: 250,
       windowMs: 600000,
@@ -1415,6 +1451,7 @@ export function withCatalogThroughputDefaults(options = {}) {
       pngCompressionLevel: 6,
       jpegChromaSubsampling: '4:2:0',
       sharpConcurrency: 1,
+      sharpCache: false,
       ...processing,
     },
   };
@@ -1500,6 +1537,12 @@ export function deriveStegoKey(id, secret) {
 
 export function createArchxMiddleware(options = {}) {
   const cfg = normalizeServerConfig(options);
+  // Scoped libvips loader policy for this instance's lifetime; released
+  // by handler.close() so a strict temporary handler cannot narrow
+  // loaders for the whole process forever.
+  const releaseSharpSecurity = cfg.processing.blockUntrustedSharpLoaders
+    ? acquireSharpSecurityLease(cfg.processing.allowedInputFormats)
+    : null;
   const signingKeys = cfg.signingKeys;
   const activeSecretId = cfg.activeSecretId;
   const secret = signingKeys[activeSecretId];
@@ -2009,6 +2052,7 @@ export function createArchxMiddleware(options = {}) {
   const outputInFlight = new Map(); // cacheKey -> Promise<Buffer> (singleflight derivatives)
   const dimensionInFlight = new Map(); // id+fileVersion -> Promise<dims|null>
   const masterInFlight = new Map(); // id+fileVersion -> Promise<{bytes,current}>
+  const baseInFlight = new Map(); // baseKey -> Promise<base> (singleflight stage-1)
 
   async function withCallbackTimeout(fn, args, label) {
     let timer = null;
@@ -2081,11 +2125,15 @@ export function createArchxMiddleware(options = {}) {
   // uses it for every candidate it returns.
   const ipv6Groups = (ip) => {
     try {
-      let addr = ip.toLowerCase();
+      let addr = String(ip || '').toLowerCase();
+      const pct = addr.indexOf('%');
+      if (pct !== -1) addr = addr.slice(0, pct); // zone id (validated in canonicalIp)
       const v4Tail = addr.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
       if (v4Tail) {
-        const hi = ((Number(v4Tail[1]) << 8) | Number(v4Tail[2])).toString(16);
-        const lo = ((Number(v4Tail[3]) << 8) | Number(v4Tail[4])).toString(16);
+        const octets = [Number(v4Tail[1]), Number(v4Tail[2]), Number(v4Tail[3]), Number(v4Tail[4])];
+        if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+        const hi = ((octets[0] << 8) | octets[1]).toString(16);
+        const lo = ((octets[2] << 8) | octets[3]).toString(16);
         addr = addr.slice(0, addr.length - v4Tail[0].length) + hi + ':' + lo;
       }
       const halves = addr.split('::');
@@ -2093,28 +2141,59 @@ export function createArchxMiddleware(options = {}) {
       const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
       const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
       const missing = 8 - head.length - tail.length;
-      if (missing < 0) return null;
-      const groups = [...head, ...Array(missing).fill('0'), ...tail]
-        .map((g) => (parseInt(g, 16) || 0).toString(16));
-      return groups.length === 8 ? groups : null;
+      if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
+      const rawGroups = [...head, ...Array(missing).fill('0'), ...tail];
+      if (rawGroups.length !== 8 || rawGroups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+      return rawGroups.map((g) => parseInt(g, 16).toString(16));
     } catch { return null; }
   };
+  // Canonical client identity for token binding, quotas and abuse
+  // accounting. IPv4-embedding transition forms collapse to the
+  // embedded IPv4 address: mapped/translated ::ffff:0:0/96, deprecated
+  // IPv4-compatible ::/96, NAT64 64:ff9b::/96 + 64:ff9b:1::/96 (every
+  // client behind a carrier NAT64 otherwise shares ONE /64 abuse
+  // bucket), 6to4 2002::/16 (one IPv4 = a whole free /48), and Teredo
+  // 2001:0::/32 (client IPv4 XORed into the last 32 bits). Zone ids
+  // (%eth0) are validated then stripped. All other IPv6 collapses to
+  // one expanded-group spelling. ::, ::1 and documentation ranges
+  // stay plain IPv6.
   const canonicalIp = (ip) => {
-    const kind = isIP(ip);
-    if (kind === 4) return ip;
-    if (kind !== 6) return null;
-    const g = ipv6Groups(ip);
-    if (!g) return ip;
-    const mapped = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === '0' && g[5] === 'ffff';
-    const translated = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === 'ffff' && g[5] === '0';
-    if (mapped || translated) {
-      const hi = parseInt(g[6], 16) || 0;
-      const lo = parseInt(g[7], 16) || 0;
-      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    if (typeof ip !== 'string' || !ip) return null;
+    let raw = ip.trim();
+    const pct = raw.indexOf('%');
+    if (pct !== -1) {
+      const zone = raw.slice(pct + 1);
+      if (!zone || zone.length > 32 || !/^[0-9A-Za-z._-]+$/.test(zone)) return null;
+      raw = raw.slice(0, pct);
     }
-    // Canonical expanded form: textual variants of one address
-    // (2001:db8::1 vs 2001:0db8:0:0:0:0:0:1) are one identity for
-    // token binding, quotas, and abuse accounting alike.
+    const kind = isIP(raw);
+    if (kind === 4) return raw;
+    if (kind !== 6) return null;
+    const g = ipv6Groups(raw);
+    if (!g) return null;
+    const toIpv4 = (hiHex, loHex) => {
+      const hi = parseInt(hiHex, 16) || 0;
+      const lo = parseInt(loHex, 16) || 0;
+      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    };
+    const zero5 = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === '0';
+    if ((zero5 && g[5] === 'ffff') ||
+        (g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === 'ffff' && g[5] === '0')) {
+      return toIpv4(g[6], g[7]); // v4-mapped / v4-translated
+    }
+    if (zero5 && g[5] === '0' && (parseInt(g[6], 16) || 0) >= 0x0100) {
+      return toIpv4(g[6], g[7]); // deprecated v4-compatible (not :: or ::1)
+    }
+    if (g[0] === '64' && g[1] === 'ff9b' && (g[2] === '0' || g[2] === '1') &&
+        g[3] === '0' && g[4] === '0' && g[5] === '0') {
+      return toIpv4(g[6], g[7]); // NAT64 (RFC 6052 / RFC 8215)
+    }
+    if (g[0] === '2002') return toIpv4(g[1], g[2]); // 6to4 (RFC 3056)
+    if (g[0] === '2001' && g[1] === '0') {
+      const hi = (((parseInt(g[6], 16) || 0) ^ 0xffff) & 0xffff);
+      const lo = (((parseInt(g[7], 16) || 0) ^ 0xffff) & 0xffff);
+      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`; // Teredo (RFC 4380)
+    }
     return g.join(':');
   };
   const requestIp = (req) => {
@@ -2311,10 +2390,7 @@ export function createArchxMiddleware(options = {}) {
           const sourceBytes = stat.size <= 64 * 1024 ? headerBytes : await fs.promises.readFile(filePath);
           const sharpModule = await import('sharp');
           const sharp = sharpModule.default;
-          if (cfg.processing.blockUntrustedSharpLoaders) {
-            const { configureSharpSecurity } = await import('./scramble-image.js');
-            configureSharpSecurity(cfg.processing.allowedInputFormats);
-          }
+          if (cfg.processing.blockUntrustedSharpLoaders) ensureUntrustedSharpLoadersBlocked();
           const meta = await sharp(sourceBytes, {
             failOn: 'warning',
             limitInputPixels: cfg.processing.maxInputPixels,
@@ -3416,7 +3492,7 @@ export function createArchxMiddleware(options = {}) {
           ? deriveStegoKey(stegoKeySubject ? `${id}|viewer:${stegoKeySubject}` : id, issuingSecret)
           : null;
         const stegoCachePart = stegoPayload
-          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}:k${hmacShort('sgkey', effectiveStegoKey || '', 8, issuingSecret)}:tm`
+          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}:k${hmacShort('sgkey', effectiveStegoKey || '', 8, issuingSecret)}:lv${stegoGlobalCfg.layoutVersion ?? 3}:lc${stegoGlobalCfg.legacyCode ? 1 : 0}:tm`
           : 'nosg';
         // Cache identity contains only inputs that can change the delivered
         // bytes. Viewer/trace hashes are not added unconditionally: when a
@@ -3434,14 +3510,18 @@ export function createArchxMiddleware(options = {}) {
           `rk:${cfg.processing.resizeKernel}`,
           `png${cfg.processing.pngCompressionLevel}`,
           `jpg:${cfg.processing.jpegChromaSubsampling}`,
+          `av${cfg.processing.avifEffort}`,
+          `avs:${cfg.processing.avifChromaSubsampling}`,
           `op${cfg.processing.maxOutputPixels}`,
         ].join(':');
         const cacheKey = [
           // Cache-key version bumps ride every pad/mark byte change so
           // warm caches never serve pre-fix bytes: v3 black->edge-
           // replicate (v1.11); v4 reflection->keyed shifted-wrap padding
-          // + 128-bit stego layouts (v1.13). Displayed pixels identical.
-          'v4', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
+          // + 128-bit stego layouts (v1.13); v5 coherent DC-anchored
+          // padding + v3 SHA-256-seeded layouts/signs + staggered
+          // watermark rows + JS overlay blend (v1.14).
+          'v5', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,
@@ -3523,9 +3603,6 @@ export function createArchxMiddleware(options = {}) {
                   masterInFlight.set(flightKey, readPending);
                   return readPending;
                 };
-                const master = await loadMaster();
-                // Lazy import so token-only deployments don't need sharp wired early.
-                const { scrambleImage, prepareDerivativeBase, finishDerivative, configureSharpPerformance } = await import('./scramble-image.js');
                 if (!sharpPerformanceConfigured &&
                     (cfg.processing.sharpConcurrency > 0 || cfg.processing.sharpCache !== undefined)) {
                   configureSharpPerformance({
@@ -3578,21 +3655,50 @@ export function createArchxMiddleware(options = {}) {
                 // and this key hashed object-form watermarks via
                 // String() -> "[object Object]", collapsing every viewer
                 // onto one shared, wrongly-watermarked frame.
+                // Resolve the master/base WITHOUT touching disk or the
+                // master cache when a stage-1 base is already cached:
+                // the previous flow loaded (and re-cached) the 5-50 MB
+                // master on EVERY per-token view, evicting base entries
+                // from the shared RAM pool and forcing re-decodes.
+                // masterVersion is already in baseKey, so a replaced
+                // master file misses the base cache cleanly.
+                const baseKey = cacheable ? null : [
+                  'base', id, masterVersion, `w${effectiveWidth}`, `g${grid}`,
+                  `rk:${cfg.processing.resizeKernel}`,
+                  `op${cfg.processing.maxOutputPixels}`,
+                ].join(':');
+                let base = baseKey ? getBaseCache(baseKey) : null;
+                let master = null;
+                if (cacheable) {
+                  master = await loadMaster();
+                } else if (!base) {
+                  // Singleflight stage-1: N concurrent per-viewer
+                  // requests share ONE decode+resize (the output
+                  // singleflight cannot help: per-token cacheKeys are
+                  // unique by construction).
+                  let flight = baseInFlight.get(baseKey);
+                  if (!flight) {
+                    flight = (async () => {
+                      try {
+                        const again = getBaseCache(baseKey);
+                        if (again) return again;
+                        const m = await loadMaster();
+                        const created = await processingSemaphore.run(() => prepareDerivativeBase(m.bytes, scrambleOpts));
+                        if (m.current) setBaseCache(baseKey, created);
+                        return created;
+                      } finally {
+                        if (baseInFlight.get(baseKey) === flight) baseInFlight.delete(baseKey);
+                      }
+                    })();
+                    baseInFlight.set(baseKey, flight);
+                  }
+                  base = await flight;
+                }
                 const result = await processingSemaphore.run(async () => {
                   if (cacheable) return scrambleImage(master.bytes, scrambleOpts);
-                  const baseKey = [
-                    'base', id, masterVersion, `w${effectiveWidth}`, `g${grid}`,
-                    `rk:${cfg.processing.resizeKernel}`,
-                    `op${cfg.processing.maxOutputPixels}`,
-                  ].join(':');
-                  let base = getBaseCache(baseKey);
-                  if (!base) {
-                    base = await prepareDerivativeBase(master.bytes, scrambleOpts);
-                    if (master.current) setBaseCache(baseKey, base);
-                  }
                   return finishDerivative(base, scrambleOpts);
                 });
-                if (master.current && cacheable) {
+                if (cacheable && master.current) {
                   setOutputCache(cacheKey, result.bytes);
                   await setDiskOutputCache(sharedCacheKey, result.bytes);
                   await setSharedOutputCache(sharedCacheKey, result.bytes);
@@ -3696,6 +3802,7 @@ export function createArchxMiddleware(options = {}) {
       outputInFlight: outputInFlight.size,
       dimensionInFlight: dimensionInFlight.size,
       masterInFlight: masterInFlight.size,
+      baseInFlight: baseInFlight.size,
     });
   };
   handler.close = () => {
@@ -3713,6 +3820,8 @@ export function createArchxMiddleware(options = {}) {
     outputInFlight.clear();
     dimensionInFlight.clear();
     masterInFlight.clear();
+    baseInFlight.clear();
+    try { releaseSharpSecurity?.(); } catch { /* shutdown best effort */ }
   };
   return handler;
 }

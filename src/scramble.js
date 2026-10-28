@@ -95,6 +95,23 @@ export function sfc32(a, b, c, d) {
 }
 
 /**
+ * sfc32 seeded from the first 128 bits of SHA-256(seedString), warmed
+ * for 12 rounds so the early outputs are fully diffused. Used by the
+ * v3 stego-layout / forensic-sign derivations (the v2 derivations use
+ * cyrb128's 128-bit state directly; v1 is the pre-1.13 32-bit path).
+ */
+export function sha256SeededPrng(seedString) {
+  const digest = sha256Bytes(utf8Encode(String(seedString)));
+  const view = new DataView(digest.buffer, digest.byteOffset, 16);
+  const rand = sfc32(
+    view.getUint32(0, false), view.getUint32(4, false),
+    view.getUint32(8, false), view.getUint32(12, false),
+  );
+  for (let i = 0; i < 12; i++) rand();
+  return rand;
+}
+
+/**
  * Build the deterministic scramble plan for a key.
  * @param {number} grid tiles per side (2..32)
  * @param {string} key  secret seed material
@@ -679,23 +696,25 @@ export async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
  * photo will weaken or destroy it. The visible watermark remains the
  * primary deterrent; this is the quiet second witness.
  */
-// Sign derivation v2 (default since 1.13) seeds through cyrb128+sfc32
-// (128-bit); v1 reproduces the pre-1.13 mulberry32(hashSeed(...>>>0))
-// sequence whose 32-bit state truncated any seed's entropy. Verifiers
-// (forensicScore) score against BOTH derivations, so marks embedded
-// before 1.13 keep verifying.
-export function forensicBlockSigns(seed, count, version = 2) {
+// Sign derivations: v3 (default since 1.14) seeds sfc32 from SHA-256
+// with warm-up; v2 (1.13) seeds through cyrb128+sfc32 (128-bit state);
+// v1 reproduces the pre-1.13 mulberry32(hashSeed(...)) sequence whose
+// 32-bit state truncated any seed's entropy. Verifiers (forensicScore)
+// score against all three derivations, so older marks keep verifying.
+export function forensicBlockSigns(seed, count, version = 3) {
   const rand = version === 1
     ? mulberry32(hashSeed(String(seed) + '::archx-forensic'))
-    : sfc32(...cyrb128(String(seed) + '::archx-forensic'));
+    : version === 2
+      ? sfc32(...cyrb128(String(seed) + '::archx-forensic'))
+      : sha256SeededPrng(String(seed) + '::archx-forensic-v3');
   return Array.from({ length: count }, () => (rand() < 0.5 ? -1 : 1));
 }
 
-export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2, signsVersion = 2 } = {}) {
+export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2, signsVersion = 3 } = {}) {
   const bs = Math.max(8, blockSize | 0);
   const bx = Math.ceil(w / bs);
   const by = Math.ceil(h / bs);
-  const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : 2);
+  const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : signsVersion === 2 ? 2 : 3);
   const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
@@ -749,8 +768,8 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
       total++;
     }
   }
-  let best = { score: 0, matched: 0, total, signsVersion: 2 };
-  for (const version of [2, 1]) {
+  let best = { score: 0, matched: 0, total, signsVersion: 3 };
+  for (const version of [3, 2, 1]) {
     const signs = forensicBlockSigns(seed, bx * by, version);
     let matched = 0, signedSum = 0;
     for (let i = 0; i < blockSigns.length; i++) {
@@ -760,7 +779,7 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
       if (hit) matched++;
     }
     const score = total ? signedSum / total : 0;
-    if (version === 2 || score > best.score) best = { score, matched, total, signsVersion: version };
+    if (version === 3 || score > best.score) best = { score, matched, total, signsVersion: version };
   }
   return best;
 }
@@ -1171,16 +1190,17 @@ function correctStegoBits(bits, reliability, key, maxDepth = 3) {
 
 const STEGO_ROW_SEGMENTS = 4;
 
-// Layout seed v2 (1.13+): the cell permutation/polarity PRNG is seeded
-// through cyrb128+sfc32 (128-bit state). The pre-1.13 layouts seeded
-// mulberry32 with hashSeed(...) >>> 0, truncating every stego key —
-// however strong — to a 2^32 layout space (GPU-brute-forceable from a
-// known clean/marked pair). Version 1 below reproduces those sequences
-// bit-exactly so existing marks keep detecting; detection tries v2
-// first, then v1 ("auto").
+// Layout seeds: v3 (1.14+) seeds sfc32 from SHA-256 with warm-up; v2
+// (1.13) seeds through cyrb128+sfc32 (128-bit state). The pre-1.13
+// layouts seeded mulberry32 with hashSeed(...) >>> 0, truncating every
+// stego key — however strong — to a 2^32 layout space
+// (GPU-brute-forceable from a known clean/marked pair). v1 and v2
+// below reproduce their sequences bit-exactly so existing marks keep
+// detecting; detection tries v3, v2, then v1 ("auto").
 function layoutRand(seedString, version, legacyHashSeedArg) {
   if (version === 1) return mulberry32(hashSeed(seedString, legacyHashSeedArg));
-  return sfc32(...cyrb128(seedString));
+  if (version === 2) return sfc32(...cyrb128(seedString));
+  return sha256SeededPrng(seedString);
 }
 
 function stegoLayout(cellCount, key, version = 2) {
@@ -1233,7 +1253,7 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   legacyCode = false,
   // Layout seed space: 2 = 128-bit (default since 1.13); 1 reproduces
   // the pre-1.13 32-bit-truncated layout for compatibility testing.
-  layoutVersion = 2,
+  layoutVersion = 3,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
@@ -1249,8 +1269,8 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust
-    ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2)
-    : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2);
+    ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3)
+    : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3);
   // The server pipeline owns a disposable Sharp buffer, so it may opt out of
   // this full-frame copy. Cell statistics are computed before that cell is
   // written, which makes the in-place path byte-for-byte equivalent.
@@ -1309,6 +1329,25 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   return out;
 }
 
+function buildLumaIntegral(src, w, h) {
+  const luma = new Uint8Array(w * h);
+  for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
+    luma[p] = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+  }
+  const integral = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    const srcRow = y * w;
+    const outRow = (y + 1) * (w + 1);
+    const prevRow = y * (w + 1);
+    for (let x = 0; x < w; x++) {
+      rowSum += luma[srcRow + x];
+      integral[outRow + x + 1] = integral[prevRow + x + 1] + rowSum;
+    }
+  }
+  return { luma, integral };
+}
+
 function flipPixelsHorizontal(src, w, h) {
   const flipped = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) {
@@ -1335,25 +1374,41 @@ export function detectStegoFingerprint(rgba, w, h, {
   layoutVersion = 'auto',
   _mirrorProbe = false,
   _layoutVersion = 0,
+  _planes = null,
 } = {}) {
-  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2
+  const concreteLayout = (_layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3)
     ? _layoutVersion
-    : (layoutVersion === 1 || layoutVersion === 2 ? layoutVersion : 0);
+    : (layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 ? layoutVersion : 0);
+  // Shared read-only pixel planes for every recursive probe of this
+  // top-level call: layout/profile/geometry/mirror fan-out used to
+  // rebuild the luma plane + summed-area table (and the flipped copy)
+  // up to a dozen times per suspect — hundreds of MB of typed-array
+  // churn at 1080p. Entries are keyed by the exact source buffer and
+  // never mutated, so every probe reads bit-identical values.
+  const planesCache = _planes || new Map();
+  const srcTop = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  const planesEntry = (buf) => {
+    let entry = planesCache.get(buf);
+    if (!entry) { entry = { flipped: null, luma: null, integral: null }; planesCache.set(buf, entry); }
+    return entry;
+  };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, _mirrorProbe };
-    const v2 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 2 });
-    if (v2?.found) return v2;
-    const v1 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 1 });
-    if (v1?.found) return v1;
-    return (v1?.confidence ?? 0) > (v2?.confidence ?? 0) ? v1 : v2;
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, _mirrorProbe, _planes: planesCache };
+    let best = null;
+    for (const version of [3, 2, 1]) {
+      const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
+      if (attempt?.found) return attempt;
+      if (!best || (attempt?.confidence ?? 0) > (best.confidence ?? 0)) best = attempt;
+    }
+    return best;
   }
   if (profile === 'auto') {
-    const standard = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+    const standard = detectStegoFingerprint(srcTop, w, h, {
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
-    const robust = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+    const robust = detectStegoFingerprint(srcTop, w, h, {
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     const initial = robust?.found && !standard?.found
       ? robust
@@ -1361,12 +1416,12 @@ export function detectStegoFingerprint(rgba, w, h, {
         ? standard
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
     if (!searchGeometry || initial?.found) return initial;
-    const standardGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+    const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (standardGeometry?.found) return standardGeometry;
-    const robustGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+    const robustGeometry = detectStegoFingerprint(srcTop, w, h, {
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
@@ -1374,20 +1429,21 @@ export function detectStegoFingerprint(rgba, w, h, {
     // compound flip+crop/resize suspects recover too; it only runs after
     // the full forward geometry search failed (offline forensic mode).
     if (searchMirror && !_mirrorProbe) try {
-      const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-      if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const flipped = flipPixelsHorizontal(src, w, h);
+      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const entry = planesEntry(srcTop);
+        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
+        const flipped = entry.flipped;
         for (const candidateProfile of ['standard', 'robust']) {
           const fast = detectStegoFingerprint(flipped, w, h, {
             key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+            searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
           });
           if (fast?.found) return { ...fast, mirrored: true };
         }
         for (const candidateProfile of ['standard', 'robust']) {
           const mirrored = detectStegoFingerprint(flipped, w, h, {
             key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+            searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true };
         }
@@ -1397,7 +1453,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       ? robustGeometry
       : standardGeometry;
   }
-  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  const src = srcTop;
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
   const robust = profile === 'robust';
   const effectiveProfile = robust ? 'robust' : 'standard';
@@ -1412,28 +1468,19 @@ export function detectStegoFingerprint(rgba, w, h, {
     ? robustStegoLayout(cellCount, key, concreteLayout)
     : stegoLayout(cellCount, key, concreteLayout);
   const cw = w / gx, ch = h / gy;
-  // One luma plane for every probe below: geometry search evaluates
-  // thousands of candidates over the same pixels, and recomputing
-  // (r*77+g*150+b*29)>>8 per sample was ~30% of detector wall time.
-  const luma = new Uint8Array(w * h);
-  for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
-    luma[p] = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+  // One luma plane + summed-area table per source buffer, shared by
+  // every recursive probe of this top-level call (see planesCache):
+  // geometry search evaluates thousands of candidates over the same
+  // pixels, and recomputing (r*77+g*150+b*29)>>8 per sample was ~30%
+  // of detector wall time. Every cell band/segment mean becomes four
+  // array reads over the table — full-population means, same gates.
+  const planes = planesEntry(src);
+  if (!planes.luma) {
+    const built = buildLumaIntegral(src, w, h);
+    planes.luma = built.luma;
+    planes.integral = built.integral;
   }
-  // Summed-area table over the luma plane: every cell band/segment mean
-  // becomes four array reads instead of a strided pixel walk shared by
-  // thousands of geometry probes. Full-population means (the previous
-  // estimator sampled on a stride) — same gates, lower estimator noise.
-  const integral = new Float64Array((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) {
-    let rowSum = 0;
-    const srcRow = y * w;
-    const outRow = (y + 1) * (w + 1);
-    const prevRow = y * (w + 1);
-    for (let x = 0; x < w; x++) {
-      rowSum += luma[srcRow + x];
-      integral[outRow + x + 1] = integral[prevRow + x + 1] + rowSum;
-    }
-  }
+  const integral = planes.integral;
   const rectSum = (rx0, ry0, rx1, ry1) =>
     integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] -
     integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
@@ -1862,11 +1909,12 @@ export function detectStegoFingerprint(rgba, w, h, {
   // since the probe inherits this call's search options).
   if (!best?.found && searchMirror && !_mirrorProbe) {
     try {
-      const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-      if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const mirrored = detectStegoFingerprint(flipPixelsHorizontal(src, w, h), w, h, {
+      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const entry = planesEntry(srcTop);
+        if (!entry.flipped) entry.flipped = flipPixelsHorizontal(srcTop, w, h);
+        const mirrored = detectStegoFingerprint(entry.flipped, w, h, {
           key, gridX, gridY, profile, searchOffsets, searchGeometry,
-          searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
+          searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
         });
         if (mirrored?.found) return { ...mirrored, mirrored: true };
       }
@@ -1985,47 +2033,175 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  // Padding = KEYED SHIFTED WRAP + per-channel noise. History of this
-  // strip: black (pre-1.11) identified every edge tile + flip; edge
-  // replication (1.11) duplicated rows exactly; interior reflection
-  // (1.12) left a palindromic seam — a pad row mirrored its edge row
-  // with mean-abs-diff ~0.6 vs ~17 for real texture, again naming the
-  // boundary tiles and their vertical flip. Now pad pixels sample the
-  // image's own interior from a plan-keyed toroidal offset (no seam, no
-  // palindrome, no aligned duplicate: each pad row also gets a keyed
-  // horizontal phase), plus keyed noise in [-3,3] per channel. A solver
-  // without the scramble key cannot predict or cleanly correlate the
-  // fill; a solver WITH the key never needed the oracle. Display is
-  // unaffected — the padded region is cropped before presentation, and
-  // unscrambling never regenerates pad content.
+  // Padding = KEYED COHERENT WRAP, DC-anchored + block-coherent noise.
+  // History of this strip: black (pre-1.11) identified every edge tile
+  // + flip; edge replication (1.11) duplicated rows exactly; interior
+  // reflection (1.12) left a palindromic seam (MAD ~0.6 vs ~17 real);
+  // the 1.13 shifted wrap killed the palindrome but re-phased every
+  // pad row horizontally and left a luminance cliff at the seam —
+  // row-to-row MAD inside strips measured 3-9x interior on smooth
+  // content, naming boundary tiles (and fy by seam position) again.
+  // Now: ONE keyed 2D toroidal offset for the whole strip (consecutive
+  // pad rows/cols are consecutive interior rows/cols, so strip texture
+  // coheres exactly like real texture), each pad pixel DC-shifted by
+  // the ±16px local box-mean delta between the true edge and its
+  // source (no seam cliff), plus keyed noise that is constant over
+  // 8x8 blocks and never zero (decorrelates exact matching without
+  // raising strip row-diff statistics). Display unaffected.
+  // A solver without the scramble key cannot predict the fill; a
+  // solver WITH the key never needed the oracle. The padded region is
+  // cropped before presentation, and unscrambling never regenerates it.
   let padSeedState = 0x9e3779b9;
   for (let i = 0; i < count; i++) {
     padSeedState = Math.imul(padSeedState ^ (plan.order[i] * 2654435761), 2246822519);
     padSeedState = Math.imul(padSeedState ^ ((plan.flips[i].fx ? 2 : 0) + (plan.flips[i].fy ? 1 : 0) + 1), 3266489917);
   }
   const padRand = mulberry32(padSeedState >>> 0);
-  const padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
-  const padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
+  let padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
+  let padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
+  // Refine each shift by keyed best-match search: among 24 keyed
+  // candidate source rows/cols, keep the one whose (mean-removed,
+  // subsampled) texture is closest to the true edge. The seam then
+  // looks like an ordinary texture continuation instead of a jump to
+  // an unrelated row — without containing any mirrored (palindromic)
+  // content. Candidates come from the keyed pad PRNG, so the chosen
+  // shift is not predictable without the scramble key.
+  if (h > 8 && w > 4) {
+    let best = padShiftY, bestScore = Infinity;
+    for (let c = 0; c < 24; c++) {
+      const cand = 1 + Math.floor(padRand() * (h - 2));
+      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
+      for (let x = 0; x < w; x += 3) {
+        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
+        ma0 += src[a]; ma1 += src[a + 1]; ma2 += src[a + 2];
+        mb0 += src[b]; mb1 += src[b + 1]; mb2 += src[b + 2];
+        n++;
+      }
+      ma0 /= n; ma1 /= n; ma2 /= n; mb0 /= n; mb1 /= n; mb2 /= n;
+      let s = 0;
+      for (let x = 0; x < w; x += 3) {
+        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
+        s += Math.abs((src[a] - ma0) - (src[b] - mb0)) +
+             Math.abs((src[a + 1] - ma1) - (src[b + 1] - mb1)) +
+             Math.abs((src[a + 2] - ma2) - (src[b + 2] - mb2));
+      }
+      const score = s / (3 * n);
+      if (score < bestScore) { bestScore = score; best = cand; }
+    }
+    padShiftY = best;
+  }
+  if (w > 8 && h > 4) {
+    let best = padShiftX, bestScore = Infinity;
+    for (let c = 0; c < 24; c++) {
+      const cand = 1 + Math.floor(padRand() * (w - 2));
+      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
+      for (let y = 0; y < h; y += 3) {
+        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
+        ma0 += src[a]; ma1 += src[a + 1]; ma2 += src[a + 2];
+        mb0 += src[b]; mb1 += src[b + 1]; mb2 += src[b + 2];
+        n++;
+      }
+      ma0 /= n; ma1 /= n; ma2 /= n; mb0 /= n; mb1 /= n; mb2 /= n;
+      let s = 0;
+      for (let y = 0; y < h; y += 3) {
+        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
+        s += Math.abs((src[a] - ma0) - (src[b] - mb0)) +
+             Math.abs((src[a + 1] - ma1) - (src[b + 1] - mb1)) +
+             Math.abs((src[a + 2] - ma2) - (src[b + 2] - mb2));
+      }
+      const score = s / (3 * n);
+      if (score < bestScore) { bestScore = score; best = cand; }
+    }
+    padShiftX = best;
+  }
   const padPhaseSeed = Math.floor(padRand() * 0xffffffff) | 0;
   const wrapPos = (c, n) => ((c % n) + n) % n;
-  const padRowPhase = (srcY) => {
-    let hash = (padPhaseSeed ^ Math.imul(srcY + 1, 374761393)) | 0;
-    hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
-    return w > 1 ? ((hash >>> 8) % w) : 0;
-  };
+  const PAD_NOISE_LUT = [-3, -2, -1, 1, 2, 3]; // never 0: pad != edge on flats
   const padNoise = (gx, gy, channel) => {
-    let hash = (padPhaseSeed ^ Math.imul(gx + 1, 374761393) ^ Math.imul(gy + 1, 668265263) ^ Math.imul(channel + 1, 2246822519)) | 0;
+    let hash = (padPhaseSeed ^ Math.imul((gx >> 3) + 1, 374761393) ^ Math.imul((gy >> 3) + 1, 668265263) ^ Math.imul(channel + 1, 2246822519)) | 0;
     hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
-    return ((hash >>> 16) % 7) - 3;
+    return PAD_NOISE_LUT[(hash >>> 16) % 6];
+  };
+  // DC anchoring: per-channel prefix sums along the true edge row/col
+  // and each referenced source row/col, built lazily (distinct strip
+  // rows/cols only). A pad pixel is shifted by the difference of
+  // ±16px box means so its local baseline continues the real edge.
+  const ANCHOR_R = 16;
+  const rowPrefixCache = new Map();
+  const colPrefixCache = new Map();
+  const rowPrefix = (y) => {
+    let p = rowPrefixCache.get(y);
+    if (!p) {
+      p = new Float64Array(3 * (w + 1));
+      const base = y * w * 4;
+      for (let x = 0; x < w; x++) {
+        const si = base + x * 4;
+        p[x + 1] = p[x] + src[si];
+        p[w + 1 + x + 1] = p[w + 1 + x] + src[si + 1];
+        p[2 * (w + 1) + x + 1] = p[2 * (w + 1) + x] + src[si + 2];
+      }
+      rowPrefixCache.set(y, p);
+    }
+    return p;
+  };
+  const colPrefix = (x) => {
+    let p = colPrefixCache.get(x);
+    if (!p) {
+      p = new Float64Array(3 * (h + 1));
+      for (let y = 0; y < h; y++) {
+        const si = (y * w + x) * 4;
+        p[y + 1] = p[y] + src[si];
+        p[h + 1 + y + 1] = p[h + 1 + y] + src[si + 1];
+        p[2 * (h + 1) + y + 1] = p[2 * (h + 1) + y] + src[si + 2];
+      }
+      colPrefixCache.set(x, p);
+    }
+    return p;
+  };
+  const _boxA = [0, 0, 0];
+  const _boxB = [0, 0, 0];
+  const rowBox = (y, cx, out) => {
+    const p = rowPrefix(y);
+    const x0 = Math.max(0, cx - ANCHOR_R), x1 = Math.min(w, cx + ANCHOR_R + 1);
+    const n = Math.max(1, x1 - x0);
+    out[0] = (p[x1] - p[x0]) / n;
+    out[1] = (p[w + 1 + x1] - p[w + 1 + x0]) / n;
+    out[2] = (p[2 * (w + 1) + x1] - p[2 * (w + 1) + x0]) / n;
+  };
+  const colBox = (x, cy, out) => {
+    const p = colPrefix(x);
+    const y0 = Math.max(0, cy - ANCHOR_R), y1 = Math.min(h, cy + ANCHOR_R + 1);
+    const n = Math.max(1, y1 - y0);
+    out[0] = (p[y1] - p[y0]) / n;
+    out[1] = (p[h + 1 + y1] - p[h + 1 + y0]) / n;
+    out[2] = (p[2 * (h + 1) + y1] - p[2 * (h + 1) + y0]) / n;
   };
   const writePixel = (di, si) => {
     target[di] = src[si]; target[di + 1] = src[si + 1];
     target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
   };
-  const writePadPixel = (di, si, gx, gy) => {
-    target[di] = Math.max(0, Math.min(255, src[si] + padNoise(gx, gy, 0)));
-    target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + padNoise(gx, gy, 1)));
-    target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + padNoise(gx, gy, 2)));
+  const PAD_FEATHER = [0.45, 0.3, 0.15];
+  const writePadPixel = (di, srcX, srcY, rawX, rawY) => {
+    const si = (srcY * w + srcX) * 4;
+    let fade = 0, edgeSi = -1;
+    if (rawY >= h) {
+      rowBox(h - 1, srcX, _boxA); rowBox(srcY, srcX, _boxB);
+      const d = rawY - h;
+      // Feather the first pad rows toward the true edge row: natural
+      // continuation rows correlate strongly with the previous row, so
+      // a partial blend hides the residual seam without ever
+      // duplicating or mirroring edge content.
+      if (d < 3) { fade = PAD_FEATHER[d]; edgeSi = ((h - 1) * w + srcX) * 4; }
+    } else {
+      colBox(w - 1, rawY, _boxA); colBox(srcX, rawY, _boxB);
+      const d = rawX - w;
+      if (d < 3) { fade = PAD_FEATHER[d]; edgeSi = (rawY * w + w - 1) * 4; }
+    }
+    for (let c = 0; c < 3; c++) {
+      let v = src[si + c] + Math.round(_boxA[c] - _boxB[c]);
+      if (fade) v = v * (1 - fade) + src[edgeSi + c] * fade;
+      target[di + c] = Math.max(0, Math.min(255, Math.round(v) + padNoise(rawX, rawY, c)));
+    }
     target[di + 3] = src[si + 3];
   };
   for (let dest = 0; dest < count; dest++) {
@@ -2044,15 +2220,14 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
       const rawY = sy + (fy ? th - 1 - y : y);
       const rowIsPad = rawY >= h;
       const srcY = rowIsPad ? wrapPos(padShiftY + (rawY - h), h) : rawY;
-      const rowPhase = padRowPhase(srcY);
       const dstRow = (dy + y) * pw + dx;
       if (useWords && !fx && !rowIsPad) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
         for (let x = avail; x < tw; x++) {
           const rawX = sx + x;
-          const srcX = wrapPos(padShiftX + rowPhase + (rawX - w), w);
-          writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
+          const srcX = wrapPos(padShiftX + (rawX - w), w);
+          writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
         }
       } else if (useWords && !rowIsPad && !((sx + tw) > w)) {
         for (let x = 0; x < tw; x++) {
@@ -2062,9 +2237,9 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
         for (let x = 0; x < tw; x++) {
           const rawX = sx + (fx ? tw - 1 - x : x);
           const colIsPad = rawX >= w;
-          const srcX = colIsPad ? wrapPos(padShiftX + rowPhase + (rawX - w), w) : rawX;
+          const srcX = colIsPad ? wrapPos(padShiftX + (rawX - w), w) : rawX;
           if (rowIsPad || colIsPad) {
-            writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
+            writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
           } else {
             writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4);
           }

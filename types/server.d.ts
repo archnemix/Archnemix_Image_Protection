@@ -72,6 +72,27 @@ export interface ArchxProcessingOptions {
   [key: string]: unknown;
 }
 
+export interface ArchxForensicOptions {
+  blockSize?: number;
+  delta?: number;
+  /** Sign-derivation vintage: 1 = legacy hashSeed, 2 = 128-bit cyrb128, 3 = SHA-256-seeded (default). */
+  signsVersion?: 1 | 2 | 3;
+}
+
+export interface ArchxStegoOptions {
+  perToken?: boolean;
+  scope?: 'image' | 'viewer' | 'token';
+  keyScope?: 'image' | 'viewer' | 'token' | 'global';
+  profile?: 'standard' | 'robust';
+  strength?: number;
+  gridX?: number;
+  gridY?: number;
+  /** Embed-layout vintage: 1 = legacy 32-bit, 2 = 128-bit cyrb128, 3 = SHA-256-seeded (default). */
+  layoutVersion?: 1 | 2 | 3;
+  /** Keep the pre-1.12 CRC tag instead of the keyed MAC tag. */
+  legacyCode?: boolean;
+}
+
 export interface ArchxServerOptions {
   /** HMAC/signing secret (>= 32 chars or bytes). Falls back to ARCHX_SECRET. */
   secret?: string | Uint8Array;
@@ -113,10 +134,10 @@ export interface ArchxServerOptions {
   /** Serve the non-CORS 1x1 taint pixel at `{basePath}/taint.png` (default on). */
   taintImage?: boolean;
   serverWatermark?: string | null;
-  forensic?: boolean | Record<string, unknown>;
+  forensic?: boolean | ArchxForensicOptions;
   forensicPerToken?: boolean;
   forensicScope?: string;
-  steganography?: boolean | Record<string, unknown>;
+  steganography?: boolean | ArchxStegoOptions;
   stegoRegistryFailure?: 'allow' | 'deny';
   onStegoIssue?: (event: ArchxSecurityEvent) => void;
   provenanceFailure?: 'allow' | 'deny';
@@ -193,6 +214,76 @@ export interface ArchxRequestHandler {
 }
 
 export function createArchxMiddleware(options?: ArchxServerOptions): ArchxRequestHandler;
+
+/* ---------- image-processing entry points (server/scramble-image.js) ----------
+ * Re-exported from the /server entry; Sharp loads lazily on first actual
+ * image operation, so importing these declarations' module in a token-only
+ * process does not require libvips to be installed/loaded. */
+
+export interface ArchxDerivativeResult {
+  bytes: Buffer;
+  header: string;
+  stegoFingerprint: string | null;
+  perceptualFingerprint?: unknown;
+}
+
+/** Opaque stage-1 result of prepareDerivativeBase(); pass to finishDerivative(). */
+export interface ArchxDerivativeBase {
+  data: Uint8Array;
+  w: number;
+  h: number;
+  hasAlpha: boolean;
+  watermarked: boolean;
+}
+
+export interface ArchxScrambleImageOptions {
+  grid?: number;
+  key?: string;
+  planVersion?: 1 | 2;
+  maxWidth?: number;
+  quality?: number | 'lossless';
+  lossless?: boolean;
+  format?: ArchxFormat;
+  encrypt?: boolean;
+  aesKey?: string | Uint8Array;
+  watermark?: string | { text?: string; opacity?: number; color?: string; [key: string]: unknown } | null;
+  forensic?: boolean | ArchxForensicOptions;
+  forensicSeed?: string;
+  stegoPayload?: string;
+  stegoKey?: string;
+  steganography?: ArchxStegoOptions & { key?: string };
+  stegoLayoutVersion?: 1 | 2 | 3;
+  stegoLegacyCode?: boolean;
+  processing?: ArchxProcessingOptions & Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export function scrambleImage(
+  input: Uint8Array | ArrayBuffer,
+  options?: ArchxScrambleImageOptions,
+): Promise<ArchxDerivativeResult>;
+export function unscrambleImage(
+  scrambledBytes: Uint8Array | ArrayBuffer,
+  options?: { grid?: number; key?: string; w?: number; h?: number; planVersion?: 1 | 2; [key: string]: unknown },
+): Promise<Buffer>;
+export function prepareDerivativeBase(
+  input: Uint8Array | ArrayBuffer,
+  options?: ArchxScrambleImageOptions,
+): Promise<ArchxDerivativeBase>;
+export function finishDerivative(
+  base: ArchxDerivativeBase,
+  options?: ArchxScrambleImageOptions,
+): Promise<ArchxDerivativeResult>;
+export function inspectImageMetadata(
+  input: Uint8Array | ArrayBuffer,
+  options?: { processing?: ArchxProcessingOptions & Record<string, unknown>; [key: string]: unknown },
+): Promise<{ format: string; width: number; height: number; [key: string]: unknown }>;
+export function configureSharpSecurity(allowedFormats?: readonly string[]): void;
+export function configureSharpPerformance(options?: { concurrency?: number; cache?: boolean }): void;
+/** Refcounted scoped libvips loader policy; returns an idempotent release fn. */
+export function acquireSharpSecurityLease(allowedFormats?: readonly string[]): () => void;
+export function ensureUntrustedSharpLoadersBlocked(): boolean;
+export function generateKeyBase64(bytes?: number): string;
 export default createArchxMiddleware;
 
 export const DEFAULT_WIDTH_BUCKETS: readonly number[];

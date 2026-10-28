@@ -247,6 +247,12 @@ export async function buildArchxAssets(options = {}) {
   }
 
   const optionsMaterial = stableValue({
+    // Derivative byte-format vintage (mirrors the middleware output
+    // cache namespace): pad generation, stego/forensic seed layouts
+    // and watermark rasterization all change output bytes without
+    // changing any user option, so incremental builds must count a
+    // vintage bump as an options change and regenerate.
+    derivativeFormatVersion: 'v5',
     grid,
     planVersion,
     keyHash: sha256(key),
@@ -364,6 +370,7 @@ export async function buildArchxAssets(options = {}) {
       variants.push({
         width: record.width,
         height: record.height,
+        file: record.file,
         url: assetUrl(record.file),
         bytes: record.bytes,
         sha256: record.outputSha256 || null,
@@ -462,6 +469,7 @@ export async function buildArchxAssets(options = {}) {
     skipped,
     removed,
     bytes: totalBytes,
+    totalBytes,
   });
 }
 

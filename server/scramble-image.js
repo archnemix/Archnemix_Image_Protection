@@ -4,13 +4,31 @@
  * tile-scrambles its pixels, and (optionally) AES-GCM-encrypts the result
  * inside an .archx container. The master file itself is never sent.
  */
-import sharp from 'sharp';
+import { createRequire } from 'node:module';
 import {
   buildScramblePlan, paddedSize, scramblePixels, scramblePixelsPadded,
   encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
-  embedStegoFingerprint, stegoFingerprint, sniffImageInfo,
+  embedStegoFingerprint, stegoFingerprint, sniffImageInfo, sha256Bytes,
   perceptualFingerprint as computePerceptualFingerprint,
 } from '../src/scramble.js';
+
+// Lazy libvips: importing this module (e.g. through the /server
+// re-exports in a token-only worker) must not load Sharp's native
+// binary until an image operation actually runs. Token/control-plane
+// processes save the native RSS (35-55 MB) and can boot even where
+// sharp is not installed; image workers pay one require, once.
+const require = createRequire(import.meta.url);
+let _sharp = null;
+function getSharp() {
+  if (!_sharp) {
+    const mod = require('sharp');
+    _sharp = mod?.default || mod;
+  }
+  return _sharp;
+}
+function getSharpOptional() {
+  try { return getSharp(); } catch { return null; }
+}
 
 export { generateKeyBase64 };
 
@@ -24,7 +42,58 @@ const SHARP_LOADERS = Object.freeze({
 });
 let sharpLoadersBlocked = false;
 const sharpLoadersUnblocked = new Set();
-const sharpSecurityWants = []; // one wanted-set per configure call
+// Loader policy state, keyed by the canonical wanted-set (<= 64
+// combinations of 6 loaders + SVG): direct configureSharpSecurity()
+// calls are PERMANENT process policy; middleware instances hold
+// refcounted LEASES released by handler.close(). The effective
+// unblocked set is the intersection of all permanents and live
+// leases, so the strictest live configuration wins — but closing a
+// strict instance restores its looser siblings, and one per-call
+// scrambleImage can no longer narrow loaders for the whole process.
+const sharpSecurityPermanent = new Map(); // key -> Set<operation>
+const sharpSecurityLeases = new Map(); // key -> { wanted, count }
+
+function sharpWantedSet(allowedFormats) {
+  const wanted = new Set(['VipsForeignLoadSvg']);
+  for (const format of allowedFormats || []) {
+    const operation = SHARP_LOADERS[String(format).toLowerCase()];
+    if (operation) wanted.add(operation);
+  }
+  return wanted;
+}
+function reconcileSharpLoaders() {
+  const sharp = getSharpOptional();
+  if (!sharp || typeof sharp.block !== 'function' || typeof sharp.unblock !== 'function') return false;
+  if (!sharpLoadersBlocked) {
+    sharp.block({ operation: ['VipsForeignLoad'] });
+    sharpLoadersBlocked = true;
+  }
+  let effective = null;
+  const intersect = (set) => {
+    effective = effective === null ? new Set(set) : new Set([...effective].filter((op) => set.has(op)));
+  };
+  for (const set of sharpSecurityPermanent.values()) intersect(set);
+  for (const lease of sharpSecurityLeases.values()) intersect(lease.wanted);
+  if (effective === null) {
+    // Baseline when nothing has configured policy yet: the root loader
+    // stays blocked (PDF/Magick/OpenSlide/FITS/raw can never load),
+    // while SVG (internal watermarks) and the six known raster loaders
+    // run. Per-call/per-deployment format allowlists are enforced at
+    // the sniff + metadata gates regardless.
+    effective = new Set(['VipsForeignLoadSvg', ...Object.values(SHARP_LOADERS)]);
+  }
+  const toUnblock = [...effective].filter((op) => !sharpLoadersUnblocked.has(op));
+  if (toUnblock.length) {
+    sharp.unblock({ operation: toUnblock });
+    for (const op of toUnblock) sharpLoadersUnblocked.add(op);
+  }
+  const toReblock = [...sharpLoadersUnblocked].filter((op) => !effective.has(op));
+  if (toReblock.length) {
+    sharp.block({ operation: toReblock });
+    for (const op of toReblock) sharpLoadersUnblocked.delete(op);
+  }
+  return true;
+}
 
 /**
  * Restrict libvips' native file loaders to the formats Archx actually uses.
@@ -33,42 +102,56 @@ const sharpSecurityWants = []; // one wanted-set per configure call
  * process-global Sharp setting; the internally generated SVG watermark and
  * the explicitly allowed master formats are unblocked.
  *
- * The effective unblocked set is the INTERSECTION of every configure
- * call in this process (strictest instance wins): module-global libvips
- * state must never widen because a second, looser Archx handler booted —
- * and a stricter later handler re-blocks what an earlier one unblocked.
+ * Direct calls are permanent for the process and intersect with every
+ * other permanent call and live lease (strictest wins, and a stricter
+ * later call re-blocks what an earlier one unblocked). Repeat calls
+ * with the same format set are O(1). Middleware instances instead use
+ * acquireSharpSecurityLease() so handler.close() can give loaders back.
  * Per-call format allowlists still apply at the sniff gate regardless;
  * this loader policy is the defense-in-depth layer behind it.
  */
 export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 'avif']) {
-  if (typeof sharp.block !== 'function' || typeof sharp.unblock !== 'function') return false;
-  if (!sharpLoadersBlocked) {
-    sharp.block({ operation: ['VipsForeignLoad'] });
-    sharpLoadersBlocked = true;
+  const wanted = sharpWantedSet(allowedFormats);
+  const key = [...wanted].sort().join(',');
+  if (sharpLoadersBlocked && sharpSecurityPermanent.has(key)) return true;
+  sharpSecurityPermanent.set(key, wanted);
+  return reconcileSharpLoaders();
+}
+
+/**
+ * Scoped loader policy for one middleware instance. Returns an
+ * idempotent release function; while any lease is live, loaders are
+ * restricted to the intersection of all permanents and leases.
+ */
+export function acquireSharpSecurityLease(allowedFormats = ['jpeg', 'png', 'webp', 'avif']) {
+  const wanted = sharpWantedSet(allowedFormats);
+  const key = [...wanted].sort().join(',');
+  let lease = sharpSecurityLeases.get(key);
+  if (!lease) {
+    lease = { wanted, count: 0 };
+    sharpSecurityLeases.set(key, lease);
   }
-  const wanted = new Set(['VipsForeignLoadSvg']);
-  for (const format of allowedFormats || []) {
-    const operation = SHARP_LOADERS[String(format).toLowerCase()];
-    if (operation) wanted.add(operation);
-  }
-  sharpSecurityWants.push(wanted);
-  const effective = new Set(wanted);
-  for (const previous of sharpSecurityWants) {
-    for (const operation of [...effective]) {
-      if (!previous.has(operation)) effective.delete(operation);
-    }
-  }
-  const toUnblock = [...effective].filter((operation) => !sharpLoadersUnblocked.has(operation));
-  if (toUnblock.length) {
-    sharp.unblock({ operation: toUnblock });
-    for (const operation of toUnblock) sharpLoadersUnblocked.add(operation);
-  }
-  const toReblock = [...sharpLoadersUnblocked].filter((operation) => !effective.has(operation));
-  if (toReblock.length) {
-    sharp.block({ operation: toReblock });
-    for (const operation of toReblock) sharpLoadersUnblocked.delete(operation);
-  }
-  return true;
+  lease.count++;
+  reconcileSharpLoaders();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    lease.count--;
+    if (lease.count <= 0) sharpSecurityLeases.delete(key);
+    reconcileSharpLoaders();
+  };
+}
+
+/**
+ * Establish the baseline loader block (root VipsForeignLoad blocked;
+ * SVG + known raster loaders subject to permanents/leases) without
+ * imposing any format policy of its own. Called on untrusted-image
+ * paths; O(1) after the first call.
+ */
+export function ensureUntrustedSharpLoadersBlocked() {
+  if (sharpLoadersBlocked) return true;
+  return reconcileSharpLoaders();
 }
 
 /**
@@ -80,6 +163,7 @@ export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 
  * hosts embedding several Archx handlers should configure this once.
  */
 export function configureSharpPerformance({ concurrency, cache } = {}) {
+  const sharp = getSharp();
   if (concurrency !== undefined) {
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 1024) {
       throw new TypeError('Archx Sharp performance: concurrency must be an integer from 1 to 1024');
@@ -206,7 +290,7 @@ function normalizeProcessingOptions(opts = {}) {
 }
 
 function sharpInput(input, limits, extra = {}) {
-  return sharp(input, {
+  return getSharp()(input, {
     failOn: 'warning',
     limitInputPixels: limits.maxInputPixels,
     limitInputChannels: 4,
@@ -240,7 +324,7 @@ function assertInputWithinLimits(input, limits) {
        sniffed.width * sniffed.height > limits.maxInputPixels)) {
     throw processingError('ARCHX_INPUT_TOO_LARGE', 'input image exceeds the configured dimension budget');
   }
-  if (limits.blockUntrustedSharpLoaders) configureSharpSecurity(limits.allowedInputFormats);
+  if (limits.blockUntrustedSharpLoaders) ensureUntrustedSharpLoadersBlocked();
   return { bytes, sniffed };
 }
 
@@ -317,8 +401,12 @@ function watermarkSvg(w, h, wm) {
     // per character for the bold sans used here) only spaces copies;
     // slight overlap or gap is harmless for a forensic overlay.
     const stepX = Math.max(fs * 2, fs * (0.58 * String(cfg.text || '').length + 1.6));
-    for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) {
-      for (let x = -diag / 2; x < diag / 2; x += stepX) {
+    // Brick-stagger alternate rows by half a step (as the client
+    // painters do): aligned columns would leave continuous unmarked
+    // diagonal alleys between text columns that a crop could thread.
+    for (let y = -diag / 2, rowIdx = 0; y < diag / 2; y += fs * 4.2, rowIdx++) {
+      const stagger = (rowIdx & 1) ? stepX * 0.5 : 0;
+      for (let x = -diag / 2 - stepX + stagger; x < diag / 2 + stepX; x += stepX) {
         rows.push(`<text x="${(x + stepX / 2).toFixed(0)}" y="${y.toFixed(0)}" text-anchor="middle">${text}</text>`);
       }
     }
@@ -329,6 +417,67 @@ function watermarkSvg(w, h, wm) {
     body += `<g opacity="${cornerOpacity}" font-size="${cfs}" font-weight="600"><text x="${w - 11}" y="${h - 10}" text-anchor="end" stroke="rgba(0,0,0,0.65)" stroke-width="3" paint-order="stroke">${text}</text></g>`;
   }
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><g font-family="Arial, Helvetica, sans-serif" fill="${color}">${body}</g></svg>`);
+}
+
+// Bounded LRU of RASTERIZED watermark overlays (raw RGBA). The old
+// path re-parsed the SVG and re-rasterized dozens of <text> glyphs
+// through Pango inside a full libvips composite on EVERY derivative
+// (~37 ms at 960x640 measured; even caching a rasterized PNG left a
+// ~20 ms composite). The overlay depends only on (w, h, svg bytes):
+// rasterize once, then blend in JS (~2 ms) with standard 'over'
+// alpha. Against libvips composite the blend agrees to <=1 LSB
+// (rounding); finished derivatives are re-encoded anyway, and cache
+// keys version the change. Caps keep the cache <= 4 entries / 32 MB.
+const watermarkOverlayCache = new Map();
+let watermarkOverlayCacheBytes = 0;
+async function watermarkOverlayRaw(w, h, svg) {
+  const digest = sha256Bytes(svg);
+  let hex = '';
+  for (let i = 0; i < 12; i++) hex += digest[i].toString(16).padStart(2, '0');
+  const key = `${w}x${h}:${hex}`;
+  const hit = watermarkOverlayCache.get(key);
+  if (hit) {
+    watermarkOverlayCache.delete(key);
+    watermarkOverlayCache.set(key, hit);
+    return hit.data;
+  }
+  const data = await getSharp()(svg).ensureAlpha().raw().toBuffer();
+  watermarkOverlayCache.set(key, { data, bytes: data.length });
+  watermarkOverlayCacheBytes += data.length;
+  while (watermarkOverlayCache.size > 4 || watermarkOverlayCacheBytes > 32 * 1024 * 1024) {
+    const [oldKey, old] = watermarkOverlayCache.entries().next().value;
+    watermarkOverlayCache.delete(oldKey);
+    watermarkOverlayCacheBytes -= old.bytes;
+  }
+  return data;
+}
+
+function blendOverlayInPlace(dst, overlay) {
+  const n = Math.min(dst.length, overlay.length);
+  for (let i = 0; i + 3 < n; i += 4) {
+    const a = overlay[i + 3];
+    if (a === 0) continue;
+    if (a === 255) {
+      dst[i] = overlay[i]; dst[i + 1] = overlay[i + 1]; dst[i + 2] = overlay[i + 2]; dst[i + 3] = 255;
+      continue;
+    }
+    const sa = dst[i + 3];
+    if (sa === 255) {
+      const ia = 255 - a;
+      dst[i] = (overlay[i] * a + dst[i] * ia + 127) / 255 | 0;
+      dst[i + 1] = (overlay[i + 1] * a + dst[i + 1] * ia + 127) / 255 | 0;
+      dst[i + 2] = (overlay[i + 2] * a + dst[i + 2] * ia + 127) / 255 | 0;
+    } else {
+      // General 'over' for translucent bases (premultiplied form).
+      const oa = a * 255 + sa * (255 - a); // out alpha x255
+      if (oa === 0) continue;
+      const t = sa * (255 - a);
+      dst[i] = (overlay[i] * a * 255 + dst[i] * t + (oa >> 1)) / oa | 0;
+      dst[i + 1] = (overlay[i + 1] * a * 255 + dst[i + 1] * t + (oa >> 1)) / oa | 0;
+      dst[i + 2] = (overlay[i + 2] * a * 255 + dst[i + 2] * t + (oa >> 1)) / oa | 0;
+      dst[i + 3] = (oa + 127) / 255 | 0;
+    }
+  }
 }
 
 /**
@@ -430,7 +579,7 @@ export async function prepareDerivativeBase(input, opts = {}) {
       width: tw,
       height: th,
       withoutEnlargement: true,
-      kernel: sharp.kernel[limits.resizeKernel],
+      kernel: getSharp().kernel[limits.resizeKernel],
     });
 
   // The visible watermark is applied in stage 2 (finishDerivative), NOT
@@ -470,14 +619,20 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   const h = base.h;
   const srcMeta = { hasAlpha: !!base.hasAlpha };
 
-  // Block-level forensic mark (also pre-scramble): survives into any
-  // reconstructed copy and can be correlated against the viewing session.
-  // `data` is a fresh Sharp-owned Buffer for this call. Reusing its view
-  // avoids an otherwise pointless full-frame copy before the mark/scramble
-  // stages; the caller-supplied compressed master is never mutated.
-  // Marks below mutate pixels in place; a cached/shared base must not be
-  // poisoned by one viewer's marks, so non-owned bases are copied first.
-  let rawPixels = owned ? base.data : Buffer.from(base.data);
+  // Marks below mutate pixels in place; a cached/shared base must not
+  // be poisoned by one viewer's marks. Copy-on-write: the base buffer
+  // is only duplicated when an in-place mark actually runs (the old
+  // code copied 8.3 MB at 1080p unconditionally, then usually
+  // orphaned that copy when the watermark composite returned a fresh
+  // buffer — and copied pointlessly when no mark was enabled at all).
+  let rawPixels = base.data;
+  let ownsPixels = !!owned;
+  const ensureMutablePixels = () => {
+    if (!ownsPixels) {
+      rawPixels = Buffer.from(rawPixels);
+      ownsPixels = true;
+    }
+  };
 
   // Server-baked visible watermark, composited pre-scramble so that NO
   // extraction route — screenshot, canvas grab, or full payload
@@ -490,20 +645,21 @@ export async function finishDerivative(base, opts = {}, owned = false) {
     const svg = watermarkSvg(w, h, opts.watermark);
     if (svg) {
       try {
-        rawPixels = await sharp(Buffer.from(rawPixels.buffer, rawPixels.byteOffset, rawPixels.byteLength), {
-          raw: { width: w, height: h, channels: 4 },
-        }).composite([{ input: svg, top: 0, left: 0 }]).raw().toBuffer();
+        const overlay = await watermarkOverlayRaw(w, h, svg);
+        ensureMutablePixels();
+        blendOverlayInPlace(rawPixels, overlay);
       } catch (err) { throw mapSharpError(err); }
       watermarked = true;
     }
   }
   let forensicMarked = false;
   if (opts.forensicSeed) {
+    ensureMutablePixels(); // applyForensicBlocks mutates in place
     const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
     rawPixels = applyForensicBlocks(rawPixels, w, h, opts.forensicSeed, {
       blockSize: fx.blockSize ?? 32,
       delta: fx.delta ?? 2,
-      signsVersion: fx.signsVersion ?? 2,
+      signsVersion: fx.signsVersion ?? 3,
     });
     forensicMarked = true;
   }
@@ -531,13 +687,15 @@ export async function finishDerivative(base, opts = {}, owned = false) {
       throw new TypeError('Archx image processing: stegoKey must differ from the scramble key (the scramble key is public wherever clients unscramble)');
     }
     const stegoProfile = opts.stegoProfile ?? stegoCfg.profile ?? 'standard';
+    ensureMutablePixels(); // embed below runs with inPlace: true
     rawPixels = embedStegoFingerprint(rawPixels, w, h, stegoPayload, {
       key: effectiveStegoKey,
       profile: stegoProfile,
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
       gridX: stegoCfg.gridX ?? (stegoProfile === 'robust' ? 20 : 24),
       gridY: stegoCfg.gridY ?? (stegoProfile === 'robust' ? 14 : 16),
-      layoutVersion: opts.stegoLayoutVersion ?? stegoCfg.layoutVersion ?? 2,
+      layoutVersion: opts.stegoLayoutVersion ?? stegoCfg.layoutVersion ?? 3,
+      legacyCode: !!(opts.stegoLegacyCode ?? stegoCfg.legacyCode),
       inPlace: true,
     });
     stegoMarked = true;
@@ -557,7 +715,7 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   scramblePixelsPadded(rawPixels, w, h, plan, scrambled);
 
   const format = opts.format ?? 'webp';
-  let encoder = sharp(scrambled, { raw: { width: pw, height: ph, channels: 4 } })
+  let encoder = getSharp()(scrambled, { raw: { width: pw, height: ph, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });
   // For opaque masters the synthesized alpha band carries zero information:
   // PNG would store/ship it (+~12% bytes) and libwebp still pays to analyze
@@ -648,7 +806,7 @@ export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h
   }
   const plan = buildScramblePlan(grid, key, planVersion);
   const raw = scramblePixels(data, info.width, info.height, plan, 'unscramble');
-  let out = sharp(bufferView(raw), { raw: { width: info.width, height: info.height, channels: 4 } })
+  let out = getSharp()(bufferView(raw), { raw: { width: info.width, height: info.height, channels: 4 } })
     .timeout({ seconds: limits.timeoutSec });
   if (w && h && (w !== info.width || h !== info.height)) {
     out = out.extract({ left: 0, top: 0, width: w, height: h });

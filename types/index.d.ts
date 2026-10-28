@@ -12,8 +12,7 @@ export * from './scramble.js';
 export const VERSION: string;
 export const DEFAULT_SOURCE_WIDTH_BUCKETS: readonly number[];
 
-export type ArchxMode =
-  | 'shield' | 'vault' | 'fortress' | 'lens' | 'trace' | 'catalog' | 'custom';
+export type ArchxMode = 'lite' | 'shield' | 'vault' | 'fortress' | 'custom';
 
 export type ArchxSource =
   | string
@@ -22,8 +21,10 @@ export type ArchxSource =
   | Uint8Array
   | HTMLCanvasElement
   | ImageBitmap
+  | { id: string }
   | { imageId: string }
   | { assetId: string }
+  | { asset: string }
   | { src: string };
 
 export interface ArchxTemporalInterlace {
@@ -32,7 +33,7 @@ export interface ArchxTemporalInterlace {
   layout?: 'pixels' | 'strips' | 'blocks' | 'checker';
   phases?: 2 | 3 | 4;
   cellSize?: number;
-  fill?: 'black' | 'dim' | 'color' | string;
+  fill?: 'lowres' | 'dim' | 'black' | 'noise';
   [key: string]: unknown;
 }
 
@@ -45,7 +46,7 @@ export interface ArchxClientEvent {
 
 export interface ArchxLoadOptions {
   mode?: ArchxMode;
-  renderer?: 'auto' | 'webgl' | 'canvas2d';
+  renderer?: 'auto' | 'webgl' | 'canvas' | 'canvas2d';
   preset?: string;
   fit?: 'cover' | 'contain' | 'fill' | 'none';
   lazy?: boolean;
@@ -60,7 +61,7 @@ export interface ArchxLoadOptions {
   aesKey?: string;
   tokenEndpoint?: string;
   tokenMethod?: 'POST' | 'GET';
-  tokenTransport?: 'header' | 'query' | 'header+proof';
+  tokenTransport?: 'header' | 'query' | 'auto';
   tokenBatch?: boolean;
   tokenBatchEndpoint?: string;
   tokenBatchSize?: number;
@@ -79,7 +80,7 @@ export interface ArchxLoadOptions {
   maxResponseBytes?: number;
   maxDecodedPixels?: number;
   maxDecodedDimension?: number;
-  onExtract?: 'blank' | 'decoy' | 'none';
+  onExtract?: 'black' | 'lowres' | 'scrambled';
   /** Origin-taint 2D display canvases so prototype-call readbacks throw. */
   taintReadback?: 'auto' | 'off';
   /** Taint pixel URL override (default: same-origin `{basePath}/taint.png`). */
@@ -91,33 +92,34 @@ export interface ArchxLoadOptions {
   sourceOversample?: number;
   maxSourceWidth?: number;
   sourceWidthBuckets?: number[];
-  qualityProfile?: 'quality' | 'balanced' | 'throughput';
+  qualityProfile?: 'original' | 'high' | 'balanced' | 'catalog' | 'fast';
   requestQuality?: number | 'lossless';
   networkAware?: boolean;
   cacheBitmap?: boolean;
   bitmapCacheMaxEntries?: number;
   bitmapCacheMaxBytes?: number;
   cachePayload?: boolean;
-  cacheScope?: 'session' | 'origin';
+  cacheScope?: string;
   reloadOnResize?: 'never' | 'upscale' | 'always';
   resizeUpscaleFactor?: number;
-  renderLoop?: boolean | 'auto';
+  renderLoop?: 'auto' | 'static' | 'continuous';
   temporalShield?: boolean | Record<string, unknown>;
   temporalInterlace?: boolean | ArchxTemporalInterlace;
   cameraShield?: boolean | Record<string, unknown>;
   watermark?: string | Record<string, unknown> | null;
   forensic?: boolean | Record<string, unknown>;
   sessionId?: string;
-  brand?: boolean;
+  brand?: string;
+  aspectRatio?: string;
   retries?: number;
   credentials?: RequestCredentials;
   integrity?: string;
   automation?: 'allow' | 'degrade' | 'block';
-  memory?: Record<string, unknown>;
+  memory?: 'strict' | 'standard';
   localScramble?: boolean;
   lens?: boolean | Record<string, unknown>;
   captureShield?: boolean | Record<string, unknown>;
-  strikes?: number;
+  strikes?: false | { blurAt?: number; lockAt?: number; lockMs?: number };
   debug?: boolean;
   guards?: Record<string, boolean>;
   onAttempt?: (event: ArchxClientEvent) => void;

@@ -141,7 +141,10 @@ function serveStatic(req, res) {
       'Referrer-Policy': 'no-referrer',
     });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => { try { res.destroy(); } catch { /* already gone */ } });
+    res.on('close', () => { if (!stream.destroyed) stream.destroy(); });
+    return stream.pipe(res);
   }
   return sendTextError(res, 404, 'not found');
 }

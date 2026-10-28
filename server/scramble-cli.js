@@ -39,12 +39,12 @@ if (!input || !output || args.help) {
   --max-width <px>     down-scale master to this width first (default 1600)
   --quality <1-100>    WebP/JPEG quality (default 95; use --lossless for exact pixels)
   --lossless           lossless WebP/PNG at the delivered size (larger payload)
-  --format <fmt>       webp (default), png, or jpeg
+  --format <fmt>       webp (default), png, jpeg, or avif
   --encrypt            AES-GCM-encrypt (ARCHX_AES_KEY if set; otherwise prints one generated key once)
   --watermark <text>   bake a visible watermark in before scrambling
   --forensic-seed <s>  forensic seed (prefer ARCHX_FORENSIC_SEED)
   --stego <payload>    bake a blind StegoMark ownership fingerprint (detect later with archx-detect)
-  --stego-key <s>      StegoMark key (prefer ARCHX_STEGO_KEY; default: scramble key)
+  --stego-key <s>      StegoMark key (required with --stego; prefer ARCHX_STEGO_KEY; MUST differ from the scramble key)
   --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
   --stego-profile <p> standard (default) or robust low-frequency forensic profile
   --stego-grid-x <n>  StegoMark grid columns 4–64 (profile default)
