@@ -17,7 +17,7 @@ import {
   perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
-import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative } from '../server/scramble-image.js';
+import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative, configureSharpSecurity } from '../server/scramble-image.js';
 import { buildArchxAssets } from '../server/build-assets.js';
 import {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS,
@@ -98,58 +98,42 @@ test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
   assert.ok(same / raw.length < 0.08, `scrambled too similar: ${same}/${raw.length} bytes identical`);
 });
 
-test('fused pad+scramble is byte-identical to pad-then-scramble (incl. awkward sizes)', () => {
-  // Padding reflects interior pixels + dithers (never black, never exact
-  // edge duplication): both would tell a keyless solver exactly which
-  // tiles are edge tiles and how they are flipped. The manual pad below
-  // mirrors that contract.
-  const manualPad = (raw, w, h, pw, ph) => {
-    // Mirrors the core padding exactly: interior reflection + deterministic
-    // +/-1 dither on pad-derived pixels.
-    const reflect = (c, n) => {
-      if (n <= 1) return 0;
-      const period = 2 * n - 2;
-      const m = ((c % period) + period) % period;
-      return m < n ? m : period - m;
-    };
-    const padDither = (gx, gy) => {
-      let hash = (gx * 374761393 + gy * 668265263) | 0;
-      hash = (hash ^ (hash >> 13)) | 0;
-      hash = Math.imul(hash, 1274126177);
-      return (((hash >>> 16) % 3) - 1);
-    };
-    const out = new Uint8Array(pw * ph * 4);
-    for (let y = 0; y < ph; y++) {
-      for (let x = 0; x < pw; x++) {
-        const di = (y * pw + x) * 4;
-        const isPad = x >= w || y >= h;
-        const sx = x < w ? x : reflect(x, w);
-        const sy = y < h ? y : reflect(y, h);
-        const si = (sy * w + sx) * 4;
-        const d = isPad ? padDither(x, y) : 0;
-        out[di] = Math.max(0, Math.min(255, raw[si] + d));
-        out[di + 1] = Math.max(0, Math.min(255, raw[si + 1] + d));
-        out[di + 2] = Math.max(0, Math.min(255, raw[si + 2] + d));
-        out[di + 3] = raw[si + 3];
-      }
-    }
-    return out;
-  };
+test('fused pad+scramble round-trips exactly on the displayed region (incl. awkward sizes)', () => {
+  // The fused pass's contract is about the DISPLAYED pixels: pad content
+  // is keyed shifted-wrap filler (v1.13) that the client crops away and
+  // never regenerates, so the invariant worth pinning is exact
+  // round-tripping of the real region at every awkward geometry.
   for (const [w, h, grid] of [[64, 48, 8], [61, 47, 8], [10, 10, 8], [333, 17, 16], [129, 257, 4], [7, 7, 32]]) {
     const raw = new Uint8Array(w * h * 4);
     for (let i = 0; i < raw.length; i++) raw[i] = (i * 40503 + 17) % 256;
     const plan = buildScramblePlan(grid, `fused-${w}x${h}-${grid}`);
     const { pw, ph } = paddedSize(w, h, grid);
-    const expected = scramblePixels(manualPad(raw, w, h, pw, ph), pw, ph, plan, 'scramble');
-    assert.deepEqual(scramblePixelsPadded(raw, w, h, plan), expected, `${w}x${h} grid ${grid}`);
+    const scrambled = scramblePixelsPadded(raw, w, h, plan);
+    assert.deepEqual(scramblePixelsPadded(raw, w, h, plan), scrambled, `${w}x${h} grid ${grid} deterministic`);
     const out = Buffer.alloc(pw * ph * 4);
     assert.equal(scramblePixelsPadded(raw, w, h, plan, out), out);
-    assert.deepEqual(new Uint8Array(out), expected, `${w}x${h} grid ${grid} (provided buffer)`);
-    // and the fused output unscrambles back to the padded original
-    assert.deepEqual(
-      scramblePixels(scramblePixelsPadded(raw, w, h, plan), pw, ph, plan, 'unscramble'),
-      manualPad(raw, w, h, pw, ph));
+    assert.deepEqual(new Uint8Array(out), scrambled, `${w}x${h} grid ${grid} (provided buffer)`);
+    const restored = scramblePixels(scrambled, pw, ph, plan, 'unscramble');
+    for (let y = 0; y < h; y++) {
+      assert.deepEqual(
+        restored.subarray((y * pw) * 4, (y * pw + w) * 4),
+        raw.subarray((y * w) * 4, (y * w + w) * 4),
+        `${w}x${h} grid ${grid} row ${y} must round-trip byte-exactly`);
+    }
   }
+  // Pad filler is keyed by the plan: a different scramble key produces
+  // different pad bytes (displayed region still identical), so a solver
+  // cannot precompute the filler for a known image.
+  const w = 61, h = 47, grid = 8;
+  const raw = new Uint8Array(w * h * 4);
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 40503 + 17) % 256;
+  const { pw, ph } = paddedSize(w, h, grid);
+  const padOf = (key) => {
+    const plan = buildScramblePlan(grid, key);
+    return scramblePixels(scramblePixelsPadded(raw, w, h, plan), pw, ph, plan, 'unscramble')
+      .subarray((h * pw) * 4);
+  };
+  assert.notDeepEqual(padOf('key-a'), padOf('key-b'), 'pad filler must depend on the scramble key');
   assert.throws(() => scramblePixelsPadded(new Uint8Array(8), 64, 64, buildScramblePlan(8, 'k')), /smaller/);
 });
 
@@ -2403,7 +2387,7 @@ test('embedding a StegoMark requires an explicit stegoKey distinct from the scra
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('scramble padding reflects interior pixels with dither (no black/duplication oracle)', () => {
+test('scramble padding is keyed shifted wrap (no black, duplication, or palindrome oracle)', () => {
   const w = 103, h = 61, grid = 8;
   const src = new Uint8Array(w * h * 4);
   for (let i = 0; i < w * h; i++) {
@@ -2414,22 +2398,23 @@ test('scramble padding reflects interior pixels with dither (no black/duplicatio
   const plan = buildScramblePlan(grid, 'pad-oracle');
   const scrambled = scramblePixelsPadded(src, w, h, plan);
   assert.equal(scrambled.length, pw * ph * 4);
-  // A uniform source stays within +-1 everywhere (reflection of a constant
-  // is the constant; only the pad dither may move a channel by one step).
+  // A uniform source stays within the keyed noise band (+-3) everywhere:
+  // wrap of a constant is the constant; pad pixels are never black.
   for (let i = 0; i < pw * ph; i++) {
-    assert.ok(Math.abs(scrambled[i * 4] - 200) <= 1 &&
-      Math.abs(scrambled[i * 4 + 1] - 180) <= 1 &&
-      Math.abs(scrambled[i * 4 + 2] - 160) <= 1,
+    assert.ok(Math.abs(scrambled[i * 4] - 200) <= 3 &&
+      Math.abs(scrambled[i * 4 + 1] - 180) <= 3 &&
+      Math.abs(scrambled[i * 4 + 2] - 160) <= 3,
       `padded pixel ${i} must stay near the edge color, never black`);
   }
-  // Vertical-gradient source: after unscrambling, the pad rows must NOT be
-  // exact copies of the last real row (the v1.11 zero-gradient signature).
-  const grad = new Uint8Array(w * h * 4);
+  // Textured source: after unscrambling, pad rows must neither duplicate
+  // the edge row (v1.11 oracle) nor mirror it (v1.12 palindrome seam:
+  // MAD(pad, reflected edge) was ~0.6 vs ~17 for real texture).
+  const tex = new Uint8Array(w * h * 4);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = (y * w + x) * 4;
-    grad[i] = y * 4; grad[i + 1] = y * 4; grad[i + 2] = y * 4; grad[i + 3] = 255;
+    tex[i] = (x * 3 + y * 5) % 256; tex[i + 1] = (x * 7 + y * 2) % 256; tex[i + 2] = (x * y) % 251; tex[i + 3] = 255;
   }
-  const restored = scramblePixels(scramblePixelsPadded(grad, w, h, plan), pw, ph, plan, 'unscramble');
+  const restored = scramblePixels(scramblePixelsPadded(tex, w, h, plan), pw, ph, plan, 'unscramble');
   let padExactDupes = 0, padCompared = 0;
   for (let y = h; y < ph; y++) {
     for (let x = 0; x < w; x++) {
@@ -2439,6 +2424,18 @@ test('scramble padding reflects interior pixels with dither (no black/duplicatio
   }
   assert.ok(padExactDupes < padCompared * 0.05,
     `pad rows must not duplicate the edge row (got ${padExactDupes}/${padCompared} exact)`);
+  const rowMAD = (y1, y2) => {
+    let s = 0;
+    for (let x = 0; x < w; x++) {
+      const a = (y1 * pw + x) * 4, b = (y2 * pw + x) * 4;
+      s += Math.abs(restored[a] - restored[b]) + Math.abs(restored[a + 1] - restored[b + 1]) + Math.abs(restored[a + 2] - restored[b + 2]);
+    }
+    return s / (w * 3);
+  };
+  const seamMAD = rowMAD(h, h - 2); // first pad row vs the row a mirror would copy
+  const textureMAD = rowMAD(20, 22); // an ordinary interior row pair
+  assert.ok(seamMAD > textureMAD * 0.5,
+    `pad seam must not be palindromic (seam MAD ${seamMAD.toFixed(2)} vs texture ${textureMAD.toFixed(2)})`);
 });
 
 test('stego confidence is capped below 0.5 whenever nothing is found', () => {
@@ -2802,4 +2799,120 @@ test('per-token redemptions populate the base-frame cache (decode+resize amortiz
   assert.equal(stats.baseCacheEntries, 1, 'one shared base frame for repeated per-token views of one geometry');
   assert.ok(stats.baseCacheBytes > 0);
   assert.equal(stats.outputCacheEntries, 0, 'per-token derivatives still skip the output cache');
+});
+
+/* ---------- v1.13 review-response regressions ---------- */
+
+test('v1.13: a per-viewer watermark never leaks to another viewer via the shared derivative base', async (t) => {
+  // Review #3 Bug #1: the viewer-independent base cache key omitted the
+  // watermark while the watermark was baked INTO the cached base, so the
+  // second viewer of a geometry received the first viewer's mark. The
+  // base is now watermark-free; marks are applied per-token in stage 2.
+  let currentViewer = 'alice@client-alpha.example';
+  const fx = await startArchxFixture(t, {
+    authorize: async () => ({
+      allow: true,
+      viewerId: currentViewer,
+      watermark: { text: 'CONFIDENTIAL {viewer}', opacity: 0.55, corner: true },
+    }),
+    // Per-token marks engage the prepare/finish split whose shared base
+    // cache this regression is about.
+    steganography: { perToken: true, scope: 'viewer' },
+  });
+  const viewAs = async (viewer) => {
+    currentViewer = viewer;
+    const tokenRes = await postToken(fx.base + '/archx/token/cat?w=240');
+    assert.equal(tokenRes.status, 200);
+    const token = await tokenRes.json();
+    const res = await redeemToken(fx.base, token);
+    assert.equal(res.status, 200);
+    const { header, payload } = decodeContainer(Buffer.from(await res.arrayBuffer()));
+    return unscrambleImage(Buffer.from(payload), {
+      grid: header.g, key: token.key, w: header.w, h: header.h, planVersion: header.pv ?? 1,
+    });
+  };
+  const Alice = await viewAs('alice@client-alpha.example');
+  const Bob = await viewAs('bob@competitor-beta.example');
+  // Bob's cache-free reference rendering.
+  const master = fs.readFileSync(path.join(fx.dir, 'cat.jpg'));
+  const ref = await scrambleImage(master, {
+    key: 'ref-key', grid: 8, maxWidth: 240,
+    watermark: { text: 'CONFIDENTIAL bob@competitor-beta.example', opacity: 0.55, corner: true },
+  });
+  const refDecoded = decodeContainer(Buffer.from(ref.bytes));
+  const bobRef = await unscrambleImage(Buffer.from(refDecoded.payload), {
+    grid: refDecoded.header.g, key: 'ref-key', w: refDecoded.header.w, h: refDecoded.header.h,
+    planVersion: refDecoded.header.pv ?? 1,
+  });
+  const madBobRef = await meanAbsDiff(Bob, bobRef, 160, 120);
+  const madBobAlice = await meanAbsDiff(Bob, Alice, 160, 120);
+  assert.ok(madBobAlice > 1.5, `Alice and Bob derivatives must actually differ (MAD=${madBobAlice.toFixed(2)})`);
+  assert.ok(madBobRef < madBobAlice,
+    `Bob must receive Bob's watermark, not Alice's (vs-ref MAD=${madBobRef.toFixed(2)}, vs-Alice MAD=${madBobAlice.toFixed(2)})`);
+  assert.equal(fx.handler.stats().baseCacheEntries, 1, 'geometry still shares ONE clean base');
+});
+
+test('v1.13: IPv4-mapped and re-spelled IPv6 clients share one quota identity', async (t) => {
+  const fx = await startArchxFixture(t, {
+    allowAnonymous: true,
+    trustProxy: true,
+    trustedProxyHops: 1,
+    quotas: { perIp: 1, windowMs: 60000 },
+  });
+  const mint = (xff) => postToken(fx.base + '/archx/token/cat?w=100', { headers: { 'x-forwarded-for': xff } });
+  assert.equal((await mint('::ffff:9.9.9.9')).status, 200);
+  assert.equal((await mint('9.9.9.9')).status, 429, '::ffff:9.9.9.9 and 9.9.9.9 are one client');
+  assert.equal((await mint('0:0:0:0:0:ffff:0909:0909')).status, 429, 'expanded mapped form is the same client');
+  assert.equal((await mint('2001:db8::1')).status, 200);
+  assert.equal((await mint('2001:0db8:0000:0000:0000:0000:0000:0001')).status, 429,
+    're-spelling one IPv6 address must not mint a fresh quota');
+});
+
+test('v1.13: stego layout v2 + forensic signs v2 default, with bit-exact v1 dual-read', () => {
+  const w = 360, h = 240;
+  const src = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    src[i] = (x * 255 / w) | 0; src[i + 1] = (y * 255 / h) | 0; src[i + 2] = ((x + y) * 255 / (w + h)) | 0; src[i + 3] = 255;
+  }
+  for (const profile of ['standard', 'robust']) {
+    for (const layoutVersion of [1, 2]) {
+      const marked = embedStegoFingerprint(src, w, h, 'layout-buyer', {
+        key: 'layout-key', profile, strength: 6, layoutVersion,
+      });
+      const auto = detectStegoFingerprint(marked, w, h, { key: 'layout-key', profile });
+      assert.equal(auto.found, true, `${profile} layout v${layoutVersion} must auto-detect`);
+      assert.equal(auto.fingerprint, stegoFingerprint('layout-buyer'));
+      assert.equal(auto.layoutVersion, layoutVersion, 'detector reports the layout vintage');
+      const pinnedWrong = detectStegoFingerprint(marked, w, h, {
+        key: 'layout-key', profile, layoutVersion: layoutVersion === 1 ? 2 : 1,
+      });
+      assert.equal(pinnedWrong.found, false, `${profile} v${layoutVersion} mark must not validate under the other layout`);
+    }
+  }
+  // Forensic block signs: v1-embedded marks score under dual-read and the
+  // result names the vintage; new embeds default to v2.
+  const flat = new Uint8Array(w * h * 4);
+  for (let i = 0; i < flat.length; i += 4) { flat[i] = 110; flat[i + 1] = 120; flat[i + 2] = 130; flat[i + 3] = 255; }
+  const legacyMarked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3, signsVersion: 1 });
+  const legacyScore = forensicScore(legacyMarked, flat, w, h, 'seed-1', { blockSize: 32 });
+  assert.ok(legacyScore.score > 0.9, `v1 forensic mark must dual-read (score=${legacyScore.score})`);
+  assert.equal(legacyScore.signsVersion, 1);
+  const v2Marked = applyForensicBlocks(new Uint8Array(flat), w, h, 'seed-1', { blockSize: 32, delta: 3 });
+  const v2Score = forensicScore(v2Marked, flat, w, h, 'seed-1', { blockSize: 32 });
+  assert.ok(v2Score.score > 0.9);
+  assert.equal(v2Score.signsVersion, 2);
+  assert.notDeepEqual(forensicBlockSigns('seed-1', 64, 1), forensicBlockSigns('seed-1', 64, 2),
+    'v1/v2 sign sequences must actually differ (128-bit seed, not a relabel)');
+});
+
+test('v1.13: Sharp loader policy re-blocks a loader a later stricter config excludes', async () => {
+  // Process-global and most-restrictive-wins by design; appended last and
+  // targets AVIF (allowed by default, unused as test INPUT elsewhere).
+  const avif = await sharp({
+    create: { width: 8, height: 8, channels: 3, background: { r: 10, g: 20, b: 30 } },
+  }).avif().toBuffer();
+  assert.equal((await sharp(avif).metadata()).format, 'heif', 'AVIF loader starts unblocked');
+  configureSharpSecurity(['jpeg', 'png', 'webp']);
+  await assert.rejects(sharp(avif).metadata(), 'stricter later config must re-block the HEIF loader');
 });

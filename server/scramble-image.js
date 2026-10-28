@@ -24,6 +24,7 @@ const SHARP_LOADERS = Object.freeze({
 });
 let sharpLoadersBlocked = false;
 const sharpLoadersUnblocked = new Set();
+const sharpSecurityWants = []; // one wanted-set per configure call
 
 /**
  * Restrict libvips' native file loaders to the formats Archx actually uses.
@@ -31,6 +32,13 @@ const sharpLoadersUnblocked = new Set();
  * alone cannot stop a GIF/TIFF/SVG/PDF parser from being reached. This is a
  * process-global Sharp setting; the internally generated SVG watermark and
  * the explicitly allowed master formats are unblocked.
+ *
+ * The effective unblocked set is the INTERSECTION of every configure
+ * call in this process (strictest instance wins): module-global libvips
+ * state must never widen because a second, looser Archx handler booted —
+ * and a stricter later handler re-blocks what an earlier one unblocked.
+ * Per-call format allowlists still apply at the sniff gate regardless;
+ * this loader policy is the defense-in-depth layer behind it.
  */
 export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 'avif']) {
   if (typeof sharp.block !== 'function' || typeof sharp.unblock !== 'function') return false;
@@ -43,10 +51,22 @@ export function configureSharpSecurity(allowedFormats = ['jpeg', 'png', 'webp', 
     const operation = SHARP_LOADERS[String(format).toLowerCase()];
     if (operation) wanted.add(operation);
   }
-  const fresh = [...wanted].filter((operation) => !sharpLoadersUnblocked.has(operation));
-  if (fresh.length) {
-    sharp.unblock({ operation: fresh });
-    for (const operation of fresh) sharpLoadersUnblocked.add(operation);
+  sharpSecurityWants.push(wanted);
+  const effective = new Set(wanted);
+  for (const previous of sharpSecurityWants) {
+    for (const operation of [...effective]) {
+      if (!previous.has(operation)) effective.delete(operation);
+    }
+  }
+  const toUnblock = [...effective].filter((operation) => !sharpLoadersUnblocked.has(operation));
+  if (toUnblock.length) {
+    sharp.unblock({ operation: toUnblock });
+    for (const operation of toUnblock) sharpLoadersUnblocked.add(operation);
+  }
+  const toReblock = [...sharpLoadersUnblocked].filter((operation) => !effective.has(operation));
+  if (toReblock.length) {
+    sharp.block({ operation: toReblock });
+    for (const operation of toReblock) sharpLoadersUnblocked.delete(operation);
   }
   return true;
 }
@@ -290,8 +310,17 @@ function watermarkSvg(w, h, wm) {
   if (cfg.tile !== false) {
     const rows = [];
     const diag = Math.hypot(w, h);
+    // Tile along BOTH axes of the rotated frame. Stepping only
+    // vertically (pre-1.13) left a single centered copy per row, so
+    // short text on a wide image marked a central band and left the
+    // side margins completely clean. The advance estimate (~0.58em
+    // per character for the bold sans used here) only spaces copies;
+    // slight overlap or gap is harmless for a forensic overlay.
+    const stepX = Math.max(fs * 2, fs * (0.58 * String(cfg.text || '').length + 1.6));
     for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) {
-      rows.push(`<text x="0" y="${y.toFixed(0)}" text-anchor="middle">${text}</text>`);
+      for (let x = -diag / 2; x < diag / 2; x += stepX) {
+        rows.push(`<text x="${(x + stepX / 2).toFixed(0)}" y="${y.toFixed(0)}" text-anchor="middle">${text}</text>`);
+      }
     }
     body += `<g transform="translate(${w / 2} ${h / 2}) rotate(${angle})" opacity="${opacity}" font-size="${fs}" font-weight="700">${rows.join('')}</g>`;
   }
@@ -348,12 +377,13 @@ function validateScrambleOpts(opts) {
 }
 
 /**
- * Stage 1 of derivative production: decode + orient + resize (+ optional
- * visible watermark composite) to the exact RGBA raster the scramble
- * stage consumes. This is the reusable front half — it depends only on
- * the master bytes, target width, watermark, and processing limits, so
- * per-token/per-viewer delivery can cache the base frame and skip the
- * master decode + resample on every view. `finishDerivative` is stage 2.
+ * Stage 1 of derivative production: decode + orient + resize to the
+ * exact RGBA raster the scramble stage consumes. This is the reusable
+ * front half — it depends only on the master bytes, target width, and
+ * processing limits (NOT on any per-viewer mark — the visible watermark
+ * moved to stage 2 in 1.13), so per-token/per-viewer delivery can cache
+ * one base frame per geometry and skip the master decode + resample on
+ * every view. `finishDerivative` is stage 2.
  */
 export async function prepareDerivativeBase(input, opts = {}) {
   const limits = normalizeProcessingOptions(opts);
@@ -403,17 +433,12 @@ export async function prepareDerivativeBase(input, opts = {}) {
       kernel: sharp.kernel[limits.resizeKernel],
     });
 
-  // Server-baked visible watermark: composited pre-scramble so that NO
-  // extraction route — screenshot, canvas grab, or full payload
-  // reconstruction with a stolen session key — can produce an unmarked copy.
-  let watermarked = false;
-  if (opts.watermark) {
-    const svg = watermarkSvg(tw, th, opts.watermark);
-    if (svg) {
-      pipeline = pipeline.composite([{ input: svg, top: 0, left: 0 }]);
-      watermarked = true;
-    }
-  }
+  // The visible watermark is applied in stage 2 (finishDerivative), NOT
+  // here: a per-viewer watermark ({viewer} expansion) baked into the
+  // stage-1 base would make the base itself per-viewer, defeating the
+  // base cache and — when a v1.12 cache-key bug collapsed object
+  // watermarks — leaking one viewer's identity into another's pixels.
+  // A clean base depends only on (master, geometry).
 
   let data, info;
   try { ({ data, info } = await pipeline.ensureAlpha().raw().toBuffer({ resolveWithObject: true })); }
@@ -423,7 +448,7 @@ export async function prepareDerivativeBase(input, opts = {}) {
   }
   const w = info.width;
   const h = info.height;
-  return { data, w, h, hasAlpha: !!srcMeta.hasAlpha, watermarked };
+  return { data, w, h, hasAlpha: !!srcMeta.hasAlpha, watermarked: false };
 }
 
 /**
@@ -443,7 +468,6 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   }
   const w = base.w;
   const h = base.h;
-  const watermarked = !!base.watermarked;
   const srcMeta = { hasAlpha: !!base.hasAlpha };
 
   // Block-level forensic mark (also pre-scramble): survives into any
@@ -454,12 +478,32 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   // Marks below mutate pixels in place; a cached/shared base must not be
   // poisoned by one viewer's marks, so non-owned bases are copied first.
   let rawPixels = owned ? base.data : Buffer.from(base.data);
+
+  // Server-baked visible watermark, composited pre-scramble so that NO
+  // extraction route — screenshot, canvas grab, or full payload
+  // reconstruction with a stolen session key — can produce an unmarked
+  // copy. Applied here (stage 2) so the cached stage-1 base stays
+  // viewer-independent; forensic/Stego marks layer over it exactly as
+  // when it was baked into the base.
+  let watermarked = !!base.watermarked;
+  if (!watermarked && opts.watermark) {
+    const svg = watermarkSvg(w, h, opts.watermark);
+    if (svg) {
+      try {
+        rawPixels = await sharp(Buffer.from(rawPixels.buffer, rawPixels.byteOffset, rawPixels.byteLength), {
+          raw: { width: w, height: h, channels: 4 },
+        }).composite([{ input: svg, top: 0, left: 0 }]).raw().toBuffer();
+      } catch (err) { throw mapSharpError(err); }
+      watermarked = true;
+    }
+  }
   let forensicMarked = false;
   if (opts.forensicSeed) {
     const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
     rawPixels = applyForensicBlocks(rawPixels, w, h, opts.forensicSeed, {
       blockSize: fx.blockSize ?? 32,
       delta: fx.delta ?? 2,
+      signsVersion: fx.signsVersion ?? 2,
     });
     forensicMarked = true;
   }
@@ -493,6 +537,7 @@ export async function finishDerivative(base, opts = {}, owned = false) {
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
       gridX: stegoCfg.gridX ?? (stegoProfile === 'robust' ? 20 : 24),
       gridY: stegoCfg.gridY ?? (stegoProfile === 'robust' ? 14 : 16),
+      layoutVersion: opts.stegoLayoutVersion ?? stegoCfg.layoutVersion ?? 2,
       inPlace: true,
     });
     stegoMarked = true;

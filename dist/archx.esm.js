@@ -670,15 +670,15 @@ async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
   ]);
   return new Uint8Array(plain);
 }
-function forensicBlockSigns(seed, count) {
-  const rand = mulberry32(hashSeed(String(seed) + "::archx-forensic"));
+function forensicBlockSigns(seed, count, version = 2) {
+  const rand = version === 1 ? mulberry32(hashSeed(String(seed) + "::archx-forensic")) : sfc32(...cyrb128(String(seed) + "::archx-forensic"));
   return Array.from({ length: count }, () => rand() < 0.5 ? -1 : 1);
 }
-function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2 } = {}) {
+function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2, signsVersion = 2 } = {}) {
   const bs = Math.max(8, blockSize | 0);
   const bx = Math.ceil(w / bs);
   const by = Math.ceil(h / bs);
-  const signs = forensicBlockSigns(seed, bx * by);
+  const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : 2);
   const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
@@ -702,8 +702,8 @@ function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}
   const bs = Math.max(8, blockSize | 0);
   const bx = Math.ceil(w / bs);
   const by = Math.ceil(h / bs);
-  const signs = forensicBlockSigns(seed, bx * by);
-  let matched = 0, total = 0, signedSum = 0;
+  const blockSigns = new Int8Array(bx * by);
+  let total = 0;
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
       const x0 = bxi * bs, y0 = byi * bs;
@@ -717,15 +717,34 @@ function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}
         }
       }
       if (!n) continue;
-      const mean = diff / n;
+      blockSigns[byi * bx + bxi] = Math.sign(diff / n) + 2;
       total++;
-      signedSum += Math.sign(mean) === signs[byi * bx + bxi] ? 1 : -1;
-      if (Math.sign(mean) === signs[byi * bx + bxi]) matched++;
     }
   }
-  return { score: total ? signedSum / total : 0, matched, total };
+  let best = { score: 0, matched: 0, total, signsVersion: 2 };
+  for (const version of [2, 1]) {
+    const signs = forensicBlockSigns(seed, bx * by, version);
+    let matched = 0, signedSum = 0;
+    for (let i = 0; i < blockSigns.length; i++) {
+      if (!blockSigns[i]) continue;
+      const hit = blockSigns[i] - 2 === signs[i];
+      signedSum += hit ? 1 : -1;
+      if (hit) matched++;
+    }
+    const score = total ? signedSum / total : 0;
+    if (version === 2 || score > best.score) best = { score, matched, total, signsVersion: version };
+  }
+  return best;
 }
 function stegoFingerprint(value) {
+  const s = String(value ?? "");
+  if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
+  const digest = sha256Bytes(utf8Encode("archx-stego-fp-v2:" + s));
+  let hex = "";
+  for (let i = 0; i < 6; i++) hex += digest[i].toString(16).padStart(2, "0");
+  return hex;
+}
+function legacyStegoFingerprint(value) {
   const s = String(value ?? "");
   if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
   const a = hashSeed("archx-stego:" + s, 20907);
@@ -774,6 +793,7 @@ function robustLegacyKeyedCrc(first8, key) {
   keyed[8] = keyByte;
   return stegoCrc16(keyed);
 }
+var ROBUST_MARKER_BITS = stegoBytesToBits(new Uint8Array([165, 90]));
 function robustStegoCodeBits(fingerprint, key, tag = "mac") {
   const payload = new Uint8Array(6);
   for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
@@ -817,16 +837,31 @@ function repairRobustViaFirstCrc(scores, hard, key, tag = "mac") {
   };
   const target = syndromeOf(first);
   const buildCanonical = (correctedFirst) => {
-    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
-    const canonical = robustStegoCodeBits(fingerprint, key, tag);
     let flips = 0;
+    let markerFlips = 0;
     let softCost = 0;
-    for (let i = 0; i < 96; i++) {
-      if (canonical[i] === hard[i]) continue;
+    for (let i = 0; i < 64; i++) {
+      if (correctedFirst[i] === hard[i]) continue;
       flips++;
       softCost += Math.abs(scores[i] || 0);
     }
-    return flips <= 8 ? { bits: canonical, flips, softCost } : null;
+    for (let j = 0; j < 16; j++) {
+      if (ROBUST_MARKER_BITS[j] === hard[80 + j]) continue;
+      markerFlips++;
+      flips++;
+      softCost += Math.abs(scores[80 + j] || 0);
+    }
+    if (markerFlips > 2 || flips > 8) return null;
+    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
+    const canonical = robustStegoCodeBits(fingerprint, key, tag);
+    let tagFlips = markerFlips;
+    for (let i = 64; i < 80; i++) {
+      if (canonical[i] === hard[i]) continue;
+      flips++;
+      tagFlips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    return flips <= 8 && tagFlips <= 2 ? { bits: canonical, flips, softCost } : null;
   };
   if (target === 0) return buildCanonical(first);
   const columns = new Uint16Array(64);
@@ -973,8 +1008,12 @@ function correctStegoBits(bits, reliability, key, maxDepth = 3) {
   return { bits, corrections: -1, tagScheme: null };
 }
 var STEGO_ROW_SEGMENTS = 4;
-function stegoLayout(cellCount, key) {
-  const rand = mulberry32(hashSeed(String(key) + "::archx-stego-layout"));
+function layoutRand(seedString, version, legacyHashSeedArg) {
+  if (version === 1) return mulberry32(hashSeed(seedString, legacyHashSeedArg));
+  return sfc32(...cyrb128(seedString));
+}
+function stegoLayout(cellCount, key, version = 2) {
+  const rand = layoutRand(String(key) + "::archx-stego-layout", version);
   const order = Array.from({ length: cellCount }, (_, i) => i);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -997,11 +1036,11 @@ function stegoGrid(w, h, gridX, gridY) {
   }
   return { gx, gy };
 }
-function robustStegoLayout(cellCount, key) {
+function robustStegoLayout(cellCount, key, version = 2) {
   const order = Array.from({ length: cellCount }, (_, i) => i);
   const polarity = new Int8Array(cellCount);
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
-  const rand = mulberry32(hashSeed("archx-stego-robust-layout:" + String(key ?? ""), 20907));
+  const rand = layoutRand("archx-stego-robust-layout:" + String(key ?? ""), version, 20907);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
@@ -1023,7 +1062,10 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   inPlace = false,
   // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
   // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
-  legacyCode = false
+  legacyCode = false,
+  // Layout seed space: 2 = 128-bit (default since 1.13); 1 reproduces
+  // the pre-1.13 32-bit-truncated layout for compatibility testing.
+  layoutVersion = 2
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
@@ -1038,7 +1080,7 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   const bits = robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key) : stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2) : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2);
   const out = inPlace ? src : new Uint8Array(src);
   const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
   const amp = robust ? Math.min(16, baseAmp * 1.35) : baseAmp;
@@ -1113,8 +1155,22 @@ function detectStegoFingerprint(rgba, w, h, {
   // extra bounded pass on flipped pixels, only when the forward pass
   // found nothing); set false to disable.
   searchMirror = true,
-  _mirrorProbe = false
+  // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
+  // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
+  // (halves worst-case cost on unmarked suspects).
+  layoutVersion = "auto",
+  _mirrorProbe = false,
+  _layoutVersion = 0
 } = {}) {
+  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2 ? _layoutVersion : layoutVersion === 1 || layoutVersion === 2 ? layoutVersion : 0;
+  if (!concreteLayout) {
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, _mirrorProbe };
+    const v2 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 2 });
+    if (v2?.found) return v2;
+    const v1 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 1 });
+    if (v1?.found) return v1;
+    return (v1?.confidence ?? 0) > (v2?.confidence ?? 0) ? v1 : v2;
+  }
   if (profile === "auto") {
     const standard = detectStegoFingerprint(rgba, w, h, {
       key,
@@ -1124,7 +1180,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: false,
       searchMirror: false,
-      _mirrorProbe: true
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust2 = detectStegoFingerprint(rgba, w, h, {
@@ -1135,7 +1192,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: false,
       searchMirror: false,
-      _mirrorProbe: true
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout
     });
     const initial = robust2?.found && !standard?.found ? robust2 : standard?.found && !robust2?.found ? standard : (robust2?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust2 : standard;
     if (!searchGeometry || initial?.found) return initial;
@@ -1147,7 +1205,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: true,
       searchMirror: false,
-      _mirrorProbe: true
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(rgba, w, h, {
@@ -1158,7 +1217,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: true,
       searchMirror: false,
-      _mirrorProbe: true
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout
     });
     if (robustGeometry?.found) return robustGeometry;
     if (searchMirror && !_mirrorProbe) try {
@@ -1174,7 +1234,8 @@ function detectStegoFingerprint(rgba, w, h, {
             searchOffsets,
             searchGeometry: false,
             searchMirror: false,
-            _mirrorProbe: true
+            _mirrorProbe: true,
+            _layoutVersion: concreteLayout
           });
           if (fast?.found) return { ...fast, mirrored: true };
         }
@@ -1187,7 +1248,8 @@ function detectStegoFingerprint(rgba, w, h, {
             searchOffsets,
             searchGeometry: true,
             searchMirror: false,
-            _mirrorProbe: true
+            _mirrorProbe: true,
+            _layoutVersion: concreteLayout
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true };
         }
@@ -1207,16 +1269,41 @@ function detectStegoFingerprint(rgba, w, h, {
   const effectiveGridY = gridY ?? (robust ? 14 : 16);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key) : stegoLayout(cellCount, key);
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, concreteLayout) : stegoLayout(cellCount, key, concreteLayout);
   const cw = w / gx, ch = h / gy;
+  const luma = new Uint8Array(w * h);
+  for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
+    luma[p] = src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
+  }
+  const integral = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    const srcRow = y * w;
+    const outRow = (y + 1) * (w + 1);
+    const prevRow = y * (w + 1);
+    for (let x = 0; x < w; x++) {
+      rowSum += luma[srcRow + x];
+      integral[outRow + x + 1] = integral[prevRow + x + 1] + rowSum;
+    }
+  }
+  const rectSum = (rx0, ry0, rx1, ry1) => integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] - integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
+  const _sums = new Float64Array(rowSegments * columnBands);
+  const _counts = new Uint32Array(rowSegments * columnBands);
+  const _bitScores = new Float64Array(codeLength);
+  const _bitCounts = new Uint16Array(codeLength);
+  const _votedBits = new Uint8Array(codeLength);
+  const _reliability = new Float64Array(codeLength);
+  const _voteScores = new Float64Array(codeLength);
+  const _groups = Array.from({ length: codeLength }, () => []);
+  const _segmentResponses = [];
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
     const cellW0 = cw * scaleX;
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
     const oy = originY ?? fy * ch;
-    const bitScores = new Float64Array(codeLength);
-    const bitCounts = new Uint16Array(codeLength);
+    const bitScores = _bitScores.fill(0);
+    const bitCounts = _bitCounts.fill(0);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
@@ -1230,28 +1317,27 @@ function detectStegoFingerprint(rgba, w, h, {
         const x0 = Math.max(0, Math.round(rawX0));
         const x1 = Math.min(w, Math.round(rawX1));
         if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
-        const sums = new Float64Array(rowSegments * columnBands);
-        const counts = new Uint32Array(rowSegments * columnBands);
+        const sums = _sums.fill(0);
+        const counts = _counts.fill(0);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
-        const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
-        for (let y = y0; y < y1; y += step) {
-          const segment = Math.max(0, Math.min(
-            rowSegments - 1,
-            Math.floor((y - rawY0) * rowSegments / cellH0)
-          ));
-          let i = (y * w + x0) * 4;
-          for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.max(0, Math.min(columnBands - 1, Math.floor((x - rawX0) * columnBands / cellW0)));
+        for (let segment = 0; segment < rowSegments; segment++) {
+          const ry0 = Math.max(y0, Math.round(rawY0 + segment * cellH0 / rowSegments));
+          const ry1 = Math.min(y1, Math.round(rawY0 + (segment + 1) * cellH0 / rowSegments));
+          if (ry1 <= ry0) continue;
+          for (let band = 0; band < columnBands; band++) {
+            const rx0 = Math.max(x0, Math.round(rawX0 + band * cellW0 / columnBands));
+            const rx1 = Math.min(x1, Math.round(rawX0 + (band + 1) * cellW0 / columnBands));
+            if (rx1 <= rx0) continue;
             const idx = segment * columnBands + band;
-            sums[idx] += src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
-            counts[idx]++;
+            sums[idx] = rectSum(rx0, ry0, rx1, ry1);
+            counts[idx] = (rx1 - rx0) * (ry1 - ry0);
           }
         }
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
         let validSegments = 0;
-        const robustSegmentResponses = robust ? [] : null;
+        const robustSegmentResponses = robust ? (_segmentResponses.length = 0, _segmentResponses) : null;
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < rowSegments; segment++) {
           const base = segment * columnBands;
@@ -1287,11 +1373,12 @@ function detectStegoFingerprint(rgba, w, h, {
         cellScores.push({ bitIndex, score });
       }
     }
-    const votedBits = new Uint8Array(codeLength);
-    const reliability = new Float64Array(codeLength);
-    const voteScores = new Float64Array(codeLength);
+    const votedBits = _votedBits.fill(0);
+    const reliability = _reliability.fill(0);
+    const voteScores = _voteScores.fill(0);
     if (robust) {
-      const groups = Array.from({ length: codeLength }, () => []);
+      const groups = _groups;
+      for (const group of groups) group.length = 0;
       for (const { bitIndex, score } of cellScores) groups[bitIndex].push(score);
       for (let i = 0; i < codeLength; i++) {
         const values = groups[i].sort((a, b) => a - b);
@@ -1312,8 +1399,25 @@ function detectStegoFingerprint(rgba, w, h, {
     const preAgreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!votedBits[bitIndex]).length;
     const preAgreement = cellScores.length ? preAgreeing / cellScores.length : 0;
     const standardDepth = meanAbsPre >= 2 && preAgreement >= 0.82 ? 3 : 1;
-    const corrected = robust ? (() => {
-      const repaired = repairRobustStegoBits(reliability, votedBits, key, 5, "mac") || repairRobustStegoBits(reliability, votedBits, key, 5, "crc");
+    const minBitCountPre = Math.min(...bitCounts);
+    const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    const coverageOkPre = robust ? observedBitsPre >= 88 && cellScores.length >= 128 : minBitCountPre >= 2 && cellScores.length >= codeLength * 3;
+    let agreementBound = preAgreement;
+    if (cellScores.length) {
+      const disagreeByBit = new Uint16Array(codeLength);
+      for (const { bitIndex, score } of cellScores) {
+        if (score >= 0 !== !!votedBits[bitIndex]) disagreeByBit[bitIndex]++;
+      }
+      const gains = [...disagreeByBit].sort((a, b) => b - a);
+      const maxFlips = robust ? 5 : standardDepth;
+      let gainSum = 0;
+      for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
+      agreementBound = (preAgreeing + gainSum) / cellScores.length;
+    }
+    const repairable = meanAbsPre >= 1.2 && cellScores.length >= 96 && coverageOkPre && agreementBound >= 0.72;
+    const corrected = !repairable ? { bits: votedBits, corrections: -1, tagScheme: null } : robust ? (() => {
+      const macDepth = meanAbsPre >= 3.5 && agreementBound >= 0.95 ? 5 : 3;
+      const repaired = repairRobustStegoBits(reliability, votedBits, key, macDepth, "mac") || repairRobustStegoBits(reliability, votedBits, key, 3, "crc");
       return repaired ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme } : { bits: votedBits, corrections: -1, tagScheme: null };
     })() : correctStegoBits(votedBits, reliability, key, standardDepth);
     const bits = corrected.bits;
@@ -1337,6 +1441,7 @@ function detectStegoFingerprint(rgba, w, h, {
       fingerprint,
       profile: effectiveProfile,
       tagScheme: corrected.tagScheme ?? null,
+      layoutVersion: concreteLayout,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
@@ -1378,7 +1483,7 @@ function detectStegoFingerprint(rgba, w, h, {
   }
   if (searchGeometry && !best?.found) {
     const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.25];
-    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 10) / 10))];
+    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 1e3) / 1e3))];
     const originRange = (span, extent) => {
       const min = Math.min(0, extent - span);
       const max = Math.max(0, extent - span);
@@ -1499,7 +1604,8 @@ function detectStegoFingerprint(rgba, w, h, {
           searchOffsets,
           searchGeometry,
           searchMirror: false,
-          _mirrorProbe: true
+          _mirrorProbe: true,
+          _layoutVersion: concreteLayout
         });
         if (mirrored?.found) return { ...mirrored, mirrored: true };
       }
@@ -1586,30 +1692,37 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
   const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 && target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  const reflect = (c, n) => {
-    if (n <= 1) return 0;
-    const period = 2 * n - 2;
-    const m = (c % period + period) % period;
-    return m < n ? m : period - m;
+  let padSeedState = 2654435769;
+  for (let i = 0; i < count; i++) {
+    padSeedState = Math.imul(padSeedState ^ plan.order[i] * 2654435761, 2246822519);
+    padSeedState = Math.imul(padSeedState ^ (plan.flips[i].fx ? 2 : 0) + (plan.flips[i].fy ? 1 : 0) + 1, 3266489917);
+  }
+  const padRand = mulberry32(padSeedState >>> 0);
+  const padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
+  const padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
+  const padPhaseSeed = Math.floor(padRand() * 4294967295) | 0;
+  const wrapPos = (c, n) => (c % n + n) % n;
+  const padRowPhase = (srcY) => {
+    let hash = padPhaseSeed ^ Math.imul(srcY + 1, 374761393) | 0;
+    hash = Math.imul(hash ^ hash >>> 13, 1274126177);
+    return w > 1 ? (hash >>> 8) % w : 0;
   };
-  const padDither = (gx, gy) => {
-    let hash = gx * 374761393 + gy * 668265263 | 0;
-    hash = hash ^ hash >> 13 | 0;
-    hash = Math.imul(hash, 1274126177);
-    return (hash >>> 16) % 3 - 1;
+  const padNoise = (gx, gy, channel) => {
+    let hash = padPhaseSeed ^ Math.imul(gx + 1, 374761393) ^ Math.imul(gy + 1, 668265263) ^ Math.imul(channel + 1, 2246822519) | 0;
+    hash = Math.imul(hash ^ hash >>> 13, 1274126177);
+    return (hash >>> 16) % 7 - 3;
   };
-  const writePixel = (di, si, dither) => {
-    if (!dither) {
-      target[di] = src[si];
-      target[di + 1] = src[si + 1];
-      target[di + 2] = src[si + 2];
-      target[di + 3] = src[si + 3];
-    } else {
-      target[di] = Math.max(0, Math.min(255, src[si] + dither));
-      target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + dither));
-      target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + dither));
-      target[di + 3] = src[si + 3];
-    }
+  const writePixel = (di, si) => {
+    target[di] = src[si];
+    target[di + 1] = src[si + 1];
+    target[di + 2] = src[si + 2];
+    target[di + 3] = src[si + 3];
+  };
+  const writePadPixel = (di, si, gx, gy) => {
+    target[di] = Math.max(0, Math.min(255, src[si] + padNoise(gx, gy, 0)));
+    target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + padNoise(gx, gy, 1)));
+    target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + padNoise(gx, gy, 2)));
+    target[di + 3] = src[si + 3];
   };
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
@@ -1625,16 +1738,17 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
       const rawY = sy + (fy ? th - 1 - y : y);
-      const srcY = rawY < h ? rawY : reflect(rawY, h);
       const rowIsPad = rawY >= h;
+      const srcY = rowIsPad ? wrapPos(padShiftY + (rawY - h), h) : rawY;
+      const rowPhase = padRowPhase(srcY);
       const dstRow = (dy + y) * pw + dx;
       if (useWords && !fx && !rowIsPad) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
         for (let x = avail; x < tw; x++) {
           const rawX = sx + x;
-          const srcX = reflect(rawX, w);
-          writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4, padDither(rawX, rawY));
+          const srcX = wrapPos(padShiftX + rowPhase + (rawX - w), w);
+          writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
         }
       } else if (useWords && !rowIsPad && !(sx + tw > w)) {
         for (let x = 0; x < tw; x++) {
@@ -1643,19 +1757,26 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
       } else {
         for (let x = 0; x < tw; x++) {
           const rawX = sx + (fx ? tw - 1 - x : x);
-          const srcX = rawX < w ? rawX : reflect(rawX, w);
-          const isPad = rowIsPad || rawX >= w;
-          writePixel(
-            (dstRow + x) * 4,
-            (srcY * w + srcX) * 4,
-            isPad ? padDither(rawX, rawY) : 0
-          );
+          const colIsPad = rawX >= w;
+          const srcX = colIsPad ? wrapPos(padShiftX + rowPhase + (rawX - w), w) : rawX;
+          if (rowIsPad || colIsPad) {
+            writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
+          } else {
+            writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4);
+          }
         }
       }
     }
   }
   return target;
 }
+var DCT_COSINES_32x8 = (() => {
+  const table = new Float64Array(32 * 8);
+  for (let x = 0; x < 32; x++) {
+    for (let u = 0; u < 8; u++) table[x * 8 + u] = Math.cos((2 * x + 1) * u * Math.PI / (2 * 32));
+  }
+  return table;
+})();
 function perceptualFingerprint(rgba, w, h) {
   if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) {
     throw new RangeError("Archx: invalid image dimensions for perceptual fingerprint");
@@ -1668,27 +1789,37 @@ function perceptualFingerprint(rgba, w, h) {
   const SIZE = 32;
   const small = new Float64Array(SIZE * SIZE);
   const weights = new Float64Array(SIZE * SIZE);
+  const spansFor = (n) => {
+    const spans = new Array(n);
+    for (let s = 0; s < n; s++) {
+      const s0 = s * SIZE / n;
+      const s1 = (s + 1) * SIZE / n;
+      const start = Math.floor(s0);
+      const end = Math.min(SIZE - 1, Math.ceil(s1) - 1);
+      const wts = new Float64Array(end - start + 1);
+      for (let o = start; o <= end; o++) wts[o - start] = Math.min(s1, o + 1) - Math.max(s0, o);
+      spans[s] = { start, wts };
+    }
+    return spans;
+  };
+  const colSpans = spansFor(w);
+  const rowSpans = spansFor(h);
   for (let y = 0; y < h; y++) {
-    const y0 = y * SIZE / h;
-    const y1 = (y + 1) * SIZE / h;
-    const oyStart = Math.floor(y0);
-    const oyEnd = Math.min(SIZE - 1, Math.ceil(y1) - 1);
+    const rowSpan = rowSpans[y];
     const rowOffset = y * w * 4;
     for (let x = 0; x < w; x++) {
       const i = rowOffset + x * 4;
       const alpha = src[i + 3] / 255;
       const gray = (src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256 * alpha;
-      const x0 = x * SIZE / w;
-      const x1 = (x + 1) * SIZE / w;
-      const oxStart = Math.floor(x0);
-      const oxEnd = Math.min(SIZE - 1, Math.ceil(x1) - 1);
-      for (let oy = oyStart; oy <= oyEnd; oy++) {
-        const wy = Math.min(y1, oy + 1) - Math.max(y0, oy);
+      const colSpan = colSpans[x];
+      for (let oyi = 0; oyi < rowSpan.wts.length; oyi++) {
+        const wy = rowSpan.wts[oyi];
         if (wy <= 0) continue;
-        for (let ox = oxStart; ox <= oxEnd; ox++) {
-          const wx = Math.min(x1, ox + 1) - Math.max(x0, ox);
+        const rowBase = (rowSpan.start + oyi) * SIZE + colSpan.start;
+        for (let oxi = 0; oxi < colSpan.wts.length; oxi++) {
+          const wx = colSpan.wts[oxi];
           if (wx <= 0) continue;
-          const idx = oy * SIZE + ox;
+          const idx = rowBase + oxi;
           const weight = wx * wy;
           small[idx] += gray * weight;
           weights[idx] += weight;
@@ -1699,12 +1830,12 @@ function perceptualFingerprint(rgba, w, h) {
   for (let i = 0; i < small.length; i++) {
     small[i] = weights[i] > 0 ? small[i] / weights[i] : 0;
   }
-  const cosines = Array.from({ length: SIZE }, (_, x) => Array.from({ length: 8 }, (_2, u) => Math.cos((2 * x + 1) * u * Math.PI / (2 * SIZE))));
+  const cosines = DCT_COSINES_32x8;
   const rowDct = new Float64Array(SIZE * 8);
   for (let y = 0; y < SIZE; y++) {
     for (let u = 0; u < 8; u++) {
       let sum = 0;
-      for (let x = 0; x < SIZE; x++) sum += small[y * SIZE + x] * cosines[x][u];
+      for (let x = 0; x < SIZE; x++) sum += small[y * SIZE + x] * cosines[x * 8 + u];
       rowDct[y * 8 + u] = sum;
     }
   }
@@ -1712,7 +1843,7 @@ function perceptualFingerprint(rgba, w, h) {
   for (let v = 0; v < 8; v++) {
     for (let u = 0; u < 8; u++) {
       let sum = 0;
-      for (let y = 0; y < SIZE; y++) sum += rowDct[y * 8 + u] * cosines[y][v];
+      for (let y = 0; y < SIZE; y++) sum += rowDct[y * 8 + u] * cosines[y * 8 + v];
       coefficients[v * 8 + u] = sum;
     }
   }
@@ -1754,7 +1885,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.12.0";
+var VERSION = "1.13.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1923,6 +2054,35 @@ function isNativeFn(fn) {
     return false;
   }
 }
+var AUDIT_WEBGL_METHODS = [
+  "texImage2D",
+  "readPixels",
+  "drawArrays",
+  "drawElements",
+  "createTexture",
+  "bindTexture",
+  "bindFramebuffer",
+  "createFramebuffer",
+  "framebufferTexture2D",
+  "createShader",
+  "shaderSource",
+  "compileShader",
+  "createProgram",
+  "linkProgram",
+  "useProgram",
+  "getContextAttributes"
+];
+var readerProtoCache;
+function currentReaderRead() {
+  try {
+    if (readerProtoCache === void 0) {
+      readerProtoCache = Object.getPrototypeOf(new ReadableStream().getReader());
+    }
+    return readerProtoCache?.read ?? null;
+  } catch {
+    return null;
+  }
+}
 function auditIntegrity() {
   const g = globalThis;
   const current = [
@@ -1938,13 +2098,7 @@ function auditIntegrity() {
     ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
     ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
     ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
-    ["ReadableStreamDefaultReader.prototype.read", (() => {
-      try {
-        return Object.getPrototypeOf(new ReadableStream().getReader()).read;
-      } catch {
-        return null;
-      }
-    })(), NATIVES.streamReaderRead],
+    ["ReadableStreamDefaultReader.prototype.read", currentReaderRead(), NATIVES.streamReaderRead],
     ["Response.prototype.text", typeof Response !== "undefined" ? Response.prototype.text : null, NATIVES.responseText],
     ["TextDecoder.prototype.decode", typeof TextDecoder !== "undefined" ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
     ["TextEncoder.prototype.encode", typeof TextEncoder !== "undefined" ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
@@ -1963,29 +2117,11 @@ function auditIntegrity() {
       }
     })(), NATIVES.getRandomValues]
   ];
-  const webglMethodNames = [
-    "texImage2D",
-    "readPixels",
-    "drawArrays",
-    "drawElements",
-    "createTexture",
-    "bindTexture",
-    "bindFramebuffer",
-    "createFramebuffer",
-    "framebufferTexture2D",
-    "createShader",
-    "shaderSource",
-    "compileShader",
-    "createProgram",
-    "linkProgram",
-    "useProgram",
-    "getContextAttributes"
-  ];
   for (const [label, ctor, capturedMap] of [
     ["WebGLRenderingContext", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext : null, NATIVES.webgl1],
     ["WebGL2RenderingContext", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext : null, NATIVES.webgl2]
   ]) {
-    for (const method of webglMethodNames) {
+    for (const method of AUDIT_WEBGL_METHODS) {
       current.push([
         `${label}.prototype.${method}`,
         ctor ? ctor.prototype[method] : null,
@@ -3902,19 +4038,48 @@ function scrambleCanvasLocally(source, grid, key) {
   const cctx = getNativeContext(cleanPadded, "2d");
   setSmoothing(cctx, false);
   nativeDrawImage(cctx, source, 0, 0);
-  if (pw > w) {
+  const shiftX = w > 1 ? (w >> 1) + plan.order[0] % Math.max(1, w >> 1) : 0;
+  const shiftY = h > 1 ? (h >> 1) + plan.order[plan.count - 1] % Math.max(1, h >> 1) : 0;
+  const drawPadStrip = (draw) => {
     cctx.save();
-    cctx.translate(2 * w, 0);
-    cctx.scale(-1, 1);
-    nativeDrawImage(cctx, source, 0, 0);
+    cctx.fillStyle = "#000";
+    cctx.globalAlpha = 1;
+    draw(true);
+    cctx.globalAlpha = 0.96;
+    draw(false);
     cctx.restore();
+  };
+  if (pw > w) {
+    drawPadStrip((fill) => {
+      if (fill) {
+        cctx.fillRect(w, 0, pw - w, h);
+        return;
+      }
+      let dx = w;
+      let sx = shiftX;
+      while (dx < pw) {
+        const seg = Math.min(w - sx, pw - dx);
+        nativeDrawImage(cctx, source, sx, 0, seg, h, dx, 0, seg, h);
+        dx += seg;
+        sx = 0;
+      }
+    });
   }
   if (ph > h) {
-    cctx.save();
-    cctx.translate(0, 2 * h);
-    cctx.scale(1, -1);
-    nativeDrawImage(cctx, cleanPadded, 0, 0);
-    cctx.restore();
+    drawPadStrip((fill) => {
+      if (fill) {
+        cctx.fillRect(0, h, pw, ph - h);
+        return;
+      }
+      let dy = h;
+      let sy = shiftY;
+      while (dy < ph) {
+        const seg = Math.min(h - sy, ph - dy);
+        nativeDrawImage(cctx, cleanPadded, 0, sy, pw, seg, 0, dy, pw, seg);
+        dy += seg;
+        sy = 0;
+      }
+    });
   }
   const scrambled = makeCanvas();
   scrambled.width = pw;
@@ -5125,9 +5290,12 @@ var ProtectedImage = class {
           ctx.rotate(-Math.PI / 7);
           ctx.textAlign = "center";
           const stepY = fs * 4.2;
+          const stepX = Math.max(fs * 3, ctx.measureText(text).width + fs * 2.2);
           const diag = Math.hypot(w, h);
-          for (let y = -diag / 2; y < diag / 2; y += stepY) {
-            ctx.fillText(text, 0, y);
+          let row = 0;
+          for (let y = -diag / 2; y < diag / 2; y += stepY, row++) {
+            const x0 = row % 2 * (stepX / 2) - diag / 2;
+            for (let x = x0; x < diag / 2 + stepX; x += stepX) ctx.fillText(text, x, y);
           }
           ctx.restore();
           ctx.save();
@@ -5724,7 +5892,12 @@ var ProtectedImage = class {
           ctx.translate(c.width / 2, c.height / 2);
           ctx.rotate(-Math.PI / 7);
           const diag = Math.hypot(c.width, c.height);
-          for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) ctx.fillText(text, 0, y);
+          const stepX = Math.max(fs * 3, ctx.measureText(text).width + fs * 2.2);
+          let row = 0;
+          for (let y = -diag / 2; y < diag / 2; y += fs * 4.2, row++) {
+            const x0 = row % 2 * (stepX / 2) - diag / 2;
+            for (let x = x0; x < diag / 2 + stepX; x += stepX) ctx.fillText(text, x, y);
+          }
           ctx.restore();
         }
         if (cfg.corner !== false) {
@@ -5798,12 +5971,6 @@ var ProtectedImage = class {
           oy = (1 - sy) / 2;
         }
       } else if (__privateGet(this, _options).fit === "contain") {
-        if (srcRatio > dstRatio) {
-          sy = srcRatio / dstRatio;
-          oy = -(sy - 1) / 2;
-          sy = 1 / sy;
-          oy = (1 - sy) / 2;
-        }
         if (srcRatio > dstRatio) {
           const s = srcRatio / dstRatio;
           sy = s;
@@ -7243,6 +7410,7 @@ export {
   hashSeed,
   hmacSha256Bytes,
   isArchxContainer,
+  legacyStegoFingerprint,
   listPlugins,
   mulberry32,
   normalizePerceptualFingerprint,

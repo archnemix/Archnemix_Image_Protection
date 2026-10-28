@@ -36,7 +36,9 @@ declare const bytes: Uint8Array;
 const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
-const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true });
+const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true, layoutVersion: 'auto' });
+const layoutVintage: 0 | 1 | 2 = detection.layoutVersion;
+void layoutVintage;
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;
 const tagScheme: 'mac' | 'crc' | null = detection.tagScheme;
@@ -49,7 +51,7 @@ const mac: Uint8Array = hmacSha256Bytes(bytes, digest);
 void mac;
 useWebCrypto(null);
 useWebCrypto({ subtle: {}, getRandomValues: (a: Uint8Array) => a });
-const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key: 'k', legacyCode: true });
+const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key: 'k', legacyCode: true, layoutVersion: 1 });
 void marked;
 
 // --- server ---

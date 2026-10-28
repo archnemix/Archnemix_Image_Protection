@@ -108,17 +108,28 @@ export function encryptPayload(plainBytes: ArchxBytes, keyBase64: string):
 export function decryptPayload(cipherBytes: ArchxBytes, keyBase64: string, ivBase64: string):
   Promise<Uint8Array>;
 
-export function forensicBlockSigns(seed: string, count: number): Int8Array;
+export function forensicBlockSigns(seed: string, count: number, signsVersion?: 1 | 2): Int8Array;
 export function applyForensicBlocks(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, seed: string,
-  options?: { blockSize?: number; delta?: number },
+  options?: {
+    blockSize?: number;
+    delta?: number;
+    /**
+     * Sign-sequence derivation: 2 (default, 128-bit SHA-256 seed) or 1
+     * (legacy 32-bit seed, for reproducing pre-v1.13 marks). Scoring
+     * always dual-reads both vintages.
+     */
+    signsVersion?: 1 | 2;
+  },
 ): Uint8Array;
 export function forensicScore(
   candidate: Uint8Array | Uint8ClampedArray, reference: Uint8Array | Uint8ClampedArray,
   w: number, h: number, seed: string, options?: { blockSize?: number },
-): { score: number; matched: number; total: number };
+): { score: number; matched: number; total: number; signsVersion: 1 | 2 };
 
 export function stegoFingerprint(value: string): string;
+/** Pre-1.13 payload->fingerprint derivation, for identity lookups against older marks. */
+export function legacyStegoFingerprint(value: string): string;
 
 export interface StegoEmbedOptions {
   key?: string;
@@ -135,6 +146,12 @@ export interface StegoEmbedOptions {
    * validate under a foreign fingerprint.
    */
   legacyCode?: boolean;
+  /**
+   * Cell-layout derivation: 2 (default, 128-bit SHA-256 seed) or 1
+   * (legacy 32-bit seed, for reproducing pre-v1.13 marks). Detectors
+   * dual-read both vintages by default.
+   */
+  layoutVersion?: 1 | 2;
 }
 export function embedStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, payload: string,
@@ -150,6 +167,12 @@ export interface StegoDetectOptions {
   searchGeometry?: boolean;
   /** Also probe a horizontally flipped copy of the suspect (default true, all profiles). */
   searchMirror?: boolean;
+  /**
+   * Restrict detection to one cell-layout vintage (1 = legacy 32-bit
+   * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
+   * `layoutVersion` reports which vintage matched.
+   */
+  layoutVersion?: 1 | 2 | 'auto';
 }
 export interface StegoDetection {
   found: boolean;
@@ -162,6 +185,8 @@ export interface StegoDetection {
    * no tag validated.
    */
   tagScheme: 'mac' | 'crc' | null;
+  /** Cell-layout vintage that matched (0 when neither layout was concrete). */
+  layoutVersion: 0 | 1 | 2;
   observedBits: number;
   minBitRepetitions: number;
   /** Acceptance tag validated (MAC-16 for codeword v2, keyed CRC for legacy). Name kept for compatibility; see `tagScheme`. */

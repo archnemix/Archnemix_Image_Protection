@@ -3,6 +3,79 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.13.0] — Unreleased
+
+Third external adversarial-review response (claim-by-claim verification
+in `docs/RESEARCH.md` §2.21). Seven bug groups were raised against
+1.12.0; all confirmed items are fixed with regression tests, one claim
+did not reproduce, and the seven optimization proposals were decided on
+measurements (three implemented, three rejected/deferred with numbers,
+one documented as a knob).
+
+### Security
+
+- **Per-viewer visible watermarks can no longer leak across viewers.**
+  The shared derivative-base cache held a watermarked base under a
+  viewer-independent key; watermarks are now applied only in the
+  per-token finishing stage and cached bases are always clean.
+- **Canonical client-IP identity.** IPv4-mapped/translated IPv6 forms
+  and alternate IPv6 spellings collapse to one identity for token IP
+  binding, quotas, rate limits, and abuse detection — re-spelling an
+  address no longer mints a fresh budget.
+- **128-bit stego layout and forensic sign seeds.** StegoMark cell
+  layouts (`layoutVersion: 2`) and forensic block signs
+  (`signsVersion: 2`) now derive from 128-bit SHA-256 seeds instead of
+  enumerable 32-bit hashes. Detectors/scoring dual-read v1 marks
+  bit-exactly and report the matched vintage. Identity→fingerprint
+  derivation for non-hex payloads moved to SHA-256;
+  `legacyStegoFingerprint()` preserves pre-1.13 lookups, the detection
+  CLI accepts either derivation for `--expect`, and issued registries
+  plus 12-hex payloads are unaffected.
+- **Robust decoder accepts only observed tag bits.** Syndrome repair
+  no longer synthesizes acceptance-tag bytes when ranking candidates
+  (a latent flaw that could mislabel legacy CRC marks as `mac` and
+  starve the CRC fallback); tag-region agreement must be observed
+  within a 2-flip vote-error allowance.
+- **Keyed shifted-wrap scramble padding.** Mirror padding's
+  palindrome seam (an oracle for keyless tile solvers) is replaced by
+  a plan-keyed toroidal wrap of interior texture plus keyed noise, in
+  both the core fused pass and the client's local canvas scrambler.
+  Displayed pixels still round-trip byte-exactly; derivative cache
+  namespace bumped to `v4`.
+- **Visible watermarks tile on both axes** (server SVG, client 2D
+  bake, client WebGL texture): measured-width steps with alternating
+  row offsets, so cropping no longer deletes attribution by bands.
+- **Tiered distinct-IP abuse detection**, quota/abuse accounting after
+  host authorization callbacks, one shared RAM budget for master+base
+  caches, any-of-keyring shared-cache tags, cache-clearing `close()`,
+  and most-restrictive-wins Sharp loader policy (later stricter
+  configurations re-block loaders).
+
+### Performance
+
+- **Detector rewrite (Opt A).** Integral-image (summed-area) cell
+  statistics replace strided sampling — exact full-population means,
+  strict-superset recovery in A/B testing (4 extra weak-mark
+  recoveries, 0 losses, 0 false positives) — plus scratch-buffer
+  reuse, an arithmetic repair pre-gate, outcome-identical depth caps,
+  and a marker prefilter before MAC evaluation. Unmarked
+  auto+geometry search: 32s → 6.0s; 90%-crop recovery: 5.3s → 1.5s
+  (800px reference). Geometry scale candidates are also deduplicated
+  at 0.001 precision instead of 0.1.
+- **Perceptual fingerprint ~1.45× faster, bit-identical output**
+  (precomputed overlap spans + static DCT basis).
+- Integrity audit no longer allocates a stream per call; dead
+  contain-fit math removed from the WebGL presenter.
+
+### Notes
+
+- Cascading builder resize and a native-HMAC backend were measured and
+  rejected/deferred with numbers in §2.21; WebP effort stays 4 by
+  default with `processing.webpEffort: 2` documented for CPU-bound
+  fleets (−24% encode time, +1.7% bytes).
+- 84 Node tests (4 new), 108 Chromium checks, fuzz + type suites in
+  `npm run verify`.
+
 ## [1.12.0] — Unreleased
 
 Second external adversarial-review response (claim-by-claim verification in

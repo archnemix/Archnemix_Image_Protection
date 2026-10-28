@@ -679,16 +679,23 @@ export async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
  * photo will weaken or destroy it. The visible watermark remains the
  * primary deterrent; this is the quiet second witness.
  */
-export function forensicBlockSigns(seed, count) {
-  const rand = mulberry32(hashSeed(String(seed) + '::archx-forensic'));
+// Sign derivation v2 (default since 1.13) seeds through cyrb128+sfc32
+// (128-bit); v1 reproduces the pre-1.13 mulberry32(hashSeed(...>>>0))
+// sequence whose 32-bit state truncated any seed's entropy. Verifiers
+// (forensicScore) score against BOTH derivations, so marks embedded
+// before 1.13 keep verifying.
+export function forensicBlockSigns(seed, count, version = 2) {
+  const rand = version === 1
+    ? mulberry32(hashSeed(String(seed) + '::archx-forensic'))
+    : sfc32(...cyrb128(String(seed) + '::archx-forensic'));
   return Array.from({ length: count }, () => (rand() < 0.5 ? -1 : 1));
 }
 
-export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2 } = {}) {
+export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2, signsVersion = 2 } = {}) {
   const bs = Math.max(8, blockSize | 0);
   const bx = Math.ceil(w / bs);
   const by = Math.ceil(h / bs);
-  const signs = forensicBlockSigns(seed, bx * by);
+  const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : 2);
   const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
@@ -719,8 +726,11 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
   const bs = Math.max(8, blockSize | 0);
   const bx = Math.ceil(w / bs);
   const by = Math.ceil(h / bs);
-  const signs = forensicBlockSigns(seed, bx * by);
-  let matched = 0, total = 0, signedSum = 0;
+  // Per-block mean signs are computed once and scored against both sign
+  // derivations (v2 default since 1.13, v1 for pre-1.13 marks); the
+  // stronger correlation wins and reports which derivation matched.
+  const blockSigns = new Int8Array(bx * by); // sign+2 encoding; 0 = not computed
+  let total = 0;
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
       const x0 = bxi * bs, y0 = byi * bs;
@@ -735,13 +745,24 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
         }
       }
       if (!n) continue;
-      const mean = diff / n;
+      blockSigns[byi * bx + bxi] = Math.sign(diff / n) + 2;
       total++;
-      signedSum += Math.sign(mean) === signs[byi * bx + bxi] ? 1 : -1;
-      if (Math.sign(mean) === signs[byi * bx + bxi]) matched++;
     }
   }
-  return { score: total ? signedSum / total : 0, matched, total };
+  let best = { score: 0, matched: 0, total, signsVersion: 2 };
+  for (const version of [2, 1]) {
+    const signs = forensicBlockSigns(seed, bx * by, version);
+    let matched = 0, signedSum = 0;
+    for (let i = 0; i < blockSigns.length; i++) {
+      if (!blockSigns[i]) continue;
+      const hit = blockSigns[i] - 2 === signs[i];
+      signedSum += hit ? 1 : -1;
+      if (hit) matched++;
+    }
+    const score = total ? signedSum / total : 0;
+    if (version === 2 || score > best.score) best = { score, matched, total, signsVersion: version };
+  }
+  return best;
 }
 
 /* ------------------------------------------------------------------ */
@@ -773,6 +794,26 @@ export function forensicScore(candidate, reference, w, h, seed, { blockSize = 32
  * remove it. Treat a positive decode as evidence, not as DRM.
  */
 export function stegoFingerprint(value) {
+  const s = String(value ?? '');
+  if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
+  // SHA-256 (first 6 bytes), not the cyrb53 pair used before 1.13: the
+  // payload->ID map gets full avalanche, so near-identical payloads no
+  // longer land in correlated ID neighborhoods. Only NEW embeds see new
+  // IDs for non-hex payloads — bits already in pixels are extracted
+  // as-is at detection, so issued registries stay valid.
+  const digest = sha256Bytes(utf8Encode('archx-stego-fp-v2:' + s));
+  let hex = '';
+  for (let i = 0; i < 6; i++) hex += digest[i].toString(16).padStart(2, '0');
+  return hex;
+}
+
+/**
+ * Pre-1.13 payload→fingerprint derivation (paired cyrb53 hashes), kept
+ * so identity-string lookups against marks embedded before 1.13 still
+ * resolve. Registries that stored the issued fingerprint never need
+ * this; 12-hex payloads pass through identically in both derivations.
+ */
+export function legacyStegoFingerprint(value) {
   const s = String(value ?? '');
   if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
   const a = hashSeed('archx-stego:' + s, 0x51ab);
@@ -843,6 +884,9 @@ function robustLegacyKeyedCrc(first8, key) {
   return stegoCrc16(keyed);
 }
 
+// Trailing sync marker of the robust codeword, as bits (bytes 10-11).
+const ROBUST_MARKER_BITS = stegoBytesToBits(new Uint8Array([0xa5, 0x5a]));
+
 function robustStegoCodeBits(fingerprint, key, tag = 'mac') {
   const payload = new Uint8Array(6);
   for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
@@ -907,16 +951,44 @@ function repairRobustViaFirstCrc(scores, hard, key, tag = 'mac') {
   };
   const target = syndromeOf(first);
   const buildCanonical = (correctedFirst) => {
-    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
-    const canonical = robustStegoCodeBits(fingerprint, key, tag);
+    // Prefilter before paying for the acceptance MAC: the canonical
+    // codeword's first 64 bits ARE correctedFirst (syndrome-zero), and
+    // the trailing marker is a constant — so most junk syndrome
+    // candidates can be rejected on marker disagreement alone, without
+    // an HMAC each (tens of thousands on unmarked geometry searches).
     let flips = 0;
+    let markerFlips = 0;
     let softCost = 0;
-    for (let i = 0; i < 96; i++) {
-      if (canonical[i] === hard[i]) continue;
+    for (let i = 0; i < 64; i++) {
+      if (correctedFirst[i] === hard[i]) continue;
       flips++;
       softCost += Math.abs(scores[i] || 0);
     }
-    return flips <= 8 ? { bits: canonical, flips, softCost } : null;
+    for (let j = 0; j < 16; j++) {
+      if (ROBUST_MARKER_BITS[j] === hard[80 + j]) continue;
+      markerFlips++;
+      flips++;
+      softCost += Math.abs(scores[80 + j] || 0);
+    }
+    if (markerFlips > 2 || flips > 8) return null;
+    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
+    const canonical = robustStegoCodeBits(fingerprint, key, tag);
+    let tagFlips = markerFlips;
+    for (let i = 64; i < 80; i++) {
+      if (canonical[i] === hard[i]) continue;
+      flips++;
+      tagFlips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    // The acceptance tag must be OBSERVED, not synthesized: bits 64..95
+    // (tag + marker) may carry a couple of vote errors, but regenerating
+    // them wholesale would let a LEGACY (CRC2) mark be claimed by the
+    // 'mac' pass — its CRC2 differs from the synthesized MAC in ~8 bits,
+    // which the old flips<=8 budget cheerfully paid, mislabeling the
+    // scheme and short-circuiting the CRC fallback. Candidates whose
+    // tag needs >2 flips fall through to the exhaustive search, which
+    // pays for every flipped tag bit out of the gate-capped budget.
+    return flips <= 8 && tagFlips <= 2 ? { bits: canonical, flips, softCost } : null;
   };
   if (target === 0) return buildCanonical(first);
 
@@ -1099,8 +1171,20 @@ function correctStegoBits(bits, reliability, key, maxDepth = 3) {
 
 const STEGO_ROW_SEGMENTS = 4;
 
-function stegoLayout(cellCount, key) {
-  const rand = mulberry32(hashSeed(String(key) + '::archx-stego-layout'));
+// Layout seed v2 (1.13+): the cell permutation/polarity PRNG is seeded
+// through cyrb128+sfc32 (128-bit state). The pre-1.13 layouts seeded
+// mulberry32 with hashSeed(...) >>> 0, truncating every stego key —
+// however strong — to a 2^32 layout space (GPU-brute-forceable from a
+// known clean/marked pair). Version 1 below reproduces those sequences
+// bit-exactly so existing marks keep detecting; detection tries v2
+// first, then v1 ("auto").
+function layoutRand(seedString, version, legacyHashSeedArg) {
+  if (version === 1) return mulberry32(hashSeed(seedString, legacyHashSeedArg));
+  return sfc32(...cyrb128(seedString));
+}
+
+function stegoLayout(cellCount, key, version = 2) {
+  const rand = layoutRand(String(key) + '::archx-stego-layout', version);
   const order = Array.from({ length: cellCount }, (_, i) => i);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -1124,11 +1208,11 @@ function stegoGrid(w, h, gridX, gridY) {
   return { gx, gy };
 }
 
-function robustStegoLayout(cellCount, key) {
+function robustStegoLayout(cellCount, key, version = 2) {
   const order = Array.from({ length: cellCount }, (_, i) => i);
   const polarity = new Int8Array(cellCount);
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
-  const rand = mulberry32(hashSeed('archx-stego-robust-layout:' + String(key ?? ''), 0x51ab));
+  const rand = layoutRand('archx-stego-robust-layout:' + String(key ?? ''), version, 0x51ab);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
@@ -1147,6 +1231,9 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
   // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
   legacyCode = false,
+  // Layout seed space: 2 = 128-bit (default since 1.13); 1 reproduces
+  // the pre-1.13 32-bit-truncated layout for compatibility testing.
+  layoutVersion = 2,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
@@ -1162,8 +1249,8 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust
-    ? robustStegoLayout(cellCount, key)
-    : stegoLayout(cellCount, key);
+    ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2)
+    : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : 2);
   // The server pipeline owns a disposable Sharp buffer, so it may opt out of
   // this full-frame copy. Cell statistics are computed before that cell is
   // written, which makes the in-place path byte-for-byte equivalent.
@@ -1242,15 +1329,31 @@ export function detectStegoFingerprint(rgba, w, h, {
   // extra bounded pass on flipped pixels, only when the forward pass
   // found nothing); set false to disable.
   searchMirror = true,
+  // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
+  // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
+  // (halves worst-case cost on unmarked suspects).
+  layoutVersion = 'auto',
   _mirrorProbe = false,
+  _layoutVersion = 0,
 } = {}) {
+  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2
+    ? _layoutVersion
+    : (layoutVersion === 1 || layoutVersion === 2 ? layoutVersion : 0);
+  if (!concreteLayout) {
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, _mirrorProbe };
+    const v2 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 2 });
+    if (v2?.found) return v2;
+    const v1 = detectStegoFingerprint(rgba, w, h, { ...shared, _layoutVersion: 1 });
+    if (v1?.found) return v1;
+    return (v1?.confidence ?? 0) > (v2?.confidence ?? 0) ? v1 : v2;
+  }
   if (profile === 'auto') {
     const standard = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
     });
     const initial = robust?.found && !standard?.found
       ? robust
@@ -1259,11 +1362,11 @@ export function detectStegoFingerprint(rgba, w, h, {
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
     if (!searchGeometry || initial?.found) return initial;
     const standardGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
@@ -1277,14 +1380,14 @@ export function detectStegoFingerprint(rgba, w, h, {
         for (const candidateProfile of ['standard', 'robust']) {
           const fast = detectStegoFingerprint(flipped, w, h, {
             key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: false, searchMirror: false, _mirrorProbe: true,
+            searchGeometry: false, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
           });
           if (fast?.found) return { ...fast, mirrored: true };
         }
         for (const candidateProfile of ['standard', 'robust']) {
           const mirrored = detectStegoFingerprint(flipped, w, h, {
             key, gridX, gridY, profile: candidateProfile, searchOffsets,
-            searchGeometry: true, searchMirror: false, _mirrorProbe: true,
+            searchGeometry: true, searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true };
         }
@@ -1306,18 +1409,55 @@ export function detectStegoFingerprint(rgba, w, h, {
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust
-    ? robustStegoLayout(cellCount, key)
-    : stegoLayout(cellCount, key);
+    ? robustStegoLayout(cellCount, key, concreteLayout)
+    : stegoLayout(cellCount, key, concreteLayout);
   const cw = w / gx, ch = h / gy;
+  // One luma plane for every probe below: geometry search evaluates
+  // thousands of candidates over the same pixels, and recomputing
+  // (r*77+g*150+b*29)>>8 per sample was ~30% of detector wall time.
+  const luma = new Uint8Array(w * h);
+  for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
+    luma[p] = (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
+  }
+  // Summed-area table over the luma plane: every cell band/segment mean
+  // becomes four array reads instead of a strided pixel walk shared by
+  // thousands of geometry probes. Full-population means (the previous
+  // estimator sampled on a stride) — same gates, lower estimator noise.
+  const integral = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0;
+    const srcRow = y * w;
+    const outRow = (y + 1) * (w + 1);
+    const prevRow = y * (w + 1);
+    for (let x = 0; x < w; x++) {
+      rowSum += luma[srcRow + x];
+      integral[outRow + x + 1] = integral[prevRow + x + 1] + rowSum;
+    }
+  }
+  const rectSum = (rx0, ry0, rx1, ry1) =>
+    integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] -
+    integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
 
+  // Reused scratch across this call's (synchronous) evaluate() probes:
+  // geometry search runs thousands of candidates, and allocating the
+  // vote/sum typed arrays per cell/evaluate was pure GC churn.
+  const _sums = new Float64Array(rowSegments * columnBands);
+  const _counts = new Uint32Array(rowSegments * columnBands);
+  const _bitScores = new Float64Array(codeLength);
+  const _bitCounts = new Uint16Array(codeLength);
+  const _votedBits = new Uint8Array(codeLength);
+  const _reliability = new Float64Array(codeLength);
+  const _voteScores = new Float64Array(codeLength);
+  const _groups = Array.from({ length: codeLength }, () => []);
+  const _segmentResponses = [];
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
     const cellW0 = cw * scaleX;
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
     const oy = originY ?? fy * ch;
-    const bitScores = new Float64Array(codeLength);
-    const bitCounts = new Uint16Array(codeLength);
+    const bitScores = _bitScores.fill(0);
+    const bitCounts = _bitCounts.fill(0);
     const cellScores = [];
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
@@ -1331,22 +1471,21 @@ export function detectStegoFingerprint(rgba, w, h, {
         const x0 = Math.max(0, Math.round(rawX0));
         const x1 = Math.min(w, Math.round(rawX1));
         if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
-        const sums = new Float64Array(rowSegments * columnBands);
-        const counts = new Uint32Array(rowSegments * columnBands);
+        const sums = _sums.fill(0);
+        const counts = _counts.fill(0);
         const cellW = x1 - x0;
         const cellH = y1 - y0;
-        const step = Math.max(1, Math.floor(Math.min(cellW, cellH) / 12));
-        for (let y = y0; y < y1; y += step) {
-          const segment = Math.max(0, Math.min(
-            rowSegments - 1,
-            Math.floor(((y - rawY0) * rowSegments) / cellH0),
-          ));
-          let i = (y * w + x0) * 4;
-          for (let x = x0; x < x1; x += step, i += step * 4) {
-            const band = Math.max(0, Math.min(columnBands - 1, Math.floor(((x - rawX0) * columnBands) / cellW0)));
+        for (let segment = 0; segment < rowSegments; segment++) {
+          const ry0 = Math.max(y0, Math.round(rawY0 + (segment * cellH0) / rowSegments));
+          const ry1 = Math.min(y1, Math.round(rawY0 + ((segment + 1) * cellH0) / rowSegments));
+          if (ry1 <= ry0) continue;
+          for (let band = 0; band < columnBands; band++) {
+            const rx0 = Math.max(x0, Math.round(rawX0 + (band * cellW0) / columnBands));
+            const rx1 = Math.min(x1, Math.round(rawX0 + ((band + 1) * cellW0) / columnBands));
+            if (rx1 <= rx0) continue;
             const idx = segment * columnBands + band;
-            sums[idx] += (src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29) >> 8;
-            counts[idx]++;
+            sums[idx] = rectSum(rx0, ry0, rx1, ry1);
+            counts[idx] = (rx1 - rx0) * (ry1 - ry0);
           }
         }
         // Third-difference responds to +−+− alternation and cancels linear /
@@ -1355,7 +1494,7 @@ export function detectStegoFingerprint(rgba, w, h, {
         let segmentScoreSum = 0;
         let segmentWeightSum = 0;
         let validSegments = 0;
-        const robustSegmentResponses = robust ? [] : null;
+        const robustSegmentResponses = robust ? (_segmentResponses.length = 0, _segmentResponses) : null;
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < rowSegments; segment++) {
           const base = segment * columnBands;
@@ -1399,15 +1538,16 @@ export function detectStegoFingerprint(rgba, w, h, {
         cellScores.push({ bitIndex, score });
       }
     }
-    const votedBits = new Uint8Array(codeLength);
-    const reliability = new Float64Array(codeLength);
-    const voteScores = new Float64Array(codeLength);
+    const votedBits = _votedBits.fill(0);
+    const reliability = _reliability.fill(0);
+    const voteScores = _voteScores.fill(0);
     if (robust) {
       // Robust repetitions are fewer than in the standard 64-bit layout.
       // Median voting prevents one hard image edge (already clipped to ±12)
       // from outvoting the other repetitions of the same code bit; the
       // standard profile retains its original summed-vote decoder exactly.
-      const groups = Array.from({ length: codeLength }, () => []);
+      const groups = _groups;
+      for (const group of groups) group.length = 0;
       for (const { bitIndex, score } of cellScores) groups[bitIndex].push(score);
       for (let i = 0; i < codeLength; i++) {
         const values = groups[i].sort((a, b) => a - b);
@@ -1434,10 +1574,44 @@ export function detectStegoFingerprint(rgba, w, h, {
     const preAgreeing = cellScores.filter(({ bitIndex, score }) => (score >= 0) === !!votedBits[bitIndex]).length;
     const preAgreement = cellScores.length ? preAgreeing / cellScores.length : 0;
     const standardDepth = meanAbsPre >= 2.0 && preAgreement >= 0.82 ? 3 : 1;
-    const corrected = robust
+    // Repair pre-gate: the flip search (CRC syndrome / MAC verification)
+    // is most of detector wall time on hopeless probes, and several
+    // acceptance inputs cannot change under repair — meanAbs and bit
+    // coverage are vote-level facts, and flipping at most K bits can
+    // raise agreement by at most the K largest per-bit disagree counts.
+    // When even that bound misses the found-gates, the candidate is
+    // rejected without running the search (tag fields then report
+    // "not evaluated": corrections -1, tagScheme null).
+    const minBitCountPre = Math.min(...bitCounts);
+    const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    const coverageOkPre = robust
+      ? observedBitsPre >= 88 && cellScores.length >= 128
+      : minBitCountPre >= 2 && cellScores.length >= codeLength * 3;
+    let agreementBound = preAgreement;
+    if (cellScores.length) {
+      const disagreeByBit = new Uint16Array(codeLength);
+      for (const { bitIndex, score } of cellScores) {
+        if ((score >= 0) !== !!votedBits[bitIndex]) disagreeByBit[bitIndex]++;
+      }
+      const gains = [...disagreeByBit].sort((a, b) => b - a);
+      const maxFlips = robust ? 5 : standardDepth;
+      let gainSum = 0;
+      for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
+      agreementBound = (preAgreeing + gainSum) / cellScores.length;
+    }
+    const repairable = meanAbsPre >= 1.2 && cellScores.length >= 96 && coverageOkPre && agreementBound >= 0.72;
+    const corrected = !repairable
+      ? { bits: votedBits, corrections: -1, tagScheme: null }
+      : robust
       ? (() => {
-          const repaired = repairRobustStegoBits(reliability, votedBits, key, 5, 'mac') ||
-            repairRobustStegoBits(reliability, votedBits, key, 5, 'crc');
+          // Depth caps that cannot change outcomes: 4-5 corrections are
+          // only acceptable for MAC candidates with meanAbs>=3.5 and
+          // agreement>=0.95 (robustCorrectionOk below), and never for
+          // legacy CRC candidates — searching deeper in other regimes
+          // only manufactures rejects at full combinatorial cost.
+          const macDepth = meanAbsPre >= 3.5 && agreementBound >= 0.95 ? 5 : 3;
+          const repaired = repairRobustStegoBits(reliability, votedBits, key, macDepth, 'mac') ||
+            repairRobustStegoBits(reliability, votedBits, key, 3, 'crc');
           return repaired
             ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme }
             : { bits: votedBits, corrections: -1, tagScheme: null };
@@ -1499,6 +1673,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       fingerprint,
       profile: effectiveProfile,
       tagScheme: corrected.tagScheme ?? null,
+      layoutVersion: concreteLayout,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
@@ -1552,7 +1727,11 @@ export function detectStegoFingerprint(rgba, w, h, {
   // manual deskew/crop to the displayed rectangle before detection.
   if (searchGeometry && !best?.found) {
     const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.25];
-    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 10) / 10))];
+    // 3-decimal precision: rounding to 1 decimal (pre-1.13) silently
+    // rewrote half the table (0.85->0.9, 1/0.9->1.1, ...), and at
+    // 1.1 vs the true 1.111 for an unresized 90% center crop the cell
+    // grid drifts ~10px across the frame — enough to lose the mark.
+    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 1000) / 1000))];
     const originRange = (span, extent) => {
       const min = Math.min(0, extent - span);
       const max = Math.max(0, extent - span);
@@ -1687,7 +1866,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const mirrored = detectStegoFingerprint(flipPixelsHorizontal(src, w, h), w, h, {
           key, gridX, gridY, profile, searchOffsets, searchGeometry,
-          searchMirror: false, _mirrorProbe: true,
+          searchMirror: false, _mirrorProbe: true, _layoutVersion: concreteLayout,
         });
         if (mirrored?.found) return { ...mirrored, mirrored: true };
       }
@@ -1806,35 +1985,48 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  // Padding uses interior REFLECTION (mirror across the edge) plus a
-  // deterministic +/-1 dither on pad-derived pixels. Black padding (pre-
-  // v1.11) identified every edge tile + flip; edge replication (v1.11)
-  // still leaked them via zero-gradient duplicated rows. Reflected
-  // texture continues the natural gradient, and the dither destroys any
-  // remaining exact-duplicate signature. Display is unaffected either
-  // way — the padded region is cropped away before presentation.
-  const reflect = (c, n) => {
-    if (n <= 1) return 0;
-    const period = 2 * n - 2;
-    const m = ((c % period) + period) % period;
-    return m < n ? m : period - m;
+  // Padding = KEYED SHIFTED WRAP + per-channel noise. History of this
+  // strip: black (pre-1.11) identified every edge tile + flip; edge
+  // replication (1.11) duplicated rows exactly; interior reflection
+  // (1.12) left a palindromic seam — a pad row mirrored its edge row
+  // with mean-abs-diff ~0.6 vs ~17 for real texture, again naming the
+  // boundary tiles and their vertical flip. Now pad pixels sample the
+  // image's own interior from a plan-keyed toroidal offset (no seam, no
+  // palindrome, no aligned duplicate: each pad row also gets a keyed
+  // horizontal phase), plus keyed noise in [-3,3] per channel. A solver
+  // without the scramble key cannot predict or cleanly correlate the
+  // fill; a solver WITH the key never needed the oracle. Display is
+  // unaffected — the padded region is cropped before presentation, and
+  // unscrambling never regenerates pad content.
+  let padSeedState = 0x9e3779b9;
+  for (let i = 0; i < count; i++) {
+    padSeedState = Math.imul(padSeedState ^ (plan.order[i] * 2654435761), 2246822519);
+    padSeedState = Math.imul(padSeedState ^ ((plan.flips[i].fx ? 2 : 0) + (plan.flips[i].fy ? 1 : 0) + 1), 3266489917);
+  }
+  const padRand = mulberry32(padSeedState >>> 0);
+  const padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
+  const padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
+  const padPhaseSeed = Math.floor(padRand() * 0xffffffff) | 0;
+  const wrapPos = (c, n) => ((c % n) + n) % n;
+  const padRowPhase = (srcY) => {
+    let hash = (padPhaseSeed ^ Math.imul(srcY + 1, 374761393)) | 0;
+    hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
+    return w > 1 ? ((hash >>> 8) % w) : 0;
   };
-  const padDither = (gx, gy) => {
-    let hash = (gx * 374761393 + gy * 668265263) | 0;
-    hash = (hash ^ (hash >> 13)) | 0;
-    hash = Math.imul(hash, 1274126177);
-    return (((hash >>> 16) % 3) - 1);
+  const padNoise = (gx, gy, channel) => {
+    let hash = (padPhaseSeed ^ Math.imul(gx + 1, 374761393) ^ Math.imul(gy + 1, 668265263) ^ Math.imul(channel + 1, 2246822519)) | 0;
+    hash = Math.imul(hash ^ (hash >>> 13), 1274126177);
+    return ((hash >>> 16) % 7) - 3;
   };
-  const writePixel = (di, si, dither) => {
-    if (!dither) {
-      target[di] = src[si]; target[di + 1] = src[si + 1];
-      target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
-    } else {
-      target[di] = Math.max(0, Math.min(255, src[si] + dither));
-      target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + dither));
-      target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + dither));
-      target[di + 3] = src[si + 3];
-    }
+  const writePixel = (di, si) => {
+    target[di] = src[si]; target[di + 1] = src[si + 1];
+    target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
+  };
+  const writePadPixel = (di, si, gx, gy) => {
+    target[di] = Math.max(0, Math.min(255, src[si] + padNoise(gx, gy, 0)));
+    target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + padNoise(gx, gy, 1)));
+    target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + padNoise(gx, gy, 2)));
+    target[di + 3] = src[si + 3];
   };
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
@@ -1850,16 +2042,17 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
       const rawY = sy + (fy ? th - 1 - y : y);
-      const srcY = rawY < h ? rawY : reflect(rawY, h);
       const rowIsPad = rawY >= h;
+      const srcY = rowIsPad ? wrapPos(padShiftY + (rawY - h), h) : rawY;
+      const rowPhase = padRowPhase(srcY);
       const dstRow = (dy + y) * pw + dx;
       if (useWords && !fx && !rowIsPad) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
         for (let x = avail; x < tw; x++) {
           const rawX = sx + x;
-          const srcX = reflect(rawX, w);
-          writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4, padDither(rawX, rawY));
+          const srcX = wrapPos(padShiftX + rowPhase + (rawX - w), w);
+          writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
         }
       } else if (useWords && !rowIsPad && !((sx + tw) > w)) {
         for (let x = 0; x < tw; x++) {
@@ -1868,13 +2061,13 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
       } else {
         for (let x = 0; x < tw; x++) {
           const rawX = sx + (fx ? tw - 1 - x : x);
-          const srcX = rawX < w ? rawX : reflect(rawX, w);
-          const isPad = rowIsPad || rawX >= w;
-          writePixel(
-            (dstRow + x) * 4,
-            (srcY * w + srcX) * 4,
-            isPad ? padDither(rawX, rawY) : 0,
-          );
+          const colIsPad = rawX >= w;
+          const srcX = colIsPad ? wrapPos(padShiftX + rowPhase + (rawX - w), w) : rawX;
+          if (rowIsPad || colIsPad) {
+            writePadPixel((dstRow + x) * 4, (srcY * w + srcX) * 4, rawX, rawY);
+          } else {
+            writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4);
+          }
         }
       }
     }
@@ -1900,6 +2093,16 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
  * @param {Uint8Array|Buffer} rgba w*h*4 bytes
  * @returns {string} 16 lowercase hex characters
  */
+// Module-static DCT basis (same Math.cos values, computed once instead
+// of 256 transcendental calls per fingerprint).
+const DCT_COSINES_32x8 = (() => {
+  const table = new Float64Array(32 * 8);
+  for (let x = 0; x < 32; x++) {
+    for (let u = 0; u < 8; u++) table[x * 8 + u] = Math.cos(((2 * x + 1) * u * Math.PI) / (2 * 32));
+  }
+  return table;
+})();
+
 export function perceptualFingerprint(rgba, w, h) {
   if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) {
     throw new RangeError('Archx: invalid image dimensions for perceptual fingerprint');
@@ -1916,27 +2119,40 @@ export function perceptualFingerprint(rgba, w, h) {
   // Area-average to 32×32. Area weighting is slower than nearest-neighbour
   // sampling but makes the fingerprint materially steadier across the exact
   // resampling choices of browsers, Sharp, and social-media transcoders.
+  // The per-column/per-row overlap spans are precomputed once (they depend
+  // only on x / y); the accumulation order — and therefore every float —
+  // is unchanged, so fingerprints stay bit-identical to the direct form.
+  const spansFor = (n) => {
+    const spans = new Array(n);
+    for (let s = 0; s < n; s++) {
+      const s0 = (s * SIZE) / n;
+      const s1 = ((s + 1) * SIZE) / n;
+      const start = Math.floor(s0);
+      const end = Math.min(SIZE - 1, Math.ceil(s1) - 1);
+      const wts = new Float64Array(end - start + 1);
+      for (let o = start; o <= end; o++) wts[o - start] = Math.min(s1, o + 1) - Math.max(s0, o);
+      spans[s] = { start, wts };
+    }
+    return spans;
+  };
+  const colSpans = spansFor(w);
+  const rowSpans = spansFor(h);
   for (let y = 0; y < h; y++) {
-    const y0 = (y * SIZE) / h;
-    const y1 = ((y + 1) * SIZE) / h;
-    const oyStart = Math.floor(y0);
-    const oyEnd = Math.min(SIZE - 1, Math.ceil(y1) - 1);
+    const rowSpan = rowSpans[y];
     const rowOffset = y * w * 4;
     for (let x = 0; x < w; x++) {
       const i = rowOffset + x * 4;
       const alpha = src[i + 3] / 255;
       const gray = ((src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256) * alpha;
-      const x0 = (x * SIZE) / w;
-      const x1 = ((x + 1) * SIZE) / w;
-      const oxStart = Math.floor(x0);
-      const oxEnd = Math.min(SIZE - 1, Math.ceil(x1) - 1);
-      for (let oy = oyStart; oy <= oyEnd; oy++) {
-        const wy = Math.min(y1, oy + 1) - Math.max(y0, oy);
+      const colSpan = colSpans[x];
+      for (let oyi = 0; oyi < rowSpan.wts.length; oyi++) {
+        const wy = rowSpan.wts[oyi];
         if (wy <= 0) continue;
-        for (let ox = oxStart; ox <= oxEnd; ox++) {
-          const wx = Math.min(x1, ox + 1) - Math.max(x0, ox);
+        const rowBase = (rowSpan.start + oyi) * SIZE + colSpan.start;
+        for (let oxi = 0; oxi < colSpan.wts.length; oxi++) {
+          const wx = colSpan.wts[oxi];
           if (wx <= 0) continue;
-          const idx = oy * SIZE + ox;
+          const idx = rowBase + oxi;
           const weight = wx * wy;
           small[idx] += gray * weight;
           weights[idx] += weight;
@@ -1948,13 +2164,12 @@ export function perceptualFingerprint(rgba, w, h) {
     small[i] = weights[i] > 0 ? small[i] / weights[i] : 0;
   }
 
-  const cosines = Array.from({ length: SIZE }, (_, x) =>
-    Array.from({ length: 8 }, (_, u) => Math.cos(((2 * x + 1) * u * Math.PI) / (2 * SIZE))));
+  const cosines = DCT_COSINES_32x8;
   const rowDct = new Float64Array(SIZE * 8);
   for (let y = 0; y < SIZE; y++) {
     for (let u = 0; u < 8; u++) {
       let sum = 0;
-      for (let x = 0; x < SIZE; x++) sum += small[y * SIZE + x] * cosines[x][u];
+      for (let x = 0; x < SIZE; x++) sum += small[y * SIZE + x] * cosines[x * 8 + u];
       rowDct[y * 8 + u] = sum;
     }
   }
@@ -1962,7 +2177,7 @@ export function perceptualFingerprint(rgba, w, h) {
   for (let v = 0; v < 8; v++) {
     for (let u = 0; u < 8; u++) {
       let sum = 0;
-      for (let y = 0; y < SIZE; y++) sum += rowDct[y * 8 + u] * cosines[y][v];
+      for (let y = 0; y < SIZE; y++) sum += rowDct[y * 8 + u] * cosines[y * 8 + v];
       coefficients[v * 8 + u] = sum;
     }
   }

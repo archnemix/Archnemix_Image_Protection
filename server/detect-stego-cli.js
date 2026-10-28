@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import sharp from 'sharp';
 import {
-  detectStegoFingerprint, stegoFingerprint, sniffImageInfo, decodeBmpImage,
+  detectStegoFingerprint, legacyStegoFingerprint, stegoFingerprint, sniffImageInfo, decodeBmpImage,
   perceptualFingerprint, normalizePerceptualFingerprint, comparePerceptualFingerprints,
 } from '../src/scramble.js';
 import { deriveStegoKey } from './middleware.js';
@@ -149,7 +149,11 @@ try {
 }
 
 const expected = args.expect ? stegoFingerprint(args.expect) : null;
-const matchesExpectation = expected ? result.fingerprint === expected : null;
+// Marks embedded before 1.13 derived non-hex identity strings through
+// the legacy hash pair; accept either derivation for --expect so old
+// attributions keep resolving (12-hex expectations are identical).
+const expectedAlternatives = expected ? [...new Set([expected, legacyStegoFingerprint(args.expect)])] : null;
+const matchesExpectation = expectedAlternatives ? expectedAlternatives.includes(result.fingerprint) : null;
 const perceptualComparison = expectedPerceptual
   ? comparePerceptualFingerprints(suspectPerceptualFingerprint, expectedPerceptual, { maxDistance: maxPerceptualDistance })
   : null;
@@ -165,6 +169,7 @@ if (args.json) {
       ? 'Repaired decode: corroborate before attributing (collusion can synthesize third-party fingerprints).'
       : undefined,
     expected,
+    expectedAlternatives,
     matchesExpectation,
     perceptual: {
       fingerprint: suspectPerceptualFingerprint,

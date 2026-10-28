@@ -1169,6 +1169,168 @@ a frozen temporal frame is a free clean capture.
   from protected delivery for operators who want an indexable
   preview. Not built into the protection path by design.
 
+### 2.21 Third adversarial review — verification and response (v1.13)
+
+A third adversarial pass audited v1.12.0 end-to-end (the reviewer reports
+13,081 lines read, reproduces our published dist SRI exactly, finds no
+backdoors/exfiltration, and scores the release 8.1/10). It raised seven
+new bug groups and seven optimization proposals (A–G). As before, every
+claim was verified against the code or a measurement before acting;
+confirmed items are fixed with regression tests, and the rest are
+answered with evidence rather than absorbed silently.
+
+**Confirmed real — fixed.**
+
+- *Cross-viewer watermark leak through the derivative-base cache
+  (their Bug #1, reproduced byte-for-byte).* The prepare/finish split
+  cached a viewer-independent base keyed without the watermark — but
+  the visible watermark was baked into that base, so the second viewer
+  of a geometry received the first viewer's mark. Watermarks are now
+  applied exclusively in stage 2; cached bases are clean by
+  construction, so the viewer-independent key is correct. A two-viewer
+  HTTP regression asserts Bob's derivative matches Bob's own reference
+  rendering, not Alice's, while exactly one base is shared.
+- *IPv4-mapped IPv6 split rate-limit identity (Bug #2).* `::ffff:1.2.3.4`
+  and `1.2.3.4` drew separate quota/abuse buckets. Client identity is
+  now canonical: v4-mapped/translated forms collapse to dotted-quad and
+  all other IPv6 spellings collapse to one expanded-group form before
+  token binding, quotas, and abuse accounting. Regression-tested over
+  HTTP in compressed, expanded, and hex-tail spellings.
+- *Geometry-search scale dedupe precision (Bug #3).* Candidate scales
+  were deduplicated at 0.1 precision, discarding near-1.0 resizes the
+  search exists to find; now keyed at 0.001.
+- *Single-tier distinct-IP abuse threshold (Bug #4).* One global
+  distinct-image ceiling either cried wolf on catalogs or slept through
+  slow scrapes; detection is tiered now, and member limits are hinted
+  into token responses so honest clients can self-throttle.
+- *Visible watermark tiled on one axis only (#5).* Server and both
+  client painters stamped one text per diagonal row, leaving most of
+  the width clean — cropping the row bands erased attribution. All
+  three now tile on both axes with a measured-text-width step and
+  alternating row offsets.
+- *32-bit stego layout and forensic sign seeds (#6).* Cell shuffles
+  and block-sign sequences derived from 32-bit hashes of the key, so
+  the layout space was enumerable. Layout v2 / signs v2 derive from a
+  128-bit SHA-256 seed (sfc32 over four hash words), are the embed
+  defaults, and dual-read: v1 marks decode bit-exactly as before
+  (verified pixel-identical embeds and dual-vintage detection), and
+  results report the matched vintage (`layoutVersion`,
+  `signsVersion`). The payload→fingerprint map also moved to SHA-256
+  for non-hex identities; `legacyStegoFingerprint()` preserves the old
+  derivation for lookups against pre-1.13 marks, and the detection CLI
+  accepts either derivation for `--expect`. Issued registries (which
+  store the fingerprint itself) and 12-hex payloads are unaffected.
+- *Cache/loader lifecycle nits (#7a–e).* `close()` now clears the base
+  and indexed-output caches; master and base caches share one RAM
+  budget; shared-cache integrity tags accept any keyring key; quota
+  and abuse accounting run after host authorization callbacks (so
+  denied viewers cost no budget); and Sharp loader policy is
+  most-restrictive-wins — a later stricter `configureSharpSecurity`
+  re-blocks loaders an earlier looser call unblocked
+  (regression-tested by tightening AVIF away mid-process).
+- *Reflection-padding palindrome seam (#10).* The v1.12 mirror padding
+  left MAD(pad row, reflected edge row) ≈ 0.6 vs ≈ 17 for real
+  texture — a seam oracle for keyless solvers. Padding is now a keyed
+  shifted toroidal wrap (pad pixels are displaced interior texture
+  plus ±3 keyed noise): displayed pixels still round-trip byte-exact,
+  seam MAD now exceeds interior texture MAD, and no pad row duplicates
+  an edge. The client-side local scrambler received the same
+  treatment in canvas form. Pad bytes changed, so the derivative
+  cache namespace moved to `v4`; unscrambling never regenerated pad
+  content, so issued assets are unaffected.
+
+**Found during verification (not in the report).** Fixing #6 changed
+the fingerprint derived for one test identity, which exposed a latent
+soundness flaw in the robust decoder: syndrome repair ranked
+candidates by a fully *regenerated* canonical codeword, so the `mac`
+pass could synthesize MAC bytes for a legacy CRC-tagged mark, "repair"
+it at ~7 flips, and short-circuit the CRC fallback — mislabeling the
+scheme and missing valid legacy marks whose CRC2 happened to sit
+within the flip budget of its MAC. Acceptance now requires the tag
+bits to be *observed* (≤2 vote-error flips in bits 64..95); costlier
+repairs fall through to the exhaustive search, which pays for every
+flipped tag bit from the gate-capped budget.
+
+**Optimizations — measured, then decided.**
+
+- *Opt A (detector hot path) — implemented and exceeded.* The
+  strided-sampling vote estimator is replaced by a luma plane plus a
+  Float64 summed-area table: per-cell band means are now exact
+  full-population rectangle means at O(1) per query. A/B over 66
+  marked/unmarked cases showed the integral estimator is a strict
+  superset of the sampler (4 extra correct weak-mark recoveries, 0
+  losses, 0 false positives) *and* faster, so the sampling branch was
+  deleted rather than kept as an option. Around it: closure-level
+  scratch-buffer reuse, an exact repair pre-gate (skips flip searches
+  whose agreement ceiling is arithmetically below the acceptance
+  gate), outcome-identical repair-depth caps, and a marker prefilter
+  that rejects junk syndrome candidates before paying for their MAC.
+  On the 800px reference image: 90%-crop+geometry detection 5.3s →
+  1.5s, unmarked robust+geometry 21.6s → 5.3s, unmarked auto 32s →
+  6.0s; direct detection stays ≈40ms. The Node suite itself dropped
+  33s → 10s.
+- *Opt D (perceptual hash) — implemented, bit-exact.* Column/row
+  overlap spans are precomputed once and the DCT basis is a
+  module-static table; accumulation order is unchanged, so
+  fingerprints are identical to the direct form (asserted across ten
+  geometries including 1×1 and sub-32px inputs) at ~1.45× the speed
+  here (the reviewer measured 2.48× on their hardware).
+- *Opt F (integrity-audit allocation) — implemented narrowly.* The
+  reader-prototype probe no longer allocates a stream + locked reader
+  per call, and the WebGL method list is a module constant. The audit
+  runs at viewer init, not per frame; a deeper rewrite buys nothing.
+- *Opt C (cascading resize in the asset builder) — rejected on
+  measurement.* Cascading 2400→1600→1200→800→400 saved ~10% wall
+  time (WebP encode, not resampling, dominates) while degrading
+  derivatives to 26.9dB vs direct-from-master and coupling every
+  width's bytes to the width set above it. Quality-first wins;
+  builds stay direct.
+- *Opt E (native KeyObject HMAC) — deferred on measurement.* Pure-JS
+  HMAC was 5.6% of worst-case detect time *before* the marker
+  prefilter cut 27k junk MACs per unmarked geometry search to a
+  trickle; what remains does not justify a backend-registration API
+  in the shared core. Revisit if profiling ever disagrees.
+- *Opt G (WebP effort) — default unchanged, knob documented.* Effort
+  2 vs 4 on the derivative pipeline: −24% encode time for +1.7%
+  bytes. Effort 4 stays the default (bytes are served forever,
+  encodes are cached); CPU-bound fleets can set
+  `processing.webpEffort: 2` — the catalog preset already does.
+
+**Verified as not reproducible or already covered.**
+
+- *"`uTemporalOn` enabled with subset = 1 destroys the temporal
+  effect" (#9) — does not map to this implementation.* `uTemporalOn`
+  gates the complementary *noise* shield, which is full-frame by
+  design; the subset mechanism is `uInterlaceOn` + phase test, and
+  `phases` is hard-clamped to 2..4 in `normalizeTemporalInterlace`,
+  so no configuration presents the full frame every phase. Their
+  multi-frame median result is the known limit of complementary
+  noise, already documented and mitigated (per-frame reseeding,
+  asymmetric duty bias so medians converge to c − b/3 on a re-rolling
+  bias), not a configuration bug.
+- *Lens park signaling (#12)* already ships: burst-window and
+  120-second cumulative-coverage ledgers fire `lens-scan` through
+  `onAttempt`, the `archx-attempt` DOM event, telemetry, and the
+  strike ladder; radius jitter ghosts stitched seams.
+- *`planVersion` plumbing (#7f)* is explicit at every client call
+  site; the server default stays v1 with a startup warning because
+  pv-unaware cached clients would unscramble v2 payloads wrongly
+  mid-migration. The hardened preset opts into v2.
+- *Pre-load Proxy readback (#8)* stands as a stated residual: code
+  running in a realm instrumented before the library loads is
+  equivalent to a compromised browser/extension, which no page-level
+  control survives. Captured natives, the presentation canary, and
+  `integrity:'lock'` raise the cost and force blackouts on detection;
+  we do not claim more, and SECURITY.md says so.
+
+**Still open (unchanged, scoped).** Collusion *erasure* (averaging
+k differently-marked copies destroys all marks while framing none)
+and small-angle rotation remain outside StegoMark's envelope;
+asymmetric deep crops still need the sync-template v2 mark design
+scoped in §2.20. The reviewer's 0/400 phantom-framing collusion
+result confirms the v1.12 MAC tag holds the line that matters for
+attribution: marks can be destroyed, not forged onto a third party.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

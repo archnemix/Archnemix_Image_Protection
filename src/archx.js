@@ -43,7 +43,7 @@ import {
   useJsonParser, useWebCrypto,
 } from './scramble.js';
 
-export const VERSION = '1.12.0';
+export const VERSION = '1.13.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -191,6 +191,25 @@ function isNativeFn(fn) {
   try { return /\[native code\]/.test(NATIVES.fnToString.call(fn)); } catch { return false; }
 }
 
+const AUDIT_WEBGL_METHODS = [
+  'texImage2D', 'readPixels', 'drawArrays', 'drawElements',
+  'createTexture', 'bindTexture', 'bindFramebuffer', 'createFramebuffer',
+  'framebufferTexture2D', 'createShader', 'shaderSource', 'compileShader',
+  'createProgram', 'linkProgram', 'useProgram', 'getContextAttributes',
+];
+// The reader PROTOTYPE object is identity-stable, so probe it once and
+// re-read `.read` off it per audit (still detects later replacement)
+// instead of allocating a stream + locked reader on every call.
+let readerProtoCache;
+function currentReaderRead() {
+  try {
+    if (readerProtoCache === undefined) {
+      readerProtoCache = Object.getPrototypeOf(new ReadableStream().getReader());
+    }
+    return readerProtoCache?.read ?? null;
+  } catch { return null; }
+}
+
 /** Names of sensitive APIs that look hooked (replaced or non-native). */
 export function auditIntegrity() {
   const g = globalThis;
@@ -207,7 +226,7 @@ export function auditIntegrity() {
     ['JSON.parse', typeof JSON !== 'undefined' ? JSON.parse : null, NATIVES.jsonParse],
     ['Element.prototype.attachShadow', typeof Element !== 'undefined' ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
     ['ReadableStream.prototype.getReader', typeof ReadableStream !== 'undefined' ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
-    ['ReadableStreamDefaultReader.prototype.read', (() => { try { return Object.getPrototypeOf(new ReadableStream().getReader()).read; } catch { return null; } })(), NATIVES.streamReaderRead],
+    ['ReadableStreamDefaultReader.prototype.read', currentReaderRead(), NATIVES.streamReaderRead],
     ['Response.prototype.text', typeof Response !== 'undefined' ? Response.prototype.text : null, NATIVES.responseText],
     ['TextDecoder.prototype.decode', typeof TextDecoder !== 'undefined' ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
     ['TextEncoder.prototype.encode', typeof TextEncoder !== 'undefined' ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
@@ -220,17 +239,11 @@ export function auditIntegrity() {
     ['SubtleCrypto.prototype.exportKey', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).exportKey : null, NATIVES.subtleExportKey],
     ['Crypto.prototype.getRandomValues', (() => { try { return globalThis.crypto?.getRandomValues || null; } catch { return null; } })(), NATIVES.getRandomValues],
   ];
-  const webglMethodNames = [
-    'texImage2D', 'readPixels', 'drawArrays', 'drawElements',
-    'createTexture', 'bindTexture', 'bindFramebuffer', 'createFramebuffer',
-    'framebufferTexture2D', 'createShader', 'shaderSource', 'compileShader',
-    'createProgram', 'linkProgram', 'useProgram', 'getContextAttributes',
-  ];
   for (const [label, ctor, capturedMap] of [
     ['WebGLRenderingContext', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext : null, NATIVES.webgl1],
     ['WebGL2RenderingContext', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext : null, NATIVES.webgl2],
   ]) {
-    for (const method of webglMethodNames) {
+    for (const method of AUDIT_WEBGL_METHODS) {
       current.push([
         `${label}.prototype.${method}`,
         ctor ? ctor.prototype[method] : null,
@@ -2160,21 +2173,50 @@ function scrambleCanvasLocally(source, grid, key) {
   const cctx = getNativeContext(cleanPadded, '2d');
   setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
   nativeDrawImage(cctx, source, 0, 0);
-  // Reflect the interior across each edge into the padding (matching the
-  // server-side scramblePixelsPadded): black or edge-duplicated padding
-  // makes every boundary tile identifiable (strip / zero gradient),
-  // leaking tile position + flip state to keyless solvers.
-  if (pw > w) {
+  // Keyed SHIFTED toroidal wrap into the padding (matching the core
+  // scramblePixelsPadded): black/edge-duplicated padding identifies
+  // boundary tiles, and mirror reflection leaves a palindrome seam a
+  // keyless solver can lock onto. Wrapping from a plan-keyed mid-image
+  // offset gives pad tiles authentic texture with no seam signature;
+  // drawing at 96% alpha over black decorrelates the wrapped bytes from
+  // their interior originals so exact-match stitching finds no anchor.
+  const shiftX = w > 1 ? (w >> 1) + (plan.order[0] % Math.max(1, w >> 1)) : 0;
+  const shiftY = h > 1 ? (h >> 1) + (plan.order[plan.count - 1] % Math.max(1, h >> 1)) : 0;
+  const drawPadStrip = (draw) => {
     cctx.save();
-    cctx.translate(2 * w, 0); cctx.scale(-1, 1);
-    nativeDrawImage(cctx, source, 0, 0);
+    cctx.fillStyle = '#000';
+    cctx.globalAlpha = 1;
+    draw(true);
+    cctx.globalAlpha = 0.96;
+    draw(false);
     cctx.restore();
+  };
+  if (pw > w) {
+    drawPadStrip((fill) => {
+      if (fill) { cctx.fillRect(w, 0, pw - w, h); return; }
+      // pad column x (>= w) shows interior column (x + shiftX) % w
+      let dx = w;
+      let sx = shiftX;
+      while (dx < pw) {
+        const seg = Math.min(w - sx, pw - dx);
+        nativeDrawImage(cctx, source, sx, 0, seg, h, dx, 0, seg, h);
+        dx += seg; sx = 0;
+      }
+    });
   }
   if (ph > h) {
-    cctx.save();
-    cctx.translate(0, 2 * h); cctx.scale(1, -1);
-    nativeDrawImage(cctx, cleanPadded, 0, 0);
-    cctx.restore();
+    drawPadStrip((fill) => {
+      if (fill) { cctx.fillRect(0, h, pw, ph - h); return; }
+      // pad row y (>= h) shows row (y + shiftY) % h of the padded frame
+      // (self-draw uses a snapshot, per canvas spec)
+      let dy = h;
+      let sy = shiftY;
+      while (dy < ph) {
+        const seg = Math.min(h - sy, ph - dy);
+        nativeDrawImage(cctx, cleanPadded, 0, sy, pw, seg, 0, dy, pw, seg);
+        dy += seg; sy = 0;
+      }
+    });
   }
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
@@ -3926,10 +3968,16 @@ export class ProtectedImage {
           ctx.translate(w / 2, h / 2);
           ctx.rotate(-Math.PI / 7);
           ctx.textAlign = 'center';
+          // Tile on BOTH axes (measured-width step, alternating row
+          // offset): one stamp per row left most of the frame's width
+          // clean, so cropping the band edges erased attribution.
           const stepY = fs * 4.2;
+          const stepX = Math.max(fs * 3, ctx.measureText(text).width + fs * 2.2);
           const diag = Math.hypot(w, h);
-          for (let y = -diag / 2; y < diag / 2; y += stepY) {
-            ctx.fillText(text, 0, y);
+          let row = 0;
+          for (let y = -diag / 2; y < diag / 2; y += stepY, row++) {
+            const x0 = (row % 2) * (stepX / 2) - diag / 2;
+            for (let x = x0; x < diag / 2 + stepX; x += stepX) ctx.fillText(text, x, y);
           }
           ctx.restore();
           ctx.save();
@@ -4627,7 +4675,12 @@ export class ProtectedImage {
           ctx.textAlign = 'center';
           ctx.translate(c.width / 2, c.height / 2); ctx.rotate(-Math.PI / 7);
           const diag = Math.hypot(c.width, c.height);
-          for (let y = -diag / 2; y < diag / 2; y += fs * 4.2) ctx.fillText(text, 0, y);
+          const stepX = Math.max(fs * 3, ctx.measureText(text).width + fs * 2.2);
+          let row = 0;
+          for (let y = -diag / 2; y < diag / 2; y += fs * 4.2, row++) {
+            const x0 = (row % 2) * (stepX / 2) - diag / 2;
+            for (let x = x0; x < diag / 2 + stepX; x += stepX) ctx.fillText(text, x, y);
+          }
           ctx.restore();
         }
         if (cfg.corner !== false) {
@@ -4702,7 +4755,6 @@ export class ProtectedImage {
         if (srcRatio > dstRatio) { sx = dstRatio / srcRatio; ox = (1 - sx) / 2; }
         else { sy = srcRatio / dstRatio; oy = (1 - sy) / 2; }
       } else if (this.#options.fit === 'contain') {
-        if (srcRatio > dstRatio) { sy = srcRatio / dstRatio; oy = -(sy - 1) / 2; sy = 1 / sy; oy = (1 - sy) / 2; /* letterbox via scale>range guarded in shader */ }
         // For contain, invert: scale uv beyond [0,1] and let shader black-bar it
         if (srcRatio > dstRatio) { const s = srcRatio / dstRatio; sy = s; oy = -(s - 1) / 2; sx = 1; ox = 0; }
         else { const s = dstRatio / srcRatio; sx = s; ox = -(s - 1) / 2; }

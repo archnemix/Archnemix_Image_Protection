@@ -1655,9 +1655,10 @@ export function createArchxMiddleware(options = {}) {
   const masterCache = new Map(); // id -> {mtimeMs,size,bytes}; byte-bounded LRU
   let masterCacheBytes = 0;
   // Resized base-frame cache for UNcacheable (per-token/per-viewer)
-  // derivatives: stage-1 output (decoded+resized+watermarked raster)
-  // depends only on master version + geometry + watermark, so per-viewer
-  // marks/encryption can start from it instead of re-decoding the master.
+  // derivatives: stage-1 output (decoded+resized CLEAN raster) depends
+  // only on master version + geometry, so the watermark, per-viewer
+  // marks, and encryption can all start from it (stage 2) instead of
+  // re-decoding the master.
   const baseCache = new Map(); // baseKey -> {data,w,h,hasAlpha,watermarked}
   let baseCacheBytes = 0;
   function getBaseCache(key) {
@@ -1666,17 +1667,42 @@ export function createArchxMiddleware(options = {}) {
     baseCache.delete(key); baseCache.set(key, value);
     return value;
   }
+  // masterCache (encoded master bytes) and baseCache (decoded stage-1
+  // frames) draw on ONE budget, cfg.masterCacheMaxBytes. In 1.12.0 each
+  // enforced the cap independently, silently doubling the documented
+  // master-side RAM ceiling (2x128 MB by default). Eviction prefers
+  // master bytes — re-reading a file is cheap; a base frame costs a
+  // Sharp decode+resize to rebuild. The just-inserted entry is never
+  // evicted by its own admission.
+  function evictMasterSide(protectedCache, protectedKey) {
+    const cap = cfg.masterCacheMaxBytes;
+    while (masterCacheBytes + baseCacheBytes > cap) {
+      let evicted = false;
+      for (const oldestKey of masterCache.keys()) {
+        if (protectedCache === 'master' && oldestKey === protectedKey) continue;
+        masterCacheBytes -= masterCache.get(oldestKey).bytes.length;
+        masterCache.delete(oldestKey);
+        evicted = true;
+        break;
+      }
+      if (evicted) continue;
+      for (const oldestKey of baseCache.keys()) {
+        if (protectedCache === 'base' && oldestKey === protectedKey) continue;
+        baseCacheBytes -= baseCache.get(oldestKey).data.length;
+        baseCache.delete(oldestKey);
+        evicted = true;
+        break;
+      }
+      if (!evicted) break;
+    }
+  }
   function setBaseCache(key, base) {
     if (!cfg.cacheMasters || !base?.data || base.data.length > cfg.masterCacheMaxBytes) return;
     const previous = baseCache.get(key);
     if (previous) { baseCacheBytes -= previous.data.length; baseCache.delete(key); }
     baseCache.set(key, base);
     baseCacheBytes += base.data.length;
-    while (baseCacheBytes > cfg.masterCacheMaxBytes && baseCache.size > 1) {
-      const oldestKey = baseCache.keys().next().value;
-      baseCacheBytes -= baseCache.get(oldestKey).data.length;
-      baseCache.delete(oldestKey);
-    }
+    evictMasterSide('base', key);
   }
   const dimensionCache = new Map(); // id -> {mtimeMs,size,width,height}
   const outputCache = new Map(); // cacheKey -> Buffer; entry- and byte-bounded LRU
@@ -1728,10 +1754,12 @@ export function createArchxMiddleware(options = {}) {
     if (typeof result !== 'boolean') throw stateStoreUnavailable(new Error('invalid claimOnce result'));
     return result;
   }
-  async function stateTrackDistinct(key, member) {
+  async function stateTrackDistinct(key, member, limitHint = cfg.abuseDetection.distinctImages) {
     const result = await callStateStore('trackDistinct', key, member, {
       windowMs: cfg.abuseDetection.windowMs,
-      maxMembers: Math.min(10001, cfg.abuseDetection.distinctImages + 1),
+      // The member set only needs to prove "more than the limit": cap it
+      // one past the CALLER's limit (aggregate tiers pass a larger hint).
+      maxMembers: Math.min(10001, Math.max(1, Math.floor(limitHint) || 1) + 1),
       now: Date.now(),
     });
     if (!result || typeof result !== 'object' || !Number.isFinite(Number(result.distinct)) ||
@@ -1771,17 +1799,28 @@ export function createArchxMiddleware(options = {}) {
   // host with a writable cache dir) but does not know the server secret:
   // structural validity alone would accept a forged container of matching
   // grid/size/mime. Memory-cache entries are in-process and untagged.
-  // Secret rotation simply misses (and regenerates) tagged entries.
-  const cacheTag = (key, bytes) => crypto.createHmac('sha256', secret)
+  // Verification accepts ANY keyring secret, not just the active one:
+  // during a rolling rotation, peer instances legitimately write entries
+  // under the previous active secret, and keying the tag to `secret`
+  // alone made those entries fail verification (and, on the disk tier,
+  // get unlinked as corrupt — cross-instance cache thrash in 1.12.0).
+  // The tag's job is "written by someone holding a deployment secret",
+  // and every keyring member qualifies. Entries retire with their kid.
+  const cacheTagSecrets = [...new Set([secret, ...Object.values(signingKeys || {})])].slice(0, 17);
+  const cacheTag = (key, bytes, keySecret = secret) => crypto.createHmac('sha256', keySecret)
     .update('archx-cache-v1\0', 'utf8').update(String(key), 'utf8').update('\0').update(bytes).digest();
   const tagCacheBytes = (key, bytes) => Buffer.concat([Buffer.from('A1', 'latin1'), cacheTag(key, bytes), bytes]);
   function untagCacheBytes(key, stored) {
     if (!stored || stored.length < 35) return null;
     if (stored[0] !== 0x41 || stored[1] !== 0x31) return null; // legacy/foreign entry → regenerate
     const bytes = stored.subarray(34);
-    return crypto.timingSafeEqual(stored.subarray(2, 34), cacheTag(key, bytes))
-      ? Buffer.from(bytes)
-      : null;
+    const presented = stored.subarray(2, 34);
+    for (const keySecret of cacheTagSecrets) {
+      if (crypto.timingSafeEqual(presented, cacheTag(key, bytes, keySecret))) {
+        return Buffer.from(bytes);
+      }
+    }
+    return null;
   }
   async function getSharedOutputCache(key, expected = null) {
     if (!sharedOutputCacheEnabled || !cfg.outputCacheMax || !cfg.outputCacheMaxBytes) return null;
@@ -2014,11 +2053,7 @@ export function createArchxMiddleware(options = {}) {
     if (previous) { masterCacheBytes -= previous.bytes.length; masterCache.delete(id); }
     masterCache.set(id, value);
     masterCacheBytes += value.bytes.length;
-    while (masterCacheBytes > cfg.masterCacheMaxBytes && masterCache.size > 1) {
-      const oldestKey = masterCache.keys().next().value;
-      masterCacheBytes -= masterCache.get(oldestKey).bytes.length;
-      masterCache.delete(oldestKey);
-    }
+    evictMasterSide('master', id);
   }
   function getOutputCache(key) { return cacheTouch(outputCache, key); }
   function setOutputCache(key, bytes) {
@@ -2036,35 +2071,14 @@ export function createArchxMiddleware(options = {}) {
     }
   }
 
-  const requestIp = (req) => {
-    const socketIp = String(req.socket?.remoteAddress || '');
-    if (cfg.trustProxy && cfg.trustedProxyHops > 0) {
-      const forwarded = req.headers?.['x-forwarded-for'];
-      const raw = Array.isArray(forwarded) ? forwarded.join(',') : String(forwarded || '');
-      if (raw.length <= 4096) {
-        const chain = raw.split(',').map((part) => part.trim()).filter(Boolean);
-        // MDN/OWASP rule: select from the right by the number of proxies you
-        // actually control. The leftmost value is attacker-controlled unless
-        // every hop in front of this process overwrites/appends correctly.
-        const candidate = chain[chain.length - cfg.trustedProxyHops] || (chain.length ? chain[0] : '');
-        const normalized = candidate.replace(/^::ffff:/i, '');
-        if (isIP(normalized)) return normalized;
-        if (isIP(candidate)) return candidate;
-      }
-    }
-    if (socketIp) {
-      const normalized = socketIp.replace(/^::ffff:/i, '');
-      if (isIP(normalized)) return normalized;
-      if (isIP(socketIp)) return socketIp;
-    }
-    return 'unknown';
-  };
-  // Rate/quota/abuse keys group IPv6 clients by /64 prefix: a single host
-  // typically controls a whole /64 (privacy extensions rotate interface
-  // IDs freely), so per-address limits are trivially evaded by rotation
-  // and the rotation also floods bounded limiter maps until blocked
-  // clients are evicted. Token IP BINDING deliberately keeps the exact
-  // address (requestIp) — only volumetric accounting groups.
+  // Canonical form for IP accounting AND token binding: an IPv4-mapped
+  // IPv6 address (::ffff:192.0.2.1, ::ffff:c000:0201, the expanded
+  // 0:0:0:0:0:ffff:192.0.2.1, and the ::ffff:0: translated form) IS the
+  // IPv4 address. Stripping only the dotted "::ffff:" prefix leaves the
+  // hex form as a "valid" IPv6 whose /64 and /48 prefixes are 0:0:0:0 and
+  // 0:0:0 — collapsing every IPv4 client on earth into ONE limiter
+  // bucket (the CVE-2026-30827 class). Defined before requestIp, which
+  // uses it for every candidate it returns.
   const ipv6Groups = (ip) => {
     try {
       let addr = ip.toLowerCase();
@@ -2085,6 +2099,49 @@ export function createArchxMiddleware(options = {}) {
       return groups.length === 8 ? groups : null;
     } catch { return null; }
   };
+  const canonicalIp = (ip) => {
+    const kind = isIP(ip);
+    if (kind === 4) return ip;
+    if (kind !== 6) return null;
+    const g = ipv6Groups(ip);
+    if (!g) return ip;
+    const mapped = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === '0' && g[5] === 'ffff';
+    const translated = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === 'ffff' && g[5] === '0';
+    if (mapped || translated) {
+      const hi = parseInt(g[6], 16) || 0;
+      const lo = parseInt(g[7], 16) || 0;
+      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    }
+    // Canonical expanded form: textual variants of one address
+    // (2001:db8::1 vs 2001:0db8:0:0:0:0:0:1) are one identity for
+    // token binding, quotas, and abuse accounting alike.
+    return g.join(':');
+  };
+  const requestIp = (req) => {
+    const socketIp = String(req.socket?.remoteAddress || '');
+    if (cfg.trustProxy && cfg.trustedProxyHops > 0) {
+      const forwarded = req.headers?.['x-forwarded-for'];
+      const raw = Array.isArray(forwarded) ? forwarded.join(',') : String(forwarded || '');
+      if (raw.length <= 4096) {
+        const chain = raw.split(',').map((part) => part.trim()).filter(Boolean);
+        // MDN/OWASP rule: select from the right by the number of proxies you
+        // actually control. The leftmost value is attacker-controlled unless
+        // every hop in front of this process overwrites/appends correctly.
+        const candidate = chain[chain.length - cfg.trustedProxyHops] || (chain.length ? chain[0] : '');
+        const canon = canonicalIp(candidate);
+        if (canon) return canon;
+      }
+    }
+    const socketCanon = canonicalIp(socketIp);
+    if (socketCanon) return socketCanon;
+    return 'unknown';
+  };
+  // Rate/quota/abuse keys group IPv6 clients by /64 prefix: a single host
+  // typically controls a whole /64 (privacy extensions rotate interface
+  // IDs freely), so per-address limits are trivially evaded by rotation
+  // and the rotation also floods bounded limiter maps until blocked
+  // clients are evicted. Token IP BINDING deliberately keeps the exact
+  // address (requestIp) — only volumetric accounting groups.
   const limiterIp = (req) => {
     const ip = requestIp(req);
     if (isIP(ip) !== 6) return ip;
@@ -2384,25 +2441,37 @@ export function createArchxMiddleware(options = {}) {
   async function abusePattern(req, id, viewerId) {
     const threshold = cfg.abuseDetection.distinctImages;
     if (!threshold) return { suspicious: false, distinct: 0 };
-    const keys = [`distinct:ip:${limiterIp(req)}`];
-    if (viewerId) keys.push(`distinct:viewer:${hmacShort('quota-viewer', viewerId, 24)}`);
+    // Distinct-image tracking follows the same IP tiers as rate/quota:
+    // the /64 at the configured threshold and its /48 aggregate at 4x.
+    // /64-only tracking (the pre-1.13 behavior) let a scraper rotate
+    // through the 65,536 /64s of one /48 and never accumulate; the 4x
+    // aggregate keeps a legitimately busy shared /48 (NAT, university)
+    // from tripping on breadth alone.
+    const checks = limiterIpTiers(req).map(({ key, mult }) => ({
+      key: `distinct:ip:${key}`,
+      limit: Math.max(1, Math.round(threshold * mult)),
+    }));
+    if (viewerId) checks.push({ key: `distinct:viewer:${hmacShort('quota-viewer', viewerId, 24)}`, limit: threshold });
     let distinct = 0;
     let crossed = false;
-    for (const key of keys) {
-      const result = await stateTrackDistinct(key, id);
+    let suspicious = false;
+    for (const { key, limit } of checks) {
+      const result = await stateTrackDistinct(key, id, limit);
       distinct = Math.max(distinct, result.distinct);
       // Fire the alert at most ONCE per client per window. The tracker's
-      // bounded member set caps `distinct` at threshold+1, so the naive
-      // "distinct === threshold+1" edge re-triggers on every subsequent
+      // bounded member set caps `distinct` at limit+1, so the naive
+      // "distinct === limit+1" edge re-triggers on every subsequent
       // new image (an unbounded SIEM alert storm). The latch remembers
       // the crossing until the window passes; a deny policy still denies
       // on `suspicious` regardless of the latch.
-      if (result.distinct > threshold &&
-          abuseAlertLatch.claim(key, Date.now() + cfg.abuseDetection.windowMs)) {
-        crossed = true;
+      if (result.distinct > limit) {
+        suspicious = true;
+        if (abuseAlertLatch.claim(key, Date.now() + cfg.abuseDetection.windowMs)) {
+          crossed = true;
+        }
       }
     }
-    return { suspicious: distinct > threshold, crossed, distinct };
+    return { suspicious, crossed, distinct };
   }
 
   function fillPlaceholders(text, ctx) {
@@ -2536,24 +2605,6 @@ export function createArchxMiddleware(options = {}) {
         (hasParam('bh') && (boxH == null || boxH < 1 || boxH > 100000)) ||
         !['cover', 'contain', 'fill'].includes(rawFit)) {
       throw new MintDenied(400, 'bad request', { id, phase: 'token', viewerId, reason: 'bad-sizing' });
-    }
-    const quota = await quotaExceeded(req, id, viewerId, 'token');
-    if (quota) {
-      throw new MintDenied(429, 'quota exceeded', {
-        id, phase: 'token', viewerId, reason: `quota:${quota.name}`,
-        headers: { 'Retry-After': String(quota.retryAfterSec || 60) },
-      });
-    }
-    const abuse = await abusePattern(req, id, viewerId);
-    if (abuse.crossed) {
-      emitSecurityEvent('archx.suspicious_scraping', req, {
-        id, phase: 'token', viewerId, status: 200, reason: `distinct-images:${abuse.distinct}`,
-      });
-    }
-    if (abuse.suspicious && cfg.abuseDetection.action === 'deny') {
-      throw new MintDenied(429, 'too many requests', {
-        id, phase: 'token', viewerId, reason: 'distinct-image-abuse', headers: { 'Retry-After': '600' },
-      });
     }
     if (boxW > 0 && boxH > 0) {
       try {
@@ -2728,6 +2779,28 @@ export function createArchxMiddleware(options = {}) {
       if (sessionBinding != null) bindings.sess = hmacShort('bind-session', sessionBinding, 16);
     } catch {
       throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'binding-unavailable' });
+    }
+    // Quota and abuse accounting run LAST, once every fallible host
+    // callback (registry, provenance, token binding) has succeeded:
+    // a transient host-side 503 must not permanently deduct a
+    // viewer's quota for a token that was never issued.
+    const quota = await quotaExceeded(req, id, viewerId, 'token');
+    if (quota) {
+      throw new MintDenied(429, 'quota exceeded', {
+        id, phase: 'token', viewerId, reason: `quota:${quota.name}`,
+        headers: { 'Retry-After': String(quota.retryAfterSec || 60) },
+      });
+    }
+    const abuse = await abusePattern(req, id, viewerId);
+    if (abuse.crossed) {
+      emitSecurityEvent('archx.suspicious_scraping', req, {
+        id, phase: 'token', viewerId, status: 200, reason: `distinct-images:${abuse.distinct}`,
+      });
+    }
+    if (abuse.suspicious && cfg.abuseDetection.action === 'deny') {
+      throw new MintDenied(429, 'too many requests', {
+        id, phase: 'token', viewerId, reason: 'distinct-image-abuse', headers: { 'Retry-After': '600' },
+      });
     }
     if (Object.keys(bindings).length) tokenPayload.b = bindings;
     const token = signToken(tokenPayload, secret);
@@ -3364,10 +3437,11 @@ export function createArchxMiddleware(options = {}) {
           `op${cfg.processing.maxOutputPixels}`,
         ].join(':');
         const cacheKey = [
-          // v3: padding changed from black to edge-replicate (v1.11); the
-          // version bump stops pre-fix black-padded entries being served
-          // from warm caches. Displayed pixels were already identical.
-          'v3', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
+          // Cache-key version bumps ride every pad/mark byte change so
+          // warm caches never serve pre-fix bytes: v3 black->edge-
+          // replicate (v1.11); v4 reflection->keyed shifted-wrap padding
+          // + 128-bit stego layouts (v1.13). Displayed pixels identical.
+          'v4', id, masterVersion, `kid:${payload.kid}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,
@@ -3498,12 +3572,16 @@ export function createArchxMiddleware(options = {}) {
                 };
                 // Uncacheable (per-token/per-viewer) derivatives reuse the
                 // cached stage-1 base frame: decode+resize runs once per
-                // (master, geometry, watermark) instead of once per view.
+                // (master, geometry) instead of once per view. The base is
+                // watermark-free since 1.13 (the watermark is a stage-2
+                // finish): in 1.12.0 the base carried the baked watermark
+                // and this key hashed object-form watermarks via
+                // String() -> "[object Object]", collapsing every viewer
+                // onto one shared, wrongly-watermarked frame.
                 const result = await processingSemaphore.run(async () => {
                   if (cacheable) return scrambleImage(master.bytes, scrambleOpts);
                   const baseKey = [
                     'base', id, masterVersion, `w${effectiveWidth}`, `g${grid}`,
-                    `wm${hmacShort('wm', payload.wm || '', 8, issuingSecret)}`,
                     `rk:${cfg.processing.resizeKernel}`,
                     `op${cfg.processing.maxOutputPixels}`,
                   ].join(':');
@@ -3627,8 +3705,10 @@ export function createArchxMiddleware(options = {}) {
       try { stateStore.close?.(); } catch { /* shutdown best effort */ }
     }
     masterCache.clear(); masterCacheBytes = 0;
+    baseCache.clear(); baseCacheBytes = 0;
     outputCache.clear(); outputCacheBytes = 0;
     dimensionCache.clear();
+    indexedFileCache.clear();
     try { abuseAlertLatch.close(); } catch { /* shutdown best effort */ }
     outputInFlight.clear();
     dimensionInFlight.clear();

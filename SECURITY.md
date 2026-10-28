@@ -108,4 +108,9 @@ pre-1.12 codeword: gates for it are deliberately tighter, the CLI
 warns, and it must be corroborated before attribution — or the mark
 re-issued under v2. Detectors older than v1.12 cannot read v2 marks
 and may report spurious repaired decodes against them; upgrade
-detection tooling before relying on new marks.
+detection tooling before relying on new marks. Since v1.13 the cell
+layout itself is seeded at 128 bits (`layoutVersion: 2`, dual-read
+with the vintage reported as `layoutVersion`), so the same
+detectors-first rule applies to layout v2 marks; embed with
+`layoutVersion: 1` only where an unupgraded detector must read new
+marks, and prefer re-issuance.
