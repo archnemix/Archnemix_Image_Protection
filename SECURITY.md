@@ -69,9 +69,17 @@ reviewed exception exists.
 Client integrity checks are tripwires. Fortress may refuse an image when a
 browser extension has patched fetch, canvas, or WebGL APIs; Vault's monitor
 policy can continue while reporting the same signal. Neither result proves
-that an attacker-owned browser is clean or compromised.
+that an attacker-owned browser is clean or compromised. Two v1.12
+refinements matter operationally: sensitive primitives (SubtleCrypto,
+stream readers, text decoding, core AES/HMAC) are executed through
+boot-captured or page-independent implementations so naive prototype
+replacement does not silently redirect them; and a rewritten
+`preserveDrawingBuffer` — including one hidden by a spoofed
+`getContextAttributes` — makes fortress fail closed (blackout) instead
+of downgrading to a readable 2D canvas. A native-looking pre-load
+forgery still evades all of this; that residual is unchanged.
 
-## StegoMark keying and attribution discipline (v1.11)
+## StegoMark keying and attribution discipline (v1.12)
 
 The StegoMark layout key (`stegoKey`) must be a dedicated secret, never
 the scramble key — the scramble key is public wherever browsers
@@ -88,3 +96,16 @@ of per-viewer derivatives. Measured mark visibility (neon-portrait,
 800 px): strength 6 ≈ 33.4 dB PSNR (standard) / 30.4 dB (robust);
 strength 3 ≈ 39.4 / 35.9 dB with weaker survival. Pick deliberately;
 StegoMark is an attribution aid, not proof.
+
+Since v1.12 the acceptance tag is a keyed 16-bit truncated HMAC-SHA256
+of the fingerprint (codeword v2), not the previous linear keyed CRC.
+A majority hybrid of several buyers' marks can correlate with a CRC of
+itself by construction; it cannot validate under a MAC it was never
+issued, and detection stays O(1) per suspect under the shared image
+key (no `keyScope:'viewer'` scan required). `detect` reports
+`tagScheme: 'mac' | 'crc' | null`. A `'crc'` result is a legacy
+pre-1.12 codeword: gates for it are deliberately tighter, the CLI
+warns, and it must be corroborated before attribution — or the mark
+re-issued under v2. Detectors older than v1.12 cannot read v2 marks
+and may report spurious repaired decodes against them; upgrade
+detection tooling before relying on new marks.

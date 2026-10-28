@@ -171,6 +171,9 @@ export interface ArchxHandlerStats {
   stateStoreShared: boolean;
   activeSecretId: string;
   signingKeyCount: number;
+  /** Resized-base derivative cache (uncacheable per-token/per-viewer variants). */
+  baseCacheEntries?: number;
+  baseCacheBytes?: number;
   [key: string]: unknown;
 }
 

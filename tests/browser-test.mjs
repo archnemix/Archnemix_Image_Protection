@@ -581,8 +581,16 @@ try {
       });
       await inst.ready;
       const before = inst._debug().glFrames;
-      await new Promise((r) => setTimeout(r, 250));
-      const dbg = inst._debug();
+      // Poll for frame advancement instead of a fixed 250 ms window: the
+      // one-time preserveDrawingBuffer canary legitimately holds two
+      // frames after the first presented frame, and under SwiftShader the
+      // first frame itself can land late — a fixed window flakes.
+      let dbg = inst._debug();
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && dbg.glFrames - before <= 2 && dbg.glContinuous) {
+        await new Promise((r) => setTimeout(r, 100));
+        dbg = inst._debug();
+      }
       const out = {
         loaded: inst.loaded,
         pattern: dbg.temporalPattern,
@@ -994,6 +1002,7 @@ try {
       sampledPixels: 0,
       nonBlackPixels: 0,
       maxChannel: 0,
+      perDraw: [],
     };
     window.__archxPreloadCapture = capture;
     for (const ctor of [
@@ -1007,6 +1016,13 @@ try {
         const result = originalDrawArrays.apply(this, args);
         if (!capture.enabled) return result;
         capture.drawCalls++;
+        // Per-draw records (canvas identity + local stats) so the test can
+        // attribute frames to the instance under test: other live harness
+        // demos may legitimately repaint during the measurement window
+        // (layout shifts, unload/reload), and their frames must not be
+        // charged to the fortress instance.
+        const rec = { canvas: this.canvas || null, nonBlack: 0, max: 0 };
+        capture.perDraw.push(rec);
         try {
           const width = Math.max(1, Math.min(16, this.drawingBufferWidth || 1));
           const height = Math.max(1, Math.min(16, this.drawingBufferHeight || 1));
@@ -1018,7 +1034,8 @@ try {
           for (let i = 0; i < pixels.length; i += 4) {
             const max = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
             if (max > capture.maxChannel) capture.maxChannel = max;
-            if (max > 8) capture.nonBlackPixels++;
+            if (max > rec.max) rec.max = max;
+            if (max > 8) { capture.nonBlackPixels++; rec.nonBlack++; }
           }
         } catch {}
         return result;
@@ -1030,9 +1047,18 @@ try {
   const preloadHook = await hookPage.evaluate(async () => {
     const capture = window.__archxPreloadCapture;
     const reset = () => Object.assign(capture, {
-      enabled: true, drawCalls: 0, sampledPixels: 0, nonBlackPixels: 0, maxChannel: 0,
+      enabled: true, drawCalls: 0, sampledPixels: 0, nonBlackPixels: 0, maxChannel: 0, perDraw: [],
     });
-    const snapshot = () => ({ ...capture, enabled: undefined });
+    // Stats restricted to one instance's own canvas (see perDraw note).
+    const forCanvas = (canvas) => {
+      const rows = canvas ? capture.perDraw.filter((d) => d.canvas === canvas) : [];
+      return {
+        drawCalls: rows.length,
+        nonBlackPixels: rows.reduce((n, d) => n + d.nonBlack, 0),
+        maxChannel: rows.reduce((m, d) => Math.max(m, d.max), 0),
+        strayDraws: capture.perDraw.length - rows.length,
+      };
+    };
     const makeHost = () => {
       const host = document.createElement('div');
       host.style.cssText = 'width:320px;height:200px';
@@ -1050,7 +1076,7 @@ try {
     const fortressResult = {
       loaded: fortress.loaded,
       issues: fortress._debug()?.integrityIssues || [],
-      capture: snapshot(),
+      capture: forCanvas(fortress._debug()?.canvas),
     };
     fortress.destroy(); fortressHost.remove();
 
@@ -1064,7 +1090,7 @@ try {
     const vaultResult = {
       loaded: vault.loaded,
       issues: vault._debug()?.integrityIssues || [],
-      capture: snapshot(),
+      capture: forCanvas(vault._debug()?.canvas),
     };
     vault.destroy(); vaultHost.remove();
     capture.enabled = false;
@@ -1088,6 +1114,62 @@ try {
       preloadHook.vault.capture.nonBlackPixels > 0 &&
       preloadHook.vault.capture.maxChannel > 32,
     JSON.stringify(preloadHook.vault));
+
+  // v1.12 canary: a pre-load proxy forces preserveDrawingBuffer:true while
+  // spoofing getContextAttributes to report false. The proxy is installed
+  // before Archx loads, so the *captured* natives are the spoofed ones and
+  // the attribute check is blind — only the behavioral readPixels canary
+  // (painted pixels surviving past composite) can detect it. A monitor
+  // instance isolates that path: preserveFlagged can only be set there.
+  const spoofPage = await browser.newPage();
+  await spoofPage.setViewport({ width: 900, height: 700 });
+  const spoofErrors = [];
+  spoofPage.on('pageerror', (e) => spoofErrors.push(e.message));
+  await spoofPage.evaluateOnNewDocument(() => {
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === 'webgl2' || type === 'webgl' || type === 'experimental-webgl') {
+        return origGetContext.call(this, type, { ...(attrs || {}), preserveDrawingBuffer: true });
+      }
+      return origGetContext.call(this, type, attrs);
+    };
+    for (const C of [
+      typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext : null,
+      typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext : null,
+    ].filter(Boolean)) {
+      const origAttrs = C.prototype.getContextAttributes;
+      C.prototype.getContextAttributes = function () {
+        return { ...origAttrs.call(this), preserveDrawingBuffer: false };
+      };
+    }
+  });
+  await spoofPage.goto(BASE + '/test-harness.html', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await spoofPage.waitForFunction(() => window.__allLoaded === true, { timeout: 60000 });
+  const canaryResult = await spoofPage.evaluate(async () => {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:320px;height:200px';
+    document.body.prepend(host);
+    const integrityEvents = [];
+    host.addEventListener('archx-integrity', (e) => integrityEvents.push(e.detail));
+    const inst = window.Archx.load.image(host, { id: 'gallery-011' }, {
+      mode: 'vault', integrity: 'monitor', debug: true, lazy: false, automation: 'monitor',
+    });
+    await inst.ready;
+    host.scrollIntoView();
+    const deadline = Date.now() + 15000;
+    let canary = inst._debug()?.canary;
+    while (Date.now() < deadline && !canary?.preserveFlagged) {
+      await new Promise((r) => setTimeout(r, 150));
+      canary = inst._debug()?.canary;
+    }
+    const out = { loaded: inst.loaded, canary, integrityEvents };
+    return out;
+  });
+  await spoofPage.close();
+  check('readPixels canary catches preserveDrawingBuffer rewrite hidden by spoofed getContextAttributes',
+    canaryResult.canary?.preserveFlagged === true &&
+      canaryResult.integrityEvents.some((d) => d?.issue === 'preserveDrawingBuffer-rewritten'),
+    JSON.stringify({ canaryResult, spoofErrors }));
 
   console.log('\n[8] Network payload — captured bytes are scrambled, master unreachable');
   const directMaster = await fetch(BASE + '/demo-masters/aurora-valley.jpg');

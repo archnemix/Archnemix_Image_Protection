@@ -12,11 +12,12 @@ import {
   encryptPayload, decryptPayload, generateKeyBase64,
   applyForensicBlocks, forensicScore, forensicBlockSigns,
   embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint,
+  sha256Bytes, hmacSha256Bytes,
   sniffImageInfo, decodeBmpImage, base64ToBytes,
   perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
-import { inspectImageMetadata, scrambleImage, unscrambleImage } from '../server/scramble-image.js';
+import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative } from '../server/scramble-image.js';
 import { buildArchxAssets } from '../server/build-assets.js';
 import {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS,
@@ -98,17 +99,38 @@ test('pixel scramble round-trips exactly (random RGBA buffer)', () => {
 });
 
 test('fused pad+scramble is byte-identical to pad-then-scramble (incl. awkward sizes)', () => {
-  // Padding replicates edge pixels (never black): a pure-black strip would
-  // tell a keyless solver exactly which tiles are edge tiles and how they
-  // are flipped. The manual pad below mirrors that contract.
+  // Padding reflects interior pixels + dithers (never black, never exact
+  // edge duplication): both would tell a keyless solver exactly which
+  // tiles are edge tiles and how they are flipped. The manual pad below
+  // mirrors that contract.
   const manualPad = (raw, w, h, pw, ph) => {
+    // Mirrors the core padding exactly: interior reflection + deterministic
+    // +/-1 dither on pad-derived pixels.
+    const reflect = (c, n) => {
+      if (n <= 1) return 0;
+      const period = 2 * n - 2;
+      const m = ((c % period) + period) % period;
+      return m < n ? m : period - m;
+    };
+    const padDither = (gx, gy) => {
+      let hash = (gx * 374761393 + gy * 668265263) | 0;
+      hash = (hash ^ (hash >> 13)) | 0;
+      hash = Math.imul(hash, 1274126177);
+      return (((hash >>> 16) % 3) - 1);
+    };
     const out = new Uint8Array(pw * ph * 4);
     for (let y = 0; y < ph; y++) {
       for (let x = 0; x < pw; x++) {
         const di = (y * pw + x) * 4;
-        const sx = Math.min(x, w - 1);
-        const sy = Math.min(y, h - 1);
-        out.set(raw.subarray((sy * w + sx) * 4, (sy * w + sx) * 4 + 4), di);
+        const isPad = x >= w || y >= h;
+        const sx = x < w ? x : reflect(x, w);
+        const sy = y < h ? y : reflect(y, h);
+        const si = (sy * w + sx) * 4;
+        const d = isPad ? padDither(x, y) : 0;
+        out[di] = Math.max(0, Math.min(255, raw[si] + d));
+        out[di + 1] = Math.max(0, Math.min(255, raw[si + 1] + d));
+        out[di + 2] = Math.max(0, Math.min(255, raw[si + 2] + d));
+        out[di + 3] = raw[si + 3];
       }
     }
     return out;
@@ -2381,7 +2403,7 @@ test('embedding a StegoMark requires an explicit stegoKey distinct from the scra
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('scramble padding replicates edge pixels (no black-strip position oracle)', () => {
+test('scramble padding reflects interior pixels with dither (no black/duplication oracle)', () => {
   const w = 103, h = 61, grid = 8;
   const src = new Uint8Array(w * h * 4);
   for (let i = 0; i < w * h; i++) {
@@ -2389,17 +2411,34 @@ test('scramble padding replicates edge pixels (no black-strip position oracle)',
   }
   const { pw, ph } = paddedSize(w, h, grid);
   assert.ok(pw > w && ph > h, 'test geometry must actually need padding');
-  const scrambled = scramblePixelsPadded(src, w, h, buildScramblePlan(grid, 'pad-oracle'));
+  const plan = buildScramblePlan(grid, 'pad-oracle');
+  const scrambled = scramblePixelsPadded(src, w, h, plan);
   assert.equal(scrambled.length, pw * ph * 4);
-  // A uniform source must stay uniform: any black pixel would mark its tile
-  // as a boundary tile and reveal position/flip to a keyless solver.
+  // A uniform source stays within +-1 everywhere (reflection of a constant
+  // is the constant; only the pad dither may move a channel by one step).
   for (let i = 0; i < pw * ph; i++) {
-    assert.deepEqual(
-      [scrambled[i * 4], scrambled[i * 4 + 1], scrambled[i * 4 + 2]],
-      [200, 180, 160],
-      `padded pixel ${i} must be the replicated edge color, never black`,
-    );
+    assert.ok(Math.abs(scrambled[i * 4] - 200) <= 1 &&
+      Math.abs(scrambled[i * 4 + 1] - 180) <= 1 &&
+      Math.abs(scrambled[i * 4 + 2] - 160) <= 1,
+      `padded pixel ${i} must stay near the edge color, never black`);
   }
+  // Vertical-gradient source: after unscrambling, the pad rows must NOT be
+  // exact copies of the last real row (the v1.11 zero-gradient signature).
+  const grad = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    grad[i] = y * 4; grad[i + 1] = y * 4; grad[i + 2] = y * 4; grad[i + 3] = 255;
+  }
+  const restored = scramblePixels(scramblePixelsPadded(grad, w, h, plan), pw, ph, plan, 'unscramble');
+  let padExactDupes = 0, padCompared = 0;
+  for (let y = h; y < ph; y++) {
+    for (let x = 0; x < w; x++) {
+      padCompared++;
+      if (restored[(y * pw + x) * 4] === restored[((h - 1) * pw + x) * 4]) padExactDupes++;
+    }
+  }
+  assert.ok(padExactDupes < padCompared * 0.05,
+    `pad rows must not duplicate the edge row (got ${padExactDupes}/${padCompared} exact)`);
 });
 
 test('stego confidence is capped below 0.5 whenever nothing is found', () => {
@@ -2429,8 +2468,13 @@ test('mirrored (flopped) suspects are recovered and flagged', () => {
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     flipped.set(marked.subarray((y * w + x) * 4, (y * w + x) * 4 + 4), (y * w + (w - 1 - x)) * 4);
   }
+  const blind = detectStegoFingerprint(flipped, w, h, { key: 'mk', profile: 'robust', searchMirror: false });
+  assert.equal(blind.found, false, 'with the mirror probe disabled a flopped grid must not decode');
+  // Explicit profiles mirror-probe by default (v1.12): found + flagged.
   const direct = detectStegoFingerprint(flipped, w, h, { key: 'mk', profile: 'robust' });
-  assert.equal(direct.found, false, 'a flopped grid must not decode unmirrored');
+  assert.equal(direct.found, true);
+  assert.equal(direct.mirrored, true);
+  assert.equal(direct.fingerprint, stegoFingerprint('mirror-probe'));
   const r = detectStegoFingerprint(flipped, w, h, { key: 'mk', profile: 'auto', searchGeometry: true });
   assert.equal(r.found, true);
   assert.equal(r.mirrored, true);
@@ -2586,4 +2630,176 @@ test('hardened defaults now encrypt; config audit warns on unencrypted or v1-pla
   });
   assert.ok(audit.warnings.some((w) => /encrypt is off/.test(w)), 'audit must call out jigsaw-solvable unencrypted payloads');
   assert.ok(audit.warnings.some((w) => /scramblePlanVersion 1/.test(w)), 'audit must call out the 32-bit plan seed');
+});
+
+/* ---------- v1.12 second external-review fixes ---------- */
+
+test('pure-JS SHA-256/HMAC match node:crypto (stego MAC primitive)', () => {
+  const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  for (const msg of ['', 'abc', 'x'.repeat(1000), 'Archx ✓']) {
+    assert.equal(hex(sha256Bytes(new TextEncoder().encode(msg))),
+      crypto.createHash('sha256').update(msg).digest('hex'));
+  }
+  for (const keyLen of [3, 32, 64, 131]) {
+    const key = new Uint8Array(keyLen).fill(0x5a);
+    const msg = new TextEncoder().encode('tag me');
+    assert.equal(hex(hmacSha256Bytes(key, msg)),
+      crypto.createHmac('sha256', Buffer.from(key)).update(msg).digest('hex'));
+  }
+});
+
+test('stego codeword v2 uses keyed MAC tags; legacy CRC marks still detect (flagged)', () => {
+  const w = 360, h = 240;
+  const src = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    src[i] = (x * 255 / w) | 0; src[i + 1] = (y * 255 / h) | 0; src[i + 2] = ((x + y) * 255 / (w + h)) | 0; src[i + 3] = 255;
+  }
+  for (const profile of ['standard', 'robust']) {
+    const mac = embedStegoFingerprint(src, w, h, 'mac-buyer', { key: 'tagkey', profile, strength: 6 });
+    const rMac = detectStegoFingerprint(mac, w, h, { key: 'tagkey', profile });
+    assert.equal(rMac.found, true, `${profile} MAC mark detects`);
+    assert.equal(rMac.tagScheme, 'mac');
+    assert.equal(rMac.fingerprint, stegoFingerprint('mac-buyer'));
+    const legacy = embedStegoFingerprint(src, w, h, 'legacy-buyer', { key: 'tagkey', profile, strength: 6, legacyCode: true });
+    const rLegacy = detectStegoFingerprint(legacy, w, h, { key: 'tagkey', profile });
+    assert.equal(rLegacy.found, true, `${profile} legacy mark still detects`);
+    assert.equal(rLegacy.tagScheme, 'crc', 'legacy decodes are flagged for corroboration');
+    assert.equal(rLegacy.fingerprint, stegoFingerprint('legacy-buyer'));
+    // A MAC mark must not validate under a wrong key via the CRC fallback.
+    const wrong = detectStegoFingerprint(mac, w, h, { key: 'wrong-key', profile });
+    assert.equal(wrong.found, false, `${profile} MAC mark rejects wrong keys`);
+  }
+});
+
+test('compound flip + 90% center crop recovers under an explicit profile', () => {
+  const w = 360, h = 240;
+  const src = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    src[i] = (x * 255 / w) | 0; src[i + 1] = (y * 255 / h) | 0; src[i + 2] = ((x + y) * 255 / (w + h)) | 0; src[i + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(src, w, h, 'flip-crop', { key: 'fc', profile: 'robust', strength: 6 });
+  // flop, then keep the center 90% at native resolution
+  const cw = Math.floor(w * 0.9), ch = Math.floor(h * 0.9);
+  const ox = Math.floor(w * 0.05), oy = Math.floor(h * 0.05);
+  const suspect = new Uint8Array(cw * ch * 4);
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+    const si = ((oy + y) * w + (w - 1 - (ox + x))) * 4;
+    suspect.set(marked.subarray(si, si + 4), (y * cw + x) * 4);
+  }
+  const r = detectStegoFingerprint(suspect, cw, ch, { key: 'fc', profile: 'robust', searchGeometry: true, searchOffsets: true });
+  assert.equal(r.found, true, 'flip+crop must recover (was the v1.11 compound blindspot)');
+  assert.equal(r.mirrored, true);
+  assert.equal(r.fingerprint, stegoFingerprint('flip-crop'));
+});
+
+test('SlidingWindowLimiter pins blocked entries against churn eviction', () => {
+  const limiter = new SlidingWindowLimiter({ windowMs: 60000, maxClients: 3, cleanupIntervalMs: 0 });
+  const t0 = 1_000_000;
+  limiter.hit('victim', 2, t0);
+  limiter.hit('victim', 2, t0 + 1);
+  assert.equal(limiter.hit('victim', 2, t0 + 2).limited, true);
+  for (let i = 0; i < 12; i++) limiter.hit('churn-' + i, 100, t0 + 3 + i);
+  assert.equal(limiter.hit('victim', 2, t0 + 20).limited, true,
+    'a blocked client must not be evicted (and un-throttled) by fresh-key churn');
+  limiter.close();
+});
+
+test('IPv6 /48 aggregate ceiling binds across rotating /64s', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-ipv6-48-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'ipv6-48-secret-for-unit-tests-32chars',
+    imagesDir: root,
+    authorize: async () => true,
+    trustProxy: true,
+    trustedProxyHops: 1,
+    quotas: { windowMs: 60000, perIp: 2 },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const mint = (ip) => postToken(`${base}/archx/token/cat?w=320`, { headers: { 'x-forwarded-for': ip } });
+  // /48 = 2001:db8:85a3::/48 — rotate the /64 (4th group) each 2 mints.
+  const statuses = [];
+  for (let subnet = 1; subnet <= 5; subnet++) {
+    for (let k = 0; k < 2; k++) statuses.push((await mint(`2001:db8:85a3:${subnet}::1`)).status);
+  }
+  assert.deepEqual(statuses.slice(0, 8), Array(8).fill(200), 'first 8 mints allowed (2 per /64, /48 ceiling 8)');
+  assert.deepEqual(statuses.slice(8), [429, 429], 'the /48 aggregate (4x perIp) binds the 9th+ mint despite fresh /64s');
+  assert.equal((await mint('2001:db8:9999:1::1')).status, 200, 'a different /48 is unaffected');
+});
+
+test('Redis store uses raw Buffers when the client supports returnBuffers', async () => {
+  const store = new Map();
+  const client = {
+    options: {},
+    // node-redis v4 shape
+    commandOptions(opts) { return { __opts: opts }; },
+    async get(arg1, arg2) {
+      const key = arg2 ?? arg1;
+      const v = store.get(key);
+      if (v == null) return null;
+      if (arg1 && arg1.__opts?.returnBuffers) return Buffer.isBuffer(v) ? v : Buffer.from(String(v));
+      return Buffer.isBuffer(v) ? v.toString('utf8') : v;
+    },
+    async set(key, value) { store.set(key, value); return 'OK'; },
+    async eval() { throw new Error('not used'); },
+  };
+  const redis = createRedisStateStore({ client, prefix: 'test112', clientFlavor: 'node-redis' });
+  const binary = Buffer.from(Array.from({ length: 300 }, (_, i) => (i * 7) % 256));
+  await redis.setCache('raw1', binary, { ttlMs: 1000 });
+  const stored = [...store.values()][0];
+  assert.ok(Buffer.isBuffer(stored) && stored.equals(binary), 'stored raw, no base64 armor');
+  assert.deepEqual(await redis.getCache('raw1'), binary);
+});
+
+test('prepare+finish is byte-identical to scrambleImage, and finish never mutates a shared base', async () => {
+  const master = await syntheticMaster(640, 420);
+  const opts = {
+    key: 'split-key', grid: 8, maxWidth: 480, quality: 90,
+    watermark: '© SPLIT', forensicSeed: 'sess-1',
+    stegoPayload: 'buyer-split', stegoKey: 'split-stego-secret',
+    processing: { webpEffort: 2 },
+  };
+  const direct = await scrambleImage(master, opts);
+  const base = await prepareDerivativeBase(master, opts);
+  const baseSnapshot = Buffer.from(base.data);
+  const staged = await finishDerivative(base, opts);
+  assert.deepEqual(new Uint8Array(staged.bytes), new Uint8Array(direct.bytes),
+    'two-stage output must equal single-call output byte for byte');
+  assert.deepEqual(new Uint8Array(base.data), new Uint8Array(baseSnapshot),
+    'finishDerivative must not poison a reusable base with per-viewer marks');
+  const staged2 = await finishDerivative(base, { ...opts, stegoPayload: 'buyer-other' });
+  assert.notDeepEqual(new Uint8Array(staged2.bytes), new Uint8Array(direct.bytes),
+    'a second viewer finished from the same base carries a different mark');
+});
+
+test('per-token redemptions populate the base-frame cache (decode+resize amortized)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-basecache-'));
+  fs.writeFileSync(path.join(root, 'cat.jpg'), await syntheticMaster(640, 420));
+  const handler = createArchxMiddleware({
+    secret: 'basecache-secret-for-unit-tests-32ch',
+    imagesDir: root,
+    authorize: async () => true,
+    steganography: { perToken: true, scope: 'viewer' },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(async () => { await new Promise((r) => server.close(r)); handler.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const seen = new Set();
+  for (let i = 0; i < 3; i++) {
+    const token = await (await postToken(`${base}/archx/token/cat?w=480`)).json();
+    const res = await redeemToken(base, token);
+    assert.equal(res.status, 200);
+    seen.add(Buffer.from(await res.arrayBuffer()).toString('base64').slice(0, 64) + i);
+    await res.arrayBuffer().catch(() => {});
+  }
+  const stats = handler.stats();
+  assert.equal(stats.baseCacheEntries, 1, 'one shared base frame for repeated per-token views of one geometry');
+  assert.ok(stats.baseCacheBytes > 0);
+  assert.equal(stats.outputCacheEntries, 0, 'per-token derivatives still skip the output cache');
 });

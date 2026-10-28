@@ -160,6 +160,86 @@ function asBytes(bytes) {
 const utf8Encoder = new TextEncoder();
 const utf8Fatal = new TextDecoder('utf-8', { fatal: true });
 const utf8Lenient = new TextDecoder('utf-8', { fatal: false });
+// Methods captured at module evaluation and called with explicit receivers,
+// so a TextDecoder/TextEncoder prototype hook installed after this module
+// loads cannot skim container headers or token JSON in the browser bundle.
+const textDecodeCall = TextDecoder.prototype.decode;
+const textEncodeCall = TextEncoder.prototype.encode;
+function utf8Encode(str) { return textEncodeCall.call(utf8Encoder, str); }
+function utf8DecodeFatal(bytes) { return textDecodeCall.call(utf8Fatal, bytes); }
+
+/* ------------------------------------------------------------------ */
+/* SHA-256 + HMAC (FIPS 180-4 / RFC 2104), synchronous and portable.   */
+/* Exists so StegoMark codeword tags can be keyed with a real MAC in   */
+/* both Node and the browser bundle, where WebCrypto is async-only.   */
+/* ------------------------------------------------------------------ */
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+export function sha256Bytes(message) {
+  const msg = asBytes(message);
+  const bitLenHi = Math.floor(msg.length / 0x20000000);
+  const bitLenLo = msg.length << 3;
+  const paddedLen = (((msg.length + 9 + 63) >> 6) << 6);
+  const buf = new Uint8Array(paddedLen);
+  buf.set(msg, 0);
+  buf[msg.length] = 0x80;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(paddedLen - 4, bitLenLo >>> 0, false);
+  dv.setUint32(paddedLen - 8, bitLenHi >>> 0, false);
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let block = 0; block < paddedLen; block += 64) {
+    for (let t = 0; t < 16; t++) w[t] = dv.getUint32(block + t * 4, false);
+    for (let t = 16; t < 64; t++) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, hh = h7;
+    for (let t = 0; t < 64; t++) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (hh + s1 + ch + SHA256_K[t] + w[t]) >>> 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (s0 + maj) >>> 0;
+      hh = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + hh) >>> 0;
+  }
+  const out = new Uint8Array(32);
+  const odv = new DataView(out.buffer);
+  [h0, h1, h2, h3, h4, h5, h6, h7].forEach((word, i) => odv.setUint32(i * 4, word, false));
+  return out;
+}
+
+export function hmacSha256Bytes(key, message) {
+  let keyBytes = asBytes(key);
+  if (keyBytes.length > 64) keyBytes = sha256Bytes(keyBytes);
+  const inner = new Uint8Array(64 + asBytes(message).length);
+  const outer = new Uint8Array(64 + 32);
+  for (let i = 0; i < 64; i++) {
+    const kb = i < keyBytes.length ? keyBytes[i] : 0;
+    inner[i] = kb ^ 0x36;
+    outer[i] = kb ^ 0x5c;
+  }
+  inner.set(asBytes(message), 64);
+  outer.set(sha256Bytes(inner), 64);
+  return sha256Bytes(outer);
+}
 
 const IMAGE_FORMAT_MIME = Object.freeze({
   jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', avif: 'image/avif',
@@ -435,7 +515,7 @@ export function validateArchxHeader(header) {
 
 export function encodeContainer(header, payload) {
   validateArchxHeader(header);
-  const headerBytes = utf8Encoder.encode(JSON.stringify(header));
+  const headerBytes = utf8Encode(JSON.stringify(header));
   if (headerBytes.length > MAX_ARCHX_HEADER_BYTES) throw new Error('Archx: .archx header is too large');
   const body = asBytes(payload);
   if (!body.length) throw new Error('Archx: .archx payload is empty');
@@ -475,7 +555,7 @@ export function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = (coreJsonParse || JSON.parse)(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
+    header = (coreJsonParse || JSON.parse)(utf8DecodeFatal(u8.subarray(10, 10 + headerLen)));
   } catch { throw new Error('Archx: invalid .archx header encoding'); }
   validateArchxHeader(header);
   const payload = u8.subarray(10 + headerLen);
@@ -490,6 +570,42 @@ export function decodeContainer(bytes) {
 const keyCache = new Map(); // base64 key -> Promise<CryptoKey>; deliberately small and LRU-bounded
 const AES_KEY_CACHE_MAX = 16;
 
+// The browser client captures SubtleCrypto methods at load and injects
+// them here (mirroring useJsonParser) so a SubtleCrypto hook installed
+// later cannot skim keys/plaintext: calls go through the captured
+// prototype methods with the captured subtle object as receiver.
+let coreWebCrypto = null; // { subtle, importKey?, encrypt?, decrypt?, digest?, getRandomValues? }
+export function useWebCrypto(injected) {
+  if (!injected || typeof injected !== 'object' || !injected.subtle) {
+    coreWebCrypto = null;
+  } else {
+    coreWebCrypto = {
+      subtle: injected.subtle,
+      importKey: typeof injected.importKey === 'function' ? injected.importKey : null,
+      encrypt: typeof injected.encrypt === 'function' ? injected.encrypt : null,
+      decrypt: typeof injected.decrypt === 'function' ? injected.decrypt : null,
+      digest: typeof injected.digest === 'function' ? injected.digest : null,
+      getRandomValues: typeof injected.getRandomValues === 'function' ? injected.getRandomValues : null,
+      cryptoObj: injected.cryptoObj || null,
+    };
+  }
+  keyCache.clear(); // CryptoKeys belong to the subtle instance that made them
+}
+function subtleCall(name, args) {
+  if (coreWebCrypto) {
+    const fn = coreWebCrypto[name];
+    if (fn) return fn.call(coreWebCrypto.subtle, ...args);
+    return coreWebCrypto.subtle[name](...args);
+  }
+  return globalThis.crypto.subtle[name](...args);
+}
+function randomFill(bytes) {
+  if (coreWebCrypto?.getRandomValues) {
+    return coreWebCrypto.getRandomValues.call(coreWebCrypto.cryptoObj || globalThis.crypto, bytes);
+  }
+  return globalThis.crypto.getRandomValues(bytes);
+}
+
 async function importAesKey(keyBase64) {
   if (typeof keyBase64 !== 'string' || !keyBase64) throw new TypeError('Archx: AES key must be a base64 string');
   const cached = keyCache.get(keyBase64);
@@ -499,12 +615,16 @@ async function importAesKey(keyBase64) {
   }
   const pending = (async () => {
     const raw = base64ToBytes(keyBase64);
-    if (![16, 24, 32].includes(raw.length)) {
-      throw new Error('Archx: AES key must be 16/24/32 bytes (base64)');
+    try {
+      if (![16, 24, 32].includes(raw.length)) {
+        throw new Error('Archx: AES key must be 16/24/32 bytes (base64)');
+      }
+      return await subtleCall('importKey', [
+        'raw', raw, { name: 'AES-GCM', length: raw.length * 8 }, false, ['encrypt', 'decrypt'],
+      ]);
+    } finally {
+      raw.fill(0); // key material now lives only in the non-extractable CryptoKey
     }
-    return globalThis.crypto.subtle.importKey(
-      'raw', raw, { name: 'AES-GCM', length: raw.length * 8 }, false, ['encrypt', 'decrypt'],
-    );
   })();
   keyCache.set(keyBase64, pending);
   while (keyCache.size > AES_KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
@@ -515,17 +635,19 @@ async function importAesKey(keyBase64) {
 /** Generate a fresh 256-bit key, base64-encoded. */
 export function generateKeyBase64() {
   const raw = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(raw);
-  return bytesToBase64(raw);
+  randomFill(raw);
+  const encoded = bytesToBase64(raw);
+  raw.fill(0);
+  return encoded;
 }
 
 export async function encryptPayload(plainBytes, keyBase64) {
   const key = await importAesKey(keyBase64);
   const iv = new Uint8Array(12);
-  globalThis.crypto.getRandomValues(iv);
-  const cipher = await globalThis.crypto.subtle.encrypt(
+  randomFill(iv);
+  const cipher = await subtleCall('encrypt', [
     { name: 'AES-GCM', iv }, key, asBytes(plainBytes),
-  );
+  ]);
   return { cipher: new Uint8Array(cipher), iv: bytesToBase64(iv) };
 }
 
@@ -535,9 +657,9 @@ export async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
   if (iv.length !== 12) throw new Error('Archx: AES-GCM IV must be 12 bytes');
   if (cipher.length < 17) throw new Error('Archx: AES-GCM payload is too short');
   const key = await importAesKey(keyBase64);
-  const plain = await globalThis.crypto.subtle.decrypt(
+  const plain = await subtleCall('decrypt', [
     { name: 'AES-GCM', iv }, key, cipher,
-  );
+  ]);
   return new Uint8Array(plain);
 }
 
@@ -680,6 +802,26 @@ function stegoCrc16(bytes) {
   return crc;
 }
 
+// Codeword v2 acceptance tag: the first 16 bits of HMAC-SHA256 over the
+// 48-bit fingerprint under the (secret) stego key. CRC-16 is linear, so
+// the bitwise majority of several buyers' codewords sits close to another
+// valid codeword and blind repair can "find" a third party's fingerprint
+// in a collusion average (phantom framing). A keyed MAC avalanches:
+// MAC(majority) agrees with majority(MACs) only at chance (~50%/bit), so
+// hybrids fall outside any sane repair budget, while detection stays a
+// single O(1) pass under one shared per-image key — no per-viewer keys
+// or registry-sized search needed. CRC-16 remains as the *repair*
+// oracle in the robust profile (its syndrome algebra is what makes
+// bounded correction fast) and as the legacy-v1 acceptance predicate.
+const STEGO_MAC_DOMAIN = utf8Encode('archx-stego-v2:');
+function stegoMac16(key, payloadBytes) {
+  const msg = new Uint8Array(STEGO_MAC_DOMAIN.length + payloadBytes.length);
+  msg.set(STEGO_MAC_DOMAIN, 0);
+  msg.set(payloadBytes, STEGO_MAC_DOMAIN.length);
+  const mac = hmacSha256Bytes(utf8Encode(String(key ?? '')), msg);
+  return (mac[0] << 8) | mac[1];
+}
+
 function stegoBytesToBits(bytes) {
   const bits = new Uint8Array(bytes.length * 8);
   bytes.forEach((byte, i) => {
@@ -693,16 +835,23 @@ function stegoBytesToBits(bytes) {
 // The detector uses the extra redundancy only after the ordinary CRC has
 // identified a plausible partially damaged vector. This is still a heuristic
 // forensic mark—not an unremovable or guaranteed identifier.
-function robustStegoCodeBits(fingerprint, key) {
+function robustLegacyKeyedCrc(first8, key) {
+  const keyByte = Math.floor(hashSeed('archx-stego-robust:' + String(key ?? ''), 0x51ab) % 256);
+  const keyed = new Uint8Array(9);
+  keyed.set(first8, 0);
+  keyed[8] = keyByte;
+  return stegoCrc16(keyed);
+}
+
+function robustStegoCodeBits(fingerprint, key, tag = 'mac') {
   const payload = new Uint8Array(6);
   for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
   const crc = stegoCrc16(payload);
   const first = [...payload, (crc >> 8) & 255, crc & 255];
-  const keyByte = Math.floor(hashSeed('archx-stego-robust:' + String(key ?? ''), 0x51ab) % 256);
-  const keyed = new Uint8Array(first.length + 1);
-  keyed.set(first, 0);
-  keyed[keyed.length - 1] = keyByte;
-  const check = stegoCrc16(keyed);
+  // v2: bytes 8-9 are the keyed MAC acceptance tag (avalanche) instead of
+  // the legacy one-key-byte CRC (linear, so collusion majorities could
+  // stay within repair distance of a phantom fingerprint).
+  const check = tag === 'crc' ? robustLegacyKeyedCrc(first, key) : stegoMac16(key, payload);
   return stegoBytesToBits(new Uint8Array([
     ...first,
     (check >> 8) & 255,
@@ -712,18 +861,19 @@ function robustStegoCodeBits(fingerprint, key) {
   ]));
 }
 
-function robustStegoBytesValid(bytes, key) {
+function robustStegoBytesValid(bytes, key, tag = 'mac') {
   if (!bytes || bytes.length !== 12) return false;
-  if (stegoCrc16(bytes.subarray(0, 6)) !== ((bytes[6] << 8) | bytes[7])) return false;
+  // Order matters for the exhaustive repair search: the marker and the
+  // linear CRC reject ~all random candidates before any HMAC runs.
   if (bytes[10] !== 0xa5 || bytes[11] !== 0x5a) return false;
-  const keyByte = Math.floor(hashSeed('archx-stego-robust:' + String(key ?? ''), 0x51ab) % 256);
-  const keyed = new Uint8Array(9);
-  keyed.set(bytes.subarray(0, 8), 0);
-  keyed[8] = keyByte;
-  return stegoCrc16(keyed) === ((bytes[8] << 8) | bytes[9]);
+  if (stegoCrc16(bytes.subarray(0, 6)) !== ((bytes[6] << 8) | bytes[7])) return false;
+  const expected = tag === 'crc'
+    ? robustLegacyKeyedCrc(bytes.subarray(0, 8), key)
+    : stegoMac16(key, bytes.subarray(0, 6));
+  return expected === ((bytes[8] << 8) | bytes[9]);
 }
 
-function robustStegoBitsValid(bits, key) {
+function robustStegoBitsValid(bits, key, tag = 'mac') {
   if (!bits || bits.length !== 96) return false;
   const bytes = new Uint8Array(12);
   for (let i = 0; i < 12; i++) {
@@ -731,7 +881,7 @@ function robustStegoBitsValid(bits, key) {
     for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
     bytes[i] = byte;
   }
-  return robustStegoBytesValid(bytes, key);
+  return robustStegoBytesValid(bytes, key, tag);
 }
 
 function robustStegoFingerprintFromBits(bits) {
@@ -744,7 +894,7 @@ function robustStegoFingerprintFromBits(bits) {
   return fingerprint;
 }
 
-function repairRobustViaFirstCrc(scores, hard, key) {
+function repairRobustViaFirstCrc(scores, hard, key, tag = 'mac') {
   const first = Uint8Array.from(hard.subarray(0, 64));
   const syndromeOf = (bits) => {
     const bytes = new Uint8Array(8);
@@ -758,7 +908,7 @@ function repairRobustViaFirstCrc(scores, hard, key) {
   const target = syndromeOf(first);
   const buildCanonical = (correctedFirst) => {
     const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
-    const canonical = robustStegoCodeBits(fingerprint, key);
+    const canonical = robustStegoCodeBits(fingerprint, key, tag);
     let flips = 0;
     let softCost = 0;
     for (let i = 0; i < 96; i++) {
@@ -829,7 +979,7 @@ function repairRobustViaFirstCrc(scores, hard, key) {
   return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
 }
 
-function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
+function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = 'mac') {
   const bits = Uint8Array.from(hard);
   const bytes = new Uint8Array(12);
   for (let i = 0; i < 12; i++) {
@@ -837,9 +987,9 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
     for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b];
     bytes[i] = byte;
   }
-  if (robustStegoBytesValid(bytes, key)) return { bits, flips: 0 };
-  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key);
-  if (syndromeRepair) return syndromeRepair;
+  if (robustStegoBytesValid(bytes, key, tag)) return { bits, flips: 0, tagScheme: tag };
+  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key, tag);
+  if (syndromeRepair) return { ...syndromeRepair, tagScheme: tag };
   // Byte-level flips plus the table CRC keep an exhaustive search of the
   // 24 weakest bits to five flips practical during offline geometry search.
   const candidates = Array.from({ length: bits.length }, (_, index) => index)
@@ -850,7 +1000,7 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
     bytes[index >> 3] ^= 1 << (7 - (index & 7));
   };
   const search = (start, depth, targetDepth) => {
-    if (depth === targetDepth) return robustStegoBytesValid(bytes, key);
+    if (depth === targetDepth) return robustStegoBytesValid(bytes, key, tag);
     for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
       flip(candidates[i]);
       if (search(i + 1, depth + 1, targetDepth)) return true;
@@ -859,16 +1009,16 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
     return false;
   };
   for (let flips = 1; flips <= maxFlips; flips++) {
-    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips };
+    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips, tagScheme: tag };
   }
   return null;
 }
 
-function stegoCodeBits(fingerprint) {
+function stegoCodeBits(fingerprint, key, tag = 'mac') {
   const bytes = new Uint8Array(6);
   for (let i = 0; i < 6; i++) bytes[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
-  const crc = stegoCrc16(bytes);
-  const all = [...bytes, (crc >> 8) & 255, crc & 255];
+  const check = tag === 'crc' ? stegoCrc16(bytes) : stegoMac16(key, bytes);
+  const all = [...bytes, (check >> 8) & 255, check & 255];
   const bits = new Uint8Array(64);
   all.forEach((byte, i) => {
     for (let b = 0; b < 8; b++) bits[i * 8 + b] = (byte >> (7 - b)) & 1;
@@ -891,32 +1041,60 @@ function stegoCrcValid(bits) {
   return stegoCrc16(bytes.subarray(0, 6)) === ((bytes[6] << 8) | bytes[7]);
 }
 
+function stegoMacValid(bits, key) {
+  const bytes = stegoBitsToBytes(bits);
+  return stegoMac16(key, bytes.subarray(0, 6)) === ((bytes[6] << 8) | bytes[7]);
+}
+
 /**
- * Soft-decision repair: if the voted codeword fails CRC, try flipping the
- * least-reliable bits (singles, pairs, triples). Real marks usually need
- * 0–2 repairs after re-encoding; random images are still rejected by the
- * caller's signal/agreement thresholds, not by CRC alone.
+ * Soft-decision repair: if the voted codeword fails its tag, try flipping
+ * the least-reliable bits (singles, pairs, triples). Real marks usually
+ * need 0–2 repairs after re-encoding; random images are still rejected by
+ * the caller's signal/agreement thresholds, not by the tag alone. The MAC
+ * predicate runs first; the legacy CRC predicate is a flagged fallback so
+ * pre-v1.12 marks stay detectable (under stricter caller gates).
  */
-function correctStegoBits(bits, reliability) {
-  if (stegoCrcValid(bits)) return { bits, corrections: 0 };
-  const weakest = [...bits.keys()]
-    .sort((a, b) => reliability[a] - reliability[b])
-    .slice(0, 20);
-  let best = null;
-  const visit = (start, chosen) => {
-    if (chosen.length) {
-      const candidate = new Uint8Array(bits);
-      let cost = 0;
-      for (const i of chosen) { candidate[i] ^= 1; cost += reliability[i]; }
-      if (stegoCrcValid(candidate) && (!best || cost < best.cost)) {
-        best = { bits: candidate, corrections: chosen.length, cost };
-      }
+function correctStegoBits(bits, reliability, key, maxDepth = 3) {
+  const macCache = new Map();
+  const macOf = (candidate) => {
+    const bytes = stegoBitsToBytes(candidate);
+    const cacheKey = ((bytes[0] << 16) | (bytes[1] << 8) | bytes[2]) + ':' +
+      ((bytes[3] << 16) | (bytes[4] << 8) | bytes[5]);
+    let mac = macCache.get(cacheKey);
+    if (mac === undefined) {
+      mac = stegoMac16(key, bytes.subarray(0, 6));
+      macCache.set(cacheKey, mac);
     }
-    if (chosen.length >= 3) return;
-    for (let i = start; i < weakest.length; i++) visit(i + 1, [...chosen, weakest[i]]);
+    return mac === ((bytes[6] << 8) | bytes[7]);
   };
-  visit(0, []);
-  return best || { bits, corrections: -1 };
+  const search = (valid, depthCap) => {
+    if (valid(bits)) return { bits, corrections: 0 };
+    const weakest = [...bits.keys()]
+      .sort((a, b) => reliability[a] - reliability[b])
+      .slice(0, 20);
+    let best = null;
+    const visit = (start, chosen) => {
+      if (chosen.length) {
+        const candidate = new Uint8Array(bits);
+        let cost = 0;
+        for (const i of chosen) { candidate[i] ^= 1; cost += reliability[i]; }
+        if (valid(candidate) && (!best || cost < best.cost)) {
+          best = { bits: candidate, corrections: chosen.length, cost };
+        }
+      }
+      if (chosen.length >= depthCap) return;
+      for (let i = start; i < weakest.length; i++) visit(i + 1, [...chosen, weakest[i]]);
+    };
+    visit(0, []);
+    return best;
+  };
+  const macBest = search(macOf, maxDepth);
+  if (macBest) return { ...macBest, tagScheme: 'mac' };
+  // Legacy standard candidates are gated to <=1 correction downstream, so
+  // a deeper CRC search could only manufacture rejected candidates.
+  const crcBest = search(stegoCrcValid, Math.min(1, maxDepth));
+  if (crcBest) return { ...crcBest, tagScheme: 'crc' };
+  return { bits, corrections: -1, tagScheme: null };
 }
 
 const STEGO_ROW_SEGMENTS = 4;
@@ -966,6 +1144,9 @@ function robustStegoLayout(cellCount, key) {
 
 export function embedStegoFingerprint(rgba, w, h, payload, {
   key = '', strength = 6, gridX, gridY, profile = 'standard', inPlace = false,
+  // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
+  // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
+  legacyCode = false,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
@@ -976,7 +1157,8 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const bits = robust ? robustStegoCodeBits(fingerprint, key) : stegoCodeBits(fingerprint);
+  const tag = legacyCode ? 'crc' : 'mac';
+  const bits = robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust
@@ -1040,16 +1222,35 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   return out;
 }
 
+function flipPixelsHorizontal(src, w, h) {
+  const flipped = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const si = row + x * 4;
+      const di = row + (w - 1 - x) * 4;
+      flipped[di] = src[si]; flipped[di + 1] = src[si + 1];
+      flipped[di + 2] = src[si + 2]; flipped[di + 3] = src[si + 3];
+    }
+  }
+  return flipped;
+}
+
 export function detectStegoFingerprint(rgba, w, h, {
   key = '', gridX, gridY, profile = 'standard', searchOffsets = false, searchGeometry = false,
+  // Mirrored-suspect recovery is on by default for every profile (one
+  // extra bounded pass on flipped pixels, only when the forward pass
+  // found nothing); set false to disable.
+  searchMirror = true,
+  _mirrorProbe = false,
 } = {}) {
   if (profile === 'auto') {
     const standard = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true,
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, _mirrorProbe: true,
     });
     const initial = robust?.found && !standard?.found
       ? robust
@@ -1058,33 +1259,32 @@ export function detectStegoFingerprint(rgba, w, h, {
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
     if (!searchGeometry || initial?.found) return initial;
     const standardGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true,
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(rgba, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, _mirrorProbe: true,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
-    // zero-cost evasion). One extra profile pair on flipped pixels — if it
-    // hits, the result is flagged so the investigator knows orientation
-    // had to be corrected before the fingerprint could be read.
-    try {
+    // zero-cost evasion). The probe inherits the geometry search so
+    // compound flip+crop/resize suspects recover too; it only runs after
+    // the full forward geometry search failed (offline forensic mode).
+    if (searchMirror && !_mirrorProbe) try {
       const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
       if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const flipped = new Uint8Array(w * h * 4);
-        for (let y = 0; y < h; y++) {
-          const row = y * w * 4;
-          for (let x = 0; x < w; x++) {
-            const si = row + x * 4;
-            const di = row + (w - 1 - x) * 4;
-            flipped[di] = src[si]; flipped[di + 1] = src[si + 1];
-            flipped[di + 2] = src[si + 2]; flipped[di + 3] = src[si + 3];
-          }
+        const flipped = flipPixelsHorizontal(src, w, h);
+        for (const candidateProfile of ['standard', 'robust']) {
+          const fast = detectStegoFingerprint(flipped, w, h, {
+            key, gridX, gridY, profile: candidateProfile, searchOffsets,
+            searchGeometry: false, searchMirror: false, _mirrorProbe: true,
+          });
+          if (fast?.found) return { ...fast, mirrored: true };
         }
         for (const candidateProfile of ['standard', 'robust']) {
           const mirrored = detectStegoFingerprint(flipped, w, h, {
-            key, gridX, gridY, profile: candidateProfile, searchOffsets, searchGeometry: false,
+            key, gridX, gridY, profile: candidateProfile, searchOffsets,
+            searchGeometry: true, searchMirror: false, _mirrorProbe: true,
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true };
         }
@@ -1226,22 +1426,33 @@ export function detectStegoFingerprint(rgba, w, h, {
         reliability[i] = Math.abs(voteScores[i]);
       }
     }
+    // Search-budget hint (outcome-preserving): the standard gates only
+    // accept 2-3 corrections when raw signal is clearly genuine, so on
+    // weak candidates a deep MAC search would manufacture rejects at
+    // full HMAC cost across every geometry probe.
+    const meanAbsPre = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    const preAgreeing = cellScores.filter(({ bitIndex, score }) => (score >= 0) === !!votedBits[bitIndex]).length;
+    const preAgreement = cellScores.length ? preAgreeing / cellScores.length : 0;
+    const standardDepth = meanAbsPre >= 2.0 && preAgreement >= 0.82 ? 3 : 1;
     const corrected = robust
       ? (() => {
-          const repaired = repairRobustStegoBits(reliability, votedBits, key, 5);
+          const repaired = repairRobustStegoBits(reliability, votedBits, key, 5, 'mac') ||
+            repairRobustStegoBits(reliability, votedBits, key, 5, 'crc');
           return repaired
-            ? { bits: repaired.bits, corrections: repaired.flips }
-            : { bits: votedBits, corrections: -1 };
+            ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme }
+            : { bits: votedBits, corrections: -1, tagScheme: null };
         })()
-      : correctStegoBits(votedBits, reliability);
+      : correctStegoBits(votedBits, reliability, key, standardDepth);
     const bits = corrected.bits;
     const fingerprint = robust
       ? robustStegoFingerprintFromBits(bits)
       : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
-    const crcValid = robust ? robustStegoBitsValid(bits, key) : stegoCrcValid(bits);
+    // The correctors only return corrections >= 0 for a candidate that
+    // passed its acceptance predicate (MAC tag, or legacy CRC fallback).
+    const crcValid = corrected.corrections >= 0;
     const agreeing = cellScores.filter(({ bitIndex, score }) => (score >= 0) === !!bits[bitIndex]).length;
     const agreement = cellScores.length ? agreeing / cellScores.length : 0;
-    const meanAbs = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    const meanAbs = meanAbsPre;
     // Unmarked photos naturally show ~0.60–0.68 self-agreement (majority
     // vote bias) and weak mean signal; genuine marks sit far above both.
     const evidence = Math.max(0, agreement - 0.64) * 2.4 +
@@ -1268,19 +1479,26 @@ export function detectStegoFingerprint(rgba, w, h, {
     // needing four or five corrections must also show strong raw signal and
     // cell agreement; a weak, heavily repaired candidate is not evidence.
     const correctionCount = Math.max(0, corrected.corrections);
+    // Legacy (pre-v1.12, CRC-tagged) candidates are held to stricter gates:
+    // their linear tag is exactly what collusion-phantom repair exploits,
+    // so a legacy standard decode must be nearly repair-free with very
+    // high agreement, and a legacy robust decode loses the 4-5 tier.
+    const legacyScheme = corrected.tagScheme === 'crc';
     const robustCorrectionOk = !robust || correctionCount <= 3 ||
-      (correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95);
+      (!legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95);
     // Same principle for the standard decoder: a candidate needing 2+
     // repaired bits must carry clearly genuine raw signal, or the repair
     // search itself manufactures the CRC match (false attribution).
-    const standardCorrectionOk = robust || correctionCount <= 1 ||
-      (meanAbs >= 2.0 && agreement >= 0.85);
+    const standardCorrectionOk = robust || (legacyScheme
+      ? correctionCount <= 1 && agreement >= 0.95
+      : correctionCount <= 1 || (meanAbs >= 2.0 && agreement >= 0.85));
     const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
       cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
     return {
       found,
       fingerprint,
       profile: effectiveProfile,
+      tagScheme: corrected.tagScheme ?? null,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
@@ -1461,6 +1679,20 @@ export function detectStegoFingerprint(rgba, w, h, {
     delete best._scaleX;
     delete best._scaleY;
   }
+  // Explicit-profile mirror recovery (compound flip+geometry included,
+  // since the probe inherits this call's search options).
+  if (!best?.found && searchMirror && !_mirrorProbe) {
+    try {
+      const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+      if (src.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const mirrored = detectStegoFingerprint(flipPixelsHorizontal(src, w, h), w, h, {
+          key, gridX, gridY, profile, searchOffsets, searchGeometry,
+          searchMirror: false, _mirrorProbe: true,
+        });
+        if (mirrored?.found) return { ...mirrored, mirrored: true };
+      }
+    } catch { /* mirror probe is best-effort */ }
+  }
   return best;
 }
 
@@ -1574,10 +1806,36 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  // Padding replicates the nearest edge pixel instead of black: a pure
-  // rgb(0,0,0) strip would blindly reveal which tiles are edge tiles and
-  // how they are flipped (an orientation oracle for keyless jigsaw
-  // solvers). Display is unaffected — the padded region is cropped away.
+  // Padding uses interior REFLECTION (mirror across the edge) plus a
+  // deterministic +/-1 dither on pad-derived pixels. Black padding (pre-
+  // v1.11) identified every edge tile + flip; edge replication (v1.11)
+  // still leaked them via zero-gradient duplicated rows. Reflected
+  // texture continues the natural gradient, and the dither destroys any
+  // remaining exact-duplicate signature. Display is unaffected either
+  // way — the padded region is cropped away before presentation.
+  const reflect = (c, n) => {
+    if (n <= 1) return 0;
+    const period = 2 * n - 2;
+    const m = ((c % period) + period) % period;
+    return m < n ? m : period - m;
+  };
+  const padDither = (gx, gy) => {
+    let hash = (gx * 374761393 + gy * 668265263) | 0;
+    hash = (hash ^ (hash >> 13)) | 0;
+    hash = Math.imul(hash, 1274126177);
+    return (((hash >>> 16) % 3) - 1);
+  };
+  const writePixel = (di, si, dither) => {
+    if (!dither) {
+      target[di] = src[si]; target[di + 1] = src[si + 1];
+      target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
+    } else {
+      target[di] = Math.max(0, Math.min(255, src[si] + dither));
+      target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + dither));
+      target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + dither));
+      target[di + 3] = src[si + 3];
+    }
+  };
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
     if (!Number.isInteger(source) || source < 0 || source >= count) {
@@ -1591,29 +1849,32 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dx = (dest % grid) * tw;
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
-      // Rows beyond the source height replicate the last real row.
-      const srcY = Math.min(sy + (fy ? th - 1 - y : y), h - 1);
+      const rawY = sy + (fy ? th - 1 - y : y);
+      const srcY = rawY < h ? rawY : reflect(rawY, h);
+      const rowIsPad = rawY >= h;
       const dstRow = (dy + y) * pw + dx;
-      if (useWords && !fx) {
+      if (useWords && !fx && !rowIsPad) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
-        if (avail < tw) {
-          // Replicate the final real pixel of the row across the pad tail.
-          const edgeWord = avail > 0 ? out32[dstRow + avail - 1] : src32[srcY * w + (w - 1)];
-          out32.fill(edgeWord, dstRow + avail, dstRow + tw);
+        for (let x = avail; x < tw; x++) {
+          const rawX = sx + x;
+          const srcX = reflect(rawX, w);
+          writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4, padDither(rawX, rawY));
         }
-      } else if (useWords) {
+      } else if (useWords && !rowIsPad && !((sx + tw) > w)) {
         for (let x = 0; x < tw; x++) {
-          const srcX = Math.min(sx + (tw - 1 - x), w - 1);
-          out32[dstRow + x] = src32[srcY * w + srcX];
+          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
         }
       } else {
         for (let x = 0; x < tw; x++) {
-          const srcX = Math.min(sx + (fx ? tw - 1 - x : x), w - 1);
-          const si = (srcY * w + srcX) * 4;
-          const di = (dstRow + x) * 4;
-          target[di] = src[si]; target[di + 1] = src[si + 1];
-          target[di + 2] = src[si + 2]; target[di + 3] = src[si + 3];
+          const rawX = sx + (fx ? tw - 1 - x : x);
+          const srcX = rawX < w ? rawX : reflect(rawX, w);
+          const isPad = rowIsPad || rawX >= w;
+          writePixel(
+            (dstRow + x) * 4,
+            (srcY * w + srcX) * 4,
+            isPad ? padDither(rawX, rawY) : 0,
+          );
         }
       }
     }

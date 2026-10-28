@@ -3,6 +3,127 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.12.0] — Unreleased
+
+Second external adversarial-review response (claim-by-claim verification in
+`docs/RESEARCH.md` §2.20). Eight file-level findings were raised against
+1.11.0; each was reproduced or refuted against the code before fixing.
+All eight real findings are addressed below, plus the feasible subset of
+the proposed optimizations. Larger roadmap items (A/B tile-sheet
+streaming, worker-thread pools, FFT sync templates, IIIF pyramids,
+learned watermarks) are evaluated and deferred with reasoning in §2.20 —
+not silently dropped.
+
+### Security
+
+- **Fortress no longer gifts a 2D fallback when `preserveDrawingBuffer`
+  is rewritten.** If a pre-loaded `getContext` proxy forces a preserved
+  drawing buffer, the attribute check now runs through the *captured*
+  `getContextAttributes`, and a one-time behavioral canary (paint, hold
+  two frames, `readPixels` before the next draw) catches proxies that
+  also spoof the attribute report. Under `integrity: 'lock'` (fortress
+  default) either signal is fatal: hard blackout instead of the previous
+  untainted Canvas2D downgrade. The canary only judges frames that were
+  provably presented (canvas inside the layout viewport) — a below-fold
+  canvas is never composited and would otherwise false-positive.
+- **StegoMark codeword v2: keyed HMAC-16 acceptance tag.** The previous
+  acceptance check was a linear CRC keyed by a single derived byte, so a
+  majority-vote hybrid of several buyers' marks could validate under a
+  fingerprint nobody was issued (collusion framing). Standard codewords
+  now carry a 16-bit truncated HMAC-SHA256 over the 48-bit fingerprint
+  (domain-separated, shared stego key) in place of the public CRC;
+  robust codewords keep their first CRC purely as a repair oracle and
+  carry the MAC in bytes 8–9. Detection stays O(1)-per-suspect under
+  the image key — no `keyScope:'viewer'` O(N) scan needed. Results
+  report `tagScheme: 'mac' | 'crc' | null`; legacy CRC decodes are
+  still detected but under tightened gates (robust ≤3 corrected bits,
+  standard ≤1 flip with ≥0.95 agreement) and the CLI prints a
+  corroboration warning. `legacyCode: true` reproduces old codewords.
+- **Core crypto no longer touches page-visible primitives.** The shared
+  core (`src/scramble.js`) gains pure-JS `sha256Bytes`/`hmacSha256Bytes`
+  (verified byte-identical to `node:crypto`) and a `useWebCrypto()`
+  injection point: the client hands over boot-captured SubtleCrypto
+  methods and every core encrypt/decrypt/digest/importKey call runs
+  through them with the correct receiver. Raw AES key bytes are zeroed
+  after import. The client also captures and routes `reader.read`,
+  `Response.text`, and `TextDecoder.decode` (shared fatal decoder for
+  bounded JSON) — closing the "captured at boot, but the sensitive call
+  still used the live global" gap for streaming, DPoP, and hashing.
+- **Paced lens stitching is now counted cumulatively.** The lens keeps
+  a 120-second last-visit ledger over an 8×8 coverage grid; sweeping
+  ≥56 of 64 cells inside the horizon raises `lens-scan` even when each
+  burst stays under the 8-second threshold (`scanCellsCumulative`
+  tunable). Lens radius also jitters ±6% (re-rolled ≤4×/s) so stitched
+  frames no longer share an exact disc geometry.
+- **Temporal shield resists order-independent medians.** The shader
+  path adds an asymmetric-duty spatial bias (duty cycle
+  [+2⁄3, −1⁄3, −1⁄3] at 24px blocks, amplitude 0.55×strength, bias
+  seed re-rolled every ~90 temporal frames): the per-pixel *mean* is
+  still exact for the viewer, but a sample *median* of captured frames
+  converges to a block-varying wrong value that keeps moving. Long
+  averaging still converges to the displayed image — that is inherent
+  to anything a person can watch, and remains documented as such.
+- **IPv6 /48 rotation + limiter eviction churn.** IP-keyed limits now
+  apply two tiers — the /64 at the configured limit and its /48 at 4× —
+  checked narrow-first, so rotating through a routed /48 no longer
+  multiplies the budget (distinct-image abuse tracking stays /64).
+  The sliding-window limiter pins blocked entries: cache churn evicts
+  unblocked entries first, so an attacker can no longer flush their own
+  block by flooding the table with fresh identities.
+
+### Fixed
+
+- **Mirror+crop blindspot in StegoMark detection.** `searchMirror`
+  (new, default `true`) probes a horizontally flipped copy for *all*
+  profiles — previously only `auto`+geometry did — and the flipped
+  probe inherits `searchOffsets`/`searchGeometry`, so flip+90%-crop
+  suspects recover in explicit standard and robust modes too.
+  Asymmetric heavy crops (~82%) still defeat cell voting; that needs
+  sync templates/registration (v2 roadmap, §2.20).
+- **Edge-replicate padding leaked a row-duplication oracle.** Pad rows
+  were exact copies of the edge row (100% duplicated rows on a
+  gradient probe), handing tile-edge solvers free boundary matches.
+  Padding is now interior reflection with a deterministic ±1 dither on
+  pad pixels only (<5% exact-duplicate rows). Displayed pixels are
+  unchanged and old payloads still decode — the client crops the pad
+  either way, so this is wire-compatible across versions.
+
+### Performance
+
+- **Two-stage derivative pipeline.** `scrambleImage` is now
+  `prepareDerivativeBase` (decode/resize/watermark → raw base) +
+  `finishDerivative` (mark/scramble/encode/encrypt), byte-identical
+  output. The middleware caches bases (byte-bounded LRU, capped by
+  `masterCacheMaxBytes`) for derivatives that can never output-cache —
+  per-token/per-viewer variants skip the decode+resize on every hit.
+  `stats` reports `baseCacheEntries`/`baseCacheBytes`.
+- **Redis binary mode.** When the client is binary-capable
+  (`getBuffer`, or node-redis `commandOptions({ returnBuffers: true })`
+  shape), cache values are stored as raw Buffers instead of `b64:`
+  armor (≈33% smaller, no encode/decode per hit). Legacy-armored
+  entries still decode; mixed fleets self-heal through the existing
+  HMAC entry tags.
+- **WebGL contexts are released off-screen.** Viewport unload now
+  loses the GL context on purpose, returning its slot to the browser's
+  active-context budget; the restore path re-runs the one-time canary.
+- **Temporal idle throttle.** A continuous temporal loop with no
+  pointer activity over the instance for 5 s draws 1 frame in 3
+  (~20 Hz at 60 Hz panels) — modulation (and its capture friction)
+  continues at a third of the GPU/battery cost; any interaction
+  restores full rate. It never fully stops: a static frame would be
+  a free clean capture.
+
+### Compatibility
+
+- Detectors **older than 1.12 cannot read marks embedded by 1.12+**
+  (the acceptance tag changed) and may report spurious "repaired"
+  decodes on them: upgrade detection tooling first. 1.12 reads legacy
+  marks and flags them (`tagScheme: 'crc'`).
+- Stego derivative cache keys gained a `:tm` (tag-migration) suffix:
+  stego-bearing derivatives regenerate once after upgrade.
+- Client bundle: 133.9 KiB minified / 43.3 KiB gzipped (+10.6/+3.2 KiB
+  vs 1.11 — inline SHA-256/HMAC, canary, lens ledger, duty bias).
+
 ## [1.11.0] — Unreleased
 
 External adversarial-review response (full verification matrix in

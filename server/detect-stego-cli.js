@@ -184,6 +184,11 @@ if (args.json) {
   // Repaired decodes are weaker evidence: the CRC corrector flipped bits to
   // reach a valid codeword, and under multi-buyer collusion averaging that
   // repair can synthesize a fingerprint belonging to none of the colluders.
+  if (result.tagScheme === 'crc') {
+    console.log('  ⚠ LEGACY CODEWORD: this mark uses the pre-v1.12 CRC tag (linear code).');
+    console.log('    Collusion averaging can synthesize third-party fingerprints in legacy');
+    console.log('    marks — corroborate before attributing, and re-issue with current code.');
+  }
   if (result.corrections > 0) {
     console.log(`  ⚠ REPAIRED DECODE: ${result.corrections} bit(s) were corrected to reach a valid codeword.`);
     console.log('    Do NOT attribute from this alone — corroborate with the issuance registry,');

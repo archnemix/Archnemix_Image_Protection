@@ -66,6 +66,7 @@ __export(index_exports, {
   forensicScore: () => forensicScore,
   generateKeyBase64: () => generateKeyBase64,
   hashSeed: () => hashSeed,
+  hmacSha256Bytes: () => hmacSha256Bytes,
   isArchxContainer: () => isArchxContainer,
   listPlugins: () => listPlugins,
   mulberry32: () => mulberry32,
@@ -81,12 +82,14 @@ __export(index_exports, {
   scramblePixels: () => scramblePixels,
   scramblePixelsPadded: () => scramblePixelsPadded,
   sfc32: () => sfc32,
+  sha256Bytes: () => sha256Bytes,
   sniffImageFormat: () => sniffImageFormat,
   sniffImageInfo: () => sniffImageInfo,
   stegoFingerprint: () => stegoFingerprint,
   tileRect: () => tileRect,
   useJsonParser: () => useJsonParser,
   usePlugin: () => usePlugin,
+  useWebCrypto: () => useWebCrypto,
   validateArchxHeader: () => validateArchxHeader,
   verifyEarlyIntegritySnapshot: () => verifyEarlyIntegritySnapshot
 });
@@ -195,6 +198,147 @@ function asBytes(bytes) {
 var utf8Encoder = new TextEncoder();
 var utf8Fatal = new TextDecoder("utf-8", { fatal: true });
 var utf8Lenient = new TextDecoder("utf-8", { fatal: false });
+var textDecodeCall = TextDecoder.prototype.decode;
+var textEncodeCall = TextEncoder.prototype.encode;
+function utf8Encode(str) {
+  return textEncodeCall.call(utf8Encoder, str);
+}
+function utf8DecodeFatal(bytes) {
+  return textDecodeCall.call(utf8Fatal, bytes);
+}
+var SHA256_K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+function sha256Bytes(message) {
+  const msg = asBytes(message);
+  const bitLenHi = Math.floor(msg.length / 536870912);
+  const bitLenLo = msg.length << 3;
+  const paddedLen = msg.length + 9 + 63 >> 6 << 6;
+  const buf = new Uint8Array(paddedLen);
+  buf.set(msg, 0);
+  buf[msg.length] = 128;
+  const dv = new DataView(buf.buffer);
+  dv.setUint32(paddedLen - 4, bitLenLo >>> 0, false);
+  dv.setUint32(paddedLen - 8, bitLenHi >>> 0, false);
+  let h0 = 1779033703, h1 = 3144134277, h2 = 1013904242, h3 = 2773480762;
+  let h4 = 1359893119, h5 = 2600822924, h6 = 528734635, h7 = 1541459225;
+  const w = new Uint32Array(64);
+  const rotr = (x, n) => x >>> n | x << 32 - n;
+  for (let block = 0; block < paddedLen; block += 64) {
+    for (let t = 0; t < 16; t++) w[t] = dv.getUint32(block + t * 4, false);
+    for (let t = 16; t < 64; t++) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ w[t - 15] >>> 3;
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ w[t - 2] >>> 10;
+      w[t] = w[t - 16] + s0 + w[t - 7] + s1 >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, hh = h7;
+    for (let t = 0; t < 64; t++) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = e & f ^ ~e & g;
+      const temp1 = hh + s1 + ch + SHA256_K[t] + w[t] >>> 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = a & b ^ a & c ^ b & c;
+      const temp2 = s0 + maj >>> 0;
+      hh = g;
+      g = f;
+      f = e;
+      e = d + temp1 >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2 >>> 0;
+    }
+    h0 = h0 + a >>> 0;
+    h1 = h1 + b >>> 0;
+    h2 = h2 + c >>> 0;
+    h3 = h3 + d >>> 0;
+    h4 = h4 + e >>> 0;
+    h5 = h5 + f >>> 0;
+    h6 = h6 + g >>> 0;
+    h7 = h7 + hh >>> 0;
+  }
+  const out = new Uint8Array(32);
+  const odv = new DataView(out.buffer);
+  [h0, h1, h2, h3, h4, h5, h6, h7].forEach((word, i) => odv.setUint32(i * 4, word, false));
+  return out;
+}
+function hmacSha256Bytes(key, message) {
+  let keyBytes = asBytes(key);
+  if (keyBytes.length > 64) keyBytes = sha256Bytes(keyBytes);
+  const inner = new Uint8Array(64 + asBytes(message).length);
+  const outer = new Uint8Array(64 + 32);
+  for (let i = 0; i < 64; i++) {
+    const kb = i < keyBytes.length ? keyBytes[i] : 0;
+    inner[i] = kb ^ 54;
+    outer[i] = kb ^ 92;
+  }
+  inner.set(asBytes(message), 64);
+  outer.set(sha256Bytes(inner), 64);
+  return sha256Bytes(outer);
+}
 var IMAGE_FORMAT_MIME = Object.freeze({
   jpeg: "image/jpeg",
   png: "image/png",
@@ -470,7 +614,7 @@ function validateArchxHeader(header) {
 }
 function encodeContainer(header, payload) {
   validateArchxHeader(header);
-  const headerBytes = utf8Encoder.encode(JSON.stringify(header));
+  const headerBytes = utf8Encode(JSON.stringify(header));
   if (headerBytes.length > MAX_ARCHX_HEADER_BYTES) throw new Error("Archx: .archx header is too large");
   const body = asBytes(payload);
   if (!body.length) throw new Error("Archx: .archx payload is empty");
@@ -499,7 +643,7 @@ function decodeContainer(bytes) {
   }
   let header;
   try {
-    header = (coreJsonParse || JSON.parse)(utf8Fatal.decode(u8.subarray(10, 10 + headerLen)));
+    header = (coreJsonParse || JSON.parse)(utf8DecodeFatal(u8.subarray(10, 10 + headerLen)));
   } catch {
     throw new Error("Archx: invalid .archx header encoding");
   }
@@ -510,6 +654,37 @@ function decodeContainer(bytes) {
 }
 var keyCache = /* @__PURE__ */ new Map();
 var AES_KEY_CACHE_MAX = 16;
+var coreWebCrypto = null;
+function useWebCrypto(injected) {
+  if (!injected || typeof injected !== "object" || !injected.subtle) {
+    coreWebCrypto = null;
+  } else {
+    coreWebCrypto = {
+      subtle: injected.subtle,
+      importKey: typeof injected.importKey === "function" ? injected.importKey : null,
+      encrypt: typeof injected.encrypt === "function" ? injected.encrypt : null,
+      decrypt: typeof injected.decrypt === "function" ? injected.decrypt : null,
+      digest: typeof injected.digest === "function" ? injected.digest : null,
+      getRandomValues: typeof injected.getRandomValues === "function" ? injected.getRandomValues : null,
+      cryptoObj: injected.cryptoObj || null
+    };
+  }
+  keyCache.clear();
+}
+function subtleCall(name, args) {
+  if (coreWebCrypto) {
+    const fn = coreWebCrypto[name];
+    if (fn) return fn.call(coreWebCrypto.subtle, ...args);
+    return coreWebCrypto.subtle[name](...args);
+  }
+  return globalThis.crypto.subtle[name](...args);
+}
+function randomFill(bytes) {
+  if (coreWebCrypto?.getRandomValues) {
+    return coreWebCrypto.getRandomValues.call(coreWebCrypto.cryptoObj || globalThis.crypto, bytes);
+  }
+  return globalThis.crypto.getRandomValues(bytes);
+}
 async function importAesKey(keyBase64) {
   if (typeof keyBase64 !== "string" || !keyBase64) throw new TypeError("Archx: AES key must be a base64 string");
   const cached = keyCache.get(keyBase64);
@@ -520,16 +695,20 @@ async function importAesKey(keyBase64) {
   }
   const pending = (async () => {
     const raw = base64ToBytes(keyBase64);
-    if (![16, 24, 32].includes(raw.length)) {
-      throw new Error("Archx: AES key must be 16/24/32 bytes (base64)");
+    try {
+      if (![16, 24, 32].includes(raw.length)) {
+        throw new Error("Archx: AES key must be 16/24/32 bytes (base64)");
+      }
+      return await subtleCall("importKey", [
+        "raw",
+        raw,
+        { name: "AES-GCM", length: raw.length * 8 },
+        false,
+        ["encrypt", "decrypt"]
+      ]);
+    } finally {
+      raw.fill(0);
     }
-    return globalThis.crypto.subtle.importKey(
-      "raw",
-      raw,
-      { name: "AES-GCM", length: raw.length * 8 },
-      false,
-      ["encrypt", "decrypt"]
-    );
   })();
   keyCache.set(keyBase64, pending);
   while (keyCache.size > AES_KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
@@ -542,18 +721,20 @@ async function importAesKey(keyBase64) {
 }
 function generateKeyBase64() {
   const raw = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(raw);
-  return bytesToBase64(raw);
+  randomFill(raw);
+  const encoded = bytesToBase64(raw);
+  raw.fill(0);
+  return encoded;
 }
 async function encryptPayload(plainBytes, keyBase64) {
   const key = await importAesKey(keyBase64);
   const iv = new Uint8Array(12);
-  globalThis.crypto.getRandomValues(iv);
-  const cipher = await globalThis.crypto.subtle.encrypt(
+  randomFill(iv);
+  const cipher = await subtleCall("encrypt", [
     { name: "AES-GCM", iv },
     key,
     asBytes(plainBytes)
-  );
+  ]);
   return { cipher: new Uint8Array(cipher), iv: bytesToBase64(iv) };
 }
 async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
@@ -562,11 +743,11 @@ async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
   if (iv.length !== 12) throw new Error("Archx: AES-GCM IV must be 12 bytes");
   if (cipher.length < 17) throw new Error("Archx: AES-GCM payload is too short");
   const key = await importAesKey(keyBase64);
-  const plain = await globalThis.crypto.subtle.decrypt(
+  const plain = await subtleCall("decrypt", [
     { name: "AES-GCM", iv },
     key,
     cipher
-  );
+  ]);
   return new Uint8Array(plain);
 }
 function forensicBlockSigns(seed, count) {
@@ -651,6 +832,14 @@ function stegoCrc16(bytes) {
   }
   return crc;
 }
+var STEGO_MAC_DOMAIN = utf8Encode("archx-stego-v2:");
+function stegoMac16(key, payloadBytes) {
+  const msg = new Uint8Array(STEGO_MAC_DOMAIN.length + payloadBytes.length);
+  msg.set(STEGO_MAC_DOMAIN, 0);
+  msg.set(payloadBytes, STEGO_MAC_DOMAIN.length);
+  const mac = hmacSha256Bytes(utf8Encode(String(key ?? "")), msg);
+  return mac[0] << 8 | mac[1];
+}
 function stegoBytesToBits(bytes) {
   const bits = new Uint8Array(bytes.length * 8);
   bytes.forEach((byte, i) => {
@@ -658,16 +847,19 @@ function stegoBytesToBits(bytes) {
   });
   return bits;
 }
-function robustStegoCodeBits(fingerprint, key) {
+function robustLegacyKeyedCrc(first8, key) {
+  const keyByte = Math.floor(hashSeed("archx-stego-robust:" + String(key ?? ""), 20907) % 256);
+  const keyed = new Uint8Array(9);
+  keyed.set(first8, 0);
+  keyed[8] = keyByte;
+  return stegoCrc16(keyed);
+}
+function robustStegoCodeBits(fingerprint, key, tag = "mac") {
   const payload = new Uint8Array(6);
   for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
   const crc = stegoCrc16(payload);
   const first = [...payload, crc >> 8 & 255, crc & 255];
-  const keyByte = Math.floor(hashSeed("archx-stego-robust:" + String(key ?? ""), 20907) % 256);
-  const keyed = new Uint8Array(first.length + 1);
-  keyed.set(first, 0);
-  keyed[keyed.length - 1] = keyByte;
-  const check = stegoCrc16(keyed);
+  const check = tag === "crc" ? robustLegacyKeyedCrc(first, key) : stegoMac16(key, payload);
   return stegoBytesToBits(new Uint8Array([
     ...first,
     check >> 8 & 255,
@@ -676,25 +868,12 @@ function robustStegoCodeBits(fingerprint, key) {
     90
   ]));
 }
-function robustStegoBytesValid(bytes, key) {
+function robustStegoBytesValid(bytes, key, tag = "mac") {
   if (!bytes || bytes.length !== 12) return false;
-  if (stegoCrc16(bytes.subarray(0, 6)) !== (bytes[6] << 8 | bytes[7])) return false;
   if (bytes[10] !== 165 || bytes[11] !== 90) return false;
-  const keyByte = Math.floor(hashSeed("archx-stego-robust:" + String(key ?? ""), 20907) % 256);
-  const keyed = new Uint8Array(9);
-  keyed.set(bytes.subarray(0, 8), 0);
-  keyed[8] = keyByte;
-  return stegoCrc16(keyed) === (bytes[8] << 8 | bytes[9]);
-}
-function robustStegoBitsValid(bits, key) {
-  if (!bits || bits.length !== 96) return false;
-  const bytes = new Uint8Array(12);
-  for (let i = 0; i < 12; i++) {
-    let byte = 0;
-    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
-    bytes[i] = byte;
-  }
-  return robustStegoBytesValid(bytes, key);
+  if (stegoCrc16(bytes.subarray(0, 6)) !== (bytes[6] << 8 | bytes[7])) return false;
+  const expected = tag === "crc" ? robustLegacyKeyedCrc(bytes.subarray(0, 8), key) : stegoMac16(key, bytes.subarray(0, 6));
+  return expected === (bytes[8] << 8 | bytes[9]);
 }
 function robustStegoFingerprintFromBits(bits) {
   let fingerprint = "";
@@ -705,7 +884,7 @@ function robustStegoFingerprintFromBits(bits) {
   }
   return fingerprint;
 }
-function repairRobustViaFirstCrc(scores, hard, key) {
+function repairRobustViaFirstCrc(scores, hard, key, tag = "mac") {
   const first = Uint8Array.from(hard.subarray(0, 64));
   const syndromeOf = (bits) => {
     const bytes = new Uint8Array(8);
@@ -719,7 +898,7 @@ function repairRobustViaFirstCrc(scores, hard, key) {
   const target = syndromeOf(first);
   const buildCanonical = (correctedFirst) => {
     const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
-    const canonical = robustStegoCodeBits(fingerprint, key);
+    const canonical = robustStegoCodeBits(fingerprint, key, tag);
     let flips = 0;
     let softCost = 0;
     for (let i = 0; i < 96; i++) {
@@ -779,7 +958,7 @@ function repairRobustViaFirstCrc(scores, hard, key) {
   }
   return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
 }
-function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
+function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = "mac") {
   const bits = Uint8Array.from(hard);
   const bytes = new Uint8Array(12);
   for (let i = 0; i < 12; i++) {
@@ -787,16 +966,16 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
     for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
     bytes[i] = byte;
   }
-  if (robustStegoBytesValid(bytes, key)) return { bits, flips: 0 };
-  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key);
-  if (syndromeRepair) return syndromeRepair;
+  if (robustStegoBytesValid(bytes, key, tag)) return { bits, flips: 0, tagScheme: tag };
+  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key, tag);
+  if (syndromeRepair) return { ...syndromeRepair, tagScheme: tag };
   const candidates = Array.from({ length: bits.length }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 24);
   const flip = (index) => {
     bits[index] ^= 1;
     bytes[index >> 3] ^= 1 << 7 - (index & 7);
   };
   const search = (start, depth, targetDepth) => {
-    if (depth === targetDepth) return robustStegoBytesValid(bytes, key);
+    if (depth === targetDepth) return robustStegoBytesValid(bytes, key, tag);
     for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
       flip(candidates[i]);
       if (search(i + 1, depth + 1, targetDepth)) return true;
@@ -805,15 +984,15 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5) {
     return false;
   };
   for (let flips = 1; flips <= maxFlips; flips++) {
-    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips };
+    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips, tagScheme: tag };
   }
   return null;
 }
-function stegoCodeBits(fingerprint) {
+function stegoCodeBits(fingerprint, key, tag = "mac") {
   const bytes = new Uint8Array(6);
   for (let i = 0; i < 6; i++) bytes[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
-  const crc = stegoCrc16(bytes);
-  const all = [...bytes, crc >> 8 & 255, crc & 255];
+  const check = tag === "crc" ? stegoCrc16(bytes) : stegoMac16(key, bytes);
+  const all = [...bytes, check >> 8 & 255, check & 255];
   const bits = new Uint8Array(64);
   all.forEach((byte, i) => {
     for (let b = 0; b < 8; b++) bits[i * 8 + b] = byte >> 7 - b & 1;
@@ -833,27 +1012,45 @@ function stegoCrcValid(bits) {
   const bytes = stegoBitsToBytes(bits);
   return stegoCrc16(bytes.subarray(0, 6)) === (bytes[6] << 8 | bytes[7]);
 }
-function correctStegoBits(bits, reliability) {
-  if (stegoCrcValid(bits)) return { bits, corrections: 0 };
-  const weakest = [...bits.keys()].sort((a, b) => reliability[a] - reliability[b]).slice(0, 20);
-  let best = null;
-  const visit = (start, chosen) => {
-    if (chosen.length) {
-      const candidate = new Uint8Array(bits);
-      let cost = 0;
-      for (const i of chosen) {
-        candidate[i] ^= 1;
-        cost += reliability[i];
-      }
-      if (stegoCrcValid(candidate) && (!best || cost < best.cost)) {
-        best = { bits: candidate, corrections: chosen.length, cost };
-      }
+function correctStegoBits(bits, reliability, key, maxDepth = 3) {
+  const macCache = /* @__PURE__ */ new Map();
+  const macOf = (candidate) => {
+    const bytes = stegoBitsToBytes(candidate);
+    const cacheKey = (bytes[0] << 16 | bytes[1] << 8 | bytes[2]) + ":" + (bytes[3] << 16 | bytes[4] << 8 | bytes[5]);
+    let mac = macCache.get(cacheKey);
+    if (mac === void 0) {
+      mac = stegoMac16(key, bytes.subarray(0, 6));
+      macCache.set(cacheKey, mac);
     }
-    if (chosen.length >= 3) return;
-    for (let i = start; i < weakest.length; i++) visit(i + 1, [...chosen, weakest[i]]);
+    return mac === (bytes[6] << 8 | bytes[7]);
   };
-  visit(0, []);
-  return best || { bits, corrections: -1 };
+  const search = (valid, depthCap) => {
+    if (valid(bits)) return { bits, corrections: 0 };
+    const weakest = [...bits.keys()].sort((a, b) => reliability[a] - reliability[b]).slice(0, 20);
+    let best = null;
+    const visit = (start, chosen) => {
+      if (chosen.length) {
+        const candidate = new Uint8Array(bits);
+        let cost = 0;
+        for (const i of chosen) {
+          candidate[i] ^= 1;
+          cost += reliability[i];
+        }
+        if (valid(candidate) && (!best || cost < best.cost)) {
+          best = { bits: candidate, corrections: chosen.length, cost };
+        }
+      }
+      if (chosen.length >= depthCap) return;
+      for (let i = start; i < weakest.length; i++) visit(i + 1, [...chosen, weakest[i]]);
+    };
+    visit(0, []);
+    return best;
+  };
+  const macBest = search(macOf, maxDepth);
+  if (macBest) return { ...macBest, tagScheme: "mac" };
+  const crcBest = search(stegoCrcValid, Math.min(1, maxDepth));
+  if (crcBest) return { ...crcBest, tagScheme: "crc" };
+  return { bits, corrections: -1, tagScheme: null };
 }
 var STEGO_ROW_SEGMENTS = 4;
 function stegoLayout(cellCount, key) {
@@ -903,7 +1100,10 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   gridX,
   gridY,
   profile = "standard",
-  inPlace = false
+  inPlace = false,
+  // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
+  // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
+  legacyCode = false
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
@@ -914,7 +1114,8 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const bits = robust ? robustStegoCodeBits(fingerprint, key) : stegoCodeBits(fingerprint);
+  const tag = legacyCode ? "crc" : "mac";
+  const bits = robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key) : stegoLayout(cellCount, key);
@@ -966,13 +1167,33 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   }
   return out;
 }
+function flipPixelsHorizontal(src, w, h) {
+  const flipped = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const si = row + x * 4;
+      const di = row + (w - 1 - x) * 4;
+      flipped[di] = src[si];
+      flipped[di + 1] = src[si + 1];
+      flipped[di + 2] = src[si + 2];
+      flipped[di + 3] = src[si + 3];
+    }
+  }
+  return flipped;
+}
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
   gridX,
   gridY,
   profile = "standard",
   searchOffsets = false,
-  searchGeometry = false
+  searchGeometry = false,
+  // Mirrored-suspect recovery is on by default for every profile (one
+  // extra bounded pass on flipped pixels, only when the forward pass
+  // found nothing); set false to disable.
+  searchMirror = true,
+  _mirrorProbe = false
 } = {}) {
   if (profile === "auto") {
     const standard = detectStegoFingerprint(rgba, w, h, {
@@ -981,7 +1202,9 @@ function detectStegoFingerprint(rgba, w, h, {
       gridY,
       profile: "standard",
       searchOffsets,
-      searchGeometry: false
+      searchGeometry: false,
+      searchMirror: false,
+      _mirrorProbe: true
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust2 = detectStegoFingerprint(rgba, w, h, {
@@ -990,7 +1213,9 @@ function detectStegoFingerprint(rgba, w, h, {
       gridY,
       profile: "robust",
       searchOffsets,
-      searchGeometry: false
+      searchGeometry: false,
+      searchMirror: false,
+      _mirrorProbe: true
     });
     const initial = robust2?.found && !standard?.found ? robust2 : standard?.found && !robust2?.found ? standard : (robust2?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust2 : standard;
     if (!searchGeometry || initial?.found) return initial;
@@ -1000,7 +1225,9 @@ function detectStegoFingerprint(rgba, w, h, {
       gridY,
       profile: "standard",
       searchOffsets,
-      searchGeometry: true
+      searchGeometry: true,
+      searchMirror: false,
+      _mirrorProbe: true
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(rgba, w, h, {
@@ -1009,23 +1236,27 @@ function detectStegoFingerprint(rgba, w, h, {
       gridY,
       profile: "robust",
       searchOffsets,
-      searchGeometry: true
+      searchGeometry: true,
+      searchMirror: false,
+      _mirrorProbe: true
     });
     if (robustGeometry?.found) return robustGeometry;
-    try {
+    if (searchMirror && !_mirrorProbe) try {
       const src2 = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
       if (src2.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const flipped = new Uint8Array(w * h * 4);
-        for (let y = 0; y < h; y++) {
-          const row = y * w * 4;
-          for (let x = 0; x < w; x++) {
-            const si = row + x * 4;
-            const di = row + (w - 1 - x) * 4;
-            flipped[di] = src2[si];
-            flipped[di + 1] = src2[si + 1];
-            flipped[di + 2] = src2[si + 2];
-            flipped[di + 3] = src2[si + 3];
-          }
+        const flipped = flipPixelsHorizontal(src2, w, h);
+        for (const candidateProfile of ["standard", "robust"]) {
+          const fast = detectStegoFingerprint(flipped, w, h, {
+            key,
+            gridX,
+            gridY,
+            profile: candidateProfile,
+            searchOffsets,
+            searchGeometry: false,
+            searchMirror: false,
+            _mirrorProbe: true
+          });
+          if (fast?.found) return { ...fast, mirrored: true };
         }
         for (const candidateProfile of ["standard", "robust"]) {
           const mirrored = detectStegoFingerprint(flipped, w, h, {
@@ -1034,7 +1265,9 @@ function detectStegoFingerprint(rgba, w, h, {
             gridY,
             profile: candidateProfile,
             searchOffsets,
-            searchGeometry: false
+            searchGeometry: true,
+            searchMirror: false,
+            _mirrorProbe: true
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true };
         }
@@ -1155,29 +1388,35 @@ function detectStegoFingerprint(rgba, w, h, {
         reliability[i] = Math.abs(voteScores[i]);
       }
     }
+    const meanAbsPre = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    const preAgreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!votedBits[bitIndex]).length;
+    const preAgreement = cellScores.length ? preAgreeing / cellScores.length : 0;
+    const standardDepth = meanAbsPre >= 2 && preAgreement >= 0.82 ? 3 : 1;
     const corrected = robust ? (() => {
-      const repaired = repairRobustStegoBits(reliability, votedBits, key, 5);
-      return repaired ? { bits: repaired.bits, corrections: repaired.flips } : { bits: votedBits, corrections: -1 };
-    })() : correctStegoBits(votedBits, reliability);
+      const repaired = repairRobustStegoBits(reliability, votedBits, key, 5, "mac") || repairRobustStegoBits(reliability, votedBits, key, 5, "crc");
+      return repaired ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme } : { bits: votedBits, corrections: -1, tagScheme: null };
+    })() : correctStegoBits(votedBits, reliability, key, standardDepth);
     const bits = corrected.bits;
     const fingerprint = robust ? robustStegoFingerprintFromBits(bits) : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    const crcValid = robust ? robustStegoBitsValid(bits, key) : stegoCrcValid(bits);
+    const crcValid = corrected.corrections >= 0;
     const agreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!bits[bitIndex]).length;
     const agreement = cellScores.length ? agreeing / cellScores.length : 0;
-    const meanAbs = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    const meanAbs = meanAbsPre;
     const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - Math.max(0, corrected.corrections) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
     const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 : minBitCount >= 2 && cellScores.length >= codeLength * 3;
     const correctionCount = Math.max(0, corrected.corrections);
-    const robustCorrectionOk = !robust || correctionCount <= 3 || correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
-    const standardCorrectionOk = robust || correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85;
+    const legacyScheme = corrected.tagScheme === "crc";
+    const robustCorrectionOk = !robust || correctionCount <= 3 || !legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
+    const standardCorrectionOk = robust || (legacyScheme ? correctionCount <= 1 && agreement >= 0.95 : correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85);
     const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
     return {
       found,
       fingerprint,
       profile: effectiveProfile,
+      tagScheme: corrected.tagScheme ?? null,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
@@ -1328,6 +1567,25 @@ function detectStegoFingerprint(rgba, w, h, {
     delete best._scaleX;
     delete best._scaleY;
   }
+  if (!best?.found && searchMirror && !_mirrorProbe) {
+    try {
+      const src2 = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+      if (src2.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const mirrored = detectStegoFingerprint(flipPixelsHorizontal(src2, w, h), w, h, {
+          key,
+          gridX,
+          gridY,
+          profile,
+          searchOffsets,
+          searchGeometry,
+          searchMirror: false,
+          _mirrorProbe: true
+        });
+        if (mirrored?.found) return { ...mirrored, mirrored: true };
+      }
+    } catch {
+    }
+  }
   return best;
 }
 function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
@@ -1408,6 +1666,31 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
   const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 && target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
   const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
   const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
+  const reflect = (c, n) => {
+    if (n <= 1) return 0;
+    const period = 2 * n - 2;
+    const m = (c % period + period) % period;
+    return m < n ? m : period - m;
+  };
+  const padDither = (gx, gy) => {
+    let hash = gx * 374761393 + gy * 668265263 | 0;
+    hash = hash ^ hash >> 13 | 0;
+    hash = Math.imul(hash, 1274126177);
+    return (hash >>> 16) % 3 - 1;
+  };
+  const writePixel = (di, si, dither) => {
+    if (!dither) {
+      target[di] = src[si];
+      target[di + 1] = src[si + 1];
+      target[di + 2] = src[si + 2];
+      target[di + 3] = src[si + 3];
+    } else {
+      target[di] = Math.max(0, Math.min(255, src[si] + dither));
+      target[di + 1] = Math.max(0, Math.min(255, src[si + 1] + dither));
+      target[di + 2] = Math.max(0, Math.min(255, src[si + 2] + dither));
+      target[di + 3] = src[si + 3];
+    }
+  };
   for (let dest = 0; dest < count; dest++) {
     const source = plan.order[dest];
     if (!Number.isInteger(source) || source < 0 || source >= count) {
@@ -1421,29 +1704,32 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
     const dx = dest % grid * tw;
     const dy = Math.floor(dest / grid) * th;
     for (let y = 0; y < th; y++) {
-      const srcY = Math.min(sy + (fy ? th - 1 - y : y), h - 1);
+      const rawY = sy + (fy ? th - 1 - y : y);
+      const srcY = rawY < h ? rawY : reflect(rawY, h);
+      const rowIsPad = rawY >= h;
       const dstRow = (dy + y) * pw + dx;
-      if (useWords && !fx) {
+      if (useWords && !fx && !rowIsPad) {
         const avail = Math.max(0, Math.min(tw, w - sx));
         if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
-        if (avail < tw) {
-          const edgeWord = avail > 0 ? out32[dstRow + avail - 1] : src32[srcY * w + (w - 1)];
-          out32.fill(edgeWord, dstRow + avail, dstRow + tw);
+        for (let x = avail; x < tw; x++) {
+          const rawX = sx + x;
+          const srcX = reflect(rawX, w);
+          writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4, padDither(rawX, rawY));
         }
-      } else if (useWords) {
+      } else if (useWords && !rowIsPad && !(sx + tw > w)) {
         for (let x = 0; x < tw; x++) {
-          const srcX = Math.min(sx + (tw - 1 - x), w - 1);
-          out32[dstRow + x] = src32[srcY * w + srcX];
+          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
         }
       } else {
         for (let x = 0; x < tw; x++) {
-          const srcX = Math.min(sx + (fx ? tw - 1 - x : x), w - 1);
-          const si = (srcY * w + srcX) * 4;
-          const di = (dstRow + x) * 4;
-          target[di] = src[si];
-          target[di + 1] = src[si + 1];
-          target[di + 2] = src[si + 2];
-          target[di + 3] = src[si + 3];
+          const rawX = sx + (fx ? tw - 1 - x : x);
+          const srcX = rawX < w ? rawX : reflect(rawX, w);
+          const isPad = rowIsPad || rawX >= w;
+          writePixel(
+            (dstRow + x) * 4,
+            (srcY * w + srcX) * 4,
+            isPad ? padDither(rawX, rawY) : 0
+          );
         }
       }
     }
@@ -1548,7 +1834,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.11.0";
+var VERSION = "1.12.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -1578,10 +1864,32 @@ var NATIVES = (() => {
     compileShader: grab(gl2Proto, "compileShader") || grab(gl1Proto, "compileShader"),
     createProgram: grab(gl2Proto, "createProgram") || grab(gl1Proto, "createProgram"),
     linkProgram: grab(gl2Proto, "linkProgram") || grab(gl1Proto, "linkProgram"),
-    useProgram: grab(gl2Proto, "useProgram") || grab(gl1Proto, "useProgram")
+    useProgram: grab(gl2Proto, "useProgram") || grab(gl1Proto, "useProgram"),
+    getContextAttributes: grab(gl2Proto, "getContextAttributes") || grab(gl1Proto, "getContextAttributes")
   };
   const elementProto = typeof Element !== "undefined" ? Element.prototype : null;
   const streamProto = typeof ReadableStream !== "undefined" ? ReadableStream.prototype : null;
+  const readerProto = (() => {
+    try {
+      const reader = new ReadableStream().getReader();
+      const proto = Object.getPrototypeOf(reader);
+      try {
+        reader.releaseLock();
+      } catch {
+      }
+      return proto;
+    } catch {
+      return null;
+    }
+  })();
+  const subtleObj = (() => {
+    try {
+      return g.crypto?.subtle || null;
+    } catch {
+      return null;
+    }
+  })();
+  const subtleProto = subtleObj ? Object.getPrototypeOf(subtleObj) : null;
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, "fetch"),
@@ -1599,6 +1907,34 @@ var NATIVES = (() => {
     })(),
     attachShadow: grab(elementProto, "attachShadow"),
     streamGetReader: grab(streamProto, "getReader"),
+    streamReaderRead: grab(readerProto, "read"),
+    responseText: typeof Response !== "undefined" ? grab(Response.prototype, "text") : null,
+    textDecode: typeof TextDecoder !== "undefined" ? grab(TextDecoder.prototype, "decode") : null,
+    textEncode: typeof TextEncoder !== "undefined" ? grab(TextEncoder.prototype, "encode") : null,
+    // WebCrypto: captured so core AES + DPoP signing bypass post-load hooks.
+    cryptoObj: (() => {
+      try {
+        return g.crypto || null;
+      } catch {
+        return null;
+      }
+    })(),
+    subtle: subtleObj,
+    subtleImportKey: grab(subtleProto, "importKey"),
+    subtleEncrypt: grab(subtleProto, "encrypt"),
+    subtleDecrypt: grab(subtleProto, "decrypt"),
+    subtleDigest: grab(subtleProto, "digest"),
+    subtleSign: grab(subtleProto, "sign"),
+    subtleGenerateKey: grab(subtleProto, "generateKey"),
+    subtleExportKey: grab(subtleProto, "exportKey"),
+    getRandomValues: (() => {
+      try {
+        return typeof g.crypto?.getRandomValues === "function" ? g.crypto.getRandomValues : null;
+      } catch {
+        return null;
+      }
+    })(),
+    glGetContextAttributes: glMethods.getContextAttributes,
     createImageBitmap: grab(g, "createImageBitmap"),
     ImageCtor: typeof Image !== "undefined" ? Image : null,
     createObjectURL: typeof URL !== "undefined" ? grab(URL, "createObjectURL") : null,
@@ -1622,6 +1958,43 @@ try {
   useJsonParser(NATIVES.jsonParse);
 } catch {
 }
+try {
+  useWebCrypto(NATIVES.subtle ? {
+    subtle: NATIVES.subtle,
+    importKey: NATIVES.subtleImportKey,
+    encrypt: NATIVES.subtleEncrypt,
+    decrypt: NATIVES.subtleDecrypt,
+    digest: NATIVES.subtleDigest,
+    getRandomValues: NATIVES.getRandomValues,
+    cryptoObj: NATIVES.cryptoObj
+  } : null);
+} catch {
+}
+var SUBTLE_CAPTURED = {
+  importKey: "subtleImportKey",
+  encrypt: "subtleEncrypt",
+  decrypt: "subtleDecrypt",
+  digest: "subtleDigest",
+  sign: "subtleSign",
+  generateKey: "subtleGenerateKey",
+  exportKey: "subtleExportKey"
+};
+function subtleDo(name, ...args) {
+  const fn = NATIVES[SUBTLE_CAPTURED[name]];
+  if (fn && NATIVES.subtle) return fn.call(NATIVES.subtle, ...args);
+  const subtle = globalThis.crypto?.subtle;
+  return subtle[name](...args);
+}
+var sharedTextEncoder = (() => {
+  try {
+    return new TextEncoder();
+  } catch {
+    return null;
+  }
+})();
+function utf8EncodeCaptured(str) {
+  return NATIVES.textEncode && sharedTextEncoder ? NATIVES.textEncode.call(sharedTextEncoder, str) : new TextEncoder().encode(str);
+}
 function isNativeFn(fn) {
   if (typeof fn !== "function") return false;
   try {
@@ -1644,7 +2017,31 @@ function auditIntegrity() {
     ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
     ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
     ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
-    ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader]
+    ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
+    ["ReadableStreamDefaultReader.prototype.read", (() => {
+      try {
+        return Object.getPrototypeOf(new ReadableStream().getReader()).read;
+      } catch {
+        return null;
+      }
+    })(), NATIVES.streamReaderRead],
+    ["Response.prototype.text", typeof Response !== "undefined" ? Response.prototype.text : null, NATIVES.responseText],
+    ["TextDecoder.prototype.decode", typeof TextDecoder !== "undefined" ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
+    ["TextEncoder.prototype.encode", typeof TextEncoder !== "undefined" ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
+    ["SubtleCrypto.prototype.importKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).importKey : null, NATIVES.subtleImportKey],
+    ["SubtleCrypto.prototype.decrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).decrypt : null, NATIVES.subtleDecrypt],
+    ["SubtleCrypto.prototype.encrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).encrypt : null, NATIVES.subtleEncrypt],
+    ["SubtleCrypto.prototype.digest", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).digest : null, NATIVES.subtleDigest],
+    ["SubtleCrypto.prototype.sign", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).sign : null, NATIVES.subtleSign],
+    ["SubtleCrypto.prototype.generateKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).generateKey : null, NATIVES.subtleGenerateKey],
+    ["SubtleCrypto.prototype.exportKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).exportKey : null, NATIVES.subtleExportKey],
+    ["Crypto.prototype.getRandomValues", (() => {
+      try {
+        return globalThis.crypto?.getRandomValues || null;
+      } catch {
+        return null;
+      }
+    })(), NATIVES.getRandomValues]
   ];
   const webglMethodNames = [
     "texImage2D",
@@ -1661,7 +2058,8 @@ function auditIntegrity() {
     "compileShader",
     "createProgram",
     "linkProgram",
-    "useProgram"
+    "useProgram",
+    "getContextAttributes"
   ];
   for (const [label, ctor, capturedMap] of [
     ["WebGLRenderingContext", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext : null, NATIVES.webgl1],
@@ -1696,7 +2094,19 @@ function auditIntegrityDetails() {
     ["Document.prototype.createElement", NATIVES.docCreateElement],
     ["JSON.parse", NATIVES.jsonParse],
     ["Element.prototype.attachShadow", NATIVES.attachShadow],
-    ["ReadableStream.prototype.getReader", NATIVES.streamGetReader]
+    ["ReadableStream.prototype.getReader", NATIVES.streamGetReader],
+    ["ReadableStreamDefaultReader.prototype.read", NATIVES.streamReaderRead],
+    ["Response.prototype.text", NATIVES.responseText],
+    ["TextDecoder.prototype.decode", NATIVES.textDecode],
+    ["TextEncoder.prototype.encode", NATIVES.textEncode],
+    ["SubtleCrypto.prototype.importKey", NATIVES.subtleImportKey],
+    ["SubtleCrypto.prototype.decrypt", NATIVES.subtleDecrypt],
+    ["SubtleCrypto.prototype.encrypt", NATIVES.subtleEncrypt],
+    ["SubtleCrypto.prototype.digest", NATIVES.subtleDigest],
+    ["SubtleCrypto.prototype.sign", NATIVES.subtleSign],
+    ["SubtleCrypto.prototype.generateKey", NATIVES.subtleGenerateKey],
+    ["SubtleCrypto.prototype.exportKey", NATIVES.subtleExportKey],
+    ["Crypto.prototype.getRandomValues", NATIVES.getRandomValues]
   ]);
   for (const [label, capturedMap] of [
     ["WebGLRenderingContext", NATIVES.webgl1],
@@ -2751,7 +3161,7 @@ async function sha256Hex(bytes) {
   try {
     if (typeof crypto === "undefined" || !crypto.subtle?.digest) return null;
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    const digest = await crypto.subtle.digest("SHA-256", view);
+    const digest = await subtleDo("digest", "SHA-256", view);
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
   } catch {
     return null;
@@ -3181,7 +3591,7 @@ async function readResponseBytes(response, maxBytes) {
   let total = 0;
   try {
     for (; ; ) {
-      const { done, value } = await reader.read();
+      const { done, value } = NATIVES.streamReaderRead ? await NATIVES.streamReaderRead.call(reader) : await reader.read();
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
       total += chunk.length;
@@ -3253,10 +3663,18 @@ function isPlainClientObject(value) {
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
+var sharedFatalDecoder = (() => {
+  try {
+    return new TextDecoder("utf-8", { fatal: true });
+  } catch {
+    return null;
+  }
+})();
 function parseBoundedJson(bytes) {
   let value;
   try {
-    value = (NATIVES.jsonParse || JSON.parse)(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const text = NATIVES.textDecode && sharedFatalDecoder ? NATIVES.textDecode.call(sharedFatalDecoder, bytes) : new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    value = (NATIVES.jsonParse || JSON.parse)(text);
   } catch {
     throw nonRetryableError("Archx: token endpoint returned invalid JSON");
   }
@@ -3334,23 +3752,24 @@ function getProofKey(required = false) {
   }
   if (!proofKeyPromise) {
     proofKeyPromise = (async () => {
-      const pair = await subtle.generateKey(
+      const pair = await subtleDo(
+        "generateKey",
         { name: "ECDSA", namedCurve: "P-256" },
         false,
         ["sign", "verify"]
       );
-      const exported = await subtle.exportKey("jwk", pair.publicKey);
+      const exported = await subtleDo("exportKey", "jwk", pair.publicKey);
       if (!exported || exported.kty !== "EC" || exported.crv !== "P-256" || typeof exported.x !== "string" || typeof exported.y !== "string") {
         throw new Error("unsupported proof public key");
       }
       const jwk = { kty: "EC", crv: "P-256", x: exported.x, y: exported.y };
       const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
-      const thumbprint = bytesToBase64Url(await subtle.digest("SHA-256", new TextEncoder().encode(canonical)));
+      const thumbprint = bytesToBase64Url(await subtleDo("digest", "SHA-256", utf8EncodeCaptured(canonical)));
       return Object.freeze({
         privateKey: pair.privateKey,
         jwk: Object.freeze(jwk),
         jkt: thumbprint,
-        header: bytesToBase64Url(new TextEncoder().encode(JSON.stringify(jwk)))
+        header: bytesToBase64Url(utf8EncodeCaptured(JSON.stringify(jwk)))
       });
     })().catch((err) => {
       proofKeyPromise = null;
@@ -3376,14 +3795,15 @@ async function createProofHeader(proofKey, accessToken, payloadUrl) {
     exp: now + 6e4,
     htm: "GET",
     htu: payloadUrl.pathname,
-    ath: bytesToBase64Url(await subtle.digest("SHA-256", new TextEncoder().encode(accessToken)))
+    ath: bytesToBase64Url(await subtleDo("digest", "SHA-256", utf8EncodeCaptured(accessToken)))
   };
-  const payloadPart = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(proof)));
+  const payloadPart = bytesToBase64Url(utf8EncodeCaptured(JSON.stringify(proof)));
   const signingInput = `v1.${payloadPart}`;
-  const signature = await subtle.sign(
+  const signature = await subtleDo(
+    "sign",
     { name: "ECDSA", hash: "SHA-256" },
     proofKey.privateKey,
-    new TextEncoder().encode(signingInput)
+    utf8EncodeCaptured(signingInput)
   );
   return `${signingInput}.${bytesToBase64Url(signature)}`;
 }
@@ -3562,8 +3982,20 @@ function scrambleCanvasLocally(source, grid, key) {
   const cctx = getNativeContext(cleanPadded, "2d");
   setSmoothing(cctx, false);
   nativeDrawImage(cctx, source, 0, 0);
-  if (pw > w) nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, pw - w, h);
-  if (ph > h) nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, ph - h);
+  if (pw > w) {
+    cctx.save();
+    cctx.translate(2 * w, 0);
+    cctx.scale(-1, 1);
+    nativeDrawImage(cctx, source, 0, 0);
+    cctx.restore();
+  }
+  if (ph > h) {
+    cctx.save();
+    cctx.translate(0, 2 * h);
+    cctx.scale(1, -1);
+    nativeDrawImage(cctx, cleanPadded, 0, 0);
+    cctx.restore();
+  }
   const scrambled = makeCanvas();
   scrambled.width = pw;
   scrambled.height = ph;
@@ -3641,7 +4073,7 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -3666,6 +4098,14 @@ var ProtectedImage = class {
     __privateAdd(this, _destroyed, false);
     __privateAdd(this, _glBudgetWarned, false);
     __privateAdd(this, _taintWarned, false);
+    __privateAdd(this, _canaryDone, false);
+    __privateAdd(this, _canaryPause, false);
+    __privateAdd(this, _canaryProbe, null);
+    __privateAdd(this, _canaryWait, 0);
+    __privateAdd(this, _canaryNextTry, 1);
+    __privateAdd(this, _preserveFlagged, false);
+    __privateAdd(this, _integrityHardLock, false);
+    __privateAdd(this, _glReleasing, false);
     __privateAdd(this, _taintImage, null);
     __privateAdd(this, _risk, /* @__PURE__ */ new Set());
     __privateAdd(this, _blackoutTimer, 0);
@@ -3689,6 +4129,9 @@ var ProtectedImage = class {
     __privateAdd(this, _lensPoint, null);
     __privateAdd(this, _lensRaf, 0);
     __privateAdd(this, _lensCells, []);
+    __privateAdd(this, _lensCoverage, new Float64Array(64).fill(-1e15));
+    __privateAdd(this, _lensRadiusScale, 1);
+    __privateAdd(this, _lensRadiusAt, 0);
     __privateAdd(this, _traceEl, null);
     __privateAdd(this, _traceTimer, 0);
     __privateAdd(this, _strikes, 0);
@@ -3714,6 +4157,11 @@ var ProtectedImage = class {
     __privateAdd(this, _temporalEngineActual, null);
     __privateAdd(this, _phaseBag, []);
     __privateAdd(this, _signBalance, 0);
+    __privateAdd(this, _dutyIndex, 0);
+    __privateAdd(this, _biasSeed, Math.random() * 100);
+    __privateAdd(this, _biasFrames, 0);
+    __privateAdd(this, _lastInteractAt, 0);
+    __privateAdd(this, _idleSkip, 0);
     __privateAdd(this, _temporalInterlaceCache);
     __privateSet(this, _options, mergeOptions(options));
     __privateSet(this, _source, source);
@@ -3840,6 +4288,13 @@ var ProtectedImage = class {
       __privateGet(this, _wrap).addEventListener("pointercancel", clear, sig);
       __privateGet(this, _wrap).addEventListener("pointermove", clear, sig);
     }
+    const interact = () => {
+      __privateSet(this, _lastInteractAt, performance.now());
+    };
+    __privateGet(this, _wrap).addEventListener("pointermove", interact, { ...sig, passive: true });
+    __privateGet(this, _wrap).addEventListener("pointerdown", interact, { ...sig, passive: true });
+    __privateGet(this, _wrap).addEventListener("touchmove", interact, { ...sig, passive: true });
+    __privateGet(this, _wrap).addEventListener("wheel", interact, { ...sig, passive: true });
     __privateGet(this, _shieldEl).addEventListener("click", (e) => {
       if (o.onClick) {
         try {
@@ -4487,6 +4942,17 @@ var ProtectedImage = class {
     }
   }
   _unloadPixels() {
+    if (__privateGet(this, _gl)) {
+      this._stopGlLoop();
+      try {
+        const lose = __privateGet(this, _gl).getExtension && __privateGet(this, _gl).getExtension("WEBGL_lose_context");
+        if (lose?.loseContext) {
+          __privateSet(this, _glReleasing, true);
+          lose.loseContext();
+        }
+      } catch {
+      }
+    }
     if (__privateGet(this, _canvas)) {
       __privateGet(this, _canvas).width = 0;
       __privateGet(this, _canvas).height = 0;
@@ -4542,6 +5008,10 @@ var ProtectedImage = class {
     return { full: unscrambleToCanvas(__privateGet(this, _bitmap), meta, fullW, fullH), fit, fullW, fullH };
   }
   _render2d() {
+    if (__privateGet(this, _integrityHardLock)) {
+      __privateMethod(this, _ProtectedImage_instances, paintBlackout_fn).call(this);
+      return;
+    }
     const { w, h } = this._backingSize();
     const canvas = __privateGet(this, _canvas);
     __privateGet(this, _tilesEl).hidden = true;
@@ -4667,6 +5137,10 @@ var ProtectedImage = class {
     __privateMethod(this, _ProtectedImage_instances, releaseSourceBitmap_fn).call(this);
   }
   _renderSplit() {
+    if (__privateGet(this, _integrityHardLock)) {
+      __privateMethod(this, _ProtectedImage_instances, paintBlackout_fn).call(this);
+      return;
+    }
     const { w, h } = this._backingSize();
     __privateSet(this, _renderedW, w);
     __privateSet(this, _renderedH, h);
@@ -4926,6 +5400,7 @@ var ProtectedImage = class {
     }
   }
   _tryRenderWebGL() {
+    if (__privateGet(this, _integrityHardLock)) return false;
     if (glContextsInUse >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) {
       if (!__privateGet(this, _glBudgetWarned)) {
         __privateSet(this, _glBudgetWarned, true);
@@ -4951,17 +5426,14 @@ var ProtectedImage = class {
       });
       if (!gl) return false;
       try {
-        const attrs = gl.getContextAttributes();
+        const attrs = NATIVES.glGetContextAttributes ? NATIVES.glGetContextAttributes.call(gl) : gl.getContextAttributes();
         if (attrs && attrs.preserveDrawingBuffer === true) {
-          __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-integrity", {
-            detail: { issue: "preserveDrawingBuffer-rewritten" },
-            bubbles: true
-          }));
           const lose = gl.getExtension && gl.getExtension("WEBGL_lose_context");
           try {
             lose && lose.loseContext && lose.loseContext();
           } catch {
           }
+          __privateMethod(this, _ProtectedImage_instances, flagPreserveRewrite_fn).call(this, "attributes");
           __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
           return false;
         }
@@ -4976,6 +5448,12 @@ var ProtectedImage = class {
         glContextsInUse = Math.max(0, glContextsInUse - 1);
         __privateSet(this, _glSource, null);
         __privateSet(this, _glMeta, null);
+        __privateSet(this, _canaryDone, false);
+        if (__privateGet(this, _glReleasing)) {
+          __privateSet(this, _glReleasing, false);
+          __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
+          return;
+        }
         __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
         if (__privateGet(this, _bitmap)) this._render2d();
         else {
@@ -5023,6 +5501,7 @@ var ProtectedImage = class {
       uniform float uTemporalOn; uniform float uTemporalSign;
       uniform float uTemporalStrength; uniform float uTemporalBlock;
       uniform float uTemporalPattern; uniform float uTemporalChroma;
+      uniform float uTemporalDuty; uniform float uTemporalBias; uniform float uBiasSeed;
       uniform float uInterlaceOn; uniform float uInterlacePhase;
       uniform float uInterlacePhases; uniform float uInterlaceLayout;
       uniform float uInterlaceCell; uniform float uInterlaceAxis;
@@ -5031,6 +5510,7 @@ var ProtectedImage = class {
       uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
+      float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
       vec3 hash3(vec2 q){
         return vec3(hash(q), hash(q+19.19), hash(q+47.47));
       }
@@ -5178,6 +5658,16 @@ var ProtectedImage = class {
             delta = hash3(blockCell) - 0.5;
           }
           c.rgb += delta * uTemporalStrength * uTemporalSign;
+          // Asymmetric duty bias: a slowly-drifting per-block offset b is
+          // applied +2b/3 on one frame and -b/3 on the next two. The
+          // temporal MEAN the eye integrates is exactly c, but the sample
+          // MEDIAN of any short capture converges to c - b/3, not c \u2014
+          // median-filter recovery of the active/interlace subsets is
+          // permanently biased, and b re-rolls every ~90 frames so even
+          // long-window medians keep chasing a moving target.
+          vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
+          float b = biasHash(biasCell) - 0.5;
+          c.rgb += vec3(b) * uTemporalBias * uTemporalDuty;
         }
         frag = vec4(c.rgb, 1.0);
       }`;
@@ -5222,6 +5712,9 @@ var ProtectedImage = class {
       "uTemporalBlock",
       "uTemporalPattern",
       "uTemporalChroma",
+      "uTemporalDuty",
+      "uTemporalBias",
+      "uBiasSeed",
       "uInterlaceOn",
       "uInterlacePhase",
       "uInterlacePhases",
@@ -5340,6 +5833,7 @@ var ProtectedImage = class {
    */
   _startGlLoop(frames = 2) {
     if (!__privateGet(this, _gl)) return;
+    if (!__privateGet(this, _lastInteractAt)) __privateSet(this, _lastInteractAt, performance.now());
     if (__privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this)) __privateSet(this, _glFrameBudget, Infinity);
     else __privateSet(this, _glFrameBudget, Math.max(__privateGet(this, _glFrameBudget), Math.max(1, frames | 0)));
     if (__privateGet(this, _raf)) return;
@@ -5347,6 +5841,15 @@ var ProtectedImage = class {
     const draw = () => {
       __privateSet(this, _raf, 0);
       if (__privateGet(this, _destroyed) || !__privateGet(this, _gl)) return;
+      if (__privateGet(this, _canaryPause) && __privateGet(this, _canaryProbe)) {
+        if (__privateGet(this, _canaryWait) > 0) {
+          __privateWrapper(this, _canaryWait)._--;
+          __privateSet(this, _raf, requestAnimationFrame(draw));
+          return;
+        }
+        __privateMethod(this, _ProtectedImage_instances, checkCanaryProbe_fn).call(this, gl);
+      }
+      if (__privateGet(this, _integrityHardLock)) return;
       const { w, h } = this._backingSize();
       if (__privateGet(this, _canvas).width !== w || __privateGet(this, _canvas).height !== h) {
         __privateGet(this, _canvas).width = w;
@@ -5402,16 +5905,27 @@ var ProtectedImage = class {
       gl.uniform1f(L.uLensOn, __privateGet(this, _options).lens ? 1 : 0);
       gl.uniform1f(L.uLensActive, __privateGet(this, _lensPoint) ? 1 : 0);
       gl.uniform2f(L.uLensCenter, __privateGet(this, _lensPoint)?.x ?? -10, __privateGet(this, _lensPoint)?.y ?? -10);
-      gl.uniform1f(L.uLensRadius, Math.max(24, Math.min(w, h) * (lensCfg.radius ?? 0.3)));
+      gl.uniform1f(L.uLensRadius, __privateMethod(this, _ProtectedImage_instances, lensRadiusPx_fn).call(this, w, h, lensCfg.radius ?? 0.3));
       gl.uniform2f(L.uResolution, w, h);
       gl.uniform1f(L.uLocked, Date.now() < __privateGet(this, _lockedUntil) ? 1 : 0);
       const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
+      if (temporal && performance.now() - __privateGet(this, _lastInteractAt) > 5e3) {
+        if (__privateWrapper(this, _idleSkip)._++ % 3 !== 0) {
+          __privateSet(this, _raf, requestAnimationFrame(draw));
+          return;
+        }
+      } else {
+        __privateSet(this, _idleSkip, 0);
+      }
       const interlace = temporal?.interlace || null;
       const interlacePhases = interlace?.phases || 2;
       const interlacePhase = (__privateGet(this, _temporalPhase) % interlacePhases + interlacePhases) % interlacePhases;
       gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
       gl.uniform1f(L.uTemporalSign, __privateGet(this, _temporalSign));
       gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
+      gl.uniform1f(L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][__privateGet(this, _dutyIndex) % 3]);
+      gl.uniform1f(L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
+      gl.uniform1f(L.uBiasSeed, __privateGet(this, _biasSeed));
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
       gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
       gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
@@ -5435,16 +5949,25 @@ var ProtectedImage = class {
       gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       __privateWrapper(this, _glFrames)._++;
+      if (!__privateGet(this, _canaryDone) && !__privateGet(this, _canaryPause) && __privateGet(this, _glFrames) >= __privateGet(this, _canaryNextTry)) {
+        __privateSet(this, _canaryNextTry, __privateGet(this, _glFrames) + 30);
+        if (__privateMethod(this, _ProtectedImage_instances, canaryPresentable_fn).call(this)) __privateMethod(this, _ProtectedImage_instances, captureCanaryProbe_fn).call(this, gl, w, h);
+      }
       if (temporal) {
         let nextSign = Math.random() < 0.5 ? 1 : -1;
         if (Math.abs(__privateGet(this, _signBalance) + nextSign) > 2) nextSign = -nextSign;
         __privateSet(this, _temporalSign, nextSign);
         __privateSet(this, _signBalance, __privateGet(this, _signBalance) + nextSign);
+        __privateWrapper(this, _dutyIndex)._++;
+        if (++__privateWrapper(this, _biasFrames)._ >= 90) {
+          __privateSet(this, _biasFrames, 0);
+          __privateSet(this, _biasSeed, Math.random() * 100);
+        }
         __privateWrapper(this, _temporalIndex)._++;
         __privateSet(this, _temporalPhase, __privateMethod(this, _ProtectedImage_instances, nextPhase_fn).call(this, interlace ? interlacePhases : 2));
       }
       if (__privateGet(this, _glFrameBudget) !== Infinity && __privateGet(this, _glFrameBudget) > 0) __privateWrapper(this, _glFrameBudget)._--;
-      const keepGoing = __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) || __privateGet(this, _glFrameBudget) > 0;
+      const keepGoing = __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) || __privateGet(this, _glFrameBudget) > 0 || __privateGet(this, _canaryPause);
       if (keepGoing && __privateGet(this, _visible) && !__privateGet(this, _destroyed) && !__privateGet(this, _unloaded)) {
         __privateSet(this, _raf, requestAnimationFrame(draw));
       }
@@ -5506,6 +6029,19 @@ var ProtectedImage = class {
       renderedSize: { w: __privateGet(this, _renderedW), h: __privateGet(this, _renderedH) },
       glFrames: __privateGet(this, _glFrames),
       glContinuous: __privateGet(this, _gl) ? __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) : false,
+      canary: {
+        done: __privateGet(this, _canaryDone),
+        pause: __privateGet(this, _canaryPause),
+        wait: __privateGet(this, _canaryWait),
+        presentable: __privateGet(this, _gl) ? __privateMethod(this, _ProtectedImage_instances, canaryPresentable_fn).call(this) : false,
+        preserveFlagged: __privateGet(this, _preserveFlagged),
+        hardLock: __privateGet(this, _integrityHardLock)
+      },
+      idleMs: __privateGet(this, _lastInteractAt) ? Math.round(performance.now() - __privateGet(this, _lastInteractAt)) : -1,
+      glBudget: __privateGet(this, _glFrameBudget) === Infinity ? "inf" : __privateGet(this, _glFrameBudget),
+      rafPending: !!__privateGet(this, _raf),
+      visible: __privateGet(this, _visible),
+      unloaded: __privateGet(this, _unloaded),
       temporalOn: !!temporal,
       temporalPattern: temporal?.pattern || null,
       temporalChroma: !!temporal?.chroma,
@@ -5610,6 +6146,14 @@ _loaded = new WeakMap();
 _destroyed = new WeakMap();
 _glBudgetWarned = new WeakMap();
 _taintWarned = new WeakMap();
+_canaryDone = new WeakMap();
+_canaryPause = new WeakMap();
+_canaryProbe = new WeakMap();
+_canaryWait = new WeakMap();
+_canaryNextTry = new WeakMap();
+_preserveFlagged = new WeakMap();
+_integrityHardLock = new WeakMap();
+_glReleasing = new WeakMap();
 _taintImage = new WeakMap();
 _risk = new WeakMap();
 _blackoutTimer = new WeakMap();
@@ -5633,6 +6177,9 @@ _lensBase = new WeakMap();
 _lensPoint = new WeakMap();
 _lensRaf = new WeakMap();
 _lensCells = new WeakMap();
+_lensCoverage = new WeakMap();
+_lensRadiusScale = new WeakMap();
+_lensRadiusAt = new WeakMap();
 _traceEl = new WeakMap();
 _traceTimer = new WeakMap();
 _strikes = new WeakMap();
@@ -5658,6 +6205,11 @@ _temporalIndex = new WeakMap();
 _temporalEngineActual = new WeakMap();
 _phaseBag = new WeakMap();
 _signBalance = new WeakMap();
+_dutyIndex = new WeakMap();
+_biasSeed = new WeakMap();
+_biasFrames = new WeakMap();
+_lastInteractAt = new WeakMap();
+_idleSkip = new WeakMap();
 _temporalInterlaceCache = new WeakMap();
 _ProtectedImage_instances = new WeakSet();
 /** Strike accounting: repeated extraction attempts escalate to lockout. */
@@ -5717,7 +6269,29 @@ trackLensTravel_fn = function(point) {
   if (distinct >= threshold) {
     __privateSet(this, _lensCells, []);
     if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "lens-scan");
+    return;
   }
+  const visited = new Set(__privateGet(this, _lensCells).map((c) => c.cell));
+  for (const cell of visited) __privateGet(this, _lensCoverage)[cell] = now;
+  let covered = 0;
+  for (let i = 0; i < 64; i++) if (now - __privateGet(this, _lensCoverage)[i] < 12e4) covered++;
+  const cumulativeThreshold = cfg.scanCellsCumulative ?? 56;
+  if (covered >= cumulativeThreshold) {
+    __privateSet(this, _lensCoverage, new Float64Array(64).fill(-1e15));
+    __privateSet(this, _lensCells, []);
+    if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "lens-scan");
+  }
+};
+// Lens radius with a slow +-6% jitter (re-rolled at most 4x/second):
+// stitched captures of overlapping parks get inconsistent disc rims,
+// so seams ghost instead of aligning pixel-exactly.
+lensRadiusPx_fn = function(w, h, frac) {
+  const now = performance.now();
+  if (now - __privateGet(this, _lensRadiusAt) > 250) {
+    __privateSet(this, _lensRadiusAt, now);
+    __privateSet(this, _lensRadiusScale, 0.94 + Math.random() * 0.12);
+  }
+  return Math.max(24, Math.min(w, h) * frac * __privateGet(this, _lensRadiusScale));
 };
 requestLensFrame_fn = function() {
   if (__privateGet(this, _gl)) {
@@ -6230,7 +6804,7 @@ paintLens2d_fn = function() {
   const point = __privateGet(this, _lensPoint);
   if (point) {
     const cfg = typeof __privateGet(this, _options).lens === "object" ? __privateGet(this, _options).lens : {};
-    const radius = Math.max(24, Math.min(w, h) * (cfg.radius ?? 0.3));
+    const radius = __privateMethod(this, _ProtectedImage_instances, lensRadiusPx_fn).call(this, w, h, cfg.radius ?? 0.3);
     const cx = point.x * w, cy = point.y * h;
     ctx.save();
     ctx.beginPath();
@@ -6300,6 +6874,130 @@ prepareGlSource_fn = function() {
   }
   __privateSet(this, _glSource, __privateGet(this, _bitmap));
   __privateSet(this, _glMeta, __privateGet(this, _meta));
+};
+// A rewritten/preserved drawing buffer breaks the vault's core
+// readback guarantee. Under integrity:'lock' (fortress default) that is
+// fatal for this instance — blackout instead of silently gifting an
+// untainted 2D fallback; under 'monitor' it is a strike + event.
+flagPreserveRewrite_fn = function(source) {
+  if (__privateGet(this, _preserveFlagged)) return;
+  __privateSet(this, _preserveFlagged, true);
+  __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-integrity", {
+    detail: { issue: "preserveDrawingBuffer-rewritten", source },
+    bubbles: true
+  }));
+  if (__privateGet(this, _attemptHandler)) __privateGet(this, _attemptHandler).call(this, "integrity:preserve-drawing-buffer");
+  if (__privateGet(this, _options).integrity === "lock") {
+    __privateSet(this, _integrityHardLock, true);
+    this._stopGlLoop();
+    if (__privateGet(this, _gl)) {
+      try {
+        const lose = __privateGet(this, _gl).getExtension && __privateGet(this, _gl).getExtension("WEBGL_lose_context");
+        if (lose?.loseContext) {
+          __privateSet(this, _glReleasing, true);
+          lose.loseContext();
+        }
+      } catch {
+      }
+    }
+    __privateMethod(this, _ProtectedImage_instances, paintBlackout_fn).call(this);
+  }
+};
+paintBlackout_fn = function() {
+  try {
+    __privateGet(this, _wrap).classList.add("blackout");
+    if (!__privateGet(this, _canvas) || __privateGet(this, _destroyed)) return;
+    const { w, h } = this._backingSize();
+    __privateGet(this, _tilesEl).hidden = true;
+    __privateGet(this, _canvas).hidden = false;
+    if (__privateGet(this, _canvas).width !== w || __privateGet(this, _canvas).height !== h) {
+      __privateGet(this, _canvas).width = w;
+      __privateGet(this, _canvas).height = h;
+    }
+    const ctx = getNativeContext(__privateGet(this, _canvas), "2d", { alpha: false });
+    if (ctx) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, w, h);
+    }
+  } catch {
+  }
+};
+// The clear-at-composite only happens for a canvas that was actually
+// presented. A below-fold canvas (our visibility observer uses a 500px
+// rootMargin, so the loop runs before the element is on screen) keeps
+// its drawing buffer indefinitely — indistinguishable from a forced
+// preserve. The canary therefore only runs when the canvas is provably
+// inside the layout viewport, and defers (never flags) otherwise.
+canaryPresentable_fn = function() {
+  try {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+    const el = __privateGet(this, _canvas) || __privateGet(this, _wrap);
+    if (!el?.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    const vw = window.innerWidth || document.documentElement?.clientWidth || 0;
+    const vh = window.innerHeight || document.documentElement?.clientHeight || 0;
+    if (!(vw > 0 && vh > 0)) return false;
+    const overlapX = Math.min(r.right, vw) - Math.max(r.left, 0);
+    const overlapY = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+    return overlapX >= 8 && overlapY >= 8;
+  } catch {
+    return false;
+  }
+};
+// One-time behavioral probe (per GL context): on a genuine
+// preserveDrawingBuffer:false swapchain, the drawing buffer is cleared
+// at composite time, so a readPixels two frames later (before drawing)
+// returns clear color. If our painted pixels are still there, a
+// getContext proxy preserved the buffer even if getContextAttributes
+// was spoofed to deny it.
+captureCanaryProbe_fn = function(gl, w, h) {
+  try {
+    if (!NATIVES.glReadPixels || w < 8 || h < 8) {
+      __privateSet(this, _canaryDone, true);
+      return;
+    }
+    const points = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+    const probe = [];
+    const px = new Uint8Array(4);
+    for (const [fx, fy] of points) {
+      const x = Math.min(w - 1, Math.max(0, Math.round(fx * w)));
+      const y = Math.min(h - 1, Math.max(0, Math.round(fy * h)));
+      NATIVES.glReadPixels.call(gl, x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (px[0] + px[1] + px[2] > 24) probe.push({ x, y, r: px[0], g: px[1], b: px[2] });
+    }
+    if (probe.length) {
+      __privateSet(this, _canaryProbe, probe);
+      __privateSet(this, _canaryPause, true);
+      __privateSet(this, _canaryWait, 2);
+    } else __privateSet(this, _canaryDone, true);
+  } catch {
+    __privateSet(this, _canaryDone, true);
+  }
+};
+checkCanaryProbe_fn = function(gl) {
+  const probe = __privateGet(this, _canaryProbe);
+  __privateSet(this, _canaryProbe, null);
+  __privateSet(this, _canaryPause, false);
+  if (!probe?.length || !NATIVES.glReadPixels) {
+    __privateSet(this, _canaryDone, true);
+    return;
+  }
+  if (!__privateMethod(this, _ProtectedImage_instances, canaryPresentable_fn).call(this)) return;
+  __privateSet(this, _canaryDone, true);
+  try {
+    const px = new Uint8Array(4);
+    let preserved = true;
+    for (const p of probe) {
+      NATIVES.glReadPixels.call(gl, p.x, p.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      if (px[0] !== p.r || px[1] !== p.g || px[2] !== p.b) {
+        preserved = false;
+        break;
+      }
+    }
+    if (preserved) __privateMethod(this, _ProtectedImage_instances, flagPreserveRewrite_fn).call(this, "canary");
+  } catch {
+  }
 };
 glContinuous_fn = function() {
   const loop = __privateGet(this, _options).renderLoop;

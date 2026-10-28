@@ -310,9 +310,7 @@ function watermarkSvg(w, h, wm) {
  * WebP/PNG pixels at the delivered size when payload size matters less.
  * @returns {Promise<{bytes:Buffer, header:object}>} bytes = .archx container (or plain scrambled image when container:false)
  */
-export async function scrambleImage(input, opts = {}) {
-  const limits = normalizeProcessingOptions(opts);
-  const { bytes: inputBytes, sniffed } = assertInputWithinLimits(input, limits);
+function validateScrambleOpts(opts) {
   const grid = opts.grid ?? 8;
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
   const planVersion = opts.planVersion ?? 1;
@@ -346,6 +344,21 @@ export async function scrambleImage(input, opts = {}) {
   }
   const lossless = opts.lossless === true || opts.quality === 'lossless';
   const quality = lossless ? 100 : (opts.quality ?? 95);
+  return { grid, planVersion, key, maxWidth, lossless, quality };
+}
+
+/**
+ * Stage 1 of derivative production: decode + orient + resize (+ optional
+ * visible watermark composite) to the exact RGBA raster the scramble
+ * stage consumes. This is the reusable front half — it depends only on
+ * the master bytes, target width, watermark, and processing limits, so
+ * per-token/per-viewer delivery can cache the base frame and skip the
+ * master decode + resample on every view. `finishDerivative` is stage 2.
+ */
+export async function prepareDerivativeBase(input, opts = {}) {
+  const limits = normalizeProcessingOptions(opts);
+  const { bytes: inputBytes, sniffed } = assertInputWithinLimits(input, limits);
+  const { grid, maxWidth } = validateScrambleOpts(opts);
 
   let srcMeta;
   try { srcMeta = await sharpInput(inputBytes, limits).metadata(); }
@@ -410,13 +423,37 @@ export async function scrambleImage(input, opts = {}) {
   }
   const w = info.width;
   const h = info.height;
+  return { data, w, h, hasAlpha: !!srcMeta.hasAlpha, watermarked };
+}
+
+/**
+ * Stage 2: forensic + StegoMark marks, tile scramble, encode, optional
+ * AES-GCM, container wrap. Marks mutate pixels, so a shared/cached base
+ * is copied first (a ~1 ms memcpy vs re-decoding the master); a base
+ * produced inline by scrambleImage is used in place exactly as before,
+ * keeping single-call output byte-identical.
+ */
+export async function finishDerivative(base, opts = {}, owned = false) {
+  const limits = normalizeProcessingOptions(opts);
+  const { grid, planVersion, key, lossless, quality } = validateScrambleOpts(opts);
+  if (!base || !(base.data instanceof Uint8Array) ||
+      !Number.isSafeInteger(base.w) || !Number.isSafeInteger(base.h) ||
+      base.w < 1 || base.h < 1 || base.data.length < base.w * base.h * 4) {
+    throw new TypeError('Archx image processing: finishDerivative requires a prepareDerivativeBase result');
+  }
+  const w = base.w;
+  const h = base.h;
+  const watermarked = !!base.watermarked;
+  const srcMeta = { hasAlpha: !!base.hasAlpha };
 
   // Block-level forensic mark (also pre-scramble): survives into any
   // reconstructed copy and can be correlated against the viewing session.
   // `data` is a fresh Sharp-owned Buffer for this call. Reusing its view
   // avoids an otherwise pointless full-frame copy before the mark/scramble
   // stages; the caller-supplied compressed master is never mutated.
-  let rawPixels = data;
+  // Marks below mutate pixels in place; a cached/shared base must not be
+  // poisoned by one viewer's marks, so non-owned bases are copied first.
+  let rawPixels = owned ? base.data : Buffer.from(base.data);
   let forensicMarked = false;
   if (opts.forensicSeed) {
     const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
@@ -538,6 +575,11 @@ export async function scrambleImage(input, opts = {}) {
     stegoFingerprint: resolvedStegoFingerprint,
     perceptualFingerprint: contentFingerprint,
   };
+}
+
+export async function scrambleImage(input, opts = {}) {
+  const base = await prepareDerivativeBase(input, opts);
+  return finishDerivative(base, opts, true);
 }
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */

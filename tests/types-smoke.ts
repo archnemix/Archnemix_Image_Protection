@@ -10,7 +10,10 @@ import Archx, {
 import { createArchxMiddleware, withHardenedProductionDefaults } from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
 import { createRedisStateStore } from '../types/redis.js';
-import { scramblePixelsPadded, useJsonParser } from '../types/scramble.js';
+import {
+  scramblePixelsPadded, useJsonParser,
+  sha256Bytes, hmacSha256Bytes, useWebCrypto, embedStegoFingerprint,
+} from '../types/scramble.js';
 
 // --- client ---
 const options: ArchxLoadOptions = {
@@ -33,11 +36,21 @@ declare const bytes: Uint8Array;
 const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
-const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true });
+const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true });
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;
-void found; void mirrored;
+const tagScheme: 'mac' | 'crc' | null = detection.tagScheme;
+void found; void mirrored; void tagScheme;
 useJsonParser(JSON.parse);
+
+// v1.12 core additions
+const digest: Uint8Array = sha256Bytes(bytes);
+const mac: Uint8Array = hmacSha256Bytes(bytes, digest);
+void mac;
+useWebCrypto(null);
+useWebCrypto({ subtle: {}, getRandomValues: (a: Uint8Array) => a });
+const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key: 'k', legacyCode: true });
+void marked;
 
 // --- server ---
 const handler = createArchxMiddleware(withHardenedProductionDefaults({
@@ -52,6 +65,8 @@ const server = http.createServer((req, res) => { void handler(req, res); });
 void server;
 const auditOk: boolean = handler.configAudit.ok;
 void auditOk;
+const baseCacheEntries: number | undefined = handler.stats().baseCacheEntries;
+void baseCacheEntries;
 
 // --- builder + redis ---
 void buildArchxAssets({

@@ -40,10 +40,10 @@ import {
   buildScramblePlan, tileRect, paddedSize,
   isArchxContainer, decodeContainer, decryptPayload,
   hashSeed, mulberry32, DEFAULT_GRID, sniffImageInfo,
-  useJsonParser,
+  useJsonParser, useWebCrypto,
 } from './scramble.js';
 
-export const VERSION = '1.11.0';
+export const VERSION = '1.12.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -85,9 +85,22 @@ const NATIVES = (() => {
     createProgram: grab(gl2Proto, 'createProgram') || grab(gl1Proto, 'createProgram'),
     linkProgram: grab(gl2Proto, 'linkProgram') || grab(gl1Proto, 'linkProgram'),
     useProgram: grab(gl2Proto, 'useProgram') || grab(gl1Proto, 'useProgram'),
+    getContextAttributes: grab(gl2Proto, 'getContextAttributes') || grab(gl1Proto, 'getContextAttributes'),
   };
   const elementProto = typeof Element !== 'undefined' ? Element.prototype : null;
   const streamProto = typeof ReadableStream !== 'undefined' ? ReadableStream.prototype : null;
+  // Reader prototype via one dummy stream (getReader itself is captured
+  // separately; a hooked reader.read would otherwise skim chunks).
+  const readerProto = (() => {
+    try {
+      const reader = new ReadableStream().getReader();
+      const proto = Object.getPrototypeOf(reader);
+      try { reader.releaseLock(); } catch { /* best-effort */ }
+      return proto;
+    } catch { return null; }
+  })();
+  const subtleObj = (() => { try { return g.crypto?.subtle || null; } catch { return null; } })();
+  const subtleProto = subtleObj ? Object.getPrototypeOf(subtleObj) : null;
   return Object.freeze({
     fnToString: Function.prototype.toString,
     fetch: grab(g, 'fetch'),
@@ -99,6 +112,22 @@ const NATIVES = (() => {
     jsonParse: (() => { try { return typeof JSON !== 'undefined' && typeof JSON.parse === 'function' ? JSON.parse : null; } catch { return null; } })(),
     attachShadow: grab(elementProto, 'attachShadow'),
     streamGetReader: grab(streamProto, 'getReader'),
+    streamReaderRead: grab(readerProto, 'read'),
+    responseText: typeof Response !== 'undefined' ? grab(Response.prototype, 'text') : null,
+    textDecode: typeof TextDecoder !== 'undefined' ? grab(TextDecoder.prototype, 'decode') : null,
+    textEncode: typeof TextEncoder !== 'undefined' ? grab(TextEncoder.prototype, 'encode') : null,
+    // WebCrypto: captured so core AES + DPoP signing bypass post-load hooks.
+    cryptoObj: (() => { try { return g.crypto || null; } catch { return null; } })(),
+    subtle: subtleObj,
+    subtleImportKey: grab(subtleProto, 'importKey'),
+    subtleEncrypt: grab(subtleProto, 'encrypt'),
+    subtleDecrypt: grab(subtleProto, 'decrypt'),
+    subtleDigest: grab(subtleProto, 'digest'),
+    subtleSign: grab(subtleProto, 'sign'),
+    subtleGenerateKey: grab(subtleProto, 'generateKey'),
+    subtleExportKey: grab(subtleProto, 'exportKey'),
+    getRandomValues: (() => { try { return typeof g.crypto?.getRandomValues === 'function' ? g.crypto.getRandomValues : null; } catch { return null; } })(),
+    glGetContextAttributes: glMethods.getContextAttributes,
     createImageBitmap: grab(g, 'createImageBitmap'),
     ImageCtor: typeof Image !== 'undefined' ? Image : null,
     createObjectURL: typeof URL !== 'undefined' ? grab(URL, 'createObjectURL') : null,
@@ -122,6 +151,40 @@ const NATIVES = (() => {
 // Route the core's container-header parsing through the captured parser so
 // a later JSON.parse hook cannot skim per-response AES keys.
 try { useJsonParser(NATIVES.jsonParse); } catch { /* non-fatal */ }
+// Same for WebCrypto: core AES import/decrypt uses the captured subtle.
+try {
+  useWebCrypto(NATIVES.subtle ? {
+    subtle: NATIVES.subtle,
+    importKey: NATIVES.subtleImportKey,
+    encrypt: NATIVES.subtleEncrypt,
+    decrypt: NATIVES.subtleDecrypt,
+    digest: NATIVES.subtleDigest,
+    getRandomValues: NATIVES.getRandomValues,
+    cryptoObj: NATIVES.cryptoObj,
+  } : null);
+} catch { /* non-fatal */ }
+
+// Call a captured SubtleCrypto prototype method with the captured subtle
+// object as receiver (post-load hooks on crypto.subtle are bypassed).
+const SUBTLE_CAPTURED = {
+  importKey: 'subtleImportKey', encrypt: 'subtleEncrypt', decrypt: 'subtleDecrypt',
+  digest: 'subtleDigest', sign: 'subtleSign', generateKey: 'subtleGenerateKey',
+  exportKey: 'subtleExportKey',
+};
+function subtleDo(name, ...args) {
+  const fn = NATIVES[SUBTLE_CAPTURED[name]];
+  if (fn && NATIVES.subtle) return fn.call(NATIVES.subtle, ...args);
+  const subtle = globalThis.crypto?.subtle;
+  return subtle[name](...args);
+}
+const sharedTextEncoder = (() => {
+  try { return new TextEncoder(); } catch { return null; }
+})();
+function utf8EncodeCaptured(str) {
+  return NATIVES.textEncode && sharedTextEncoder
+    ? NATIVES.textEncode.call(sharedTextEncoder, str)
+    : new TextEncoder().encode(str);
+}
 
 function isNativeFn(fn) {
   if (typeof fn !== 'function') return false;
@@ -144,12 +207,24 @@ export function auditIntegrity() {
     ['JSON.parse', typeof JSON !== 'undefined' ? JSON.parse : null, NATIVES.jsonParse],
     ['Element.prototype.attachShadow', typeof Element !== 'undefined' ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
     ['ReadableStream.prototype.getReader', typeof ReadableStream !== 'undefined' ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
+    ['ReadableStreamDefaultReader.prototype.read', (() => { try { return Object.getPrototypeOf(new ReadableStream().getReader()).read; } catch { return null; } })(), NATIVES.streamReaderRead],
+    ['Response.prototype.text', typeof Response !== 'undefined' ? Response.prototype.text : null, NATIVES.responseText],
+    ['TextDecoder.prototype.decode', typeof TextDecoder !== 'undefined' ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
+    ['TextEncoder.prototype.encode', typeof TextEncoder !== 'undefined' ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
+    ['SubtleCrypto.prototype.importKey', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).importKey : null, NATIVES.subtleImportKey],
+    ['SubtleCrypto.prototype.decrypt', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).decrypt : null, NATIVES.subtleDecrypt],
+    ['SubtleCrypto.prototype.encrypt', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).encrypt : null, NATIVES.subtleEncrypt],
+    ['SubtleCrypto.prototype.digest', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).digest : null, NATIVES.subtleDigest],
+    ['SubtleCrypto.prototype.sign', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).sign : null, NATIVES.subtleSign],
+    ['SubtleCrypto.prototype.generateKey', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).generateKey : null, NATIVES.subtleGenerateKey],
+    ['SubtleCrypto.prototype.exportKey', NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).exportKey : null, NATIVES.subtleExportKey],
+    ['Crypto.prototype.getRandomValues', (() => { try { return globalThis.crypto?.getRandomValues || null; } catch { return null; } })(), NATIVES.getRandomValues],
   ];
   const webglMethodNames = [
     'texImage2D', 'readPixels', 'drawArrays', 'drawElements',
     'createTexture', 'bindTexture', 'bindFramebuffer', 'createFramebuffer',
     'framebufferTexture2D', 'createShader', 'shaderSource', 'compileShader',
-    'createProgram', 'linkProgram', 'useProgram',
+    'createProgram', 'linkProgram', 'useProgram', 'getContextAttributes',
   ];
   for (const [label, ctor, capturedMap] of [
     ['WebGLRenderingContext', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext : null, NATIVES.webgl1],
@@ -194,6 +269,18 @@ export function auditIntegrityDetails() {
     ['JSON.parse', NATIVES.jsonParse],
     ['Element.prototype.attachShadow', NATIVES.attachShadow],
     ['ReadableStream.prototype.getReader', NATIVES.streamGetReader],
+    ['ReadableStreamDefaultReader.prototype.read', NATIVES.streamReaderRead],
+    ['Response.prototype.text', NATIVES.responseText],
+    ['TextDecoder.prototype.decode', NATIVES.textDecode],
+    ['TextEncoder.prototype.encode', NATIVES.textEncode],
+    ['SubtleCrypto.prototype.importKey', NATIVES.subtleImportKey],
+    ['SubtleCrypto.prototype.decrypt', NATIVES.subtleDecrypt],
+    ['SubtleCrypto.prototype.encrypt', NATIVES.subtleEncrypt],
+    ['SubtleCrypto.prototype.digest', NATIVES.subtleDigest],
+    ['SubtleCrypto.prototype.sign', NATIVES.subtleSign],
+    ['SubtleCrypto.prototype.generateKey', NATIVES.subtleGenerateKey],
+    ['SubtleCrypto.prototype.exportKey', NATIVES.subtleExportKey],
+    ['Crypto.prototype.getRandomValues', NATIVES.getRandomValues],
   ]);
   for (const [label, capturedMap] of [
     ['WebGLRenderingContext', NATIVES.webgl1],
@@ -1252,7 +1339,7 @@ async function sha256Hex(bytes) {
   try {
     if (typeof crypto === 'undefined' || !crypto.subtle?.digest) return null;
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    const digest = await crypto.subtle.digest('SHA-256', view);
+    const digest = await subtleDo('digest', 'SHA-256', view);
     return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
   } catch { return null; }
 }
@@ -1683,7 +1770,9 @@ async function readResponseBytes(response, maxBytes) {
   let total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = NATIVES.streamReaderRead
+        ? await NATIVES.streamReaderRead.call(reader)
+        : await reader.read();
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
       total += chunk.length;
@@ -1743,9 +1832,18 @@ function isPlainClientObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+const sharedFatalDecoder = (() => {
+  try { return new TextDecoder('utf-8', { fatal: true }); } catch { return null; }
+})();
+
 function parseBoundedJson(bytes) {
   let value;
-  try { value = (NATIVES.jsonParse || JSON.parse)(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  try {
+    const text = NATIVES.textDecode && sharedFatalDecoder
+      ? NATIVES.textDecode.call(sharedFatalDecoder, bytes)
+      : new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    value = (NATIVES.jsonParse || JSON.parse)(text);
+  }
   catch { throw nonRetryableError('Archx: token endpoint returned invalid JSON'); }
   if (!isPlainClientObject(value)) throw nonRetryableError('Archx: token endpoint returned an invalid response');
   return value;
@@ -1828,24 +1926,24 @@ function getProofKey(required = false) {
   }
   if (!proofKeyPromise) {
     proofKeyPromise = (async () => {
-      const pair = await subtle.generateKey(
+      const pair = await subtleDo('generateKey',
         { name: 'ECDSA', namedCurve: 'P-256' },
         false,
         ['sign', 'verify'],
       );
-      const exported = await subtle.exportKey('jwk', pair.publicKey);
+      const exported = await subtleDo('exportKey', 'jwk', pair.publicKey);
       if (!exported || exported.kty !== 'EC' || exported.crv !== 'P-256' ||
           typeof exported.x !== 'string' || typeof exported.y !== 'string') {
         throw new Error('unsupported proof public key');
       }
       const jwk = { kty: 'EC', crv: 'P-256', x: exported.x, y: exported.y };
       const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
-      const thumbprint = bytesToBase64Url(await subtle.digest('SHA-256', new TextEncoder().encode(canonical)));
+      const thumbprint = bytesToBase64Url(await subtleDo('digest', 'SHA-256', utf8EncodeCaptured(canonical)));
       return Object.freeze({
         privateKey: pair.privateKey,
         jwk: Object.freeze(jwk),
         jkt: thumbprint,
-        header: bytesToBase64Url(new TextEncoder().encode(JSON.stringify(jwk))),
+        header: bytesToBase64Url(utf8EncodeCaptured(JSON.stringify(jwk))),
       });
     })().catch((err) => {
       proofKeyPromise = null;
@@ -1872,14 +1970,14 @@ async function createProofHeader(proofKey, accessToken, payloadUrl) {
     exp: now + 60000,
     htm: 'GET',
     htu: payloadUrl.pathname,
-    ath: bytesToBase64Url(await subtle.digest('SHA-256', new TextEncoder().encode(accessToken))),
+    ath: bytesToBase64Url(await subtleDo('digest', 'SHA-256', utf8EncodeCaptured(accessToken))),
   };
-  const payloadPart = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(proof)));
+  const payloadPart = bytesToBase64Url(utf8EncodeCaptured(JSON.stringify(proof)));
   const signingInput = `v1.${payloadPart}`;
-  const signature = await subtle.sign(
+  const signature = await subtleDo('sign',
     { name: 'ECDSA', hash: 'SHA-256' },
     proofKey.privateKey,
-    new TextEncoder().encode(signingInput),
+    utf8EncodeCaptured(signingInput),
   );
   return `${signingInput}.${bytesToBase64Url(signature)}`;
 }
@@ -2062,11 +2160,22 @@ function scrambleCanvasLocally(source, grid, key) {
   const cctx = getNativeContext(cleanPadded, '2d');
   setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
   nativeDrawImage(cctx, source, 0, 0);
-  // Replicate the nearest edge into the padding (matching the server-side
-  // scramblePixelsPadded): an opaque-black pad makes every boundary tile
-  // identifiable by its black strip, leaking tile position + flip state.
-  if (pw > w) nativeDrawImage(cctx, source, w - 1, 0, 1, h, w, 0, pw - w, h);
-  if (ph > h) nativeDrawImage(cctx, cleanPadded, 0, h - 1, pw, 1, 0, h, pw, ph - h);
+  // Reflect the interior across each edge into the padding (matching the
+  // server-side scramblePixelsPadded): black or edge-duplicated padding
+  // makes every boundary tile identifiable (strip / zero gradient),
+  // leaking tile position + flip state to keyless solvers.
+  if (pw > w) {
+    cctx.save();
+    cctx.translate(2 * w, 0); cctx.scale(-1, 1);
+    nativeDrawImage(cctx, source, 0, 0);
+    cctx.restore();
+  }
+  if (ph > h) {
+    cctx.save();
+    cctx.translate(0, 2 * h); cctx.scale(1, -1);
+    nativeDrawImage(cctx, cleanPadded, 0, 0);
+    cctx.restore();
+  }
   const scrambled = makeCanvas();
   scrambled.width = pw; scrambled.height = ph;
   const ctx = getNativeContext(scrambled, '2d');
@@ -2155,12 +2264,16 @@ export class ProtectedImage {
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
   #decoy = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
   #glBudgetWarned = false; #taintWarned = false;
+  #canaryDone = false; #canaryPause = false; #canaryProbe = null; #canaryWait = 0; #canaryNextTry = 1;
+  #preserveFlagged = false; #integrityHardLock = false; #glReleasing = false;
   #taintImage = null;
   #risk = new Set(); #blackoutTimer = 0; #resizeTimer = 0; #visibilityObs = null; #realCtx = null;
   #attemptHandler = null; #loading = false; #visible = false; #unloaded = false;
   #glProg = null; #glLoc = null; #glTex = null; #glMap = null; #glWm = null; #glWmOn = 0;
   #glSource = null; #glMeta = null; #frameCanvas = null; #lensBase = null;
   #lensPoint = null; #lensRaf = 0; #lensCells = [];
+  #lensCoverage = new Float64Array(64).fill(-1e15);
+  #lensRadiusScale = 1; #lensRadiusAt = 0;
   #traceEl = null; #traceTimer = 0;
   #strikes = 0; #lockedUntil = 0; #lockTimer = 0; #integrityIssues = [];
   #bitmapReleased = false;
@@ -2169,6 +2282,8 @@ export class ProtectedImage {
   #glFrameBudget = 0; #glFrames = 0; #temporalSign = 1; #temporalPhase = 0;
   #temporalRaf = 0; #temporalFrames = null; #temporalIndex = 0; #temporalEngineActual = null;
   #phaseBag = []; #signBalance = 0;
+  #dutyIndex = 0; #biasSeed = Math.random() * 100; #biasFrames = 0;
+  #lastInteractAt = 0; #idleSkip = 0;
   #temporalInterlaceCache = undefined;
 
   /** Sanitised, secret-free view of the effective options. */
@@ -2296,6 +2411,12 @@ export class ProtectedImage {
       this.#wrap.addEventListener('pointercancel', clear, sig);
       this.#wrap.addEventListener('pointermove', clear, sig);
     }
+    // Interaction clock for the temporal idle throttle (passive, cheap).
+    const interact = () => { this.#lastInteractAt = performance.now(); };
+    this.#wrap.addEventListener('pointermove', interact, { ...sig, passive: true });
+    this.#wrap.addEventListener('pointerdown', interact, { ...sig, passive: true });
+    this.#wrap.addEventListener('touchmove', interact, { ...sig, passive: true });
+    this.#wrap.addEventListener('wheel', interact, { ...sig, passive: true });
     // Forward genuine clicks so galleries/lightboxes keep working.
     this.#shieldEl.addEventListener('click', (e) => {
       if (o.onClick) { try { o.onClick(e, this); } catch {} }
@@ -2423,7 +2544,35 @@ export class ProtectedImage {
     if (distinct >= threshold) {
       this.#lensCells = [];
       if (this.#attemptHandler) this.#attemptHandler('lens-scan');
+      return;
     }
+    // Paced stitching defeats the 8 s burst window by parking, waiting
+    // out the window, and parking elsewhere. A slow cumulative ledger
+    // (last-visit timestamp per cell, 120 s horizon) catches systematic
+    // whole-frame coverage across pauses: a human inspects 1-3 regions,
+    // a stitcher eventually visits almost every cell.
+    const visited = new Set(this.#lensCells.map((c) => c.cell));
+    for (const cell of visited) this.#lensCoverage[cell] = now;
+    let covered = 0;
+    for (let i = 0; i < 64; i++) if (now - this.#lensCoverage[i] < 120000) covered++;
+    const cumulativeThreshold = cfg.scanCellsCumulative ?? 56;
+    if (covered >= cumulativeThreshold) {
+      this.#lensCoverage = new Float64Array(64).fill(-1e15);
+      this.#lensCells = [];
+      if (this.#attemptHandler) this.#attemptHandler('lens-scan');
+    }
+  }
+
+  // Lens radius with a slow +-6% jitter (re-rolled at most 4x/second):
+  // stitched captures of overlapping parks get inconsistent disc rims,
+  // so seams ghost instead of aligning pixel-exactly.
+  #lensRadiusPx(w, h, frac) {
+    const now = performance.now();
+    if (now - this.#lensRadiusAt > 250) {
+      this.#lensRadiusAt = now;
+      this.#lensRadiusScale = 0.94 + Math.random() * 0.12;
+    }
+    return Math.max(24, Math.min(w, h) * frac * this.#lensRadiusScale);
   }
 
   #requestLensFrame() {
@@ -3252,6 +3401,18 @@ export class ProtectedImage {
     // bitmap: repaint can decode locally with no network/token reload. If
     // there is no local recovery path, keep the shared bitmap rather than
     // turning an ordinary scroll into a fresh one-time-token mint.
+    // Release the WebGL context too: otherwise the first GL_CONTEXT_BUDGET
+    // vault images in a long gallery hold contexts forever and everything
+    // below the fold degrades to 2D. The context-lost handler (flagged
+    // intentional) returns the budget slot; visibility re-render creates
+    // a fresh context on return.
+    if (this.#gl) {
+      this._stopGlLoop();
+      try {
+        const lose = this.#gl.getExtension && this.#gl.getExtension('WEBGL_lose_context');
+        if (lose?.loseContext) { this.#glReleasing = true; lose.loseContext(); }
+      } catch { /* context stays; budget slot returns on natural loss */ }
+    }
     if (this.#canvas) { this.#canvas.width = 0; this.#canvas.height = 0; }
     if (this.#bitmap && this.#cachedBytes) {
       if (this.#bitmapCacheEntry) cacheReleaseEntry(this.#bitmapCacheEntry);
@@ -3325,6 +3486,7 @@ export class ProtectedImage {
   }
 
   _render2d() {
+    if (this.#integrityHardLock) { this.#paintBlackout(); return; }
     const { w, h } = this._backingSize();
     const canvas = this.#canvas;
     this.#tilesEl.hidden = true;
@@ -3691,7 +3853,7 @@ export class ProtectedImage {
     const point = this.#lensPoint;
     if (point) {
       const cfg = typeof this.#options.lens === 'object' ? this.#options.lens : {};
-      const radius = Math.max(24, Math.min(w, h) * (cfg.radius ?? 0.30));
+      const radius = this.#lensRadiusPx(w, h, cfg.radius ?? 0.30);
       const cx = point.x * w, cy = point.y * h;
       ctx.save();
       ctx.beginPath();
@@ -3712,6 +3874,7 @@ export class ProtectedImage {
   }
 
   _renderSplit() {
+    if (this.#integrityHardLock) { this.#paintBlackout(); return; }
     const { w, h } = this._backingSize();
     this.#renderedW = w; this.#renderedH = h;
     const g = Math.max(2, Math.min(6, this.#options.splitGrid | 0));
@@ -3980,7 +4143,119 @@ export class ProtectedImage {
     this.#glMeta = this.#meta;
   }
 
+  // A rewritten/preserved drawing buffer breaks the vault's core
+  // readback guarantee. Under integrity:'lock' (fortress default) that is
+  // fatal for this instance — blackout instead of silently gifting an
+  // untainted 2D fallback; under 'monitor' it is a strike + event.
+  #flagPreserveRewrite(source) {
+    if (this.#preserveFlagged) return;
+    this.#preserveFlagged = true;
+    this.#host.dispatchEvent(new CustomEvent('archx-integrity', {
+      detail: { issue: 'preserveDrawingBuffer-rewritten', source }, bubbles: true,
+    }));
+    if (this.#attemptHandler) this.#attemptHandler('integrity:preserve-drawing-buffer');
+    if (this.#options.integrity === 'lock') {
+      this.#integrityHardLock = true;
+      this._stopGlLoop();
+      if (this.#gl) {
+        try {
+          const lose = this.#gl.getExtension && this.#gl.getExtension('WEBGL_lose_context');
+          if (lose?.loseContext) { this.#glReleasing = true; lose.loseContext(); }
+        } catch { /* best-effort */ }
+      }
+      this.#paintBlackout();
+    }
+  }
+
+  #paintBlackout() {
+    try {
+      this.#wrap.classList.add('blackout');
+      if (!this.#canvas || this.#destroyed) return;
+      const { w, h } = this._backingSize();
+      this.#tilesEl.hidden = true;
+      this.#canvas.hidden = false;
+      if (this.#canvas.width !== w || this.#canvas.height !== h) {
+        this.#canvas.width = w; this.#canvas.height = h;
+      }
+      const ctx = getNativeContext(this.#canvas, '2d', { alpha: false });
+      if (ctx) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h); }
+    } catch { /* blackout is best-effort; the wrap class still applies */ }
+  }
+
+  // The clear-at-composite only happens for a canvas that was actually
+  // presented. A below-fold canvas (our visibility observer uses a 500px
+  // rootMargin, so the loop runs before the element is on screen) keeps
+  // its drawing buffer indefinitely — indistinguishable from a forced
+  // preserve. The canary therefore only runs when the canvas is provably
+  // inside the layout viewport, and defers (never flags) otherwise.
+  #canaryPresentable() {
+    try {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
+      const el = this.#canvas || this.#wrap;
+      if (!el?.getBoundingClientRect) return false;
+      const r = el.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) return false;
+      const vw = window.innerWidth || document.documentElement?.clientWidth || 0;
+      const vh = window.innerHeight || document.documentElement?.clientHeight || 0;
+      if (!(vw > 0 && vh > 0)) return false;
+      const overlapX = Math.min(r.right, vw) - Math.max(r.left, 0);
+      const overlapY = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+      return overlapX >= 8 && overlapY >= 8;
+    } catch { return false; }
+  }
+
+  // One-time behavioral probe (per GL context): on a genuine
+  // preserveDrawingBuffer:false swapchain, the drawing buffer is cleared
+  // at composite time, so a readPixels two frames later (before drawing)
+  // returns clear color. If our painted pixels are still there, a
+  // getContext proxy preserved the buffer even if getContextAttributes
+  // was spoofed to deny it.
+  #captureCanaryProbe(gl, w, h) {
+    try {
+      if (!NATIVES.glReadPixels || w < 8 || h < 8) { this.#canaryDone = true; return; }
+      const points = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+      const probe = [];
+      const px = new Uint8Array(4);
+      for (const [fx, fy] of points) {
+        const x = Math.min(w - 1, Math.max(0, Math.round(fx * w)));
+        const y = Math.min(h - 1, Math.max(0, Math.round(fy * h)));
+        NATIVES.glReadPixels.call(gl, x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        if (px[0] + px[1] + px[2] > 24) probe.push({ x, y, r: px[0], g: px[1], b: px[2] });
+      }
+      if (probe.length) {
+        this.#canaryProbe = probe;
+        this.#canaryPause = true;
+        // Chromium clears the drawing buffer only after the SECOND
+        // following rAF (verified empirically); checking one frame after
+        // capture reads the not-yet-composited buffer and false-positives.
+        this.#canaryWait = 2;
+      } else this.#canaryDone = true;
+    } catch { this.#canaryDone = true; }
+  }
+
+  #checkCanaryProbe(gl) {
+    const probe = this.#canaryProbe;
+    this.#canaryProbe = null;
+    this.#canaryPause = false;
+    if (!probe?.length || !NATIVES.glReadPixels) { this.#canaryDone = true; return; }
+    // Scrolled out of the viewport between capture and check: the frame
+    // may never have been composited, so surviving pixels prove nothing.
+    // Defer — recapture on a later presented frame, never flag.
+    if (!this.#canaryPresentable()) return;
+    this.#canaryDone = true;
+    try {
+      const px = new Uint8Array(4);
+      let preserved = true;
+      for (const p of probe) {
+        NATIVES.glReadPixels.call(gl, p.x, p.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        if (px[0] !== p.r || px[1] !== p.g || px[2] !== p.b) { preserved = false; break; }
+      }
+      if (preserved) this.#flagPreserveRewrite('canary');
+    } catch { /* inconclusive: never lock on a failed probe */ }
+  }
+
   _tryRenderWebGL() {
+    if (this.#integrityHardLock) return false;
     if (glContextsInUse >= GL_CONTEXT_BUDGET && !this.#gl) {
       if (!this.#glBudgetWarned) {
         this.#glBudgetWarned = true;
@@ -4005,16 +4280,17 @@ export class ProtectedImage {
       });
       if (!gl) return false;
       // A getContext proxy can honor our call but rewrite the attributes:
-      // verify the actual context configuration before trusting the vault
-      // property (non-preserved buffer). A mismatch fails closed to 2D.
+      // verify the actual context configuration (via the captured native
+      // getter — the method itself can be proxied, which is what the
+      // post-composite readPixels canary below catches behaviorally).
       try {
-        const attrs = gl.getContextAttributes();
+        const attrs = NATIVES.glGetContextAttributes
+          ? NATIVES.glGetContextAttributes.call(gl)
+          : gl.getContextAttributes();
         if (attrs && attrs.preserveDrawingBuffer === true) {
-          this.#host.dispatchEvent(new CustomEvent('archx-integrity', {
-            detail: { issue: 'preserveDrawingBuffer-rewritten' }, bubbles: true,
-          }));
           const lose = gl.getExtension && gl.getExtension('WEBGL_lose_context');
           try { lose && lose.loseContext && lose.loseContext(); } catch { /* best-effort */ }
+          this.#flagPreserveRewrite('attributes');
           this.#fresh2dCanvas();
           return false;
         }
@@ -4029,6 +4305,14 @@ export class ProtectedImage {
         e.preventDefault();
         this.#gl = null; glContextsInUse = Math.max(0, glContextsInUse - 1);
         this.#glSource = null; this.#glMeta = null;
+        this.#canaryDone = false; // re-probe if a fresh context is created
+        if (this.#glReleasing) {
+          // Intentional release (viewport unload / hard lock): stay
+          // unloaded; the visibility lifecycle re-renders on return.
+          this.#glReleasing = false;
+          this.#fresh2dCanvas();
+          return;
+        }
         this.#fresh2dCanvas();
         if (this.#bitmap) this._render2d();
         else { this.#loaded = false; this._load(); }
@@ -4072,6 +4356,7 @@ export class ProtectedImage {
       uniform float uTemporalOn; uniform float uTemporalSign;
       uniform float uTemporalStrength; uniform float uTemporalBlock;
       uniform float uTemporalPattern; uniform float uTemporalChroma;
+      uniform float uTemporalDuty; uniform float uTemporalBias; uniform float uBiasSeed;
       uniform float uInterlaceOn; uniform float uInterlacePhase;
       uniform float uInterlacePhases; uniform float uInterlaceLayout;
       uniform float uInterlaceCell; uniform float uInterlaceAxis;
@@ -4080,6 +4365,7 @@ export class ProtectedImage {
       uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
       in vec2 vUv; out vec4 frag;
       float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
+      float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
       vec3 hash3(vec2 q){
         return vec3(hash(q), hash(q+19.19), hash(q+47.47));
       }
@@ -4227,6 +4513,16 @@ export class ProtectedImage {
             delta = hash3(blockCell) - 0.5;
           }
           c.rgb += delta * uTemporalStrength * uTemporalSign;
+          // Asymmetric duty bias: a slowly-drifting per-block offset b is
+          // applied +2b/3 on one frame and -b/3 on the next two. The
+          // temporal MEAN the eye integrates is exactly c, but the sample
+          // MEDIAN of any short capture converges to c - b/3, not c —
+          // median-filter recovery of the active/interlace subsets is
+          // permanently biased, and b re-rolls every ~90 frames so even
+          // long-window medians keep chasing a moving target.
+          vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
+          float b = biasHash(biasCell) - 0.5;
+          c.rgb += vec3(b) * uTemporalBias * uTemporalDuty;
         }
         frag = vec4(c.rgb, 1.0);
       }`;
@@ -4248,6 +4544,7 @@ export class ProtectedImage {
     ['uTex','uMap','uWm','uGrid','uCrop','uFitScale','uFitOffset','uScrambled','uSeed','uWmOn',
      'uLensOn','uLensActive','uLensCenter','uLensRadius','uResolution','uLocked',
      'uTemporalOn','uTemporalSign','uTemporalStrength','uTemporalBlock','uTemporalPattern','uTemporalChroma',
+     'uTemporalDuty','uTemporalBias','uBiasSeed',
      'uInterlaceOn','uInterlacePhase','uInterlacePhases','uInterlaceLayout','uInterlaceCell','uInterlaceAxis',
      'uInterlaceFill','uInterlaceFillBlock','uInterlaceFillStrength','uInterlaceHiddenScale','uInterlaceActiveGain','uInterlaceNoiseStrength']
       .forEach((n) => { this.#glLoc[n] = gl.getUniformLocation(prog, n); });
@@ -4365,6 +4662,7 @@ export class ProtectedImage {
    */
   _startGlLoop(frames = 2) {
     if (!this.#gl) return;
+    if (!this.#lastInteractAt) this.#lastInteractAt = performance.now();
     if (this.#glContinuous()) this.#glFrameBudget = Infinity;
     else this.#glFrameBudget = Math.max(this.#glFrameBudget, Math.max(1, frames | 0));
     if (this.#raf) return;
@@ -4372,6 +4670,18 @@ export class ProtectedImage {
     const draw = () => {
       this.#raf = 0;
       if (this.#destroyed || !this.#gl) return;
+      // Post-composite canary: hold drawing for two frames so the captured
+      // frame is definitely composited (and, if honest, cleared), then
+      // check before this frame draws anything.
+      if (this.#canaryPause && this.#canaryProbe) {
+        if (this.#canaryWait > 0) {
+          this.#canaryWait--;
+          this.#raf = requestAnimationFrame(draw);
+          return;
+        }
+        this.#checkCanaryProbe(gl);
+      }
+      if (this.#integrityHardLock) return;
       const { w, h } = this._backingSize();
       if (this.#canvas.width !== w || this.#canvas.height !== h) {
         this.#canvas.width = w; this.#canvas.height = h;
@@ -4412,16 +4722,32 @@ export class ProtectedImage {
       gl.uniform1f(L.uLensOn, this.#options.lens ? 1 : 0);
       gl.uniform1f(L.uLensActive, this.#lensPoint ? 1 : 0);
       gl.uniform2f(L.uLensCenter, this.#lensPoint?.x ?? -10, this.#lensPoint?.y ?? -10);
-      gl.uniform1f(L.uLensRadius, Math.max(24, Math.min(w, h) * (lensCfg.radius ?? 0.30)));
+      gl.uniform1f(L.uLensRadius, this.#lensRadiusPx(w, h, lensCfg.radius ?? 0.30));
       gl.uniform2f(L.uResolution, w, h);
       gl.uniform1f(L.uLocked, Date.now() < this.#lockedUntil ? 1 : 0);
       const temporal = this.#temporalConfig();
+      // Idle throttle: after 5 s without pointer activity over this
+      // instance, a continuous temporal loop draws 1 frame in 3 (~20 Hz).
+      // Modulation — and its capture friction — continues; it just stops
+      // burning full-rate GPU/battery (and blocking panel self-refresh)
+      // for an unwatched still. Any interaction restores full rate.
+      if (temporal && performance.now() - this.#lastInteractAt > 5000) {
+        if ((this.#idleSkip++ % 3) !== 0) {
+          this.#raf = requestAnimationFrame(draw);
+          return;
+        }
+      } else {
+        this.#idleSkip = 0;
+      }
       const interlace = temporal?.interlace || null;
       const interlacePhases = interlace?.phases || 2;
       const interlacePhase = ((this.#temporalPhase % interlacePhases) + interlacePhases) % interlacePhases;
       gl.uniform1f(L.uTemporalOn, temporal?.noise ? 1 : 0);
       gl.uniform1f(L.uTemporalSign, this.#temporalSign);
       gl.uniform1f(L.uTemporalStrength, temporal ? temporal.strength * (0.75 + Math.random() * 0.5) : 0);
+      gl.uniform1f(L.uTemporalDuty, [2 / 3, -1 / 3, -1 / 3][this.#dutyIndex % 3]);
+      gl.uniform1f(L.uTemporalBias, temporal ? temporal.strength * 0.55 : 0);
+      gl.uniform1f(L.uBiasSeed, this.#biasSeed);
       gl.uniform1f(L.uTemporalBlock, temporal ? temporal.block : 1);
       gl.uniform1f(L.uTemporalPattern, temporal ? temporal.patternCode : 0);
       gl.uniform1f(L.uTemporalChroma, temporal?.chroma ? 1 : 0);
@@ -4447,6 +4773,12 @@ export class ProtectedImage {
       gl.uniform1f(L.uInterlaceNoiseStrength, interlace?.noiseStrength ?? 0.16);
       nativeGlDrawArrays(gl, gl.TRIANGLE_STRIP, 0, 4);
       this.#glFrames++;
+      if (!this.#canaryDone && !this.#canaryPause && this.#glFrames >= this.#canaryNextTry) {
+        // Retry at most every 30 drawn frames until the canvas has been
+        // presented on screen at least once (see #canaryPresentable).
+        this.#canaryNextTry = this.#glFrames + 30;
+        if (this.#canaryPresentable()) this.#captureCanaryProbe(gl, w, h);
+      }
       if (temporal) {
         // Randomized sign (balance-corrected so long-run brightness stays
         // neutral) and shuffled phase order: fixed +- alternation let a
@@ -4456,11 +4788,16 @@ export class ProtectedImage {
         if (Math.abs(this.#signBalance + nextSign) > 2) nextSign = -nextSign;
         this.#temporalSign = nextSign;
         this.#signBalance += nextSign;
+        this.#dutyIndex++;
+        if (++this.#biasFrames >= 90) {
+          this.#biasFrames = 0;
+          this.#biasSeed = Math.random() * 100;
+        }
         this.#temporalIndex++;
         this.#temporalPhase = this.#nextPhase(interlace ? interlacePhases : 2);
       }
       if (this.#glFrameBudget !== Infinity && this.#glFrameBudget > 0) this.#glFrameBudget--;
-      const keepGoing = this.#glContinuous() || this.#glFrameBudget > 0;
+      const keepGoing = this.#glContinuous() || this.#glFrameBudget > 0 || this.#canaryPause;
       if (keepGoing && this.#visible && !this.#destroyed && !this.#unloaded) {
         this.#raf = requestAnimationFrame(draw);
       }
@@ -4520,6 +4857,14 @@ export class ProtectedImage {
       renderedSize: { w: this.#renderedW, h: this.#renderedH },
       glFrames: this.#glFrames,
       glContinuous: this.#gl ? this.#glContinuous() : false,
+      canary: {
+        done: this.#canaryDone, pause: this.#canaryPause, wait: this.#canaryWait,
+        presentable: this.#gl ? this.#canaryPresentable() : false,
+        preserveFlagged: this.#preserveFlagged, hardLock: this.#integrityHardLock,
+      },
+      idleMs: this.#lastInteractAt ? Math.round(performance.now() - this.#lastInteractAt) : -1,
+      glBudget: this.#glFrameBudget === Infinity ? 'inf' : this.#glFrameBudget,
+      rafPending: !!this.#raf, visible: this.#visible, unloaded: this.#unloaded,
       temporalOn: !!temporal,
       temporalPattern: temporal?.pattern || null,
       temporalChroma: !!temporal?.chroma,

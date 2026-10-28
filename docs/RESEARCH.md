@@ -1037,6 +1037,138 @@ closed shadow roots, decoy `toDataURL`, cross-origin taint, black
 vault readback, naive-hook detection, path traversal / Fetch Metadata /
 DPoP replay / width-clamp / race handling.
 
+### 2.20 Second adversarial follow-up — verification and response (v1.12)
+
+The same reviewer re-tested v1.11.0 and returned eight file/function-mapped
+fixes, a set of compute/memory/battery optimizations, and a competitor
+comparison (SmartFrame, IIIF+OpenSeadragon, IMATAG/Steg.AI/Digimarc,
+Adobe TrustMark, Meta WAM). Each claim was verified against the code —
+and, where the claim was about browser behavior, against a real Chromium
+— before acting.
+
+**Confirmed real — fixed.**
+
+- *Fortress 2D downgrade on `preserveDrawingBuffer` rewrite.* True: the
+  v1.11 attribute verification fell back to an untainted 2D canvas under
+  exactly the conditions fortress exists to distrust, and a proxy that
+  also spoofs `getContextAttributes` defeated the check entirely. The
+  attribute read now goes through the captured native, and a behavioral
+  canary backstops it: after the first presented frame, drawing holds
+  for two frames and `readPixels` runs before the next draw — on an
+  honest swapchain the buffer is clear color by then. Two empirical
+  corrections to the reviewer's sketch: Chromium clears the buffer only
+  after the **second** following rAF (one-frame checks false-positive),
+  and a canvas that was never composited (below the fold — our
+  visibility observer runs the loop 500px early) is never cleared at
+  all, so the canary only judges provably presented frames and defers
+  otherwise. Either signal under `integrity:'lock'` is now a hard
+  blackout, not a downgrade. The browser suite includes a pre-load
+  proxy that forces-true while spoofing-false; the canary catches it
+  (`source:'canary'`).
+- *Hookable crypto/stream primitives in the core.* True: the shared
+  core called `globalThis.crypto.subtle` directly, and the client used
+  live `subtle.*`, `reader.read`, `Response.text`, and fresh
+  `TextDecoder`s on sensitive paths. The core now ships pure-JS
+  SHA-256/HMAC-SHA256 (byte-identical to `node:crypto`, including
+  >64-byte keys) and takes an injected, boot-captured WebCrypto surface
+  (`useWebCrypto`) for AES-GCM and digests; raw key bytes are zeroed
+  after import. Client-side, all subtle calls route through a
+  receiver-correct captured-method helper (SubtleCrypto methods throw
+  "Illegal invocation" on any other receiver), streaming uses the
+  captured reader, and bounded-JSON parsing uses a shared captured
+  fatal decoder.
+- *Mirror+crop blindspot.* True for explicit profiles: only
+  `auto`+geometry tried the flipped candidate, and it dropped the
+  other search dimensions. `searchMirror` now defaults on for every
+  profile and the flipped probe inherits offset/geometry search.
+  Measured (800px, strength 6): flip + 90% center-crop recovers in
+  3.6s (standard) and 9.1s (robust) — before: not found.
+- *Edge-replicate row-duplication oracle.* True, and it was our own
+  v1.11 padding fix that created it: replicated pad rows are exact
+  duplicates, self-identifying to tile-edge solvers (100% duplicate
+  rows on a gradient probe). Padding is now interior reflection with
+  a deterministic ±1 dither confined to pad pixels (<5% duplicates).
+  Displayed pixels and wire compatibility are unchanged (the client
+  crops the pad; it never re-derives it for server payloads).
+- *Paced lens stitching.* True: the 8s burst window let a slow,
+  scripted sweep stay under threshold forever. The lens now keeps a
+  120s last-visit ledger over the 8×8 coverage grid (≥56/64 cells ⇒
+  `lens-scan`, tunable via `scanCellsCumulative`), and the disc
+  radius jitters ±6% so captured discs no longer share one geometry.
+- *Temporal median after the v1.11 reseed.* The reseed removed the
+  exact 6-frame algebraic shortcut, but an order-independent median
+  of a couple dozen frames still tracked the clean value closely.
+  The shader path now adds an asymmetric-duty spatial bias
+  ([+2⁄3, −1⁄3, −1⁄3] duty at 24px blocks, 0.55×strength amplitude,
+  seed re-rolled every ~90 frames): the frame *mean* is exact, the
+  sample *median* converges to a block-varying offset that keeps
+  moving. Long-window averaging still converges to the displayed
+  image. That is inherent to anything watchable and stays documented
+  as a cost-raiser, not a wall.
+- *IPv6 /48 rotation + limiter eviction churn.* Both true. Limits now
+  apply at /64 (configured) and /48 (4×) narrow-first; the distinct-
+  image abuse signal intentionally stays /64 so a big NAT /48 is not
+  auto-flagged. The limiter evicts unblocked entries before blocked
+  ones, so flooding the table no longer flushes the flooders' blocks.
+- *Collusion framing against the StegoMark CRC.* Structurally true:
+  the acceptance tag was a linear CRC whose only keying was one
+  derived byte in the layout — majority hybrids correlate with the
+  CRC of the majority fingerprint by construction, and detection
+  under per-viewer keys degrades to an O(N) scan. **Not reproduced
+  as demonstrated, though:** our replication (3-buyer pixel-average,
+  800px, strength 6, 12 trials) produced zero validating phantoms
+  under *either* scheme — the averaged marks erased below gate
+  thresholds first. The fix is justified by the structure, not by
+  reproducing their phantom: codeword v2 accepts on a 16-bit
+  truncated HMAC-SHA256 of the fingerprint (shared image key, so
+  detection stays O(1)); the robust profile keeps its first CRC
+  strictly as a repair oracle. `tagScheme` reports which tag
+  validated, legacy decodes are gated harder and CLI-warned, and
+  pre-1.12 detectors cannot read new marks (upgrade detectors first).
+
+**Optimizations shipped.** Two-stage derivatives
+(`prepareDerivativeBase`/`finishDerivative`): resize/watermark once,
+cache the raw base for per-token/per-viewer variants that can never
+output-cache (byte-identical; base proven non-mutated by tests).
+Redis binary mode when the client can return Buffers (≈33% smaller
+than the `b64:` armor, which remains the fallback; HMAC entry tags
+make mixed fleets self-heal). WebGL contexts are deliberately lost
+on viewport unload so long galleries return slots to the browser's
+context budget. Continuous temporal loops idle-throttle to 1-in-3
+frames after 5s without interaction — reduced, never stopped, since
+a frozen temporal frame is a free clean capture.
+
+**Evaluated and deferred (with the competitor table).**
+
+- *A/B tile-sheet streaming & IIIF tile pyramids* (OpenSeadragon's
+  model) are the right architecture for gigapixel masters and for
+  never shipping a whole frame; they are also a protocol and client
+  rewrite whose benefit concentrates far above current display caps.
+  The temporal-interlace engine already ships the "no single frame
+  is whole" property at display resolution. Roadmap, not this round.
+- *Worker-thread pool for the JS stages.* Sharp already runs libvips
+  on its own thread pool; measured JS-side work (scramble/mark) is
+  the minority share (§2.17) and structured-clone copies of raw
+  frames would eat much of the win. Revisit with `SharedArrayBuffer`
+  measurements, not on principle.
+- *FFT/sync-template registration for cropped suspects.* This is the
+  correct fix for the ~82% asymmetric-crop dead end — boundary cells
+  vote wrong at high reliability, and no search density fixes that
+  (§2.19). It requires a sync template in the mark itself: a v2 mark
+  redesign, scoped as such.
+- *Learned watermarks (Adobe TrustMark, Meta WAM; IMATAG/Steg.AI/
+  Digimarc as services).* Different product and threat model:
+  provenance/recovery at internet scale, with model weights, GPU
+  inference, and (for the services) a hosted detector. Archx's
+  StegoMark is a self-hostable, key-held attribution tag with known
+  measured envelopes; C2PA-style provenance is complementary and
+  explicitly not access control. We do not claim parity.
+- *SmartFrame-style crawler/SEO previews.* Serving different bytes
+  to crawlers is a hosted-service growth feature with cloaking
+  policy risk; the static catalog already separates public widths
+  from protected delivery for operators who want an indexable
+  preview. Not built into the protection path by design.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

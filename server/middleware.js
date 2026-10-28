@@ -131,20 +131,20 @@ export class SlidingWindowLimiter {
   }
 
   cleanup(now = Date.now()) {
-    for (const [key, list] of this.#map) {
-      if (!this.#prune(list, now).length) this.#map.delete(key);
+    for (const [key, entry] of this.#map) {
+      if (!this.#prune(entry.list, now).length) this.#map.delete(key);
     }
-    while (this.#map.size > this.maxClients) {
-      this.#map.delete(this.#map.keys().next().value);
-    }
+    this.#evict(now);
   }
 
   hit(key, max, now = Date.now()) {
     if (!max || max <= 0) return { limited: false, retryAfterSec: 0, count: 0 };
-    const list = this.#prune(this.#map.get(key) || [], now);
+    const entry = this.#map.get(key) || { list: [], max };
+    entry.max = max;
+    const list = this.#prune(entry.list, now);
     if (list.length >= max) {
-      this.#map.set(key, list);
-      this.#bound();
+      this.#map.set(key, entry);
+      this.#bound(now);
       return {
         limited: true,
         retryAfterSec: Math.max(1, Math.ceil((this.windowMs - (now - list[0])) / 1000)),
@@ -154,17 +154,31 @@ export class SlidingWindowLimiter {
     list.push(now);
     // Refresh LRU position before enforcing the bound.
     this.#map.delete(key);
-    this.#map.set(key, list);
+    this.#map.set(key, entry);
     this.#bound(now);
     return { limited: false, retryAfterSec: 0, count: list.length };
+  }
+
+  // Eviction preference order: expired/empty, then oldest UNBLOCKED
+  // entries, and only then blocked ones. Plain LRU lets an attacker
+  // churning fresh keys (e.g. rotating IPv6 prefixes) evict the entries
+  // of clients who are actively throttled, resetting their windows.
+  #evict(now = Date.now()) {
+    if (this.#map.size <= this.maxClients) return;
+    for (const [key, entry] of this.#map) {
+      if (this.#map.size <= this.maxClients) return;
+      const blocked = entry.max > 0 && this.#prune(entry.list, now).length >= entry.max;
+      if (!blocked) this.#map.delete(key);
+    }
+    while (this.#map.size > this.maxClients) {
+      this.#map.delete(this.#map.keys().next().value);
+    }
   }
 
   #bound(now = Date.now()) {
     if (this.#map.size <= this.maxClients) return;
     this.cleanup(now);
-    while (this.#map.size > this.maxClients) {
-      this.#map.delete(this.#map.keys().next().value);
-    }
+    this.#evict(now);
   }
 
   close() {
@@ -1640,6 +1654,30 @@ export function createArchxMiddleware(options = {}) {
 
   const masterCache = new Map(); // id -> {mtimeMs,size,bytes}; byte-bounded LRU
   let masterCacheBytes = 0;
+  // Resized base-frame cache for UNcacheable (per-token/per-viewer)
+  // derivatives: stage-1 output (decoded+resized+watermarked raster)
+  // depends only on master version + geometry + watermark, so per-viewer
+  // marks/encryption can start from it instead of re-decoding the master.
+  const baseCache = new Map(); // baseKey -> {data,w,h,hasAlpha,watermarked}
+  let baseCacheBytes = 0;
+  function getBaseCache(key) {
+    const value = baseCache.get(key);
+    if (value === undefined) return undefined;
+    baseCache.delete(key); baseCache.set(key, value);
+    return value;
+  }
+  function setBaseCache(key, base) {
+    if (!cfg.cacheMasters || !base?.data || base.data.length > cfg.masterCacheMaxBytes) return;
+    const previous = baseCache.get(key);
+    if (previous) { baseCacheBytes -= previous.data.length; baseCache.delete(key); }
+    baseCache.set(key, base);
+    baseCacheBytes += base.data.length;
+    while (baseCacheBytes > cfg.masterCacheMaxBytes && baseCache.size > 1) {
+      const oldestKey = baseCache.keys().next().value;
+      baseCacheBytes -= baseCache.get(oldestKey).data.length;
+      baseCache.delete(oldestKey);
+    }
+  }
   const dimensionCache = new Map(); // id -> {mtimeMs,size,width,height}
   const outputCache = new Map(); // cacheKey -> Buffer; entry- and byte-bounded LRU
   let outputCacheBytes = 0;
@@ -2027,9 +2065,7 @@ export function createArchxMiddleware(options = {}) {
   // and the rotation also floods bounded limiter maps until blocked
   // clients are evicted. Token IP BINDING deliberately keeps the exact
   // address (requestIp) — only volumetric accounting groups.
-  const limiterIp = (req) => {
-    const ip = requestIp(req);
-    if (isIP(ip) !== 6) return ip;
+  const ipv6Groups = (ip) => {
     try {
       let addr = ip.toLowerCase();
       const v4Tail = addr.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
@@ -2039,16 +2075,35 @@ export function createArchxMiddleware(options = {}) {
         addr = addr.slice(0, addr.length - v4Tail[0].length) + hi + ':' + lo;
       }
       const halves = addr.split('::');
-      if (halves.length > 2) return ip;
+      if (halves.length > 2) return null;
       const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
       const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
       const missing = 8 - head.length - tail.length;
-      if (missing < 0) return ip;
+      if (missing < 0) return null;
       const groups = [...head, ...Array(missing).fill('0'), ...tail]
         .map((g) => (parseInt(g, 16) || 0).toString(16));
-      if (groups.length !== 8) return ip;
-      return groups.slice(0, 4).join(':') + '::/64';
-    } catch { return ip; }
+      return groups.length === 8 ? groups : null;
+    } catch { return null; }
+  };
+  const limiterIp = (req) => {
+    const ip = requestIp(req);
+    if (isIP(ip) !== 6) return ip;
+    const groups = ipv6Groups(ip);
+    return groups ? groups.slice(0, 4).join(':') + '::/64' : ip;
+  };
+  // Volumetric tiers for one request: IPv6 clients get their strict /64
+  // bucket AND an aggregate /48 ceiling at 4x, so a holder of a whole /48
+  // (65,536 /64s to rotate through) cannot mint unbounded fresh buckets.
+  const IPV6_AGGREGATE_MULTIPLIER = 4;
+  const limiterIpTiers = (req) => {
+    const ip = requestIp(req);
+    if (isIP(ip) !== 6) return [{ key: ip, mult: 1 }];
+    const groups = ipv6Groups(ip);
+    if (!groups) return [{ key: ip, mult: 1 }];
+    return [
+      { key: groups.slice(0, 4).join(':') + '::/64', mult: 1 },
+      { key: groups.slice(0, 3).join(':') + '::/48', mult: IPV6_AGGREGATE_MULTIPLIER },
+    ];
   };
   const hmacShort = (label, value, len = 24, keySecret = secret) =>
     crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
@@ -2289,29 +2344,33 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function quotaExceeded(req, id, viewerId, phase, keySecret = secret) {
-    const ip = limiterIp(req);
+    const tiers = limiterIpTiers(req);
     const checks = [];
     // NARROWEST scope first, and stop at the first limiting check:
     // hitWindow both tests and increments, so evaluating wide global
     // counters before a per-image rejection would burn global quota on
-    // requests that were never going to be served.
+    // requests that were never going to be served. IP dimensions expand
+    // across tiers (/64 strict, /48 aggregate at 4x for IPv6).
+    const ipChecks = (template, max, name) => {
+      for (const tier of tiers) checks.push([template(tier.key), max ? max * tier.mult : max, name]);
+    };
     if (phase === 'token') {
       if (viewerId) {
         const viewerHash = hmacShort('quota-viewer', viewerId, 24, keySecret);
         checks.push([`quota:viewer-image:${viewerHash}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
-        checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+        ipChecks((ip) => `quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage');
         checks.push([`quota:viewer:${viewerHash}`, cfg.quotas.perViewer, 'perViewer']);
       } else {
-        checks.push([`quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+        ipChecks((ip) => `quota:ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage');
       }
-      checks.push([`quota:ip:${ip}`, cfg.quotas.perIp, 'perIp']);
+      ipChecks((ip) => `quota:ip:${ip}`, cfg.quotas.perIp, 'perIp');
     } else if (!oneTimeTokens) {
       // With replayable tokens, count redemptions too. With one-time tokens
       // the token-phase quota already corresponds to at most one download.
       if (viewerId) {
         checks.push([`quota:redeem-viewer-image:${hmacShort('quota-viewer', viewerId, 24, keySecret)}:${id}`, cfg.quotas.perViewerImage, 'perViewerImage']);
       }
-      checks.push([`quota:redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage']);
+      ipChecks((ip) => `quota:redeem-ip-image:${ip}:${id}`, cfg.quotas.perIpImage, 'perIpImage');
     }
     for (const [key, max, name] of checks) {
       if (!max) continue;
@@ -2397,9 +2456,15 @@ export function createArchxMiddleware(options = {}) {
     return normalizeWatermarkResult(wm);
   }
 
-  function rateLimited(req, kind = 'i') {
+  async function rateLimited(req, kind = 'i') {
     const max = kind === 'token' ? tokenRateMax : rateMax;
-    return stateHitWindow(`rate:${kind}:${limiterIp(req)}`, max, 60000);
+    // Strict /64 bucket first, then the /48 aggregate ceiling (IPv6).
+    let last = { limited: false, retryAfterSec: 0, count: 0 };
+    for (const tier of limiterIpTiers(req)) {
+      last = await stateHitWindow(`rate:${kind}:${tier.key}`, max * tier.mult, 60000);
+      if (last.limited) return last;
+    }
+    return last;
   }
 
   function protectedHeaders(req, extra = {}) {
@@ -3278,7 +3343,7 @@ export function createArchxMiddleware(options = {}) {
           ? deriveStegoKey(stegoKeySubject ? `${id}|viewer:${stegoKeySubject}` : id, issuingSecret)
           : null;
         const stegoCachePart = stegoPayload
-          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}:k${hmacShort('sgkey', effectiveStegoKey || '', 8, issuingSecret)}`
+          ? `${hmacShort('sg', stegoPayload, 12, issuingSecret)}:${effectiveStegoProfile}:s${effectiveStegoStrength}:x${effectiveStegoGridX ?? (effectiveStegoProfile === 'robust' ? 20 : 24)}:y${effectiveStegoGridY ?? (effectiveStegoProfile === 'robust' ? 14 : 16)}:k${hmacShort('sgkey', effectiveStegoKey || '', 8, issuingSecret)}:tm`
           : 'nosg';
         // Cache identity contains only inputs that can change the delivered
         // bytes. Viewer/trace hashes are not added unconditionally: when a
@@ -3386,7 +3451,7 @@ export function createArchxMiddleware(options = {}) {
                 };
                 const master = await loadMaster();
                 // Lazy import so token-only deployments don't need sharp wired early.
-                const { scrambleImage, configureSharpPerformance } = await import('./scramble-image.js');
+                const { scrambleImage, prepareDerivativeBase, finishDerivative, configureSharpPerformance } = await import('./scramble-image.js');
                 if (!sharpPerformanceConfigured &&
                     (cfg.processing.sharpConcurrency > 0 || cfg.processing.sharpCache !== undefined)) {
                   configureSharpPerformance({
@@ -3399,7 +3464,7 @@ export function createArchxMiddleware(options = {}) {
                   });
                   sharpPerformanceConfigured = true;
                 }
-                const result = await processingSemaphore.run(() => scrambleImage(master.bytes, {
+                const scrambleOpts = {
                   grid,
                   planVersion: scramblePlanVersion,
                   key: scrambleKey,
@@ -3430,7 +3495,25 @@ export function createArchxMiddleware(options = {}) {
                   processingTimeoutSec: cfg.processing.timeoutSec,
                   allowedInputFormats: cfg.processing.allowedInputFormats,
                   blockUntrustedSharpLoaders: cfg.processing.blockUntrustedSharpLoaders,
-                }));
+                };
+                // Uncacheable (per-token/per-viewer) derivatives reuse the
+                // cached stage-1 base frame: decode+resize runs once per
+                // (master, geometry, watermark) instead of once per view.
+                const result = await processingSemaphore.run(async () => {
+                  if (cacheable) return scrambleImage(master.bytes, scrambleOpts);
+                  const baseKey = [
+                    'base', id, masterVersion, `w${effectiveWidth}`, `g${grid}`,
+                    `wm${hmacShort('wm', payload.wm || '', 8, issuingSecret)}`,
+                    `rk:${cfg.processing.resizeKernel}`,
+                    `op${cfg.processing.maxOutputPixels}`,
+                  ].join(':');
+                  let base = getBaseCache(baseKey);
+                  if (!base) {
+                    base = await prepareDerivativeBase(master.bytes, scrambleOpts);
+                    if (master.current) setBaseCache(baseKey, base);
+                  }
+                  return finishDerivative(base, scrambleOpts);
+                });
                 if (master.current && cacheable) {
                   setOutputCache(cacheKey, result.bytes);
                   await setDiskOutputCache(sharedCacheKey, result.bytes);
@@ -3524,6 +3607,8 @@ export function createArchxMiddleware(options = {}) {
       sharedCacheEntries: statNumber(storeStats.sharedCacheEntries),
       sharedCacheBytes: statNumber(storeStats.sharedCacheBytes),
       outputCacheEntries: outputCache.size,
+      baseCacheEntries: baseCache.size,
+      baseCacheBytes,
       outputCacheBytes,
       derivativeCache: Object.freeze({ ...derivativeCacheStats }),
       masterCacheEntries: masterCache.size,

@@ -111,6 +111,14 @@ export function createRedisStateStore({
   const flavor = detectClientFlavor(client, clientFlavor);
   const cleanPrefix = prefix.replace(/:+$/, '');
   const keyFor = (key) => `${cleanPrefix}:${String(key)}`;
+  // Binary-safe fast path: clients that can return raw Buffers skip the
+  // base64 armor (saves ~33% Redis RAM/bandwidth). node-redis v4+ exposes
+  // commandOptions({ returnBuffers: true }); ioredis exposes getBuffer.
+  // Mixed fleets stay safe: getCache decodes `b64:` values from either
+  // representation, and unarmored values read as UTF-8 strings by an older
+  // peer simply fail the middleware's HMAC cache tag and regenerate.
+  const binaryCapable = typeof client.getBuffer === 'function' ||
+    (flavor === 'node-redis' && typeof client.commandOptions === 'function');
 
   async function evalScript(script, key, args) {
     const redisKey = keyFor(key);
@@ -205,6 +213,9 @@ export function createRedisStateStore({
       const redisKey = keyFor(key);
       let value = null;
       if (typeof client.getBuffer === 'function') value = await client.getBuffer(redisKey);
+      else if (binaryCapable && flavor === 'node-redis' && typeof client.get === 'function') {
+        value = await client.get(client.commandOptions({ returnBuffers: true }), redisKey);
+      }
       else if (typeof client.get === 'function') value = await client.get(redisKey);
       else if (typeof client.call === 'function') value = await client.call('GET', redisKey);
       else if (typeof client.sendCommand === 'function') value = await client.sendCommand(['GET', redisKey]);
@@ -232,9 +243,9 @@ export function createRedisStateStore({
     async setCache(key, bytes, { ttlMs = 0 } = {}) {
       if (!bytes || typeof bytes.length !== 'number' || !bytes.length) return false;
       const raw = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-      // Base64 armor: +33% size, but binary-safe across every client
-      // flavor (node-redis string GETs, sendCommand string arrays, ...).
-      const value = 'b64:' + raw.toString('base64');
+      // Raw Buffers when the client can read them back intact; otherwise
+      // base64 armor (+33% size, binary-safe across every client flavor).
+      const value = binaryCapable ? raw : 'b64:' + raw.toString('base64');
       const redisKey = keyFor(key);
       const safeTtlMs = Number.isFinite(ttlMs) ? Math.floor(ttlMs) : 0;
       let result;

@@ -80,6 +80,28 @@ export function decodeContainer(bytes: ArchxBytes): { header: ArchxHeader; paylo
 /** Supply the JSON parser used for container headers (the browser client passes its captured native). */
 export function useJsonParser(fn: ((text: string) => unknown) | null): void;
 
+/** Pure-JS SHA-256 (identical output to node:crypto). Anchor-independent of any page hooks. */
+export function sha256Bytes(message: ArchxBytes): Uint8Array;
+/** Pure-JS HMAC-SHA256 over byte inputs (keys longer than 64 bytes are hashed first, per RFC 2104). */
+export function hmacSha256Bytes(key: ArchxBytes, message: ArchxBytes): Uint8Array;
+
+/**
+ * Captured WebCrypto primitives injected by the client runtime so the
+ * shared core never calls page-visible `crypto.subtle.*` references that
+ * a pre-loaded script may have replaced. Server/Node consumers do not
+ * need this; pass `null` to clear.
+ */
+export interface InjectedWebCrypto {
+  subtle: object;
+  importKey?: ((...args: any[]) => Promise<any>) | null;
+  encrypt?: ((...args: any[]) => Promise<any>) | null;
+  decrypt?: ((...args: any[]) => Promise<any>) | null;
+  digest?: ((...args: any[]) => Promise<any>) | null;
+  getRandomValues?: ((array: Uint8Array) => Uint8Array) | null;
+  cryptoObj?: object | null;
+}
+export function useWebCrypto(injected: InjectedWebCrypto | null): void;
+
 export function generateKeyBase64(): string;
 export function encryptPayload(plainBytes: ArchxBytes, keyBase64: string):
   Promise<{ cipher: Uint8Array; iv: string }>;
@@ -105,6 +127,14 @@ export interface StegoEmbedOptions {
   gridY?: number;
   profile?: 'standard' | 'robust';
   inPlace?: boolean;
+  /**
+   * Write a pre-v1.12 codeword whose acceptance tag is the linear keyed
+   * CRC instead of the default keyed HMAC-16 (codeword v2). Only for
+   * reproducing marks that old detectors must read: CRC-tagged hybrids
+   * can survive multi-buyer collusion averaging, MAC-tagged ones cannot
+   * validate under a foreign fingerprint.
+   */
+  legacyCode?: boolean;
 }
 export function embedStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, payload: string,
@@ -118,18 +148,28 @@ export interface StegoDetectOptions {
   profile?: 'standard' | 'robust' | 'auto';
   searchOffsets?: boolean;
   searchGeometry?: boolean;
+  /** Also probe a horizontally flipped copy of the suspect (default true, all profiles). */
+  searchMirror?: boolean;
 }
 export interface StegoDetection {
   found: boolean;
   fingerprint: string;
   profile: 'standard' | 'robust';
+  /**
+   * Which acceptance tag validated the decode: 'mac' (codeword v2,
+   * keyed HMAC-16 — collusion hybrids cannot forge it), 'crc' (legacy
+   * pre-v1.12 codeword — corroborate before attribution), or null when
+   * no tag validated.
+   */
+  tagScheme: 'mac' | 'crc' | null;
   observedBits: number;
   minBitRepetitions: number;
+  /** Acceptance tag validated (MAC-16 for codeword v2, keyed CRC for legacy). Name kept for compatibility; see `tagScheme`. */
   crcValid: boolean;
   corrections: number;
   /** Capped at 0.49 whenever `found` is false — never present a negative verdict as near-certain. */
   confidence: number;
-  /** True when the mark was recovered from a horizontally flipped suspect (auto profile + geometry search). */
+  /** True when the mark was recovered from a horizontally flipped suspect (mirror probe, all profiles). */
   mirrored?: boolean;
   agreement: number;
   meanSignal: number;
