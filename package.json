@@ -65,7 +65,6 @@
     "server/scramble-image.js",
     "server/detect-worker.js",
     "server/scramble-cli.js",
-    "server/detect-worker.js",
     "server/detect-stego-cli.js",
     "CHANGELOG.md",
     "README.md",
