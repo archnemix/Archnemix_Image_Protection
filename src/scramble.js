@@ -124,7 +124,11 @@ export function sha256SeededPrng(seedString) {
  *   order[scrambledPos]   = originalPos
  *   inverse[originalPos]  = scrambledPos
  */
-export function buildScramblePlan(grid = DEFAULT_GRID, key = '', version = 1) {
+export function buildScramblePlan(grid = DEFAULT_GRID, key = '', version = 2) {
+  // Default is the 128-bit-seeded plan (v2) since 1.17, matching the
+  // server/builder/CLI defaults flipped in 1.15: no public entry point
+  // emits the brute-forceable 32-bit-seed permutation unless a caller
+  // explicitly passes version 1 for legacy payloads.
   if (version !== 1 && version !== 2) throw new TypeError('Archx: scramble plan version must be 1 or 2');
   const g = Math.max(2, Math.min(32, grid | 0));
   const count = g * g;
@@ -1301,7 +1305,15 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
       }
       const mean = n ? sum / n : 0;
       const std = n ? Math.sqrt(Math.max(0, sum2 / n - mean * mean)) : 0;
-      const cellAmp = amp * Math.max(0.35, Math.min(1, 0.35 + std / 55));
+      // Texture-boosted masking (1.17): the previous curve only ever
+      // REDUCED amplitude below nominal (cap 1.0), so the cells where
+      // image content fights the estimator hardest — textured/edge
+      // cells — got the same or less energy than flat sky. Flat cells
+      // stay gentle (they need little help and show banding first);
+      // textured cells may now exceed nominal amplitude, where the
+      // energy is perceptually hidden. Sign pattern is unchanged, so
+      // older detectors still read marks embedded with the new curve.
+      const cellAmp = Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
       const cellW = x1 - x0;
       const cellH = y1 - y0;
 
@@ -1402,6 +1414,83 @@ function rotatedVariant(entry, srcTop, w, h, clockwise) {
   return entry[slot];
 }
 
+// The last two dihedral symmetries (EXIF orientations 5 and 7):
+// reflections across the main / anti diagonal. Both are involutions,
+// so probing applies the same transform that produced the suspect.
+// With these, all 8 rectangle symmetries are covered.
+function transposePixels(src, w, h, anti) {
+  const out = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      const di = anti
+        ? ((w - 1 - x) * h + (h - 1 - y)) * 4
+        : (x * h + y) * 4;
+      out[di] = src[si]; out[di + 1] = src[si + 1];
+      out[di + 2] = src[si + 2]; out[di + 3] = src[si + 3];
+    }
+  }
+  return out;
+}
+function transposedVariant(entry, srcTop, w, h, anti) {
+  const slot = anti ? 'trAnti' : 'trMain';
+  if (!entry[slot]) entry[slot] = transposePixels(srcTop, w, h, anti);
+  return entry[slot];
+}
+
+// Bilinear resample / rotate for the tilt (small-angle deskew) search.
+// rotateRgba rotates image CONTENT clockwise by angleRad in screen
+// coordinates (matching sharp.rotate(+deg)); out-of-frame samples
+// replicate edge pixels so no artificial black wedges bias the
+// third-difference estimator.
+function resampleRgba(src, w, h, nw, nh) {
+  const out = new Uint8Array(nw * nh * 4);
+  const sx = w / nw, sy = h / nh;
+  for (let y = 0; y < nh; y++) {
+    const fy = Math.min(h - 1, Math.max(0, (y + 0.5) * sy - 0.5));
+    const y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1), wy = fy - y0;
+    for (let x = 0; x < nw; x++) {
+      const fx = Math.min(w - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+      const x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1), wx = fx - x0;
+      const di = (y * nw + x) * 4;
+      const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
+      const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+      for (let c = 0; c < 4; c++) {
+        out[di + c] = (src[i00 + c] * (1 - wx) + src[i10 + c] * wx) * (1 - wy) +
+          (src[i01 + c] * (1 - wx) + src[i11 + c] * wx) * wy;
+      }
+    }
+  }
+  return out;
+}
+function rotateRgba(src, w, h, angleRad) {
+  const out = new Uint8Array(w * h * 4);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  const cos = Math.cos(angleRad), sin = Math.sin(angleRad);
+  for (let y = 0; y < h; y++) {
+    const dy = y - cy;
+    for (let x = 0; x < w; x++) {
+      const dx = x - cx;
+      // Inverse map for a clockwise content rotation (y down).
+      const fx = cx + dx * cos + dy * sin;
+      const fy = cy - dx * sin + dy * cos;
+      const sx = Math.min(w - 1, Math.max(0, fx));
+      const sy = Math.min(h - 1, Math.max(0, fy));
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+      const wx = sx - x0, wy = sy - y0;
+      const di = (y * w + x) * 4;
+      const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
+      const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+      for (let c = 0; c < 4; c++) {
+        out[di + c] = (src[i00 + c] * (1 - wx) + src[i10 + c] * wx) * (1 - wy) +
+          (src[i01 + c] * (1 - wx) + src[i11 + c] * wx) * wy;
+      }
+    }
+  }
+  return out;
+}
+
 export function detectStegoFingerprint(rgba, w, h, {
   key = '', gridX, gridY, profile = 'standard', searchOffsets = false, searchGeometry = false,
   // Mirrored-suspect recovery is on by default for every profile (one
@@ -1409,11 +1498,16 @@ export function detectStegoFingerprint(rgba, w, h, {
   // found nothing); set false to disable.
   searchMirror = true,
   searchRotation = true,
+  // Small-angle deskew search (offline forensic opt-in): sweeps
+  // ±6° on a downscaled proxy, refines by raw signal, then confirms
+  // at full resolution. Off by default (cost); the CLI exposes --tilt.
+  searchTilt = false,
   // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
   // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
   // (halves worst-case cost on unmarked suspects).
   layoutVersion = 'auto',
   _mirrorProbe = false,
+  _tiltProbe = false,
   _layoutVersion = 0,
   _planes = null,
 } = {}) {
@@ -1434,7 +1528,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, _mirrorProbe, _planes: planesCache };
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache };
     let best = null;
     for (const version of [3, 2, 1]) {
       const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
@@ -1445,11 +1539,11 @@ export function detectStegoFingerprint(rgba, w, h, {
   }
   if (profile === 'auto') {
     const standard = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     const initial = robust?.found && !standard?.found
       ? robust
@@ -1458,11 +1552,11 @@ export function detectStegoFingerprint(rgba, w, h, {
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
     if (!searchGeometry || initial?.found) return initial;
     const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
@@ -1480,7 +1574,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const fast = detectStegoFingerprint(variant, w, h, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: false, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
             });
             if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
           }
@@ -1490,9 +1584,19 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const fast = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: false, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
             });
             if (fast?.found) return { ...fast, rotated: clockwise ? 270 : 90 };
+          }
+        }
+        if (searchRotation) for (const anti of [false, true]) {
+          const variant = transposedVariant(entry, srcTop, w, h, anti);
+          for (const candidateProfile of ['standard', 'robust']) {
+            const fast = detectStegoFingerprint(variant, h, w, {
+              key, gridX, gridY, profile: candidateProfile, searchOffsets,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            });
+            if (fast?.found) return { ...fast, transposed: anti ? 'anti' : 'main' };
           }
         }
         for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
@@ -1501,7 +1605,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const mirrored = detectStegoFingerprint(variant, w, h, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: true, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
             });
             if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
           }
@@ -1516,9 +1620,19 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['robust']) {
             const rotated = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: true, searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
             });
             if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
+          }
+        }
+        if (searchRotation && searchGeometry) for (const anti of [false, true]) {
+          const variant = transposedVariant(entry, srcTop, w, h, anti);
+          for (const candidateProfile of ['robust']) {
+            const transposed = detectStegoFingerprint(variant, h, w, {
+              key, gridX, gridY, profile: candidateProfile, searchOffsets,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            });
+            if (transposed?.found) return { ...transposed, transposed: anti ? 'anti' : 'main' };
           }
         }
       }
@@ -1744,7 +1858,10 @@ export function detectStegoFingerprint(rgba, w, h, {
       // disagree with at most 2 observed bits.
       const deep = erasedTotal > 24;
       if (meanAbsPre < 2.0 || preAgreement < (deep ? 0.9 : 0.8) || cellScores.length < 96) return null;
-      const budget = deep ? 2 : 3;
+      // Extremely clean deep candidates (near-unanimous consensus at
+      // high amplitude — the real-photo 60% crop profile) may spend
+      // the full budget of 3; noisier deep candidates stay at 2.
+      const budget = deep && !(preAgreement >= 0.95 && meanAbsPre >= 4) ? 2 : 3;
       const weak = [];
       for (let i = 0; i < 48; i++) if (bitCounts[i] > 0) weak.push(i);
       weak.sort((a, b) => reliability[a] - reliability[b]);
@@ -1799,10 +1916,10 @@ export function detectStegoFingerprint(rgba, w, h, {
         return null;
       };
       let hit = enumerate([]);
-      if (!hit && erasedPayload.length <= 16) {
+      if (!hit && erasedPayload.length <= 17) {
         for (const i of weakPool) { hit = enumerate([i]); if (hit) break; }
       }
-      if (!hit && erasedPayload.length <= 12) {
+      if (!hit && erasedPayload.length <= 14) {
         outer: for (let a = 0; a < weakPool.length; a++) {
           for (let b = a + 1; b < weakPool.length; b++) {
             hit = enumerate([weakPool[a], weakPool[b]]);
@@ -1841,7 +1958,13 @@ export function detectStegoFingerprint(rgba, w, h, {
           // agreement>=0.95 (robustCorrectionOk below), and never for
           // legacy CRC candidates — searching deeper in other regimes
           // only manufactures rejects at full combinatorial cost.
-          const macDepth = meanAbsPre >= 3.5 && agreementBound >= 0.95 ? 5 : 3;
+          // MAC depth tier relaxed in 1.17: the agreementBound >= 0.95
+          // condition was CRC-era phantom logic. A <=5-flip candidate
+          // must still satisfy marker+CRC+MAC (48 redundancy bits), so
+          // at genuine signal levels (meanAbs >= 3.5) a depth-5 search
+          // cannot manufacture an attribution — but gating it out made
+          // real photos with 4-5 content-damaged bits undetectable.
+          const macDepth = meanAbsPre >= 3.5 ? 5 : 3;
           const repaired = repairRobustStegoBits(reliability, votedBits, key, macDepth, 'mac') ||
             repairRobustStegoBits(reliability, votedBits, key, 3, 'crc');
           return repaired
@@ -1897,7 +2020,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     // high agreement, and a legacy robust decode loses the 4-5 tier.
     const legacyScheme = corrected.tagScheme === 'crc';
     const robustCorrectionOk = !robust || correctionCount <= 3 ||
-      (!legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95);
+      (!legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.85);
     // Same principle for the standard decoder: a candidate needing 2+
     // repaired bits must carry clearly genuine raw signal, or the repair
     // search itself manufactures the CRC match (false attribution).
@@ -1966,7 +2089,7 @@ export function detectStegoFingerprint(rgba, w, h, {
   // NOT claim perspective/rotation recovery: a phone photo usually needs
   // manual deskew/crop to the displayed rectangle before detection.
   if (searchGeometry && !best?.found) {
-    const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.25];
+    const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.2, 1.25];
     // 3-decimal precision: rounding to 1 decimal (pre-1.13) silently
     // rewrote half the table (0.85->0.9, 1/0.9->1.1, ...), and at
     // 1.1 vs the true 1.111 for an unresized 90% center crop the cell
@@ -2014,7 +2137,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     // X/Y values keep aspect-changing crops reachable; the origin
     // refinement below polishes whichever pair leads.
     if (!best?.found) {
-      const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1 / 0.7, 1 / 0.65];
+      const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1.38, 1 / 0.7, 1 / 0.65];
       for (const scaleX of deepScales) {
         const rangeX = originRange(gx * cw * scaleX, w);
         for (const scaleY of deepScales) {
@@ -2244,6 +2367,115 @@ export function detectStegoFingerprint(rgba, w, h, {
   }
   // Explicit-profile mirror recovery (compound flip+geometry included,
   // since the probe inherits this call's search options).
+  // Tilt (small-angle) deskew stage: a few degrees of rotation smear
+  // the macro-cell grid beyond every axis-aligned candidate, so no
+  // amount of scale/origin search registers it. Sweep candidate
+  // angles on a <=960px proxy with cheap native detects (center-
+  // cropped, since rotating editors expand the canvas and leave the
+  // grid at ~0.94-0.99x frame scale), estimate the angle as the
+  // signal-weighted CENTROID of the resulting broad bump (argmax is
+  // unstable: residual scale mismatch flattens the peak over ~±1.5
+  // degrees), then confirm a handful of candidate angles at full
+  // resolution with the complete detector. Forensic opt-in.
+  if (!best?.found && searchTilt && !_tiltProbe) {
+    try {
+      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const entry = planesEntry(srcTop);
+        // Confirmation detects run WITHOUT variant probes per angle
+        // (each would fan out into full mirror/rotation geometry
+        // searches on failure); one final variants-on confirmation at
+        // the leading candidate covers tilt+flip compounds.
+        const confirmAt = (degreesCw, variants = false) => {
+          const warpedFull = rotateRgba(srcTop, w, h, (-degreesCw * Math.PI) / 180);
+          return detectStegoFingerprint(warpedFull, w, h, {
+            key, gridX, gridY, profile, searchOffsets: true, searchGeometry,
+            searchMirror: variants && searchMirror, searchRotation: variants && searchRotation,
+            searchTilt: false,
+            _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+          });
+        };
+        let tiltCandidates = entry.tiltCandidates || null;
+        let tiltScreenHit = null;
+        if (!tiltCandidates) {
+          const proxyScale = Math.min(1, 960 / w);
+          const pw = Math.max(64, Math.round(w * proxyScale));
+          const ph = Math.max(64, Math.round(h * proxyScale));
+          const proxy = proxyScale < 1 ? resampleRgba(srcTop, w, h, pw, ph) : srcTop;
+          const cropCenter = (buf, bw, bh, frac) => {
+            if (frac >= 1) return { buf, w: bw, h: bh };
+            const cw2 = Math.max(64, Math.round(bw * frac));
+            const ch2 = Math.max(64, Math.round(bh * frac));
+            const ox = Math.round((bw - cw2) / 2), oy = Math.round((bh - ch2) / 2);
+            const out = new Uint8Array(cw2 * ch2 * 4);
+            for (let y = 0; y < ch2; y++) {
+              out.set(buf.subarray(((oy + y) * bw + ox) * 4, ((oy + y) * bw + ox + cw2) * 4), y * cw2 * 4);
+            }
+            return { buf: out, w: cw2, h: ch2 };
+          };
+          const quickDetect = (degreesCw) => {
+            const warped = rotateRgba(proxy, pw, ph, (-degreesCw * Math.PI) / 180);
+            let bestHit = null;
+            for (const frac of [1, 0.96, 0.92]) {
+              const view = cropCenter(warped, pw, ph, frac);
+              const hit = detectStegoFingerprint(view.buf, view.w, view.h, {
+                key, gridX, gridY, profile, searchOffsets: true,
+                searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false,
+                _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              });
+              if (hit?.found) return hit;
+              if (!bestHit || (hit?.meanSignal ?? 0) > (bestHit.meanSignal ?? 0)) bestHit = hit;
+            }
+            return bestHit;
+          };
+          const samples = [];
+          for (let angle = -6; angle <= 6.001; angle += 0.5) {
+            if (Math.abs(angle) < 1e-9) continue;
+            const hit = quickDetect(angle);
+            if (hit?.found) { tiltScreenHit = { hit, angle }; break; }
+            samples.push([angle, hit?.meanSignal ?? 0]);
+          }
+          if (tiltScreenHit) {
+            tiltCandidates = [tiltScreenHit.angle];
+          } else if (samples.length >= 5) {
+            const signals = samples.map((s) => s[1]);
+            const sorted = [...signals].sort((a, b) => a - b);
+            const baseline = sorted[Math.floor(sorted.length / 2)] ?? 0;
+            let maxIdx = 0;
+            for (let i = 1; i < signals.length; i++) if (signals[i] > signals[maxIdx]) maxIdx = i;
+            const peak = signals[maxIdx];
+            if (peak >= 1.2 && peak > baseline + 0.15) {
+              const thresh = baseline + 0.25 * (peak - baseline);
+              let lo = maxIdx, hi = maxIdx;
+              while (lo > 0 && signals[lo - 1] > thresh) lo--;
+              while (hi < signals.length - 1 && signals[hi + 1] > thresh) hi++;
+              let wSum = 0, aSum = 0;
+              for (let i = lo; i <= hi; i++) {
+                const weight = (signals[i] - baseline) ** 2;
+                wSum += weight;
+                aSum += weight * samples[i][0];
+              }
+              const centroid = wSum > 0 ? aSum / wSum : samples[maxIdx][0];
+              tiltCandidates = [...new Set([
+                centroid, samples[maxIdx][0], centroid - 0.3, centroid + 0.3,
+              ].map((a) => Math.round(a * 100) / 100))];
+            }
+          }
+          entry.tiltCandidates = tiltCandidates;
+        }
+        if (tiltCandidates) {
+          for (const angle of tiltCandidates) {
+            const full = confirmAt(angle);
+            if (full?.found) return { ...full, deskewed: Math.round(angle * 100) / 100 };
+          }
+          if (searchMirror || searchRotation) {
+            const full = confirmAt(tiltCandidates[0], true);
+            if (full?.found) return { ...full, deskewed: Math.round(tiltCandidates[0] * 100) / 100 };
+          }
+          if (tiltScreenHit) return { ...tiltScreenHit.hit, deskewed: Math.round(tiltScreenHit.angle * 100) / 100 };
+        }
+      }
+    } catch { /* tilt search is best-effort */ }
+  }
   if (!best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
     try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
@@ -2252,7 +2484,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
           const mirrored = detectStegoFingerprint(variant, w, h, {
             key, gridX, gridY, profile, searchOffsets, searchGeometry,
-            searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
         }
@@ -2260,9 +2492,17 @@ export function detectStegoFingerprint(rgba, w, h, {
           const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
           const rotated = detectStegoFingerprint(variant, h, w, {
             key, gridX, gridY, profile, searchOffsets, searchGeometry,
-            searchMirror: false, searchRotation: false, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
           });
           if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
+        }
+        for (const anti of searchRotation ? [false, true] : []) {
+          const variant = transposedVariant(entry, srcTop, w, h, anti);
+          const transposed = detectStegoFingerprint(variant, h, w, {
+            key, gridX, gridY, profile, searchOffsets, searchGeometry,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+          });
+          if (transposed?.found) return { ...transposed, transposed: anti ? 'anti' : 'main' };
         }
       }
     } catch { /* variant probes are best-effort */ }
@@ -2281,6 +2521,181 @@ export function detectStegoFingerprint(rgba, w, h, {
  * @param {Uint8Array|Buffer} rgba  pw*ph*4 bytes (already padded)
  * @param {'scramble'|'unscramble'} direction
  */
+/**
+ * Collusion assay (investigative ranking aid, NOT a Tardos code):
+ * when k recipients average their differently-marked copies, each
+ * participant's per-cell pattern survives at ~1/k amplitude while
+ * bit-level decoding fails. This scores candidate payloads against
+ * the suspect's soft per-cell readings: E[reading * expectedSign]
+ * is ~amplitude/k for participants and ~0 for everyone else, so the
+ * z-scored ranking surfaces likely colluders for manual review. It
+ * ranks suspicion; it never proves participation on its own.
+ *
+ * candidates: [{ id, payload, key? }] — key defaults to options.key
+ * (pass per-candidate keys when marks were embedded viewer-scoped).
+ * Run detectStegoFingerprint first on single-recipient leaks; pass
+ * its result.geometry here so the assay reads at the registered
+ * grid when the suspect was cropped/rescaled.
+ */
+export function assayStegoCollusion(rgba, w, h, candidates, {
+  key = '', profile = 'robust', gridX, gridY, layoutVersion = 3, geometry = null,
+} = {}) {
+  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (!Number.isSafeInteger(w * h * 4) || src.length < w * h * 4) {
+    throw new Error('Archx stego assay: pixel buffer is smaller than w×h×4');
+  }
+  if (w < 64 || h < 64) throw new Error('Archx stego assay: image too small (minimum 64×64)');
+  if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > 4096) {
+    throw new Error('Archx stego assay: candidates must be an array of 1..4096 entries');
+  }
+  const robust = profile === 'robust';
+  const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3;
+  const rowSegments = STEGO_ROW_SEGMENTS;
+  const columnBands = 4;
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
+  const cellCount = gx * gy;
+  const cw = w / gx, ch = h / gy;
+  const scaleX = geometry?.scaleX > 0 ? geometry.scaleX : 1;
+  const scaleY = geometry?.scaleY > 0 ? geometry.scaleY : 1;
+  const originX = geometry?.originX ?? 0;
+  const originY = geometry?.originY ?? 0;
+  const { integral } = buildLumaIntegral(src, w, h);
+  const rectSum = (rx0, ry0, rx1, ry1) =>
+    integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] -
+    integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
+
+  // Soft per-cell readings, grouped by effective key (the polarity
+  // correction that makes "positive means bit 1" is key-dependent).
+  // Estimator mirrors detect's evaluate(): keep the two in sync.
+  const readingsByKey = new Map();
+  const readCells = (readKey) => {
+    const { order, polarity, segmentPolarity } = robust
+      ? robustStegoLayout(cellCount, readKey, layout)
+      : stegoLayout(cellCount, readKey, layout);
+    const readings = new Float64Array(cellCount);
+    readings.fill(NaN);
+    const cellW0 = cw * scaleX, cellH0 = ch * scaleY;
+    for (let cy = 0; cy < gy; cy++) {
+      const rawY0 = originY + cy * cellH0;
+      const y0 = Math.max(0, Math.round(rawY0));
+      const y1 = Math.min(h, Math.round(rawY0 + cellH0));
+      if (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) continue;
+      for (let cx = 0; cx < gx; cx++) {
+        const rawX0 = originX + cx * cellW0;
+        const x0 = Math.max(0, Math.round(rawX0));
+        const x1 = Math.min(w, Math.round(rawX0 + cellW0));
+        if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
+        const cellIndex = cy * gx + cx;
+        const responses = [];
+        let scoreSum = 0, weightSum = 0, validSegments = 0;
+        for (let segment = 0; segment < rowSegments; segment++) {
+          const ry0 = Math.max(y0, Math.round(rawY0 + (segment * cellH0) / rowSegments));
+          const ry1 = Math.min(y1, Math.round(rawY0 + ((segment + 1) * cellH0) / rowSegments));
+          if (ry1 <= ry0) continue;
+          const means = [];
+          let weight = Infinity, complete = true;
+          for (let band = 0; band < columnBands; band++) {
+            const rx0 = Math.max(x0, Math.round(rawX0 + (band * cellW0) / columnBands));
+            const rx1 = Math.min(x1, Math.round(rawX0 + ((band + 1) * cellW0) / columnBands));
+            if (rx1 <= rx0) { complete = false; break; }
+            means[band] = rectSum(rx0, ry0, rx1, ry1) / ((rx1 - rx0) * (ry1 - ry0));
+            weight = Math.min(weight, (rx1 - rx0) * (ry1 - ry0));
+          }
+          if (!complete) continue;
+          validSegments++;
+          const response = -(-means[0] + 3 * means[1] - 3 * means[2] + means[3]) / 8;
+          const signed = response * polarity[cellIndex]
+            * segmentPolarity[cellIndex * rowSegments + segment];
+          responses.push(signed);
+          scoreSum += signed * weight;
+          weightSum += weight;
+        }
+        if (!weightSum || validSegments < 2) continue;
+        if (robust && responses.length >= 3) {
+          const sorted = [...responses].sort((a, b) => a - b);
+          readings[cellIndex] = sorted[Math.floor(sorted.length / 2)];
+        } else {
+          readings[cellIndex] = scoreSum / weightSum;
+        }
+      }
+    }
+    return { readings, order };
+  };
+
+  // Score per CODEWORD BIT, not per cell: cells repeat each bit
+  // ~cellCount/codeLength times, so a per-cell z would overstate
+  // significance ~sqrt(repeats). Bits identical across every
+  // candidate in a key group (the constant sync tail) carry no
+  // ranking information and are excluded.
+  const prepared = candidates.map((candidate) => {
+    const candKey = candidate?.key ?? key;
+    if (!readingsByKey.has(candKey)) readingsByKey.set(candKey, readCells(candKey));
+    const fingerprint = stegoFingerprint(candidate?.payload ?? '');
+    const bits = robust
+      ? robustStegoCodeBits(fingerprint, candKey, 'mac')
+      : stegoCodeBits(fingerprint, candKey, 'mac');
+    return { candidate, candKey, fingerprint, bits };
+  });
+  const constantBitsByKey = new Map();
+  for (const p of prepared) {
+    if (!constantBitsByKey.has(p.candKey)) {
+      const group = prepared.filter((q) => q.candKey === p.candKey);
+      const constants = new Uint8Array(p.bits.length);
+      if (group.length > 1) {
+        for (let b = 0; b < constants.length; b++) {
+          constants[b] = group.every((q) => q.bits[b] === group[0].bits[b]) ? 1 : 0;
+        }
+      }
+      constantBitsByKey.set(p.candKey, constants);
+    }
+  }
+  const results = prepared.map(({ candidate, candKey, fingerprint, bits }) => {
+    const { readings, order } = readingsByKey.get(candKey);
+    const constants = constantBitsByKey.get(candKey);
+    const bitSum = new Float64Array(bits.length);
+    const bitCount = new Uint16Array(bits.length);
+    let cells = 0, agree = 0;
+    for (let cell = 0; cell < cellCount; cell++) {
+      const reading = readings[cell];
+      if (!Number.isFinite(reading)) continue;
+      const bitIndex = order[cell] % bits.length;
+      bitSum[bitIndex] += reading;
+      bitCount[bitIndex]++;
+      if ((reading >= 0) === (bits[bitIndex] === 1)) agree++;
+      cells++;
+    }
+    let usedBits = 0, signedSum = 0, absSum = 0;
+    for (let b = 0; b < bits.length; b++) {
+      if (constants[b] || bitCount[b] === 0) continue;
+      const soft = bitSum[b] / bitCount[b];
+      signedSum += soft * (bits[b] ? 1 : -1);
+      absSum += soft * soft;
+      usedBits++;
+    }
+    const score = usedBits ? signedSum / usedBits : 0;
+    const sigma = usedBits ? Math.sqrt(absSum / usedBits) : 0;
+    const zScore = sigma > 0 ? (score * Math.sqrt(usedBits)) / sigma : 0;
+    return {
+      id: candidate?.id ?? null,
+      fingerprint,
+      score: Math.round(score * 1000) / 1000,
+      zScore: Math.round(zScore * 100) / 100,
+      cellAgreement: cells ? Math.round((agree / cells) * 1000) / 1000 : 0,
+      cells,
+      bits: usedBits,
+    };
+  });
+  results.sort((a, b) => b.zScore - a.zScore);
+  return {
+    results,
+    cells: results[0]?.cells ?? 0,
+    geometry: { scaleX, scaleY, originX, originY },
+    profile: robust ? 'robust' : 'standard',
+  };
+}
+
 export function scramblePixels(rgba, pw, ph, plan, direction = 'scramble') {
   if (direction !== 'scramble' && direction !== 'unscramble') {
     throw new TypeError('Archx: scramble direction is invalid');

@@ -610,3 +610,33 @@ invalidate application sessions as appropriate, review issuance records and
 Stego registry entries, and notify affected customers under your incident
 policy. Keep the compromised key only in an offline evidence vault if needed
 to investigate previously issued marks.
+
+
+## 9. Design note: deep-zoom tile delivery (not shipped)
+
+Sketch only — no v1.17 code implements this. For gigapixel-style
+viewing (maps, gigapixel product zoom), the current single-derivative
+delivery forces a choice between capping zoom resolution and shipping
+one very large payload. A future tile mode would:
+
+- Split each authorized derivative into a fixed tile grid (e.g.
+  512×512 display pixels, aligned to the width-bucket discipline so
+  tile variants stay canonical and cacheable).
+- Issue one short-lived token per tile *set*; each tile is an
+  ordinary `.archx` payload whose key/scope derives from
+  (image, tile coordinates, zoom bucket) through the existing
+  variant-scope machinery — no new token format.
+- Render tiles into the same protected viewer surface; off-viewport
+  tiles are never requested (bandwidth and exposure both scale with
+  what is actually viewed), and eviction reuses the viewport-unload
+  lifecycle so a full-resolution composite never persists in memory
+  longer than needed.
+- Embed steganographic marks per *derivative* (unchanged: marks are
+  embedded before tiling, so a stitched screenshot still carries
+  them; tile boundaries must not align to macro-cell boundaries).
+
+Open questions before building: tile-edge scramble seams, prefetch
+policy under quotas, per-tile PoP cost, and whether zoom beyond the
+master's delivered cap should ever be authorized. Recorded here so
+the design starts from the threat model rather than from a map
+library's defaults.

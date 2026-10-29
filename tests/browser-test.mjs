@@ -880,6 +880,41 @@ try {
   const integrityRestored = await page.evaluate(() => window.Archx.auditIntegrity());
   check('integrity audit is clean again after restoring the native fetch', integrityRestored.length === 0, JSON.stringify(integrityRestored));
 
+  // v1.17: sensitive dispatch goes through a captured Reflect.apply, so
+  // hooking the generic invocation primitives page-wide must neither
+  // break loading nor go unnoticed by the integrity audit.
+  const reflectHook = await page.evaluate(async () => {
+    const originalApply = Reflect.apply;
+    const originalCall = Function.prototype.call;
+    const out = { loaded: false, audit: [], error: '' };
+    try {
+      Reflect.apply = function () { throw new Error('hooked Reflect.apply'); };
+      Function.prototype.call = function (...args) { return originalApply(originalCall, this, args); };
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id: 'gallery-006' },
+        { mode: 'shield', debug: true, lazy: false, automation: 'monitor' });
+      await inst.ready;
+      out.loaded = inst.loaded === true;
+      inst.destroy(); host.remove();
+    } catch (err) {
+      out.error = String((err && err.message) || err);
+    } finally {
+      Reflect.apply = originalApply;
+      Function.prototype.call = originalCall;
+    }
+    const originalApply2 = Reflect.apply;
+    Reflect.apply = function (fn, self, args) { return originalApply2(fn, self, args); };
+    out.audit = window.Archx.auditIntegrity();
+    Reflect.apply = originalApply2;
+    return out;
+  });
+  check('image still loads with Reflect.apply sabotaged and Function#call wrapped (captured dispatch)',
+    reflectHook.loaded === true, JSON.stringify(reflectHook));
+  check('integrity audit flags a hooked Reflect.apply',
+    reflectHook.audit.includes('Reflect.apply'), JSON.stringify(reflectHook.audit));
+
   const webglIntegrity = await page.evaluate(async () => {
     const events = [];
     const pluginEvents = [];

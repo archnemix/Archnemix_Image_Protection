@@ -12,7 +12,7 @@ import {
   encodeContainer, decodeContainer, isArchxContainer,
   encryptPayload, decryptPayload, generateKeyBase64,
   applyForensicBlocks, forensicScore, forensicBlockSigns,
-  embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint,
+  embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint, assayStegoCollusion,
   sha256Bytes, hmacSha256Bytes,
   sniffImageInfo, decodeBmpImage, base64ToBytes,
   perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
@@ -32,6 +32,7 @@ import {
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
+  batchDetectStegoInWorker, configureStegoDetectWorker,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -58,7 +59,7 @@ test('scramble plan is deterministic per key and differs across keys', () => {
 });
 
 test('scramble plan v2 (128-bit seed) is deterministic, distinct from v1, and round-trips', () => {
-  const v1 = buildScramblePlan(8, 'correct horse battery staple');
+  const v1 = buildScramblePlan(8, 'correct horse battery staple', 1); // explicit legacy pin (default is v2 since 1.17)
   const v2 = buildScramblePlan(8, 'correct horse battery staple', 2);
   const v2Again = buildScramblePlan(8, 'correct horse battery staple', 2);
   assert.equal(v1.version, 1);
@@ -2405,7 +2406,7 @@ test('scramble padding is keyed shifted wrap (no black, duplication, or palindro
   }
   const { pw, ph } = paddedSize(w, h, grid);
   assert.ok(pw > w && ph > h, 'test geometry must actually need padding');
-  const plan = buildScramblePlan(grid, 'pad-oracle');
+  const plan = buildScramblePlan(grid, 'pad-oracle', 1); // seam statistics below were calibrated against the v1 permutation
   const scrambled = scramblePixelsPadded(src, w, h, plan);
   assert.equal(scrambled.length, pw * ph * 4);
   // A uniform source stays within the keyed noise band (+-3) everywhere:
@@ -3351,4 +3352,223 @@ test('detector recovers rotations, deep crops and reframes via erasure decoding'
   // Rotation probes are opt-out for callers bounding worst-case time.
   const noRot = detect(rot90, { searchRotation: false });
   assert.equal(noRot.found, false, 'searchRotation:false disables rotation recovery');
+});
+
+/* ---------- v1.17: plan default, watermark claims, stores, assay, worker ---------- */
+
+test('v1.17 scramble plan default is v2 and round-trips; v1 stays explicit', () => {
+  const plan = buildScramblePlan(8, 'plan-default-key');
+  assert.equal(plan.version, 2, 'default plan version is 2 (no fixed-origin seam)');
+  const px = new Uint8Array(64 * 64 * 4);
+  for (let i = 0; i < px.length; i++) px[i] = (i * 7) & 255;
+  const scrambled = scramblePixels(px, 64, 64, plan, 'scramble');
+  assert.deepEqual(scramblePixels(scrambled, 64, 64, plan, 'unscramble'), px);
+  assert.equal(buildScramblePlan(8, 'plan-default-key', 1).version, 1, 'legacy v1 remains available explicitly');
+});
+
+test('v1.17 watermark opt-out: nwm claim minted, validated, and honored', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    allowAnonymous: false,
+    authorize: async (req) => req.headers['x-clean']
+      ? { viewerId: 'clean-viewer', watermark: false }
+      : { viewerId: 'marked-viewer' },
+    serverWatermark: 'GLOBAL MARK',
+  });
+  const cleanToken = await (await postToken(base + '/archx/token/cat', { headers: { 'x-clean': '1' } })).json();
+  const cleanClaims = tokenPayloadForTest(cleanToken.token);
+  assert.equal(cleanClaims.nwm, 1, 'opt-out is recorded inside the signed claims');
+  assert.equal(cleanClaims.wm, undefined, 'opt-out token carries no watermark text');
+  const markedToken = await (await postToken(base + '/archx/token/cat')).json();
+  const markedClaims = tokenPayloadForTest(markedToken.token);
+  assert.equal(markedClaims.wm, 'GLOBAL MARK');
+  assert.equal(markedClaims.nwm, undefined);
+  const cleanRes = await redeemToken(base, cleanToken, { headers: { 'x-clean': '1' } });
+  const markedRes = await redeemToken(base, markedToken);
+  assert.equal(cleanRes.status, 200);
+  assert.equal(markedRes.status, 200);
+  const cleanBytes = new Uint8Array(await cleanRes.arrayBuffer());
+  const markedBytes = new Uint8Array(await markedRes.arrayBuffer());
+  assert.notDeepEqual(cleanBytes, markedBytes, 'opt-out delivery differs from watermarked delivery');
+  // Forged claim shapes are rejected by the claim validator itself.
+  const nowMs = Date.now();
+  const baseClaims = {
+    v: 2, aud: 'archx:image', scope: 'image:view', id: 'cat', n: 'probe-nonce-1234567890',
+    iat: nowMs, exp: nowMs + 60_000, w: 320,
+  };
+  assert.equal(validateTokenClaims({ ...baseClaims, nwm: 1 }, { id: 'cat' }), true, 'well-formed nwm claim validates');
+  assert.equal(validateTokenClaims({ ...baseClaims, nwm: 2 }, { id: 'cat' }), false, 'nwm accepts only the exact value 1');
+  assert.equal(validateTokenClaims({ ...baseClaims, nwm: 1, wm: 'X' }, { id: 'cat' }), false, 'nwm and wm are mutually exclusive');
+});
+
+test('v1.17 variant cache scope separates watermark/forensic variants end-to-end', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    authorize: async (req) => ({ viewerId: String(req.headers['x-who'] || 'a'), watermark: String(req.headers['x-who'] || 'a') }),
+    forensicScope: 'image',
+  });
+  const take = async (who) => {
+    const tok = await (await postToken(base + '/archx/token/cat', { headers: { 'x-who': who } })).json();
+    const res = await redeemToken(base, tok, { headers: { 'x-who': who } });
+    assert.equal(res.status, 200);
+    return new Uint8Array(await res.arrayBuffer());
+  };
+  const first = await take('ALPHA');
+  const second = await take('BRAVO');
+  const again = await take('ALPHA');
+  assert.notDeepEqual(first, second, 'different watermark text must not share a cached finished variant');
+  assert.deepEqual(again, first, 'same variant scope reuses identical bytes');
+});
+
+test('v1.17 BoundedTtlSet reports live evictions only', () => {
+  const evicted = [];
+  const set = new BoundedTtlSet({
+    maxEntries: 2, cleanupIntervalMs: 0,
+    onLiveEvict: (count) => evicted.push(count),
+  });
+  const now = Date.now();
+  assert.equal(set.claim('a', now + 60_000), true);
+  assert.equal(set.claim('stale', now - 1), false, 'already-expired claims are refused');
+  assert.equal(set.claim('b', now + 60_000), true);
+  assert.equal(set.claim('c', now + 60_000), true, 'third live claim forces FIFO eviction of entry a');
+  assert.deepEqual(evicted, [1], 'exactly one live eviction is reported, as a count');
+  set.close();
+});
+
+test('v1.17 production audit blocks tiny replay stores; AVIF/memory profiles normalize', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v17-audit-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const base = {
+    secret: TEST_SECRET, imagesDir: dir, authorize: async () => ({ viewerId: 'auditor' }),
+    stateStore: createMemoryStateStore(),
+  };
+  const tiny = auditArchxProductionConfig({ ...base, oneTimeTokenMaxEntries: 500 });
+  assert.ok(tiny.blockers.some((b) => /oneTimeTokenMaxEntries/.test(b)), 'sub-10k replay store is a named blocker');
+  const fine = auditArchxProductionConfig(base);
+  assert.ok(!fine.blockers.some((b) => /oneTimeTokenMaxEntries/.test(b)));
+
+  const clamped = createArchxMiddleware({ ...base, processing: { avifEffort: 6 } });
+  assert.equal(clamped.configAudit.summary.processing.avifEffort, 2, 'request-path AVIF effort clamps to 2');
+  assert.equal(clamped.configAudit.summary.oneTimeTokenMaxEntries, 250000, 'standard profile default replay store');
+  clamped.close();
+  const allowed = createArchxMiddleware({ ...base, processing: { avifEffort: 6, allowSlowRequestAvif: true } });
+  assert.equal(allowed.configAudit.summary.processing.avifEffort, 6, 'explicit opt-in preserves high effort');
+  allowed.close();
+  const compact = createArchxMiddleware({ ...base, memoryProfile: 'compact' });
+  assert.equal(compact.configAudit.summary.oneTimeTokenMaxEntries, 50000, 'compact profile scales store defaults down');
+  compact.close();
+  assert.throws(() => createArchxMiddleware({ ...base, memoryProfile: 'tiny' }), /memoryProfile/);
+});
+
+test('v1.17 transpose (D4 diagonal) suspects are recovered and labelled', async () => {
+  const w = 480, h = 320;
+  const gradient = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    gradient[i * 4] = (x * 3 + y) & 255; gradient[i * 4 + 1] = (x + y * 5) & 255;
+    gradient[i * 4 + 2] = 128 + ((x ^ y) & 63); gradient[i * 4 + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(gradient, w, h, 'buyer-d4', { key: 'd4-key', profile: 'robust', strength: 6, layoutVersion: 3 });
+  const transpose = (buf, bw, bh, anti) => {
+    // Mirrors the detector's own transposePixels: both are self-inverse.
+    const out = new Uint8Array(bw * bh * 4);
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const si = (y * bw + x) * 4;
+      const di = (anti ? ((bw - 1 - x) * bh + (bh - 1 - y)) : (x * bh + y)) * 4;
+      for (let c = 0; c < 4; c++) out[di + c] = buf[si + c];
+    }
+    return out;
+  };
+  for (const [anti, label] of [[false, 'main'], [true, 'anti']]) {
+    const suspect = transpose(marked, w, h, anti);
+    const hit = detectStegoFingerprint(suspect, h, w, { key: 'd4-key', profile: 'robust', searchGeometry: true });
+    assert.equal(hit.found, true, `${label} transpose recovered`);
+    assert.equal(hit.transposed, label);
+    assert.equal(hit.fingerprint, stegoFingerprint('buyer-d4'));
+  }
+});
+
+test('v1.17 tilt search deskews small-angle rotations', () => {
+  const w = 640, h = 400;
+  const gradient = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    gradient[i * 4] = 60 + ((x * 5 + y * 2) % 160); gradient[i * 4 + 1] = 80 + ((x + y * 3) % 140);
+    gradient[i * 4 + 2] = 90 + (((x >> 1) ^ (y >> 1)) % 120); gradient[i * 4 + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(gradient, w, h, 'tilt-buyer', { key: 'tilt-key', profile: 'robust', strength: 7, layoutVersion: 3 });
+  // Rotate +2 degrees clockwise in place (bilinear, edge-replicated):
+  // the phone-straighten shape the deskew search targets.
+  const rad = (2 * Math.PI) / 180, cos = Math.cos(rad), sin = Math.sin(rad);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  const tilted = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const dx = x - cx, dy = y - cy;
+    const sx = Math.min(w - 1.001, Math.max(0, cx + dx * cos + dy * sin));
+    const sy = Math.min(h - 1.001, Math.max(0, cy - dx * sin + dy * cos));
+    const x0 = sx | 0, y0 = sy | 0, fx = sx - x0, fy = sy - y0;
+    const o = (y * w + x) * 4;
+    for (let c = 0; c < 4; c++) {
+      const p00 = marked[(y0 * w + x0) * 4 + c], p10 = marked[(y0 * w + x0 + 1) * 4 + c];
+      const p01 = marked[((y0 + 1) * w + x0) * 4 + c], p11 = marked[((y0 + 1) * w + x0 + 1) * 4 + c];
+      tilted[o + c] = (p00 * (1 - fx) + p10 * fx) * (1 - fy) + (p01 * (1 - fx) + p11 * fx) * fy;
+    }
+  }
+  const noTilt = detectStegoFingerprint(tilted, w, h, { key: 'tilt-key', profile: 'robust', searchGeometry: true });
+  assert.equal(noTilt.found, false, 'axis-aligned search cannot register a 2-degree tilt');
+  const hit = detectStegoFingerprint(tilted, w, h, { key: 'tilt-key', profile: 'robust', searchGeometry: true, searchTilt: true });
+  assert.equal(hit.found, true, 'deskew search recovers the mark');
+  assert.equal(hit.fingerprint, stegoFingerprint('tilt-buyer'));
+  assert.ok(Math.abs(hit.deskewed ?? 0) >= 0.75 && Math.abs(hit.deskewed ?? 0) <= 3,
+    `reported tilt in the applied range (got ${hit.deskewed})`);
+});
+
+test('v1.17 collusion assay ranks averaging participants above innocents', () => {
+  const w = 640, h = 480;
+  const base = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    base[i * 4] = 90 + ((x * 7 + y) % 120); base[i * 4 + 1] = 70 + ((x + y * 5) % 130);
+    base[i * 4 + 2] = 110 + ((x ^ y) % 90); base[i * 4 + 3] = 255;
+  }
+  const opts = { key: 'assay-key', profile: 'robust', strength: 6, layoutVersion: 3 };
+  const a = embedStegoFingerprint(base, w, h, 'alice', opts);
+  const b = embedStegoFingerprint(base, w, h, 'bob', opts);
+  const avg = new Uint8Array(w * h * 4);
+  for (let i = 0; i < avg.length; i++) avg[i] = (a[i] + b[i]) >> 1;
+  assert.equal(detectStegoFingerprint(avg, w, h, { key: 'assay-key', profile: 'robust' }).found, false,
+    'the averaged copy itself does not decode at bit level');
+  const assay = assayStegoCollusion(avg, w, h, [
+    { id: 'alice', payload: 'alice' }, { id: 'bob', payload: 'bob' },
+    { id: 'carol', payload: 'carol' }, { id: 'dave', payload: 'dave' },
+  ], { key: 'assay-key', profile: 'robust' });
+  const top2 = assay.results.slice(0, 2).map((r) => r.id).sort();
+  assert.deepEqual(top2, ['alice', 'bob'], 'both colluders rank at the top');
+  assert.ok(assay.results[1].zScore > assay.results[2].zScore + 2, 'separation from innocents is material');
+  assert.throws(() => assayStegoCollusion(avg, w, h, [], { key: 'k' }), /candidates/);
+});
+
+test('v1.17 detect worker: batch screening, queue cap, config validation', async (t) => {
+  t.after(() => closeStegoDetectWorker());
+  const w = 480, h = 320;
+  const base = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    base[i * 4] = 80 + ((x * 3 + y) % 130); base[i * 4 + 1] = 90 + ((x + y * 7) % 110);
+    base[i * 4 + 2] = 70 + ((x ^ y) % 120); base[i * 4 + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(base, w, h, 'worker-buyer', { key: 'right-key', profile: 'robust', strength: 6 });
+  const batch = await batchDetectStegoInWorker(marked, w, h, ['k1', 'k2', 'right-key', 'k4'], { profile: 'robust' });
+  assert.equal(batch.length, 4);
+  assert.equal(batch.find((e) => e.key === 'right-key').result.found, true, 'batch screen identifies the marking key');
+  assert.ok(batch.filter((e) => e.escalated).length <= 2, 'full searches stay bounded by escalateTop');
+
+  assert.throws(() => configureStegoDetectWorker({ maxPending: 0 }), /maxPending/);
+  const cfg = configureStegoDetectWorker({ maxPending: 1 });
+  assert.equal(cfg.maxPending, 1);
+  const slow = detectStegoFingerprintInWorker(base, w, h, { key: 'none', profile: 'robust', searchGeometry: true });
+  await assert.rejects(
+    detectStegoFingerprintInWorker(marked, w, h, { key: 'right-key', profile: 'robust' }),
+    /queue is full/, 'cap rejects immediately instead of growing an unbounded queue',
+  );
+  await slow;
+  configureStegoDetectWorker({ maxPending: 64 });
 });

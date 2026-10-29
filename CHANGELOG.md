@@ -3,6 +3,71 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.17.0] — Unreleased
+
+Sixth-review response (`docs/RESEARCH.md` §2.25): client dispatch
+capture, variant-scope v2, watermark opt-out claims, detector
+forensic reach (D4 transposes, MAC-era gates, tilt deskew, collusion
+assay), a bounded detect worker, and request-path AVIF/memory
+guardrails.
+
+### Added
+
+- **Tilt deskew search** (`searchTilt`, CLI `--tilt`): ±6° small-angle
+  recovery with canvas-expansion-aware screening and centroid angle
+  estimation; results carry `deskewed`. Recovers pure tilts and
+  tilt+JPEG50; tilt+crop+resize+JPEG compounds remain out of
+  envelope (oracle-verified signal loss).
+- **D4 transpose recovery**: EXIF 5/7 diagonal reflections join the
+  mirror/rotation fan-out (`transposed: 'main' | 'anti'`).
+- **Collusion assay** (`assayStegoCollusion`): per-bit soft-evidence
+  ranking of candidate recipients for averaging investigations.
+  Investigative aid only — not a Tardos code.
+- **Detect-worker bounds**: `configureStegoDetectWorker()`
+  (queue cap, per-job timeout with worker recycle),
+  `batchDetectStegoInWorker()` (shared-plane many-key screening with
+  bounded escalation), zero-copy transfer.
+- **Watermark opt-out**: `authorize` may return `watermark: false`;
+  the signed token carries `nwm: 1` (validator rejects any other
+  value and `nwm`+`wm` combinations).
+- **Replay-store telemetry**: `archx.replay_store_evicted` security
+  event when live JTIs are evicted under pressure.
+- **`memoryProfile: 'compact'`**: scales bounded-store defaults for
+  small containers; explicit options win.
+
+### Changed
+
+- **Scramble plan v2 is the default** in `buildScramblePlan()`
+  (explicit `1` still available). Delivered containers embed their
+  plan version and keep decoding.
+- **Derivative variant scope v2 / cache namespace `v7`**: keys now
+  mix watermark/forensic/stego digests; mint and redemption derive
+  identical scopes. Per-image key mode has a one-TTL re-mint window.
+- **Request-path AVIF effort clamps to 2** unless
+  `allowSlowRequestAvif: true` (offline builds unaffected).
+- **`oneTimeTokenMaxEntries` defaults to 250,000**; production audit
+  blocks under 10,000.
+- **Robust embed masking** lets textured cells exceed nominal
+  amplitude (cap 1.4×). Measured PSNR at strength 6 is 27.9–28.9 dB
+  on the photo corpus (was 30.4–31.4 dB) with better crop recovery;
+  the reviewed ≥34 dB target was not reachable without losing the
+  envelope and is documented as such. Strength 8 is now recommended
+  for smooth product photography.
+- MAC-tagged correction/erasure gates relaxed to signal-based
+  thresholds (CRC legacy stays strict); real-photo matrix 39/51 →
+  42/51 at strength 6, 18/18 negative controls still clean.
+- Watermark overlay blend touches only nonzero-alpha pixels
+  (byte-identical output).
+- `VERSION` constant in the client was stale (1.14.0); fixed.
+
+### Security
+
+- Client sensitive dispatch routes through a load-time-captured
+  `Reflect.apply`; canvas sizing through captured setters; integrity
+  audit covers both (plus `createImageBitmap`). Images load with
+  `Reflect.apply` sabotaged.
+- DevTools polling idles while the document is hidden.
+
 ## [1.16.0] — Unreleased
 
 StegoMark forensic-envelope release (`docs/RESEARCH.md` §2.24). The

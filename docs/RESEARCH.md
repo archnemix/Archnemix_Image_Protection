@@ -1890,6 +1890,188 @@ claims only the axis-aligned envelope measured here. A non-match
 remains weak evidence of unrelatedness, and an erasure-decoded match
 is flagged so it is never silently equated with a full-evidence one.
 
+### 2.25 Sixth adversarial review — verification and response (v1.17)
+
+A sixth review arrived as 15 targets in three tiers. Two items (4 and
+12) were truncated mid-sentence in the paste; the implementation
+follows their clear intent — item 4: `authorize` returning
+`watermark: false` opts out of a global `serverWatermark`, recorded
+as `nwm: 1` in the signed claims (mirroring `nsg: 1`); item 12:
+hard-cap request-path `avifEffort <= 2` unless
+`allowSlowRequestAvif: true`, plus a `memoryProfile` preset — and
+those assumptions are flagged wherever they matter. Everything else
+was verified against the code before being believed, in the §2.21–
+§2.24 discipline. Three of the review's premises turned out stale
+(the facility already existed); two of its numeric targets were
+measured and rejected; one API name does not exist. Each is recorded
+below rather than silently "fixed."
+
+**Tier 1 — client dispatch, plan default, token/cache correctness.**
+
+1. *Captured invocation primitives (client).* Sensitive calls were
+   already honeymooned through captured natives (§2.23) but the
+   dispatch itself still used `.call`, and the integrity audit did
+   not cover two readback paths. The client now dispatches through a
+   load-time-captured `Reflect.apply` (`nativeCall`), sizes sensitive
+   canvases through captured `HTMLCanvasElement.width/height`
+   setters, and the audit covers `Reflect.apply`, `createImageBitmap`,
+   and the captured canvas setters. Measured in Chromium: an image
+   still loads with `Reflect.apply` sabotaged to throw (and
+   `Function.prototype.call` wrapped), and the audit flags the hook.
+   A throwing `Function.prototype.call` is a page-wide denial of
+   service against every script including the attacker's, and is out
+   of the threat model.
+2. *Scramble plan v2 is the default.* `buildScramblePlan(grid, key)`
+   now produces the v2 plan (randomized seam position) unless version
+   1 is requested explicitly. Containers embed their plan version, so
+   previously-delivered payloads decode unchanged; only new
+   deliveries pick up v2. Two fixture statistics that tested v1-plan
+   properties (seam placement, a legacy-plan expectation) were pinned
+   to version 1 explicitly rather than recalibrated.
+3. *Variant scope v2 (cache namespace `v7`).* The derivative key now
+   mixes HMAC digests of the effective watermark, forensic seed, and
+   stego payload (`w…:q…:f…:wm…:fx…:sg…`) instead of bucketing by
+   dimensions/quality/format only, and mint/redemption derive the
+   scope from identical inputs. Per-token scramble/AES derivation
+   ignores the scope; per-image mode has the same accepted one-TTL
+   re-mint window as the §2.23 key-subject change.
+4. *Watermark opt-out (`nwm`).* `authorize` may return
+   `watermark: false` (or `null`) to suppress a global
+   `serverWatermark` for that view; the signed token carries
+   `nwm: 1`. The claim validator accepts only the exact value `1`
+   and rejects `nwm`+`wm` together, so a forged or confused
+   combination fails closed.
+5. *Live replay-store evictions are observable.* `BoundedTtlSet`
+   gained an `onLiveEvict(count)` callback, threaded through the
+   memory store; live JTI evictions aggregate into at most one
+   `archx.replay_store_evicted` security event per 60 s. Expired-
+   entry sweeps do not fire it.
+6. *Replay-store sizing.* `oneTimeTokenMaxEntries` defaults to
+   250,000; `auditArchxProductionConfig` now reports the configured
+   maximum and names anything under 10,000 as a blocker (the store
+   must hold a full token TTL of JTIs at peak mint rate).
+
+**Tier 2 — forensic detector and worker.**
+
+7. *MAC-era correction gates + D4 transposes.* Real-photo failures
+   were decomposed before touching the embed. The headline case
+   (smooth product photo, 90% center crop, strength 6) registered
+   *exactly* — correct scale/origin, agreement 0.903, strong signal —
+   and then died on a CRC-era gate that required agreement ≥ 0.95 to
+   search repair depth 5. The actual acceptance test has been
+   MAC-16 since v1.12, so for MAC-tagged codewords the depth gate is
+   now signal-based (`meanSignal >= 3.5`) and 4–5 corrections are
+   accepted at agreement ≥ 0.85; CRC-tagged legacy codewords keep
+   the strict gates. Erasure budgets widen only for exceptionally
+   clean candidates (pre-erasure agreement ≥ 0.95 and
+   `meanSignal >= 4`: 1-flip assist to 17 erased payload bits,
+   2-flip to 14). D4 diagonal reflections (EXIF 5/7 transposes)
+   joined the variant fan-out — both are self-inverse pixel
+   permutations; results carry `transposed: 'main' | 'anti'` — as
+   did scale seeds 1.2 (and 1.38 in the deep stage). Measured on the
+   three-photo corpus (robust, layout v3, strength 6, 17 transforms
+   each): 39/51 → **42/51 (42/48 excluding opt-in tilt rows)**, and
+   18/18 unmarked negative controls stay not-found under the relaxed
+   gates. The weakest subject is smooth product photography: its
+   deepest crops (60–70% retained) and native reframes fail at
+   strength 6 but pass at strength 8, which the docs now recommend
+   for smooth subjects.
+8. *Perceptual masking — premise corrected.* The review asked for
+   texture-adaptive amplitude "instead of fixed"; masking has existed
+   since early versions but only ever *reduced* amplitude (cap 1.0×).
+   The useful change is letting textured cells hide more: the curve
+   is now `min(16, amp · clamp(0.4 + σ/36, 0.4, 1.4))`. Measured at
+   strength 6: targeted-subset recovery improved on the hard photo
+   (2/7 → 4/7) and held on the others (7/7), while PSNR moved
+   30.4–31.4 dB → 27.9–28.9 dB. The review's "≥34 dB at robust
+   strength" target is **rejected as measured**: even the pre-change
+   embed sat at ~31 dB on these photos, and no tested curve reached
+   34 dB without losing the crop envelope. Operators who need higher
+   fidelity lower `strength`; the tradeoff is documented, not hidden.
+9. *Small-angle tilt (`searchTilt`, opt-in).* A ±6° deskew stage:
+   sweep angles on a ≤960 px proxy with cheap native detects,
+   estimate the angle as the signal-weighted centroid of the
+   resulting broad bump, then confirm a few candidate angles at full
+   resolution (results carry `deskewed`). Two measured subtleties
+   shaped it: editors that rotate *expand the canvas*, leaving the
+   grid at ~0.94–0.99× frame scale, so screening must center-crop
+   the deskewed proxy to register at all; and residual scale
+   mismatch flattens the signal peak over ±1.5°, so argmax is noise
+   and the centroid is load-bearing. Envelope (800 px photos,
+   strength 7): pure tilts +1°/+2°/−3°/+5° and tilt+JPEG50 recover;
+   tilt→crop→resize→JPEG50 does not — an oracle deskew at the exact
+   angle still fails (triple-resampling signal loss), so that
+   compound is documented as outside the current envelope rather
+   than chased. CLI: `archx-detect --tilt`.
+10. *Collusion assay.* `assayStegoCollusion()` ranks candidate
+    recipients against a suspect's soft per-cell readings. The
+    statistic is deliberately per-*codeword-bit* (cells repeat bits,
+    so a per-cell z overstates significance ~√repetitions), and bits
+    constant across the candidate set (the sync tail) are excluded
+    as non-discriminative. Measured on a 2-recipient pixel average
+    that no longer decodes at bit level: participants score
+    z ≈ 5.0–6.3 against an innocent spread of RMS ≈ 1.1. This is an
+    investigative ranking aid — explicitly **not** a Tardos
+    accusation code and never standalone proof.
+11. *Detect-worker hardening.* The worker now has a bounded FIFO
+    queue (`configureStegoDetectWorker({ maxPending })`, default 64,
+    immediate rejection when full), a per-job timeout (default
+    120 s) that recycles the worker without stranding queued jobs
+    (including a guard against a recycled worker's late `exit` event
+    failing its replacement's work), zero-copy buffer transfer, and
+    `batchDetectStegoInWorker()` for many-key sweeps: the buffer
+    crosses the thread boundary once, planes build once, each key
+    gets a native screen, and only the top-ranked keys
+    (`escalateTop`, default 2) escalate to a full search — mark
+    *energy* is key-independent, so absolute thresholds cannot prune
+    wrong keys; vote-consistency ranking can. (The review's
+    "BatchDetectStego" name did not exist; this is the facility it
+    was reaching for.)
+
+**Tier 3 — request-path cost and parity.**
+
+12. *AVIF effort clamp + `memoryProfile`.* AVIF at effort > 2 already
+    carried an audit warning; it is now clamped to 2 in middleware
+    normalization unless `allowSlowRequestAvif: true` (offline
+    `buildArchxAssets` is unaffected; cache keys already carry the
+    effort, so no stale-bytes risk). `memoryProfile: 'compact'`
+    scales bounded-store defaults for small containers (replay store
+    250k → 50k, output cache 64 MB → 16 MB, master cache 128 MB →
+    32 MB, rate-limit clients 10k → 2.5k, processing queue 100 →
+    25); explicit options always win.
+13. *Watermark/encode path — premise partly stale.* The rasterized-
+    overlay cache the review asked for shipped in v1.14. The
+    remaining win was the blend loop scanning every pixel although
+    glyph alpha is sparse; nonzero-alpha offsets are now precomputed
+    at rasterize time and only those pixels are blended — byte-
+    identical output (alpha-0 is identity), verified. WebP effort
+    defaults were measured rather than assumed (1200 px photo,
+    q82): effort 2/4/6 = 167/222/448 ms at 200/197/193 KiB. Effort 2
+    saves only ~25% CPU for +1.8% bytes; the middleware default
+    stays 4 (catalog/build paths already default to 2).
+14. *Client power.* Temporal loops were already visibility-gated
+    (rAF stops in hidden tabs; loops also check an IntersectionObserver
+    flag) and the trace updater already skipped hidden/off-screen
+    repaints; the 400 ms DevTools poll now also idles while hidden.
+    Shared WebGL contexts were assessed and **rejected**: a browser
+    binds a context to one canvas, so "sharing" means blitting
+    through a 2D canvas or `ImageBitmap` — a readable surface,
+    which would surrender the vault's non-preserved-drawing-buffer
+    readback property. The existing design (per-canvas contexts,
+    budget of 8 with 2D fallback, context-loss recovery) stands.
+15. *Deep-zoom tiles (optional) — design note, deferred.* A tile
+    protocol (manifest of per-tile signed variants, tile-size
+    buckets aligned to the width-bucket discipline, per-tile
+    forensics reuse via variant scope v2) is sketched in
+    `docs/OPERATIONS.md` notes for a future release; shipping half
+    a tiling protocol was explicitly the thing to avoid, and the
+    review made the item conditional. No code in v1.17.
+
+**Verification:** 101 Node unit tests + 7 fuzz, 120 Chromium checks,
+18/18 real-photo negative controls, photo matrix 42/51 at strength 6
+(42/48 non-tilt), tilt envelope as itemized above, byte-identical
+watermark blend, worker queue/timeout/batch exercised end-to-end.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

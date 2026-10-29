@@ -46,7 +46,7 @@ function parseArgs(argv, booleanFlags = new Set()) {
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'help']));
+const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'help']));
 const input = args._[0];
 if (!input || args.help) {
   console.log(`Usage: archx-detect <suspect image> [options]
@@ -62,6 +62,7 @@ if (!input || args.help) {
   --max-input-bytes <n> reject files above this size before reading (default 52428800)
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
   --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
+  --tilt             also search small-angle tilts (±6°) — slow, forensic mode
   --json             print machine-readable JSON only`);
   process.exit(input ? 0 : 1);
 }
@@ -142,6 +143,7 @@ try {
     gridX,
     gridY,
     searchOffsets: !args['no-search'],
+    searchTilt: !!args.tilt,
     searchGeometry: !args['no-geometry'],
   });
   // Compute the soft binding from a bounded thumbnail rather than walking a

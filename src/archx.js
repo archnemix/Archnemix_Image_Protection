@@ -43,7 +43,7 @@ import {
   useJsonParser, useWebCrypto,
 } from './scramble.js';
 
-export const VERSION = '1.14.0';
+export const VERSION = '1.17.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */
@@ -124,8 +124,32 @@ const NATIVES = (() => {
   })();
   const subtleObj = (() => { try { return g.crypto?.subtle || null; } catch { return null; } })();
   const subtleProto = subtleObj ? Object.getPrototypeOf(subtleObj) : null;
+  // Property descriptors whose accessors a post-load hook could use to
+  // observe off-DOM canvas creation/resizing (the setter receives the
+  // canvas itself). Captured for audit comparison; sensitive buffers
+  // additionally prefer OffscreenCanvas (constructor-sized).
+  const grabDescriptor = (obj, name) => {
+    try { return Object.getOwnPropertyDescriptor(obj, name) || null; } catch { return null; }
+  };
+  const canvasWidthDesc = grabDescriptor(canvasProto, 'width');
+  const canvasHeightDesc = grabDescriptor(canvasProto, 'height');
+  const smoothingQualityDesc = grabDescriptor(ctx2dProto, 'imageSmoothingQuality');
   return Object.freeze({
     fnToString: Function.prototype.toString,
+    // Dispatch primitive: `fn.call(...)` resolves Function.prototype.call
+    // AT CALL TIME, so a post-load hook there intercepts every "captured
+    // native" invocation despite the captures. All sensitive dispatch
+    // goes through the captured Reflect.apply instead (nativeCall).
+    reflectApply: grab(g.Reflect, 'apply'),
+    fnCall: Function.prototype.call,
+    fnApply: Function.prototype.apply,
+    fnBind: Function.prototype.bind,
+    canvasWidthGet: canvasWidthDesc?.get || null,
+    canvasWidthSet: canvasWidthDesc?.set || null,
+    canvasHeightGet: canvasHeightDesc?.get || null,
+    canvasHeightSet: canvasHeightDesc?.set || null,
+    smoothingQualityGet: smoothingQualityDesc?.get || null,
+    smoothingQualitySet: smoothingQualityDesc?.set || null,
     fetch: grab(g, 'fetch'),
     // Extra hooks an external review demonstrated: a patched JSON.parse can
     // log every container header (which carries the per-response AES key),
@@ -204,9 +228,16 @@ const SUBTLE_CAPTURED = {
   digest: 'subtleDigest', sign: 'subtleSign', generateKey: 'subtleGenerateKey',
   exportKey: 'subtleExportKey',
 };
+// Captured-Reflect.apply dispatch: immune to post-load hooks on
+// Function.prototype.call/apply/bind (which `fn.call(...)` is not).
+function nativeCall(fn, receiver, args) {
+  return NATIVES.reflectApply
+    ? NATIVES.reflectApply(fn, receiver, args)
+    : fn.call(receiver, ...args);
+}
 function subtleDo(name, ...args) {
   const fn = NATIVES[SUBTLE_CAPTURED[name]];
-  if (fn && NATIVES.subtle) return fn.call(NATIVES.subtle, ...args);
+  if (fn && NATIVES.subtle) return nativeCall(fn, NATIVES.subtle, args);
   const subtle = globalThis.crypto?.subtle;
   return subtle[name](...args);
 }
@@ -215,13 +246,13 @@ const sharedTextEncoder = (() => {
 })();
 function utf8EncodeCaptured(str) {
   return NATIVES.textEncode && sharedTextEncoder
-    ? NATIVES.textEncode.call(sharedTextEncoder, str)
+    ? nativeCall(NATIVES.textEncode, sharedTextEncoder, [str])
     : new TextEncoder().encode(str);
 }
 
 function isNativeFn(fn) {
   if (typeof fn !== 'function') return false;
-  try { return /\[native code\]/.test(NATIVES.fnToString.call(fn)); } catch { return false; }
+  try { return /\[native code\]/.test(nativeCall(NATIVES.fnToString, fn, [])); } catch { return false; }
 }
 
 const AUDIT_WEBGL_METHODS = [
@@ -249,6 +280,16 @@ function currentReaderRead() {
 }
 
 /** Names of sensitive APIs that look hooked (replaced or non-native). */
+function currentDescriptorAccessor(ctorName, prop, kind) {
+  try {
+    const ctor = ctorName === 'HTMLCanvasElement'
+      ? (typeof HTMLCanvasElement !== 'undefined' ? HTMLCanvasElement : null)
+      : (typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D : null);
+    if (!ctor) return null;
+    return Object.getOwnPropertyDescriptor(ctor.prototype, prop)?.[kind] || null;
+  } catch { return null; }
+}
+
 export function auditIntegrity() {
   const g = globalThis;
   const current = [
@@ -264,6 +305,19 @@ export function auditIntegrity() {
     ['CanvasRenderingContext2D.prototype.restore', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.restore : null, NATIVES.ctxRestore],
     ['CanvasRenderingContext2D.prototype.translate', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.translate : null, NATIVES.ctxTranslate],
     ['CanvasRenderingContext2D.prototype.scale', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.scale : null, NATIVES.ctxScale],
+    ['CanvasRenderingContext2D.prototype.rotate', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.rotate : null, NATIVES.ctxRotate],
+    ['CanvasRenderingContext2D.prototype.setTransform', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.setTransform : null, NATIVES.ctxSetTransform],
+    ['Function.prototype.call', Function.prototype.call, NATIVES.fnCall],
+    ['Function.prototype.apply', Function.prototype.apply, NATIVES.fnApply],
+    ['Function.prototype.bind', Function.prototype.bind, NATIVES.fnBind],
+    ['Function.prototype.toString', Function.prototype.toString, NATIVES.fnToString],
+    ['Reflect.apply', typeof Reflect !== 'undefined' ? Reflect.apply : null, NATIVES.reflectApply],
+    ['HTMLCanvasElement.prototype.width.get', currentDescriptorAccessor('HTMLCanvasElement', 'width', 'get'), NATIVES.canvasWidthGet],
+    ['HTMLCanvasElement.prototype.width.set', currentDescriptorAccessor('HTMLCanvasElement', 'width', 'set'), NATIVES.canvasWidthSet],
+    ['HTMLCanvasElement.prototype.height.get', currentDescriptorAccessor('HTMLCanvasElement', 'height', 'get'), NATIVES.canvasHeightGet],
+    ['HTMLCanvasElement.prototype.height.set', currentDescriptorAccessor('HTMLCanvasElement', 'height', 'set'), NATIVES.canvasHeightSet],
+    ['CanvasRenderingContext2D.prototype.imageSmoothingQuality.get', currentDescriptorAccessor('CanvasRenderingContext2D', 'imageSmoothingQuality', 'get'), NATIVES.smoothingQualityGet],
+    ['CanvasRenderingContext2D.prototype.imageSmoothingQuality.set', currentDescriptorAccessor('CanvasRenderingContext2D', 'imageSmoothingQuality', 'set'), NATIVES.smoothingQualitySet],
     ['Document.prototype.createElement', typeof Document !== 'undefined' ? Document.prototype.createElement : null, NATIVES.docCreateElement],
     ['JSON.parse', typeof JSON !== 'undefined' ? JSON.parse : null, NATIVES.jsonParse],
     ['Element.prototype.attachShadow', typeof Element !== 'undefined' ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
@@ -320,6 +374,23 @@ export function auditIntegrityDetails() {
     ['HTMLCanvasElement.prototype.toBlob', NATIVES.canvasToBlob],
     ['CanvasRenderingContext2D.prototype.drawImage', NATIVES.ctxDrawImage],
     ['CanvasRenderingContext2D.prototype.getImageData', NATIVES.ctxGetImageData],
+    ['CanvasRenderingContext2D.prototype.save', NATIVES.ctxSave],
+    ['CanvasRenderingContext2D.prototype.restore', NATIVES.ctxRestore],
+    ['CanvasRenderingContext2D.prototype.translate', NATIVES.ctxTranslate],
+    ['CanvasRenderingContext2D.prototype.scale', NATIVES.ctxScale],
+    ['CanvasRenderingContext2D.prototype.rotate', NATIVES.ctxRotate],
+    ['CanvasRenderingContext2D.prototype.setTransform', NATIVES.ctxSetTransform],
+    ['Function.prototype.call', NATIVES.fnCall],
+    ['Function.prototype.apply', NATIVES.fnApply],
+    ['Function.prototype.bind', NATIVES.fnBind],
+    ['Function.prototype.toString', NATIVES.fnToString],
+    ['Reflect.apply', NATIVES.reflectApply],
+    ['HTMLCanvasElement.prototype.width.get', NATIVES.canvasWidthGet],
+    ['HTMLCanvasElement.prototype.width.set', NATIVES.canvasWidthSet],
+    ['HTMLCanvasElement.prototype.height.get', NATIVES.canvasHeightGet],
+    ['HTMLCanvasElement.prototype.height.set', NATIVES.canvasHeightSet],
+    ['CanvasRenderingContext2D.prototype.imageSmoothingQuality.get', NATIVES.smoothingQualityGet],
+    ['CanvasRenderingContext2D.prototype.imageSmoothingQuality.set', NATIVES.smoothingQualitySet],
     ['Document.prototype.createElement', NATIVES.docCreateElement],
     ['JSON.parse', NATIVES.jsonParse],
     ['Element.prototype.attachShadow', NATIVES.attachShadow],
@@ -383,6 +454,14 @@ export function captureEarlyIntegritySnapshot() {
     webgl2DrawArrays: typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.drawArrays : null,
     webglReadPixels: typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.readPixels : null,
     webgl2ReadPixels: typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.readPixels : null,
+    fnCall: Function.prototype.call,
+    fnApply: Function.prototype.apply,
+    fnBind: Function.prototype.bind,
+    reflectApply: typeof Reflect !== 'undefined' ? Reflect.apply : null,
+    ctxSave: typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.save : null,
+    ctxRestore: typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.restore : null,
+    canvasWidthSet: (() => { try { return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width')?.set || null; } catch { return null; } })(),
+    canvasHeightSet: (() => { try { return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'height')?.set || null; } catch { return null; } })(),
     at: Date.now(),
   });
   return snapshot;
@@ -398,6 +477,14 @@ export function verifyEarlyIntegritySnapshot(snapshot) {
     ['WebGL2RenderingContext.prototype.drawArrays', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.drawArrays : null, snapshot.webgl2DrawArrays],
     ['WebGLRenderingContext.prototype.readPixels', typeof WebGLRenderingContext !== 'undefined' ? WebGLRenderingContext.prototype.readPixels : null, snapshot.webglReadPixels],
     ['WebGL2RenderingContext.prototype.readPixels', typeof WebGL2RenderingContext !== 'undefined' ? WebGL2RenderingContext.prototype.readPixels : null, snapshot.webgl2ReadPixels],
+    ['Function.prototype.call', Function.prototype.call, snapshot.fnCall],
+    ['Function.prototype.apply', Function.prototype.apply, snapshot.fnApply],
+    ['Function.prototype.bind', Function.prototype.bind, snapshot.fnBind],
+    ['Reflect.apply', typeof Reflect !== 'undefined' ? Reflect.apply : null, snapshot.reflectApply],
+    ['CanvasRenderingContext2D.prototype.save', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.save : null, snapshot.ctxSave],
+    ['CanvasRenderingContext2D.prototype.restore', typeof CanvasRenderingContext2D !== 'undefined' ? CanvasRenderingContext2D.prototype.restore : null, snapshot.ctxRestore],
+    ['HTMLCanvasElement.prototype.width.set', currentDescriptorAccessor('HTMLCanvasElement', 'width', 'set'), snapshot.canvasWidthSet],
+    ['HTMLCanvasElement.prototype.height.set', currentDescriptorAccessor('HTMLCanvasElement', 'height', 'set'), snapshot.canvasHeightSet],
   ];
   const issues = checks.filter(([, now, before]) => (before || now) && now !== before).map(([name]) => name);
   return Object.freeze({ ok: issues.length === 0, issues: Object.freeze(issues), snapshotAt: snapshot.at || null });
@@ -418,30 +505,43 @@ export function detectAutomation() {
 }
 
 function nativeFetch(url, options) {
-  return NATIVES.fetch ? NATIVES.fetch.call(globalThis, url, options) : fetch(url, options);
+  return NATIVES.fetch ? nativeCall(NATIVES.fetch, globalThis, [url, options]) : fetch(url, options);
 }
 function nativeCreateImageBitmap(source, opts) {
   return NATIVES.createImageBitmap
-    ? NATIVES.createImageBitmap.call(globalThis, source, opts)
+    ? nativeCall(NATIVES.createImageBitmap, globalThis, [source, opts])
     : createImageBitmap(source, opts);
+}
+// Size a sensitive off-DOM canvas through the CAPTURED width/height
+// setters: a post-load hook on the prototype setters would otherwise
+// receive the canvas reference before a single (clean) pixel is drawn
+// — and could no-op the width=0 wipes that are supposed to erase it.
+function setCanvasSize(canvas, width, height) {
+  if (NATIVES.canvasWidthSet && NATIVES.canvasHeightSet) {
+    nativeCall(NATIVES.canvasWidthSet, canvas, [width]);
+    nativeCall(NATIVES.canvasHeightSet, canvas, [height]);
+  } else {
+    canvas.width = width;
+    canvas.height = height;
+  }
 }
 function makeCanvas(ownerDocument) {
   const doc = ownerDocument || document;
   return NATIVES.docCreateElement
-    ? NATIVES.docCreateElement.call(doc, 'canvas')
+    ? nativeCall(NATIVES.docCreateElement, doc, ['canvas'])
     : doc.createElement('canvas');
 }
 function getNativeContext(canvas, type, attrs) {
   return NATIVES.canvasGetContext
-    ? NATIVES.canvasGetContext.call(canvas, type, attrs)
+    ? nativeCall(NATIVES.canvasGetContext, canvas, [type, attrs])
     : canvas.getContext(type, attrs);
 }
 function nativeDrawImage(ctx, ...args) {
-  return NATIVES.ctxDrawImage ? NATIVES.ctxDrawImage.call(ctx, ...args) : ctx.drawImage(...args);
+  return NATIVES.ctxDrawImage ? nativeCall(NATIVES.ctxDrawImage, ctx, args) : ctx.drawImage(...args);
 }
 function nativeGlDrawArrays(gl, mode, first, count) {
   return NATIVES.glDrawArrays
-    ? NATIVES.glDrawArrays.call(gl, mode, first, count)
+    ? nativeCall(NATIVES.glDrawArrays, gl, [mode, first, count])
     : gl.drawArrays(mode, first, count);
 }
 // Captured-method dispatch for every other render-path GL call: a
@@ -449,7 +549,7 @@ function nativeGlDrawArrays(gl, mode, first, count) {
 // observe or alter our uniform values, texture setup, or draws.
 function glNative(gl, name, ...args) {
   const fn = NATIVES.webgl?.[name];
-  return fn ? fn.call(gl, ...args) : gl[name](...args);
+  return fn ? nativeCall(fn, gl, args) : gl[name](...args);
 }
 const CTX_NATIVE = {
   save: 'ctxSave', restore: 'ctxRestore', translate: 'ctxTranslate',
@@ -457,7 +557,7 @@ const CTX_NATIVE = {
 };
 function ctxNative(ctx, name, ...args) {
   const fn = NATIVES[CTX_NATIVE[name]];
-  return fn ? fn.call(ctx, ...args) : ctx[name](...args);
+  return fn ? nativeCall(fn, ctx, args) : ctx[name](...args);
 }
 
 /* ================================================================== */
@@ -1198,6 +1298,9 @@ let devtoolsTimer = null;
 function ensureDevtoolsWatcher() {
   if (devtoolsTimer) return;
   const check = () => {
+    // Hidden tabs need no DevTools polling (and rAF-driven temporal
+    // loops already stop with the tab); skip the layout reads.
+    if (typeof document !== 'undefined' && document.hidden) return;
     // Docked DevTools changes the viewport/outer-size relationship. Undocked
     // DevTools and remote/CDP capture cannot be detected by page JavaScript.
     const open = (window.outerWidth - window.innerWidth > 170) ||
@@ -1845,14 +1948,14 @@ async function readResponseBytes(response, maxBytes) {
     return bytes;
   }
   const reader = NATIVES.streamGetReader
-    ? NATIVES.streamGetReader.call(response.body)
+    ? nativeCall(NATIVES.streamGetReader, response.body, [])
     : response.body.getReader();
   const chunks = [];
   let total = 0;
   try {
     for (;;) {
       const { done, value } = NATIVES.streamReaderRead
-        ? await NATIVES.streamReaderRead.call(reader)
+        ? await nativeCall(NATIVES.streamReaderRead, reader, [])
         : await reader.read();
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || []);
@@ -1921,7 +2024,7 @@ function parseBoundedJson(bytes) {
   let value;
   try {
     const text = NATIVES.textDecode && sharedFatalDecoder
-      ? NATIVES.textDecode.call(sharedFatalDecoder, bytes)
+      ? nativeCall(NATIVES.textDecode, sharedFatalDecoder, [bytes])
       : new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     value = (NATIVES.jsonParse || JSON.parse)(text);
   }
@@ -2150,8 +2253,7 @@ function drawImageHighQuality(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh) {
   }
 
   const intermediate = makeCanvas();
-  intermediate.width = Math.max(1, Math.ceil(dw * 2));
-  intermediate.height = Math.max(1, Math.ceil(dh * 2));
+  setCanvasSize(intermediate, Math.max(1, Math.ceil(dw * 2)), Math.max(1, Math.ceil(dh * 2)));
   const ictx = getNativeContext(intermediate, '2d');
   drawImageHighQuality(
     ictx, source, sx, sy, sw, sh,
@@ -2159,14 +2261,13 @@ function drawImageHighQuality(ctx, source, sx, sy, sw, sh, dx, dy, dw, dh) {
   );
   setSmoothing(ctx, true);
   nativeDrawImage(ctx, intermediate, 0, 0, intermediate.width, intermediate.height, dx, dy, dw, dh);
-  intermediate.width = 0; intermediate.height = 0;
+  setCanvasSize(intermediate, 0, 0);
 }
 
 /** Un-scramble a bitmap onto a private offscreen canvas (capped size). */
 function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   const canvas = makeCanvas();
-  canvas.width = Math.max(1, targetW);
-  canvas.height = Math.max(1, targetH);
+  setCanvasSize(canvas, Math.max(1, targetW), Math.max(1, targetH));
   const ctx = getNativeContext(canvas, '2d');
   if (!meta.plan) { // not scrambled — single high-quality draw
     drawImageHighQuality(ctx, bitmap, 0, 0, bitmap.width, bitmap.height, 0, 0, targetW, targetH);
@@ -2195,8 +2296,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   const tileW = Math.max(1, Math.round((targetPadW * intermediateScale) / plan.grid));
   const tileH = Math.max(1, Math.round((targetPadH * intermediateScale) / plan.grid));
   const padded = makeCanvas();
-  padded.width = tileW * plan.grid;
-  padded.height = tileH * plan.grid;
+  setCanvasSize(padded, tileW * plan.grid, tileH * plan.grid);
   const pctx = getNativeContext(padded, '2d');
   const exactScale = Math.abs(tileW - twSrc) < 0.01 && Math.abs(tileH - thSrc) < 0.01;
   setSmoothing(pctx, !exactScale);
@@ -2223,7 +2323,7 @@ function unscrambleToCanvas(bitmap, meta, targetW, targetH) {
   drawImageHighQuality(ctx, padded,
     0, 0, padded.width * (origW / padW), padded.height * (origH / padH),
     0, 0, targetW, targetH);
-  padded.width = 0; padded.height = 0;
+  setCanvasSize(padded, 0, 0);
   return canvas;
 }
 
@@ -2237,7 +2337,7 @@ function scrambleCanvasLocally(source, grid, key) {
   const { tw, th, pw, ph } = paddedSize(w, h, grid);
   const plan = buildScramblePlan(grid, key, 2); // ephemeral in-page plan: strongest seed is free here
   const cleanPadded = makeCanvas();
-  cleanPadded.width = pw; cleanPadded.height = ph;
+  setCanvasSize(cleanPadded, pw, ph);
   const cctx = getNativeContext(cleanPadded, '2d');
   setSmoothing(cctx, false); // exact 1:1 copy into the padded frame
   nativeDrawImage(cctx, source, 0, 0);
@@ -2291,7 +2391,7 @@ function scrambleCanvasLocally(source, grid, key) {
     ctxNative(cctx, 'restore', );
   }
   const scrambled = makeCanvas();
-  scrambled.width = pw; scrambled.height = ph;
+  setCanvasSize(scrambled, pw, ph);
   const ctx = getNativeContext(scrambled, '2d');
   setSmoothing(ctx, false); // tiles are copied 1:1; never resample them here
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, pw, ph);
@@ -2306,7 +2406,7 @@ function scrambleCanvasLocally(source, grid, key) {
     nativeDrawImage(ctx, cleanPadded, s.x, s.y, tw, th, 0, 0, tw, th);
     ctxNative(ctx, 'restore', );
   }
-  cleanPadded.width = 0; cleanPadded.height = 0;
+  setCanvasSize(cleanPadded, 0, 0);
   return { canvas: scrambled, meta: { plan, origW: w, origH: h, padW: pw, padH: ph } };
 }
 
@@ -2440,7 +2540,7 @@ export class ProtectedImage {
         // downgrade the closed root to an open one.
         const attachInit = { mode: o.shadow === 'open' ? 'open' : 'closed' };
         root = NATIVES.attachShadow
-          ? NATIVES.attachShadow.call(this.#host, attachInit)
+          ? nativeCall(NATIVES.attachShadow, this.#host, [attachInit])
           : this.#host.attachShadow(attachInit);
       } catch {
         // Never silently downgrade a requested closed/open shadow root to
@@ -3380,7 +3480,7 @@ export class ProtectedImage {
 
   _bitmapViaImage(blob, timeoutMs = DEFAULTS.fetchTimeoutMs) {
     return new Promise((resolve, reject) => {
-      const url = NATIVES.createObjectURL ? NATIVES.createObjectURL.call(URL, blob) : URL.createObjectURL(blob);
+      const url = NATIVES.createObjectURL ? nativeCall(NATIVES.createObjectURL, URL, [blob]) : URL.createObjectURL(blob);
       const img = new (NATIVES.ImageCtor || Image)(); // detached, never inserted into the document
       let settled = false;
       const finish = (fn, value) => {
@@ -3389,7 +3489,7 @@ export class ProtectedImage {
         clearTimeout(timer);
         img.onload = null;
         img.onerror = null;
-        (NATIVES.revokeObjectURL ? NATIVES.revokeObjectURL.call(URL, url) : URL.revokeObjectURL(url));
+        (NATIVES.revokeObjectURL ? nativeCall(NATIVES.revokeObjectURL, URL, [url]) : URL.revokeObjectURL(url));
         fn(value);
       };
       const timer = setTimeout(() => {
@@ -4268,12 +4368,12 @@ export class ProtectedImage {
     define('toDataURL', function (type, quality) {
       self.#attemptHandler('extract-dataurl');
       const d = decoy();
-      return d ? realToDataURL.call(d, type, quality) : 'data:,';
+      return d ? nativeCall(realToDataURL, d, [type, quality]) : 'data:,';
     });
     define('toBlob', function (cb, type, quality) {
       self.#attemptHandler('extract-blob');
       const d = decoy();
-      if (d) realToBlob.call(d, cb, type, quality);
+      if (d) nativeCall(realToBlob, d, [cb, type, quality]);
       else if (cb) cb(new Blob([], { type: type || 'image/png' }));
     });
     if ('captureStream' in canvas) {
@@ -4404,7 +4504,7 @@ export class ProtectedImage {
       for (const [fx, fy] of points) {
         const x = Math.min(w - 1, Math.max(0, Math.round(fx * w)));
         const y = Math.min(h - 1, Math.max(0, Math.round(fy * h)));
-        NATIVES.glReadPixels.call(gl, x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        nativeCall(NATIVES.glReadPixels, gl, [x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px]);
         if (px[0] + px[1] + px[2] > 24) probe.push({ x, y, r: px[0], g: px[1], b: px[2] });
       }
       if (probe.length) {
@@ -4432,7 +4532,7 @@ export class ProtectedImage {
       const px = new Uint8Array(4);
       let preserved = true;
       for (const p of probe) {
-        NATIVES.glReadPixels.call(gl, p.x, p.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        nativeCall(NATIVES.glReadPixels, gl, [p.x, p.y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px]);
         if (px[0] !== p.r || px[1] !== p.g || px[2] !== p.b) { preserved = false; break; }
       }
       if (preserved) this.#flagPreserveRewrite('canary');
@@ -4471,7 +4571,7 @@ export class ProtectedImage {
       // post-composite readPixels canary below catches behaviorally).
       try {
         const attrs = NATIVES.glGetContextAttributes
-          ? NATIVES.glGetContextAttributes.call(gl)
+          ? nativeCall(NATIVES.glGetContextAttributes, gl, [])
           : glNative(gl, 'getContextAttributes', );
         if (attrs && attrs.preserveDrawingBuffer === true) {
           const lose = gl.getExtension && glNative(gl, 'getExtension', 'WEBGL_lose_context');
@@ -4769,7 +4869,7 @@ export class ProtectedImage {
     const meta = this.#glMeta || this.#meta;
     const source = this.#glSource || this.#bitmap;
     const texImage = (...args) => (NATIVES.glTexImage2D
-      ? NATIVES.glTexImage2D.call(gl, ...args)
+      ? nativeCall(NATIVES.glTexImage2D, gl, args)
       : glNative(gl, 'texImage2D', ...args));
     glNative(gl, 'activeTexture', gl.TEXTURE0);
     glNative(gl, 'bindTexture', gl.TEXTURE_2D, this.#glTex);

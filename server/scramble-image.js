@@ -440,24 +440,35 @@ async function watermarkOverlayRaw(w, h, svg) {
   if (hit) {
     watermarkOverlayCache.delete(key);
     watermarkOverlayCache.set(key, hit);
-    return hit.data;
+    return hit;
   }
   const data = await getSharp()(svg).ensureAlpha().raw().toBuffer();
-  watermarkOverlayCache.set(key, { data, bytes: data.length });
+  // Watermark glyphs cover a few percent of pixels; precompute the
+  // nonzero-alpha offsets once so each blend touches only those
+  // pixels instead of scanning the whole frame (same math, same
+  // output bytes — alpha-0 pixels are identity by definition).
+  const sparse = [];
+  for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) sparse.push(i - 3);
+  const entry = { data, sparse: Uint32Array.from(sparse), bytes: data.length };
+  watermarkOverlayCache.set(key, entry);
   watermarkOverlayCacheBytes += data.length;
   while (watermarkOverlayCache.size > 4 || watermarkOverlayCacheBytes > 32 * 1024 * 1024) {
     const [oldKey, old] = watermarkOverlayCache.entries().next().value;
     watermarkOverlayCache.delete(oldKey);
     watermarkOverlayCacheBytes -= old.bytes;
   }
-  return data;
+  return entry;
 }
 
-function blendOverlayInPlace(dst, overlay) {
+function blendOverlayInPlace(dst, overlayEntry) {
+  const overlay = overlayEntry.data ?? overlayEntry;
   const n = Math.min(dst.length, overlay.length);
-  for (let i = 0; i + 3 < n; i += 4) {
+  const offsets = overlayEntry.sparse;
+  const count = offsets ? offsets.length : (n >> 2);
+  for (let k = 0; k < count; k++) {
+    const i = offsets ? offsets[k] : k * 4;
+    if (i + 3 >= n) continue;
     const a = overlay[i + 3];
-    if (a === 0) continue;
     if (a === 255) {
       dst[i] = overlay[i]; dst[i + 1] = overlay[i + 1]; dst[i + 2] = overlay[i + 2]; dst[i + 3] = 255;
       continue;
@@ -825,16 +836,77 @@ export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h
  * worker_threads worker (lazily spawned, respawned after crashes). */
 let detectWorker = null;
 let detectSeq = 0;
-const detectPending = new Map();
+const detectQueue = [];
+let detectActive = null;
+let detectWorkerConfig = { maxPending: 64, timeoutMs: 120_000 };
+
+/**
+ * Bound the forensic detect worker: pending jobs (active + queued)
+ * are capped so a request flood cannot grow memory without limit,
+ * and each job has a hard timeout after which the worker is
+ * recycled (a pathological suspect must not wedge forensic
+ * capacity forever). Returns the effective config + live depth.
+ */
+export function configureStegoDetectWorker({ maxPending, timeoutMs } = {}) {
+  if (maxPending !== undefined) {
+    if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > 4096) {
+      throw new TypeError('Archx stego detection: maxPending must be an integer in [1, 4096]');
+    }
+    detectWorkerConfig.maxPending = maxPending;
+  }
+  if (timeoutMs !== undefined) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 100 || timeoutMs > 3_600_000) {
+      throw new TypeError('Archx stego detection: timeoutMs must be in [100, 3600000]');
+    }
+    detectWorkerConfig.timeoutMs = timeoutMs;
+  }
+  return { ...detectWorkerConfig, pending: detectQueue.length + (detectActive ? 1 : 0) };
+}
 
 function failDetectWorker(err) {
-  const pending = [...detectPending.values()];
-  detectPending.clear();
+  const jobs = [...(detectActive ? [detectActive] : []), ...detectQueue];
+  detectActive = null;
+  detectQueue.length = 0;
   if (detectWorker) {
     try { detectWorker.terminate(); } catch { /* already gone */ }
     detectWorker = null;
   }
-  for (const entry of pending) entry.reject(err);
+  for (const job of jobs) {
+    if (job.timer) clearTimeout(job.timer);
+    job.reject(err);
+  }
+}
+
+function pumpDetectQueue() {
+  if (detectActive || detectQueue.length === 0) return;
+  const job = detectQueue.shift();
+  detectActive = job;
+  let worker;
+  try {
+    worker = ensureDetectWorker();
+  } catch (err) {
+    detectActive = null;
+    job.reject(err);
+    pumpDetectQueue();
+    return;
+  }
+  job.timer = setTimeout(() => {
+    if (detectActive !== job) return;
+    detectActive = null;
+    try { worker.terminate(); } catch { /* already gone */ }
+    if (detectWorker === worker) detectWorker = null;
+    job.reject(new Error(`Archx stego detection timed out after ${job.timeoutMs}ms`));
+    pumpDetectQueue();
+  }, job.timeoutMs);
+  job.timer.unref?.();
+  try {
+    worker.postMessage(job.message, job.transfer);
+  } catch (err) {
+    clearTimeout(job.timer);
+    detectActive = null;
+    job.reject(err);
+    pumpDetectQueue();
+  }
 }
 
 function ensureDetectWorker() {
@@ -842,49 +914,87 @@ function ensureDetectWorker() {
   const worker = new Worker(new URL('./detect-worker.js', import.meta.url), { type: 'module' });
   worker.unref();
   worker.on('message', (msg) => {
-    const entry = detectPending.get(msg?.id);
-    if (!entry) return;
-    detectPending.delete(msg.id);
-    if (msg.ok) entry.resolve(msg.result);
-    else entry.reject(new Error(`Archx stego detection failed: ${msg.error || 'worker error'}`));
+    const job = detectActive;
+    if (!job || msg?.id !== job.id) return;
+    detectActive = null;
+    if (job.timer) clearTimeout(job.timer);
+    if (msg.ok) job.resolve(msg.result);
+    else job.reject(new Error(`Archx stego detection failed: ${msg.error || 'worker error'}`));
+    pumpDetectQueue();
   });
-  worker.on('error', (err) => failDetectWorker(err));
+  worker.on('error', (err) => {
+    if (detectWorker === worker) failDetectWorker(err);
+  });
   worker.on('exit', (code) => {
-    if (code !== 0 && detectPending.size) {
+    // A recycled (timed-out) worker's exit can arrive AFTER its
+    // replacement is already serving jobs; only the CURRENT
+    // worker's exit may fail pending work.
+    if (detectWorker !== worker) return;
+    if (code !== 0 && (detectActive || detectQueue.length)) {
       failDetectWorker(new Error(`Archx stego detection worker exited (${code})`));
-    } else if (detectWorker === worker) detectWorker = null;
+    } else detectWorker = null;
   });
   detectWorker = worker;
   return worker;
 }
 
-/**
- * Run StegoMark detection off the main thread. Same options/results
- * as `detectStegoFingerprint` from the core; calls are serialized
- * through one worker (the detector is CPU-bound — parallel workers
- * would multiply RAM per plane set).
- */
+function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
+  const pending = detectQueue.length + (detectActive ? 1 : 0);
+  if (pending >= detectWorkerConfig.maxPending) {
+    return Promise.reject(new Error(
+      `Archx stego detection queue is full (${detectWorkerConfig.maxPending} pending); retry later or raise maxPending`,
+    ));
+  }
+  const id = ++detectSeq;
+  const timeoutMs = Number.isFinite(options?.timeoutMs) && options.timeoutMs >= 100
+    ? Math.min(options.timeoutMs, 3_600_000)
+    : detectWorkerConfig.timeoutMs;
+  return new Promise((resolve, reject) => {
+    // Copy into a standalone buffer so caller mutation cannot race
+    // the worker, then TRANSFER it (zero-copy handoff).
+    const copy = new Uint8Array(messageBytes.length);
+    copy.set(messageBytes);
+    detectQueue.push({
+      id, resolve, reject, timeoutMs, timer: null,
+      message: { id, kind, rgba: copy, w, h, ...payload },
+      transfer: [copy.buffer],
+    });
+    pumpDetectQueue();
+  });
+}
+
 export function detectStegoFingerprintInWorker(rgba, w, h, options = {}) {
   const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || bytes.length < w * h * 3) {
     return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent'));
   }
-  const worker = ensureDetectWorker();
-  const id = ++detectSeq;
-  return new Promise((resolve, reject) => {
-    detectPending.set(id, { resolve, reject });
-    try {
-      // Copy into a standalone buffer so caller mutation cannot race
-      // the worker; keeps the transfer list free of SharedArrayBuffer
-      // edge cases across runtimes.
-      const copy = new Uint8Array(bytes.length);
-      copy.set(bytes);
-      worker.postMessage({ id, rgba: copy, w, h, options });
-    } catch (err) {
-      detectPending.delete(id);
-      reject(err);
-    }
-  });
+  const { timeoutMs, ...detectOptions } = options || {};
+  return enqueueDetectJob(bytes, w, h, 'detect', { options: detectOptions }, { timeoutMs });
+}
+
+/**
+ * Screen one suspect against MANY keys in a single worker job: the
+ * pixel buffer crosses the thread boundary once, the luma/integral
+ * planes are built once, each key gets a fast native screen, and
+ * only keys showing signal escalate to the full search. This is
+ * the supported shape for "which recipient key marked this leak?"
+ * sweeps — never a loop of full detects on a request path.
+ */
+export function batchDetectStegoInWorker(rgba, w, h, keys, options = {}) {
+  const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || bytes.length < w * h * 3) {
+    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent'));
+  }
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > 512
+      || keys.some((k) => typeof k !== 'string')) {
+    return Promise.reject(new TypeError('Archx stego detection: keys must be an array of 1..512 strings'));
+  }
+  const { timeoutMs, escalateTop, ...detectOptions } = options || {};
+  return enqueueDetectJob(bytes, w, h, 'batch', {
+    keys: [...keys],
+    escalateTop: Number.isSafeInteger(escalateTop) && escalateTop >= 0 ? Math.min(escalateTop, 32) : 2,
+    options: detectOptions,
+  }, { timeoutMs });
 }
 
 export function closeStegoDetectWorker() {

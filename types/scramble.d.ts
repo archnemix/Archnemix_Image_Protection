@@ -171,6 +171,8 @@ export interface StegoDetectOptions {
   searchMirror?: boolean;
   /** Probe 90°/270°-rotated variants of the suspect (default true). */
   searchRotation?: boolean;
+  /** Small-angle deskew search, ±6° (default false; forensic opt-in). */
+  searchTilt?: boolean;
   /**
    * Restrict detection to one cell-layout vintage (1 = legacy 32-bit
    * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
@@ -203,6 +205,10 @@ export interface StegoDetection {
   mirrorAxis?: 'x' | 'y' | 'xy';
   /** Degrees the suspect was rotated clockwise from the marked original. */
   rotated?: 90 | 270;
+  /** Which diagonal reflection (EXIF 5/7) was undone, if any. */
+  transposed?: 'main' | 'anti';
+  /** Estimated clockwise tilt removed by the deskew search, in degrees. */
+  deskewed?: number;
   /** True when unobserved (erased) code bits were recovered algebraically
    *  (robust: payload-erasure enumeration; standard: bounded assist). */
   erasureDecoded?: boolean;
@@ -218,6 +224,44 @@ export interface StegoDetection {
 export function detectStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, options?: StegoDetectOptions,
 ): StegoDetection;
+
+export interface StegoCollusionCandidate {
+  id?: string | null;
+  payload: string;
+  /** Per-candidate embed key when marks were embedded viewer-scoped. */
+  key?: string;
+}
+export interface StegoCollusionScore {
+  id: string | null;
+  fingerprint: string;
+  /** Mean soft agreement (signed amplitude units) over discriminative bits. */
+  score: number;
+  /** Comparative z-score within the candidate set; ranking aid, never proof. */
+  zScore: number;
+  cellAgreement: number;
+  cells: number;
+  bits: number;
+}
+export interface StegoCollusionAssay {
+  results: StegoCollusionScore[];
+  cells: number;
+  geometry: { scaleX: number; scaleY: number; originX: number; originY: number };
+  profile: 'robust' | 'standard';
+}
+/**
+ * Rank candidate recipients by soft-evidence support in a suspect
+ * image (collusion-averaging investigations). Investigative aid
+ * only — not a Tardos accusation code and never proof on its own.
+ */
+export function assayStegoCollusion(
+  rgba: Uint8Array | Uint8ClampedArray, w: number, h: number,
+  candidates: StegoCollusionCandidate[],
+  options?: {
+    key?: string; profile?: 'standard' | 'robust';
+    gridX?: number; gridY?: number; layoutVersion?: 1 | 2 | 3;
+    geometry?: { scaleX?: number; scaleY?: number; originX?: number; originY?: number } | null;
+  },
+): StegoCollusionAssay;
 
 export function scramblePixels(
   rgba: Uint8Array | Uint8ClampedArray, pw: number, ph: number, plan: ScramblePlan,

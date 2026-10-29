@@ -63,6 +63,8 @@ export interface ArchxProcessingOptions {
   webpEffort?: number;
   webpSmartSubsample?: boolean;
   avifEffort?: number;
+  /** Permit request-path AVIF effort > 2 (otherwise clamped to 2; pre-build offline instead). */
+  allowSlowRequestAvif?: boolean;
   avifChromaSubsampling?: '4:2:0' | '4:4:4';
   resizeKernel?: 'nearest' | 'cubic' | 'mitchell' | 'lanczos2' | 'lanczos3' | 'mks2013' | 'mks2021';
   pngCompressionLevel?: number;
@@ -124,6 +126,8 @@ export interface ArchxServerOptions {
     | Array<'ip' | 'userAgent' | 'ua' | 'user-agent' | 'session'>;
   oneTimeTokens?: boolean;
   oneTimeTokenMaxEntries?: number;
+  /** Scale bounded-store defaults for small containers ('compact') or normal hosts ('standard', default). */
+  memoryProfile?: 'standard' | 'compact';
   proofOfPossession?: 'off' | 'optional' | 'required';
   grid?: number;
   /** 1 = legacy 32-bit plan seed, 2 = 128-bit seed (default since 1.15).
@@ -252,7 +256,8 @@ export interface ArchxScrambleImageOptions {
   format?: ArchxFormat;
   encrypt?: boolean;
   aesKey?: string | Uint8Array;
-  watermark?: string | { text?: string; opacity?: number; color?: string; [key: string]: unknown } | null;
+  /** string/object/function to mark; `false` or `null` opts this view out of the global serverWatermark. */
+  watermark?: string | { text?: string; opacity?: number; color?: string; [key: string]: unknown } | null | false;
   forensic?: boolean | ArchxForensicOptions;
   forensicSeed?: string;
   stegoPayload?: string;
@@ -299,8 +304,24 @@ export function detectStegoFingerprintInWorker(
   rgba: Uint8Array,
   w: number,
   h: number,
-  options?: Record<string, unknown>,
+  options?: Record<string, unknown> & { timeoutMs?: number },
 ): Promise<Record<string, unknown>>;
+/** Bound the forensic worker queue (default 64 pending) and per-job timeout (default 120s). */
+export function configureStegoDetectWorker(options?: {
+  maxPending?: number; timeoutMs?: number;
+}): { maxPending: number; timeoutMs: number; pending: number };
+/**
+ * Screen one suspect against many keys in a single worker job:
+ * shared planes, cheap native screen per key, full search only for
+ * the top-ranked keys (escalateTop, default 2).
+ */
+export function batchDetectStegoInWorker(
+  rgba: Uint8Array,
+  w: number,
+  h: number,
+  keys: string[],
+  options?: Record<string, unknown> & { timeoutMs?: number; escalateTop?: number },
+): Promise<Array<{ key: string; escalated: boolean; result: Record<string, unknown> }>>;
 export function closeStegoDetectWorker(): void;
 export default createArchxMiddleware;
 

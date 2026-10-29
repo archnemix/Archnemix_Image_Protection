@@ -36,6 +36,7 @@ import {
   configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
   acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
+  batchDetectStegoInWorker, configureStegoDetectWorker,
 } from './scramble-image.js';
 
 // The documented /server public surface includes the image-processing
@@ -48,6 +49,7 @@ export {
   configureSharpSecurity, configureSharpPerformance, generateKeyBase64,
   acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
+  batchDetectStegoInWorker, configureStegoDetectWorker,
 };
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -214,8 +216,9 @@ export class BoundedTtlSet {
   #map = new Map();
   #timer = null;
 
-  constructor({ maxEntries = 100000, cleanupIntervalMs = 60000 } = {}) {
+  constructor({ maxEntries = 100000, cleanupIntervalMs = 60000, onLiveEvict = null } = {}) {
     this.maxEntries = maxEntries;
+    this.onLiveEvict = typeof onLiveEvict === 'function' ? onLiveEvict : null;
     if (cleanupIntervalMs > 0) {
       this.#timer = setInterval(() => this.cleanup(), cleanupIntervalMs);
       this.#timer.unref?.();
@@ -243,11 +246,21 @@ export class BoundedTtlSet {
       // one near-expiry JTI re-opens replay for that single signed,
       // PoP-bound, re-authorized token only; failing everyone is worse.
       let budget = 1024 + (this.maxEntries >> 6);
+      let liveEvicted = 0;
       for (const [k, e] of this.#map) {
         if (budget-- <= 0) break;
         if (e <= now) { this.#map.delete(k); continue; }
         if (this.#map.size < this.maxEntries) break;
         this.#map.delete(k);
+        liveEvicted++;
+      }
+      // A live (unexpired) entry lost its replay protection early.
+      // That is the S4 safety valve firing: the deployment is minting
+      // faster than the store can hold one TTL of JTIs. Surface it so
+      // operators can raise oneTimeTokenMaxEntries or tighten mint
+      // rates instead of discovering it from a replayed token.
+      if (liveEvicted > 0 && this.onLiveEvict) {
+        try { this.onLiveEvict(liveEvicted); } catch { /* observer must not break claims */ }
       }
       if (this.#map.size >= this.maxEntries) return false; // pathological disorder only
     }
@@ -386,6 +399,7 @@ export function createMemoryStateStore({
   maxCacheEntries = 100,
   maxCacheBytes = 64 * 1024 * 1024,
   cleanupIntervalMs = 60000,
+  onLiveEvict = null,
 } = {}) {
   const claimSets = new Map();
   const windowLimiters = new Map();
@@ -398,7 +412,7 @@ export function createMemoryStateStore({
     let set = claimSets.get(namespace);
     if (!set) {
       if (claimSets.size >= 16) throw new Error('too many state-store claim namespaces');
-      set = new BoundedTtlSet({ maxEntries, cleanupIntervalMs });
+      set = new BoundedTtlSet({ maxEntries, cleanupIntervalMs, onLiveEvict });
       claimSets.set(namespace, set);
     }
     return set;
@@ -610,7 +624,7 @@ function isPlainObject(value) {
 
 const TOKEN_CLAIM_FIELDS = new Set([
   'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm',
-  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'b', 'jkt',
+  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'nwm', 'b', 'jkt',
 ]);
 
 /** Strict server-side claim validation for v2 Archx image tokens. Signature
@@ -645,6 +659,8 @@ export function validateTokenClaims(payload, {
     if (payload.sgi !== undefined && payload.sgi !== 1) return false;
     if (payload.sgk !== undefined && payload.sgk !== 1) return false;
     if (payload.nsg !== undefined && payload.nsg !== 1) return false;
+    if (payload.nwm !== undefined && payload.nwm !== 1) return false;
+    if (payload.nwm === 1 && payload.wm != null) return false; // contradictory watermark claims
     if (payload.sgs !== undefined && (typeof payload.sgs !== 'number' || !Number.isFinite(payload.sgs) || payload.sgs < 1 || payload.sgs > 16)) return false;
     if (payload.sgx !== undefined && (!Number.isInteger(payload.sgx) || payload.sgx < 4 || payload.sgx > 64)) return false;
     if (payload.sgy !== undefined && (!Number.isInteger(payload.sgy) || payload.sgy < 4 || payload.sgy > 64)) return false;
@@ -856,7 +872,8 @@ export function normalizeAuthorizationResult(auth) {
     if ('format' in auth && auth.format !== undefined && !['webp', 'png', 'jpeg', 'avif'].includes(auth.format)) return null;
     if ('ttlSec' in auth && auth.ttlSec !== undefined &&
         (!Number.isInteger(auth.ttlSec) || auth.ttlSec < 5 || auth.ttlSec > 900)) return null;
-    if ('watermark' in auth && auth.watermark != null && typeof auth.watermark !== 'function' &&
+    if ('watermark' in auth && auth.watermark != null && auth.watermark !== false &&
+        typeof auth.watermark !== 'function' &&
         !validateWatermarkValue(auth.watermark)) return null;
     if ('steganography' in auth && auth.steganography !== undefined && !validateStegoConfig(auth.steganography)) return null;
     if ('stegoFingerprint' in auth && auth.stegoFingerprint !== undefined &&
@@ -890,12 +907,12 @@ function inspectServerConfig(options = {}) {
     'blockUntrustedSharpLoaders', 'cacheMasters',
     'callbackTimeoutMs', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken',
     'forensicScope', 'format', 'grid',
-    'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
+    'allowSlowRequestAvif', 'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
     'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'onAbuse',
     'onDelivery', 'onProvenanceIssue', 'onSecurityEvent', 'onStegoIssue', 'oneTimeTokenMaxEntries',
     'oneTimeTokens', 'proofOfPossession', 'provenanceFailure',
-    'outputCacheDir', 'outputCacheDiskMaxBytes', 'outputCacheDiskMaxEntries',
+    'outputCacheDir', 'memoryProfile', 'outputCacheDiskMaxBytes', 'outputCacheDiskMaxEntries',
     'outputCacheDiskTtlMs', 'outputCacheMax', 'outputCacheMaxBytes', 'processing', 'processingConcurrency',
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
@@ -1138,7 +1155,7 @@ function inspectServerConfig(options = {}) {
     'maxConcurrentProcessing', 'processingQueueMax', 'processingQueueTimeoutMs',
     'blockUntrustedSharpLoaders', 'webpEffort', 'encoderEffort', 'webpSmartSubsample',
     'smartSubsample', 'resizeKernel', 'pngCompressionLevel', 'jpegChromaSubsampling',
-    'sharpConcurrency', 'sharpCache', 'avifEffort', 'avifChromaSubsampling',
+    'sharpConcurrency', 'sharpCache', 'avifEffort', 'avifChromaSubsampling', 'allowSlowRequestAvif',
   ]));
   const pick = (...names) => {
     for (const name of names) {
@@ -1147,6 +1164,15 @@ function inspectServerConfig(options = {}) {
     }
     return undefined;
   };
+  // memoryProfile scales the DEFAULTS of the bounded in-memory
+  // stores for small containers; explicit options always win.
+  const compactProfile = options.memoryProfile === 'compact';
+  // AVIF effort >2 costs CPU-seconds per encode: on the REQUEST path
+  // it is clamped to 2 unless explicitly allowed (pre-build offline
+  // with buildArchxAssets for high-effort AVIF catalogs).
+  const avifEffortEffective = pick('allowSlowRequestAvif') === true
+    ? (pick('avifEffort') ?? 4)
+    : Math.min(pick('avifEffort') ?? 4, 2);
   checkInt('maxInputBytes', pick('maxInputBytes'), 1024, 500 * 1024 * 1024);
   checkInt('maxInputPixels', pick('maxInputPixels'), 10000, 268402689);
   checkInt('maxInputWidth', pick('maxInputWidth'), 64, 65536);
@@ -1163,6 +1189,11 @@ function inspectServerConfig(options = {}) {
   checkInt('sharpConcurrency', pick('sharpConcurrency'), 0, 1024);
   checkBoolean('sharpCache', pick('sharpCache'));
   checkInt('avifEffort', pick('avifEffort'), 0, 9);
+  checkBoolean('allowSlowRequestAvif', pick('allowSlowRequestAvif'));
+  if (options.memoryProfile !== undefined &&
+      options.memoryProfile !== 'standard' && options.memoryProfile !== 'compact') {
+    fail("memoryProfile must be 'standard' or 'compact'");
+  }
   if (pick('avifChromaSubsampling') !== undefined &&
       !['4:2:0', '4:4:4'].includes(pick('avifChromaSubsampling'))) {
     fail("processing.avifChromaSubsampling must be '4:2:0' or '4:4:4'");
@@ -1263,8 +1294,8 @@ function inspectServerConfig(options = {}) {
     forensicScope: options.forensicScope ?? 'viewer',
     tokenMethods: Object.freeze([...new Set((tokenMethodsRaw || ['POST']).map((m) => String(m).toUpperCase()))]),
     oneTimeTokens: options.oneTimeTokens !== false,
-    rateLimitMaxClients: options.rateLimitMaxClients ?? options.maxTrackedClients ?? 10000,
-    oneTimeTokenMaxEntries: options.oneTimeTokenMaxEntries ?? 100000,
+    rateLimitMaxClients: options.rateLimitMaxClients ?? options.maxTrackedClients ?? (compactProfile ? 2500 : 10000),
+    oneTimeTokenMaxEntries: options.oneTimeTokenMaxEntries ?? (compactProfile ? 50000 : 250000),
     processing: Object.freeze({
       maxInputBytes: pick('maxInputBytes') ?? 50 * 1024 * 1024,
       maxInputPixels: pick('maxInputPixels') ?? 50000000,
@@ -1279,13 +1310,14 @@ function inspectServerConfig(options = {}) {
       resizeKernel: pick('resizeKernel') ?? 'lanczos3',
       pngCompressionLevel: pick('pngCompressionLevel') ?? 9,
       jpegChromaSubsampling: pick('jpegChromaSubsampling') ?? '4:4:4',
-      avifEffort: pick('avifEffort') ?? 4,
+      avifEffort: avifEffortEffective,
+      allowSlowRequestAvif: pick('allowSlowRequestAvif') === true,
       avifChromaSubsampling: pick('avifChromaSubsampling') ?? '4:2:0',
       sharpConcurrency: pick('sharpConcurrency') ?? 0,
       sharpCache: pick('sharpCache'),
     }),
     processingConcurrency: pick('processingConcurrency', 'maxConcurrentProcessing') ?? Math.max(1, Math.min(4, availableParallelism || 2)),
-    processingQueueMax: pick('processingQueueMax') ?? 100,
+    processingQueueMax: pick('processingQueueMax') ?? (compactProfile ? 25 : 100),
     processingQueueTimeoutMs: pick('processingQueueTimeoutMs') ?? 5000,
     quotas: Object.freeze({
       windowMs: quotas.windowMs ?? 3600000,
@@ -1299,13 +1331,14 @@ function inspectServerConfig(options = {}) {
       windowMs: abuse.windowMs ?? 600000,
       action: abuse.action ?? 'event',
     }),
-    outputCacheMax: options.outputCacheMax ?? 100,
-    outputCacheMaxBytes: options.outputCacheMaxBytes ?? 64 * 1024 * 1024,
+    outputCacheMax: options.outputCacheMax ?? (compactProfile ? 32 : 100),
+    outputCacheMaxBytes: options.outputCacheMaxBytes ?? (compactProfile ? 16 : 64) * 1024 * 1024,
     outputCacheDir: options.outputCacheDir ?? null,
     outputCacheDiskMaxBytes: options.outputCacheDiskMaxBytes ?? 2 * 1024 * 1024 * 1024,
     outputCacheDiskMaxEntries: options.outputCacheDiskMaxEntries ?? 20000,
     outputCacheDiskTtlMs: options.outputCacheDiskTtlMs ?? 30 * 24 * 3600 * 1000,
-    masterCacheMaxBytes: options.masterCacheMaxBytes ?? 128 * 1024 * 1024,
+    masterCacheMaxBytes: options.masterCacheMaxBytes ?? (compactProfile ? 32 : 128) * 1024 * 1024,
+    memoryProfile: compactProfile ? 'compact' : 'standard',
     cacheMasters: options.cacheMasters !== false,
     trustProxy: options.trustProxy === true && (options.trustedProxyHops ?? 0) > 0,
     trustedProxyHops: options.trustedProxyHops ?? 0,
@@ -1352,8 +1385,11 @@ function inspectServerConfig(options = {}) {
   if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
   if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only and can be reassembled keylessly by tile-edge continuity (jigsaw) solvers — enable encrypt:true for payload secrecy');
   const avifEffortWarn = options.processing?.avifEffort ?? options.avifEffort;
-  if (options.format === 'avif' && (avifEffortWarn ?? 4) > 2) {
-    warn(`dynamic AVIF encoding at effort ${avifEffortWarn ?? 4} costs multiple CPU-seconds per image and can exceed processingTimeoutSec at large sizes; keep avifEffort <= 2 on request paths or pre-build AVIF offline`);
+  const allowSlowAvif = (options.processing?.allowSlowRequestAvif ?? options.allowSlowRequestAvif) === true;
+  if (options.format === 'avif' && (avifEffortWarn ?? 4) > 2 && allowSlowAvif) {
+    warn(`dynamic AVIF encoding at effort ${avifEffortWarn ?? 4} costs multiple CPU-seconds per image and can exceed processingTimeoutSec at large sizes (allowSlowRequestAvif is set); consider pre-building AVIF offline`);
+  } else if ((avifEffortWarn ?? 4) > 2 && !allowSlowAvif) {
+    warn(`avifEffort ${avifEffortWarn ?? 4} is clamped to 2 on the request path (set allowSlowRequestAvif: true to override, or pre-build AVIF offline)`);
   }
   if (options.scramblePlanVersion === 1) warn('scramblePlanVersion 1 uses a 32-bit plan seed (brute-forceable permutation, ~17 s on a 64-core host); v2 (128-bit) has been the default since 1.15 — v1 remains only for pre-1.10 cached clients');
   if (options.forensic && config.forensicScope !== 'image') warn('viewer-scoped forensic marks make derivatives viewer-specific and reduce output-cache sharing; use forensicScope image for reusable catalog derivatives');
@@ -1381,6 +1417,7 @@ export function auditArchxServerConfig(options = {}) {
       signingKeyCount: Object.keys(config.signingKeys).length,
       tokenMethods: config.tokenMethods,
       oneTimeTokens: config.oneTimeTokens,
+      oneTimeTokenMaxEntries: config.oneTimeTokenMaxEntries,
       maxWidthCap: config.maxWidthCap,
       widthBuckets: config.widthBuckets,
       batchTokenMaxItems: config.batchTokenMaxItems,
@@ -1533,6 +1570,9 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (summary.allowQueryTokens) blockers.push('allowQueryTokens must be false so bearer tokens stay out of URLs, history, Referer headers, and logs');
     if (summary.proofOfPossession !== 'required') blockers.push("proofOfPossession must be explicitly set to 'required' for the hardened baseline, after confirming every supported client can present proofs");
     if (!summary.oneTimeTokens) blockers.push('oneTimeTokens must be enabled');
+    if (summary.oneTimeTokens && summary.oneTimeTokenMaxEntries < 10000) {
+      blockers.push('oneTimeTokenMaxEntries is very small: the replay store must hold a full token-TTL of JTIs at peak mint rate or live entries are evicted (see archx.replay_store_evicted)');
+    }
     if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are reassembled keylessly by tile-edge (jigsaw) solvers in well under a second');
     if (summary.scramblePlanVersion !== 2) blockers.push('scramblePlanVersion must be 2: the v1 plan seed is 32-bit and brute-forceable');
     if (summary.tokenMethods.some((method) => method !== 'POST')) blockers.push("tokenMethods must be ['POST'] for the hardened baseline");
@@ -1753,7 +1793,28 @@ export function createArchxMiddleware(options = {}) {
   // scope's key. Tokens minted before this change still redeem (the
   // payload fetch succeeds) but their legacy keys will not unscramble
   // post-upgrade derivatives — a one-TTL migration window.
-  const variantKeyScope = (wClaim, qClaim, fmtClaim) => `w${wClaim}:q${qClaim}:f${fmtClaim}`;
+  // Per-image keys are scoped to everything that changes the delivered
+  // bytes: variant (w/q/fmt, since 1.15) plus digests of the visible
+  // watermark, forensic seed, and stego fingerprint (since 1.17). A
+  // key minted for a watermarked preview therefore cannot open the
+  // unwatermarked container of the same w:q:fmt even if its ciphertext
+  // is obtained — tier isolation holds by construction, not by
+  // transport control. All inputs come from signed claims (or values
+  // deterministically derived from them) at redemption, and from the
+  // identical derivations over the about-to-be-signed payload at mint.
+  const variantKeyScope = ({ w, q, fmt, wm, forensicSeed, stegoPayload }, keySecret) => {
+    const wmPart = wm ? hmacShort('wm', JSON.stringify(wm), 12, keySecret) : '0';
+    const fxPart = forensicSeed ? hmacShort('fxs', forensicSeed, 12, keySecret) : '0';
+    const sgPart = stegoPayload ? hmacShort('sg', stegoPayload, 12, keySecret) : '0';
+    return `w${w}:q${q}:f${fmt}:wm${wmPart}:fx${fxPart}:sg${sgPart}`;
+  };
+  const computeForensicSeed = (imageId, payloadLike, keySecret) => (forensic
+    ? hmacShort('forensic', forensicScope === 'image'
+      ? `${imageId}:image`
+      : forensicPerToken
+        ? `${imageId}:${payloadLike.n}:${payloadLike.th || payloadLike.vh || ''}`
+        : `${imageId}:static:${payloadLike.th || payloadLike.vh || ''}`, 32, keySecret)
+    : null);
   const deriveScrambleKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
     scrambleKeyMode === 'per-token'
       ? nonce
@@ -1819,11 +1880,31 @@ export function createArchxMiddleware(options = {}) {
   const outputCache = new Map(); // cacheKey -> Buffer; entry- and byte-bounded LRU
   let outputCacheBytes = 0;
   const ownsStateStore = !cfg.stateStore;
+  // Live-eviction telemetry for the built-in store: if the one-time
+  // replay store ever evicts an unexpired JTI (mint rate x TTL exceeds
+  // capacity), say so loudly (throttled) instead of silently reopening
+  // a replay window. External stores own their eviction semantics.
+  let lastEvictEventAt = 0;
+  let pendingEvictions = 0;
+  const noteLiveEviction = (count) => {
+    pendingEvictions += count;
+    const now = Date.now();
+    if (now - lastEvictEventAt >= 60000) {
+      lastEvictEventAt = now;
+      const evicted = pendingEvictions;
+      pendingEvictions = 0;
+      emitSecurityEvent('archx.replay_store_evicted', null, {
+        phase: 'state-store', status: 503,
+        reason: `live-jti-evicted:${evicted}`,
+      });
+    }
+  };
   const stateStore = cfg.stateStore || createMemoryStateStore({
     maxClients: cfg.rateLimitMaxClients,
     maxEntries: cfg.oneTimeTokenMaxEntries,
     maxCacheEntries: cfg.outputCacheMax,
     maxCacheBytes: cfg.outputCacheMaxBytes,
+    onLiveEvict: noteLiveEviction,
   });
   const stateStoreUnavailable = (cause) => {
     const err = new Error('Archx state store unavailable');
@@ -2782,8 +2863,14 @@ export function createArchxMiddleware(options = {}) {
     // authorize() may tighten (or modestly extend) this token's lifetime;
     // normalizeAuthorizationResult has already bounded it to 5..900 s.
     const exp = iat + (Number.isInteger(entitlement.ttlSec) ? entitlement.ttlSec * 1000 : ttlMs);
+    // `watermark: false` (or null) from authorize is an explicit
+    // per-viewer opt-out of the global serverWatermark — e.g. paid
+    // tiers see no visible mark. Previously `false` failed value
+    // validation and denied the whole authorization.
     const watermark = await resolveWatermark(
-      entitlement.watermark ?? serverWatermark,
+      'watermark' in entitlement && entitlement.watermark !== undefined
+        ? entitlement.watermark
+        : serverWatermark,
       { req, id, nonce, viewerId, trace, exp },
     );
     const tokenPayload = {
@@ -2798,6 +2885,9 @@ export function createArchxMiddleware(options = {}) {
     if (trace.hash) tokenPayload.th = trace.hash;
     if (proofThumbprint) tokenPayload.jkt = proofThumbprint;
     if (watermark) tokenPayload.wm = watermark;
+    else if (serverWatermark && (entitlement.watermark === false || entitlement.watermark === null)) {
+      tokenPayload.nwm = 1; // entitlement explicitly opted this view out
+    }
 
     // Direct delivery-quality control. Your authorize() entitlement wins;
     // the browser's q=… request is honoured only when you opt in.
@@ -2969,11 +3059,21 @@ export function createArchxMiddleware(options = {}) {
       url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
       cleanUrl: imagePath,
       token,
-      key: deriveScrambleKey(id, nonce, secret, variantKeyScope(w, deliveryQuality, deliveryFormat)),
+      key: deriveScrambleKey(id, nonce, secret, variantKeyScope({
+        w, q: deliveryQuality, fmt: deliveryFormat,
+        wm: tokenPayload.wm ?? null,
+        forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+        stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
+      }, secret)),
       grid,
       exp,
     };
-    if (encrypt) out.aesKey = deriveAesKey(id, nonce, secret, variantKeyScope(w, deliveryQuality, deliveryFormat));
+    if (encrypt) out.aesKey = deriveAesKey(id, nonce, secret, variantKeyScope({
+      w, q: deliveryQuality, fmt: deliveryFormat,
+      wm: tokenPayload.wm ?? null,
+      forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+      stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
+    }, secret));
     emitDeliveryEvent('archx.token_issued', {
       id,
       phase: 'token',
@@ -3523,15 +3623,7 @@ export function createArchxMiddleware(options = {}) {
           effectiveFormat = entitlement.format;
         }
 
-        const keyScope = variantKeyScope(payload.w, payload.q ?? quality, payload.fmt || format);
-        const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret, keyScope);
-        const forensicSeed = forensic
-          ? hmacShort('forensic', forensicScope === 'image'
-              ? `${id}:image`
-              : forensicPerToken
-                ? `${id}:${payload.n}:${payload.th || payload.vh || ''}`
-                : `${id}:static:${payload.th || payload.vh || ''}`, 32, issuingSecret)
-          : null;
+        const forensicSeed = computeForensicSeed(id, payload, issuingSecret);
         const deliveryQuality = effectiveQuality;
         const deliveryLossless = effectiveLossless;
         const deliveryFormat = effectiveFormat;
@@ -3559,6 +3651,14 @@ export function createArchxMiddleware(options = {}) {
               perToken: payload.sgi === 1 ? false : payload.sgp !== 0,
             }))
           : null;
+        // Key scope now folds in the mark state (watermark / forensic
+        // seed / stego fingerprint), so it is computed after those are
+        // resolved from the signed claims.
+        const keyScope = variantKeyScope({
+          w: payload.w, q: payload.q ?? quality, fmt: payload.fmt || format,
+          wm: payload.wm ?? null, forensicSeed, stegoPayload,
+        }, issuingSecret);
+        const scrambleKey = deriveScrambleKey(id, payload.n, issuingSecret, keyScope);
         const effectiveStegoProfile = payload.sgv === 2 ? 'robust' : 'standard';
         const effectiveStegoStrength = payload.sgs ?? stegoGlobalCfg.strength ?? 6;
         const effectiveStegoGridX = payload.sgx ?? stegoGlobalCfg.gridX;
@@ -3598,9 +3698,10 @@ export function createArchxMiddleware(options = {}) {
           // + 128-bit stego layouts (v1.13); v5 coherent DC-anchored
           // padding + v3 SHA-256-seeded layouts/signs + staggered
           // watermark rows + JS overlay blend (v1.14); v6 variant-scoped
-          // per-image keys + planVersion 2 default (v1.15). The ks part
+          // per-image keys + planVersion 2 default (v1.15); v7 mark-state
+          // digests in the key scope (v1.17). The ks part
           // pins bytes to the key scope they were scrambled under.
-          'v6', id, masterVersion, `kid:${payload.kid}`, `ks:${keyScope}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
+          'v7', id, masterVersion, `kid:${payload.kid}`, `ks:${keyScope}`, effectiveWidth, `g${grid}`, `pv${scramblePlanVersion}`,
           hmacShort('scramble-key', scrambleKey, 16, issuingSecret),
           aesKey ? hmacShort('aes-key', aesKey, 16, issuingSecret) : 'plain',
           wmCachePart, forensicCachePart,
