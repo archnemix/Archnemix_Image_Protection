@@ -43,7 +43,7 @@ import {
   useJsonParser, useWebCrypto,
 } from './scramble.js';
 
-export const VERSION = '1.17.0';
+export const VERSION = '1.18.0';
 
 /* ================================================================== */
 /* Pristine native references (captured before any page script runs)    */

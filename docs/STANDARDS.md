@@ -31,7 +31,7 @@ called out as a gap with its disposition.
 | Security headers | Met — `nosniff`, `Referrer-Policy: no-referrer`, CORP, sandboxed CSP on payloads, exact-origin CORS only (no `*` with credentials) |
 | Fetch Metadata / CSRF friction | Met — POST + `X-Archx-Request` header required by default; same-site token gating option |
 | Readback resistance | Met (layered, honestly bounded) — instance-poisoned decoys; browser-enforced `SecurityError` via origin tainting on cross-origin deployments; WebGL non-preserved black readback; documented residual: privileged capture (OS/CDP/camera) |
-| Scramble strength | Met — plan v1 (32-bit seed, legacy compat) and **plan v2 (128-bit seed)** selectable per deployment; scramble is documented obfuscation, AES-256-GCM is the encryption layer |
+| Scramble strength | Met — **plan v2 (128-bit seed) is the default** (server since 1.15, library since 1.17); plan v1 (32-bit seed) remains only as an explicitly-warned legacy-compat choice; scramble is documented obfuscation, AES-256-GCM is the encryption layer |
 | CSP friendliness | Met — no eval/inline-script needs; constructable stylesheets in shadow DOM (documented fallback caveat) |
 
 ## C. Cryptography & key management
@@ -103,3 +103,22 @@ called out as a gap with its disposition.
 - **Not independently audited / certified**: no SOC 2, ISO 27001, or
   third-party penetration-test claim is made. This checklist maps
   controls to public frameworks; it is not a certification.
+
+## F. Versioned requirement mapping (review #7)
+
+Checklists age. Each row names the exact framework version, the
+specific requirement, and who owns the control. "Library" means
+Archx implements and tests it; "Operator" means the deploying site
+must configure/operate it; a control is never silently both.
+
+| Framework (version) | Requirement | Owner | Status / evidence |
+|---|---|---|---|
+| OWASP ASVS 5.0.0 §2.2.1 | Anti-automation controls on sensitive flows | Library | Met — distinct-image abuse detection, quotas, one-time tokens, PoP (see section A) |
+| OWASP ASVS 5.0.0 §3.2.2 | Session/token binding to client properties where required | Library + Operator | Library provides DPoP-style PoP and optional IP/UA/session binding; Operator chooses `proofOfPossession`/`bindTokenTo` posture |
+| OWASP ASVS 5.0.0 §6.2.1–6.2.3 | Approved algorithms, unique nonces, authenticated encryption | Library | Met — AES-256-GCM random 96-bit IV (uniqueness unit-tested), HMAC-SHA256 (FIPS/RFC known-answer tests). **No FIPS module-validation claim is made or implied.** |
+| OWASP ASVS 5.0.0 §8.3.4 | Sensitive data not in URLs/logs | Library | Met — header-carried tokens by default; query tokens opt-in only; events are hash-only |
+| OWASP ASVS 5.0.0 §13.2.x | RESTful resource authorization per object | Library | Met — authorize() at mint + redemption, deny-by-default |
+| NIST SSDF 1.1 PS.3.2 | Artifact integrity for releases | Library | Partially — SRI published for the browser bundle, CycloneDX SBOM in CI, packaged-artifact smoke test (`npm run test:pack`); registry-side trusted-publishing enablement is Operator-verified at release time |
+| NIST SSDF 1.1 RV.1.2 | Vulnerability response process | Library | Met as policy — SECURITY.md private reporting; no funded bounty; supported-version window stated there |
+| RFC 9449 (DPoP) | Sender-constrained tokens | Library | **DPoP-style subset**, deliberately narrower (single-request proof to this API, P-256 page key, RFC 7638 thumbprint); not claimed as full RFC 9449 conformance |
+| WCAG 2.2 §§2.2/2.3 | Motion/flashing safety, alternatives | Library + Operator | Library honors `prefers-reduced-motion` by default (temporal effects disabled with a static image, browser-tested) and exposes role/alt semantics; Operator owns page-level conformance and content alternatives |

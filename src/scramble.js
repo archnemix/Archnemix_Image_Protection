@@ -1491,6 +1491,8 @@ function rotateRgba(src, w, h, angleRad) {
   return out;
 }
 
+const STEGO_TIMEOUT = Symbol('archx-stego-timeout');
+
 export function detectStegoFingerprint(rgba, w, h, {
   key = '', gridX, gridY, profile = 'standard', searchOffsets = false, searchGeometry = false,
   // Mirrored-suspect recovery is on by default for every profile (one
@@ -1502,6 +1504,11 @@ export function detectStegoFingerprint(rgba, w, h, {
   // ±6° on a downscaled proxy, refines by raw signal, then confirms
   // at full resolution. Off by default (cost); the CLI exposes --tilt.
   searchTilt = false,
+  // Optional wall-clock budget for the WHOLE search (all layouts,
+  // profiles, and probes share one deadline). On expiry the best
+  // candidate so far is returned with `timedOut: true` instead of
+  // running unbounded forensic stages. 0 (default) = unlimited.
+  maxTimeMs = 0,
   // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
   // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
   // (halves worst-case cost on unmarked suspects).
@@ -1510,7 +1517,11 @@ export function detectStegoFingerprint(rgba, w, h, {
   _tiltProbe = false,
   _layoutVersion = 0,
   _planes = null,
+  _deadline = 0,
 } = {}) {
+  const deadline = _deadline > 0 ? _deadline
+    : (Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0);
+  const deadlineHit = () => deadline > 0 && Date.now() > deadline;
   const concreteLayout = (_layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3)
     ? _layoutVersion
     : (layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 ? layoutVersion : 0);
@@ -1528,22 +1539,26 @@ export function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache };
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache, _deadline: deadline };
     let best = null;
     for (const version of [3, 2, 1]) {
       const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
       if (attempt?.found) return attempt;
       if (!best || (attempt?.confidence ?? 0) > (best.confidence ?? 0)) best = attempt;
+      if (attempt?.timedOut || deadlineHit()) {
+        if (best && !best.timedOut) best = { ...best, timedOut: true };
+        break;
+      }
     }
     return best;
   }
   if (profile === 'auto') {
     const standard = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
     });
     const initial = robust?.found && !standard?.found
       ? robust
@@ -1551,12 +1566,13 @@ export function detectStegoFingerprint(rgba, w, h, {
         ? standard
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
     if (!searchGeometry || initial?.found) return initial;
+    if (deadlineHit()) return initial?.timedOut ? initial : { ...initial, timedOut: true };
     const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
@@ -1574,7 +1590,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const fast = detectStegoFingerprint(variant, w, h, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
           }
@@ -1584,7 +1600,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const fast = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (fast?.found) return { ...fast, rotated: clockwise ? 270 : 90 };
           }
@@ -1594,7 +1610,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const fast = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (fast?.found) return { ...fast, transposed: anti ? 'anti' : 'main' };
           }
@@ -1605,7 +1621,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['standard', 'robust']) {
             const mirrored = detectStegoFingerprint(variant, w, h, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
           }
@@ -1620,7 +1636,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['robust']) {
             const rotated = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
           }
@@ -1630,7 +1646,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           for (const candidateProfile of ['robust']) {
             const transposed = detectStegoFingerprint(variant, h, w, {
               key, gridX, gridY, profile: candidateProfile, searchOffsets,
-              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+              searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
             });
             if (transposed?.found) return { ...transposed, transposed: anti ? 'anti' : 'main' };
           }
@@ -1686,7 +1702,13 @@ export function detectStegoFingerprint(rgba, w, h, {
   const _voteScores = new Float64Array(codeLength);
   const _groups = Array.from({ length: codeLength }, () => []);
   const _segmentResponses = [];
+  let _evalTick = 0;
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
+    // Every search stage funnels through evaluate(); checking the
+    // shared deadline here (amortized) bounds total forensic time
+    // without threading flags through dozens of loops. The sentinel
+    // is caught around the search body below.
+    if (deadline && (++_evalTick & 15) === 0 && Date.now() > deadline) throw STEGO_TIMEOUT;
     const cellW0 = cw * scaleX;
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
@@ -2077,6 +2099,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     return candidate;
   };
 
+  try {
   for (const fx of fractions) for (const fy of fractions) {
     consider(evaluate({ fx, fy }));
     if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
@@ -2391,7 +2414,7 @@ export function detectStegoFingerprint(rgba, w, h, {
             key, gridX, gridY, profile, searchOffsets: true, searchGeometry,
             searchMirror: variants && searchMirror, searchRotation: variants && searchRotation,
             searchTilt: false,
-            _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
           });
         };
         let tiltCandidates = entry.tiltCandidates || null;
@@ -2420,7 +2443,7 @@ export function detectStegoFingerprint(rgba, w, h, {
               const hit = detectStegoFingerprint(view.buf, view.w, view.h, {
                 key, gridX, gridY, profile, searchOffsets: true,
                 searchGeometry: false, searchMirror: false, searchRotation: false, searchTilt: false,
-                _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+                _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
               });
               if (hit?.found) return hit;
               if (!bestHit || (hit?.meanSignal ?? 0) > (bestHit.meanSignal ?? 0)) bestHit = hit;
@@ -2429,6 +2452,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           };
           const samples = [];
           for (let angle = -6; angle <= 6.001; angle += 0.5) {
+            if (deadlineHit()) throw STEGO_TIMEOUT;
             if (Math.abs(angle) < 1e-9) continue;
             const hit = quickDetect(angle);
             if (hit?.found) { tiltScreenHit = { hit, angle }; break; }
@@ -2474,7 +2498,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           if (tiltScreenHit) return { ...tiltScreenHit.hit, deskewed: Math.round(tiltScreenHit.angle * 100) / 100 };
         }
       }
-    } catch { /* tilt search is best-effort */ }
+    } catch (tiltErr) { if (tiltErr === STEGO_TIMEOUT) throw tiltErr; /* tilt search is best-effort */ }
   }
   if (!best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
     try {
@@ -2484,7 +2508,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
           const mirrored = detectStegoFingerprint(variant, w, h, {
             key, gridX, gridY, profile, searchOffsets, searchGeometry,
-            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
         }
@@ -2492,7 +2516,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
           const rotated = detectStegoFingerprint(variant, h, w, {
             key, gridX, gridY, profile, searchOffsets, searchGeometry,
-            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
           });
           if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
         }
@@ -2500,12 +2524,32 @@ export function detectStegoFingerprint(rgba, w, h, {
           const variant = transposedVariant(entry, srcTop, w, h, anti);
           const transposed = detectStegoFingerprint(variant, h, w, {
             key, gridX, gridY, profile, searchOffsets, searchGeometry,
-            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
           });
           if (transposed?.found) return { ...transposed, transposed: anti ? 'anti' : 'main' };
         }
       }
-    } catch { /* variant probes are best-effort */ }
+    } catch (probeErr) { if (probeErr === STEGO_TIMEOUT) throw probeErr; /* variant probes are best-effort */ }
+  }
+  } catch (err) {
+    if (err !== STEGO_TIMEOUT) throw err;
+    if (!best) {
+      return {
+        found: false, fingerprint: '', profile: effectiveProfile, tagScheme: null,
+        layoutVersion: concreteLayout, erasureDecoded: false, erasedBits: 0, observedBits: 0,
+        minBitRepetitions: 0, crcValid: false, corrections: 0, confidence: 0, agreement: 0,
+        meanSignal: 0, cells: 0, offset: { x: 0, y: 0 },
+        geometry: { scaleX: 1, scaleY: 1, originX: 0, originY: 0 }, grid: { x: gx, y: gy },
+        timedOut: true,
+      };
+    }
+    delete best._evidence;
+    delete best._originX;
+    delete best._originY;
+    delete best._scaleX;
+    delete best._scaleY;
+    best.timedOut = true;
+    return best;
   }
   return best;
 }

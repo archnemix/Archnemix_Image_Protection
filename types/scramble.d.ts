@@ -173,6 +173,9 @@ export interface StegoDetectOptions {
   searchRotation?: boolean;
   /** Small-angle deskew search, ±6° (default false; forensic opt-in). */
   searchTilt?: boolean;
+  /** Wall-clock budget for the whole search in ms (0 = unlimited).
+   *  On expiry the best-so-far candidate returns with `timedOut`. */
+  maxTimeMs?: number;
   /**
    * Restrict detection to one cell-layout vintage (1 = legacy 32-bit
    * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
@@ -209,6 +212,9 @@ export interface StegoDetection {
   transposed?: 'main' | 'anti';
   /** Estimated clockwise tilt removed by the deskew search, in degrees. */
   deskewed?: number;
+  /** True when maxTimeMs cut the search short; `found:false` is then
+   *  "not found yet", not "not present". */
+  timedOut?: boolean;
   /** True when unobserved (erased) code bits were recovered algebraically
    *  (robust: payload-erasure enumeration; standard: bounded assist). */
   erasureDecoded?: boolean;

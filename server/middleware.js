@@ -38,6 +38,11 @@ import {
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
   batchDetectStegoInWorker, configureStegoDetectWorker,
 } from './scramble-image.js';
+import {
+  generateOwnershipKeyPair, signOwnershipClaim, verifyOwnershipClaim,
+  extractOwnershipClaim, embedOwnershipMetadata, verifyOwnership,
+  ownershipPublicKeyFingerprint,
+} from './ownership.js';
 
 // The documented /server public surface includes the image-processing
 // entry points. They live in scramble-image.js, where Sharp now loads
@@ -50,6 +55,11 @@ export {
   acquireSharpSecurityLease, ensureUntrustedSharpLoadersBlocked,
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
   batchDetectStegoInWorker, configureStegoDetectWorker,
+};
+export {
+  generateOwnershipKeyPair, signOwnershipClaim, verifyOwnershipClaim,
+  extractOwnershipClaim, embedOwnershipMetadata, verifyOwnership,
+  ownershipPublicKeyFingerprint,
 };
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -216,8 +226,16 @@ export class BoundedTtlSet {
   #map = new Map();
   #timer = null;
 
-  constructor({ maxEntries = 100000, cleanupIntervalMs = 60000, onLiveEvict = null } = {}) {
+  constructor({ maxEntries = 100000, cleanupIntervalMs = 60000, onLiveEvict = null, saturation = 'evict' } = {}) {
     this.maxEntries = maxEntries;
+    // Saturation policy is an explicit security/availability choice:
+    // 'evict' (availability) drops the oldest live claims when full;
+    // 'strict' never evicts a live claim and instead rejects NEW
+    // claims — strict one-time semantics, at the cost of rejecting
+    // legitimate redemptions while the store is saturated.
+    this.saturation = saturation === 'strict' ? 'strict' : 'evict';
+    this.liveEvictions = 0;
+    this.saturationRejections = 0;
     this.onLiveEvict = typeof onLiveEvict === 'function' ? onLiveEvict : null;
     if (cleanupIntervalMs > 0) {
       this.#timer = setInterval(() => this.cleanup(), cleanupIntervalMs);
@@ -251,9 +269,11 @@ export class BoundedTtlSet {
         if (budget-- <= 0) break;
         if (e <= now) { this.#map.delete(k); continue; }
         if (this.#map.size < this.maxEntries) break;
+        if (this.saturation === 'strict') continue; // never evict live; keep sweeping expired
         this.#map.delete(k);
         liveEvicted++;
       }
+      this.liveEvictions += liveEvicted;
       // A live (unexpired) entry lost its replay protection early.
       // That is the S4 safety valve firing: the deployment is minting
       // faster than the store can hold one TTL of JTIs. Surface it so
@@ -262,10 +282,27 @@ export class BoundedTtlSet {
       if (liveEvicted > 0 && this.onLiveEvict) {
         try { this.onLiveEvict(liveEvicted); } catch { /* observer must not break claims */ }
       }
-      if (this.#map.size >= this.maxEntries) return false; // pathological disorder only
+      if (this.#map.size >= this.maxEntries) {
+        // 'strict': saturated with live claims -> reject the new one
+        // (caller distinguishes nothing: claimOnce=false is a denial,
+        // and the unclaimed token may succeed after entries expire).
+        // 'evict': only reachable under pathological expiry disorder.
+        if (this.saturation === 'strict') this.saturationRejections++;
+        return false;
+      }
     }
     this.#map.set(key, exp);
     return true;
+  }
+
+  stats() {
+    return Object.freeze({
+      size: this.#map.size,
+      maxEntries: this.maxEntries,
+      saturation: this.saturation,
+      liveEvictions: this.liveEvictions,
+      saturationRejections: this.saturationRejections,
+    });
   }
 
   close() {
@@ -400,6 +437,7 @@ export function createMemoryStateStore({
   maxCacheBytes = 64 * 1024 * 1024,
   cleanupIntervalMs = 60000,
   onLiveEvict = null,
+  saturation = 'evict',
 } = {}) {
   const claimSets = new Map();
   const windowLimiters = new Map();
@@ -412,7 +450,7 @@ export function createMemoryStateStore({
     let set = claimSets.get(namespace);
     if (!set) {
       if (claimSets.size >= 16) throw new Error('too many state-store claim namespaces');
-      set = new BoundedTtlSet({ maxEntries, cleanupIntervalMs, onLiveEvict });
+      set = new BoundedTtlSet({ maxEntries, cleanupIntervalMs, onLiveEvict, saturation });
       claimSets.set(namespace, set);
     }
     return set;
@@ -516,8 +554,11 @@ export function createMemoryStateStore({
         for (const [key, limiter] of windowLimiters) if (key.startsWith(prefix + ':')) total += limiter.size;
         return total;
       };
+      const replaySets = {};
+      for (const [ns, set] of claimSets) replaySets[ns] = set.stats();
       return Object.freeze({
         kind: 'memory',
+        replaySets: Object.freeze(replaySets),
         consumedTokens: claimSets.get('nonce')?.size || 0,
         consumedProofs: claimSets.get('proof')?.size || 0,
         rateLimitClients: sumWindowClients('rate'),
@@ -909,8 +950,9 @@ function inspectServerConfig(options = {}) {
     'forensicScope', 'format', 'grid',
     'allowSlowRequestAvif', 'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
-    'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'onAbuse',
+    'maxInputWidth', 'maxOutputPixels', 'maxTrackedClients', 'maxWidthCap', 'maxWidthFraction', 'onAbuse',
     'onDelivery', 'onProvenanceIssue', 'onSecurityEvent', 'onStegoIssue', 'oneTimeTokenMaxEntries',
+    'replaySaturation', 'ownership',
     'oneTimeTokens', 'proofOfPossession', 'provenanceFailure',
     'outputCacheDir', 'memoryProfile', 'outputCacheDiskMaxBytes', 'outputCacheDiskMaxEntries',
     'outputCacheDiskTtlMs', 'outputCacheMax', 'outputCacheMaxBytes', 'processing', 'processingConcurrency',
@@ -1108,6 +1150,7 @@ function inspectServerConfig(options = {}) {
   checkInt('outputCacheDiskTtlMs', options.outputCacheDiskTtlMs, 0, 365 * 24 * 3600 * 1000);
   checkInt('grid', options.grid, 2, 32);
   checkInt('maxWidthCap', options.maxWidthCap, 64, 8192);
+  checkNumber('maxWidthFraction', options.maxWidthFraction, 0.05, 1);
   checkInt('callbackTimeoutMs', options.callbackTimeoutMs ?? options.authorizeTimeoutMs, 100, 60000);
   checkInt('trustedProxyHops', options.trustedProxyHops, 0, 20);
   for (const field of [
@@ -1124,6 +1167,27 @@ function inspectServerConfig(options = {}) {
   checkInt('rateLimitMaxClients', options.rateLimitMaxClients, 10, 1000000);
   checkInt('maxTrackedClients', options.maxTrackedClients, 10, 1000000);
   checkInt('oneTimeTokenMaxEntries', options.oneTimeTokenMaxEntries, 100, 5000000);
+  if (options.replaySaturation !== undefined &&
+      options.replaySaturation !== 'evict' && options.replaySaturation !== 'strict') {
+    fail("replaySaturation must be 'evict' or 'strict'");
+  }
+  if (options.ownership !== undefined && options.ownership !== null) {
+    const own = options.ownership;
+    if (!isPlainObject(own) || typeof own.owner !== 'string' || !own.owner || own.owner.length > 128) {
+      fail('ownership.owner must be a non-empty string of at most 128 chars');
+    }
+    for (const field of ['copyright', 'artist']) {
+      if (own[field] !== undefined && (typeof own[field] !== 'string' || own[field].length > 256)) {
+        fail(`ownership.${field} must be a string of at most 256 chars`);
+      }
+    }
+    if (own.privateKey !== undefined) {
+      try {
+        const keyObject = crypto.createPrivateKey(String(own.privateKey));
+        if (keyObject.asymmetricKeyType !== 'ed25519') fail('ownership.privateKey must be an Ed25519 PEM');
+      } catch { fail('ownership.privateKey must be a valid Ed25519 PEM'); }
+    }
+  }
   checkInt('stateStoreTimeoutMs', options.stateStoreTimeoutMs, 1, 10000);
   checkInt('sharedCacheTtlMs', options.sharedCacheTtlMs, 0, 31 * 24 * 3600 * 1000);
 
@@ -1286,6 +1350,12 @@ function inspectServerConfig(options = {}) {
     ttlMs: (options.ttlSec ?? 120) * 1000,
     grid: options.grid ?? 8,
     maxWidthCap: options.maxWidthCap ?? 1920,
+    // Strict-preview policy: delivered width may never exceed this
+    // fraction of the master's own width (1 = full-resolution pixels
+    // allowed when other caps permit). Protects asset classes whose
+    // masters must never be delivered at native resolution even to
+    // entitled viewers.
+    maxWidthFraction: options.maxWidthFraction ?? 1,
     widthBuckets: options.widthBuckets == null
       ? null
       : Object.freeze([...new Set(options.widthBuckets)].sort((a, b) => a - b)),
@@ -1296,6 +1366,24 @@ function inspectServerConfig(options = {}) {
     oneTimeTokens: options.oneTimeTokens !== false,
     rateLimitMaxClients: options.rateLimitMaxClients ?? options.maxTrackedClients ?? (compactProfile ? 2500 : 10000),
     oneTimeTokenMaxEntries: options.oneTimeTokenMaxEntries ?? (compactProfile ? 50000 : 250000),
+    replaySaturation: options.replaySaturation === 'strict' ? 'strict' : 'evict',
+    ownership: (() => {
+      if (!isPlainObject(options.ownership) || !options.ownership.owner) return null;
+      const own = options.ownership;
+      let privateKey = null, publicKeyFingerprint = null;
+      if (own.privateKey) {
+        privateKey = crypto.createPrivateKey(String(own.privateKey));
+        const der = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+        publicKeyFingerprint = crypto.createHash('sha256').update(der).digest('hex').slice(0, 32);
+      }
+      return Object.freeze({
+        owner: String(own.owner),
+        copyright: own.copyright ? String(own.copyright) : null,
+        artist: own.artist ? String(own.artist) : null,
+        privateKey,
+        publicKeyFingerprint,
+      });
+    })(),
     processing: Object.freeze({
       maxInputBytes: pick('maxInputBytes') ?? 50 * 1024 * 1024,
       maxInputPixels: pick('maxInputPixels') ?? 50000000,
@@ -1385,6 +1473,9 @@ function inspectServerConfig(options = {}) {
   if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
   if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only and can be reassembled keylessly by tile-edge continuity (jigsaw) solvers — enable encrypt:true for payload secrecy');
   const avifEffortWarn = options.processing?.avifEffort ?? options.avifEffort;
+  if (options.lossless === true && (options.maxWidthFraction ?? 1) >= 1 && (options.maxWidthCap ?? 1920) >= 1920) {
+    warn('lossless delivery with maxWidthFraction 1 and a high maxWidthCap lets an entitled viewer receive the master\'s FULL-RESOLUTION pixels (the original file/metadata are still never served, but pixel-for-pixel content is). If these asset classes must stay previews, set maxWidthFraction < 1 (e.g. 0.6) or disable lossless');
+  }
   const allowSlowAvif = (options.processing?.allowSlowRequestAvif ?? options.allowSlowRequestAvif) === true;
   if (options.format === 'avif' && (avifEffortWarn ?? 4) > 2 && allowSlowAvif) {
     warn(`dynamic AVIF encoding at effort ${avifEffortWarn ?? 4} costs multiple CPU-seconds per image and can exceed processingTimeoutSec at large sizes (allowSlowRequestAvif is set); consider pre-building AVIF offline`);
@@ -1418,7 +1509,12 @@ export function auditArchxServerConfig(options = {}) {
       tokenMethods: config.tokenMethods,
       oneTimeTokens: config.oneTimeTokens,
       oneTimeTokenMaxEntries: config.oneTimeTokenMaxEntries,
+      replaySaturation: config.replaySaturation,
+      ownership: config.ownership
+        ? { owner: config.ownership.owner, signed: !!config.ownership.privateKey, publicKeyFingerprint: config.ownership.publicKeyFingerprint }
+        : null,
       maxWidthCap: config.maxWidthCap,
+      maxWidthFraction: config.maxWidthFraction,
       widthBuckets: config.widthBuckets,
       batchTokenMaxItems: config.batchTokenMaxItems,
       forensicScope: config.forensicScope,
@@ -1572,6 +1668,9 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (!summary.oneTimeTokens) blockers.push('oneTimeTokens must be enabled');
     if (summary.oneTimeTokens && summary.oneTimeTokenMaxEntries < 10000) {
       blockers.push('oneTimeTokenMaxEntries is very small: the replay store must hold a full token-TTL of JTIs at peak mint rate or live entries are evicted (see archx.replay_store_evicted)');
+    }
+    if (summary.oneTimeTokens && summary.replaySaturation !== 'strict') {
+      recommendations.push("replaySaturation is 'evict' (availability mode): under sustained mint pressure the in-memory store can evict a live JTI and reopen a narrow replay window for that one signed, re-authorized token (watch archx.replay_store_evicted). Set replaySaturation: 'strict' to reject new claims instead, accepting redemption failures while saturated — size oneTimeTokenMaxEntries to peak-claim-rate × token TTL × safety margin either way");
     }
     if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are reassembled keylessly by tile-edge (jigsaw) solvers in well under a second');
     if (summary.scramblePlanVersion !== 2) blockers.push('scramblePlanVersion must be 2: the v1 plan seed is 32-bit and brute-forceable');
@@ -1802,11 +1901,22 @@ export function createArchxMiddleware(options = {}) {
   // transport control. All inputs come from signed claims (or values
   // deterministically derived from them) at redemption, and from the
   // identical derivations over the about-to-be-signed payload at mint.
+  const ownershipScopeDigests = new Map(); // per issuing-secret (kid rotation safe)
+  const ownershipScopeDigest = (keySecret) => {
+    if (!cfg.ownership) return null;
+    let digest = ownershipScopeDigests.get(keySecret);
+    if (!digest) {
+      digest = hmacShort('own', JSON.stringify([cfg.ownership.owner, cfg.ownership.copyright, cfg.ownership.artist, cfg.ownership.publicKeyFingerprint]), 12, keySecret);
+      ownershipScopeDigests.set(keySecret, digest);
+    }
+    return digest;
+  };
   const variantKeyScope = ({ w, q, fmt, wm, forensicSeed, stegoPayload }, keySecret) => {
     const wmPart = wm ? hmacShort('wm', JSON.stringify(wm), 12, keySecret) : '0';
     const fxPart = forensicSeed ? hmacShort('fxs', forensicSeed, 12, keySecret) : '0';
     const sgPart = stegoPayload ? hmacShort('sg', stegoPayload, 12, keySecret) : '0';
-    return `w${w}:q${q}:f${fmt}:wm${wmPart}:fx${fxPart}:sg${sgPart}`;
+    const ownPart = ownershipScopeDigest(keySecret) ? `:own${ownershipScopeDigest(keySecret)}` : '';
+    return `w${w}:q${q}:f${fmt}:wm${wmPart}:fx${fxPart}:sg${sgPart}${ownPart}`;
   };
   const computeForensicSeed = (imageId, payloadLike, keySecret) => (forensic
     ? hmacShort('forensic', forensicScope === 'image'
@@ -1905,6 +2015,7 @@ export function createArchxMiddleware(options = {}) {
     maxCacheEntries: cfg.outputCacheMax,
     maxCacheBytes: cfg.outputCacheMaxBytes,
     onLiveEvict: noteLiveEviction,
+    saturation: cfg.replaySaturation === 'strict' ? 'strict' : 'evict',
   });
   const stateStoreUnavailable = (cause) => {
     const err = new Error('Archx state store unavailable');
@@ -2825,7 +2936,13 @@ export function createArchxMiddleware(options = {}) {
     }
     // The BROWSER asks for a width; the SERVER's entitlement caps it.
     // A tampered client can no longer "just ask for 1920px" beyond policy.
-    const widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
+    let widthCap = Math.min(maxWidthCap, Math.floor(entitlementWidth));
+    if (cfg.maxWidthFraction < 1) {
+      try {
+        const dims = await imageDimensions(id);
+        if (dims?.width) widthCap = Math.max(64, Math.min(widthCap, Math.floor(dims.width * cfg.maxWidthFraction)));
+      } catch { /* redemption re-clamps with the master in hand */ }
+    }
     const rawRequested = paramValue('w') || paramValue('bw') || '1200';
     let requestedW = parseStrictInt(rawRequested);
     const boxW = hasParam('bw') ? parseStrictInt(paramValue('bw')) : null;
@@ -3600,6 +3717,12 @@ export function createArchxMiddleware(options = {}) {
           }
           effectiveWidth = Math.min(effectiveWidth, Math.floor(currentCap));
         }
+        if (cfg.maxWidthFraction < 1) {
+          try {
+            const dims = await imageDimensions(id);
+            if (dims?.width) effectiveWidth = Math.max(64, Math.min(effectiveWidth, Math.floor(dims.width * cfg.maxWidthFraction)));
+          } catch { /* other caps still apply */ }
+        }
         let effectiveQuality = payload.q ?? quality;
         let effectiveLossless = payload.ls === 1 || effectiveQuality === 'lossless' || lossless;
         if (entitlement.lossless === false && effectiveLossless) {
@@ -3805,6 +3928,11 @@ export function createArchxMiddleware(options = {}) {
                   format: deliveryFormat,
                   aesKey,
                   watermark: payload.wm || null,
+                  ownership: cfg.ownership ? {
+                    owner: cfg.ownership.owner, imageId: id,
+                    privateKey: cfg.ownership.privateKey,
+                    copyright: cfg.ownership.copyright, artist: cfg.ownership.artist,
+                  } : null,
                   forensicSeed,
                   forensic: typeof forensic === 'object' ? forensic : {},
                   stegoPayload,
@@ -3968,6 +4096,7 @@ export function createArchxMiddleware(options = {}) {
       quotaClients: statNumber(storeStats.quotaClients),
       consumedTokens: statNumber(storeStats.consumedTokens),
       consumedProofs: statNumber(storeStats.consumedProofs),
+      replaySets: (storeStats.replaySets && typeof storeStats.replaySets === 'object') ? storeStats.replaySets : undefined,
       sharedCacheEntries: statNumber(storeStats.sharedCacheEntries),
       sharedCacheBytes: statNumber(storeStats.sharedCacheBytes),
       outputCacheEntries: outputCache.size,

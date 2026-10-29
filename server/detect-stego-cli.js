@@ -20,6 +20,7 @@ import {
   perceptualFingerprint, normalizePerceptualFingerprint, comparePerceptualFingerprints,
 } from '../src/scramble.js';
 import { deriveStegoKey } from './middleware.js';
+import { verifyOwnership } from './ownership.js';
 import { configureSharpSecurity } from './scramble-image.js';
 
 function parseArgs(argv, booleanFlags = new Set()) {
@@ -46,7 +47,7 @@ function parseArgs(argv, booleanFlags = new Set()) {
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'help']));
+const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'verify-ownership', 'help']));
 const input = args._[0];
 if (!input || args.help) {
   console.log(`Usage: archx-detect <suspect image> [options]
@@ -63,6 +64,11 @@ if (!input || args.help) {
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
   --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
   --tilt             also search small-angle tilts (±6°) — slow, forensic mode
+  --verify-ownership verify the signed ownership claim (metadata + perceptual
+                     soft binding + stego) instead of stego detection only;
+                     public key from ARCHX_OWNERSHIP_PUBLIC_KEY (PEM) or
+                     --ownership-pubkey <file>; optional --claim <ARCHX1 token>
+                     checks a metadata-stripped copy against a known claim
   --json             print machine-readable JSON only`);
   process.exit(input ? 0 : 1);
 }
@@ -136,6 +142,27 @@ try {
   }
   if (!info?.width || !info?.height || info.channels !== 4 || data.length < info.width * info.height * 4) {
     throw new Error('suspect image did not decode to RGBA pixels');
+  }
+  if (args['verify-ownership']) {
+    const pubPem = process.env.ARCHX_OWNERSHIP_PUBLIC_KEY
+      || (args['ownership-pubkey'] ? fs.readFileSync(String(args['ownership-pubkey']), 'utf8') : null);
+    if (!pubPem) throw new Error('--verify-ownership needs ARCHX_OWNERSHIP_PUBLIC_KEY or --ownership-pubkey <file>');
+    const report = await verifyOwnership(bytes, {
+      publicKey: pubPem,
+      stegoKey: key || null,
+      claim: args.claim ? String(args.claim) : null,
+      detectOptions: { searchTilt: !!args.tilt },
+    });
+    if (args.json) console.log(JSON.stringify({ file: input, ownership: report }, null, 2));
+    else {
+      console.log(`Ownership verification for ${input}: ${report.verdict.toUpperCase()}`);
+      console.log(`  claim       : ${report.claimFound ? `found (${report.claimSource}), signature ${report.signatureValid ? 'VALID' : 'INVALID'}` : 'none'}`);
+      if (report.owner) console.log(`  owner/image : ${report.owner} / ${report.imageId || '?'}`);
+      console.log(`  perceptual  : ${report.perceptual.hash} (distance to claim: ${report.perceptual.distanceToClaim ?? 'n/a'})`);
+      if (report.stego) console.log(`  stego       : ${report.stego.found ? `found ${report.stego.fingerprint} (claim match: ${report.stego.matchesClaim})` : 'not found'}`);
+      console.log('  note        : evidence for investigation, not standalone legal proof of ownership.');
+    }
+    process.exit(report.verdict === 'verified' || report.verdict === 'content-match' ? 0 : 1);
   }
   result = detectStegoFingerprint(data, info.width, info.height, {
     key,

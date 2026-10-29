@@ -10,6 +10,14 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +36,14 @@ jobs:
       - name: Browser tests
         if: matrix.node-version == 22
         run: npm run test:browser
+      - name: Real-Redis integration tests
+        if: matrix.node-version == 22
+        env:
+          ARCHX_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: npm run test:redis
+      - name: Packaged-artifact smoke test
+        if: matrix.node-version == 22
+        run: npm run test:pack
       - run: npm audit --audit-level=high
       - name: Generate CycloneDX SBOM
         if: matrix.node-version == 22

@@ -121,6 +121,18 @@ Contract requirements:
 6. A supplied store is host-owned. `handler.close()` does not close it,
    because several handlers may share it; close it during application
    shutdown.
+7. **Eviction policy is a security setting (v1.18).** Redis/Valkey with
+   an LRU/LFU `maxmemory-policy` can silently evict `nonce:`/`proof:`
+   keys under pressure — that replays tokens exactly like local-store
+   saturation. Run security state on an instance (or logical DB in a
+   dedicated fleet) with `maxmemory-policy noeviction`, size memory
+   for peak claim rate × TTL, and alert on used-memory headroom. The
+   in-memory store makes the same trade-off explicit instead:
+   `replaySaturation: 'evict' | 'strict'` plus live counters in
+   `handler.stats().replaySets` and the `archx.replay_store_evicted`
+   event. Sizing: `oneTimeTokenMaxEntries` >= peak redemptions/sec ×
+   token TTL seconds × 4 (burst + clock-skew margin); the production
+   audit blocks < 10,000 entries.
 
 Bundled Redis example:
 
@@ -640,3 +652,46 @@ policy under quotas, per-tile PoP cost, and whether zoom beyond the
 master's delivered cap should ever be authorized. Recorded here so
 the design starts from the threat model rather than from a map
 library's defaults.
+
+## 10. Ownership claims: keys, custody, and verification (v1.18)
+
+Generate a dedicated signing key pair per catalog/brand:
+
+```bash
+npx archx-protect --gen-ownership-key   # prints both PEMs once
+```
+
+Store `ARCHX_OWNERSHIP_PRIVATE_KEY` like the server `secret` (secret
+manager, never in the repo, never shipped to browsers). Publish
+`ARCHX_OWNERSHIP_PUBLIC_KEY` wherever investigators need it (it is
+safe to embed in runbooks and demand letters). Server config:
+
+```js
+ownership: { owner: 'Studio Example', privateKey: process.env.ARCHX_OWNERSHIP_PRIVATE_KEY }
+```
+
+Derivatives then carry an Ed25519-signed claim in EXIF/XMP. Custody
+rules that matter more than the cryptography:
+
+- **Log the claim at issuance.** `finishDerivative()` returns
+  `ownershipToken`; store it in the same registry row as the stego
+  fingerprint (see the record schema in `docs/IP_HOLDER_GUIDE.md`).
+  A metadata-stripped leak can then be checked against the *known*
+  claim (`--claim`) via its perceptual hash + stego fingerprint.
+- **Rotation:** mint a new key pair, keep old PUBLIC keys published
+  forever (old copies verify against them), retire old private keys
+  offline. Never reuse one key pair across unrelated catalogs.
+- **Verification workflow:**
+  `ARCHX_OWNERSHIP_PUBLIC_KEY=... npx archx-detect suspect.jpg --verify-ownership --json`.
+  `verified` requires signature + a content layer to agree;
+  `content-match` means pixels match a claim whose signature you did
+  not (or could not) verify; `claim-only` means authentic metadata
+  on inconclusive pixels. Cite the layer breakdown in any report —
+  never "the tool proved ownership."
+
+Forensic worker capacity: `configureStegoDetectWorker()` bounds job
+count AND total queued RGBA bytes (`maxQueuedBytes`, 512 MiB
+default), per-suspect pixels (`maxPixels`, 50 MP), queue wait
+(`queueTimeoutMs`), and per-job time (`timeoutMs`). If detection is
+exposed to untrusted callers, those bounds plus the detector's own
+`maxTimeMs` are the contract; verify them in staging before launch.

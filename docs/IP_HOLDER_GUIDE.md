@@ -115,6 +115,27 @@ your evidence; it cannot repeal the "analog hole."
   a smaller prepared size automatically, which cuts your bandwidth bill
   without changing what well-connected visitors see.
 
+## The issuance record: keep this for every delivered image
+
+Attribution only works if a detector hit can be tied back to a
+delivery. Persist one record per issued derivative (the `onStegoIssue`
+callback and token telemetry give you the fields):
+
+| Field | Why it matters later |
+|---|---|
+| Image ID + master version | Which work, which revision of it |
+| Recipient (viewer/buyer/order/delivery/trace IDs) | Who this copy was issued to |
+| Stego fingerprint (12-hex) + profile + layout version | The in-pixel evidence key and how to read it back |
+| Stego key ID (not the key) + signing `kid` | Which detector key generation applies after rotation |
+| Perceptual fingerprint (16-hex) | Soft binding for metadata-stripped copies |
+| Ownership claim token (`ARCHX1.…`) + public-key fingerprint | Signed claim to check stripped copies against (v1.18) |
+| Issued-at timestamp, derivative width/format | Timeline and plausible-source narrowing |
+
+Never store delivery tokens, scramble/AES keys, or private keys in
+this registry — it must be safe to hand to investigators. Old
+detector keys stay in an offline vault (detection after rotation
+depends on them); old ownership PUBLIC keys stay published forever.
+
 ## If you find a suspected copy
 
 1. Save the suspect file exactly as found. Do not edit, resize, or re-save

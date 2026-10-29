@@ -377,6 +377,11 @@ available:
 
 ```bash
 export ARCHX_SCRAMBLE_KEY='<long random secret>'
+# The StegoMark key MUST be a different secret: the scramble key is
+# delivered to browsers to render the image, so anyone holding it could
+# forge or strip marks if it also keyed the fingerprint. Keep the
+# StegoMark key private, server/CLI-side only.
+export ARCHX_STEGO_KEY='<a DIFFERENT long random secret — never ship to browsers>'
 export ARCHX_FORENSIC_SEED='campaign-or-batch-id'
 npx archx-protect photo.jpg photo.archx --max-width 1400 \
   --watermark "© Studio" \
@@ -396,12 +401,14 @@ Archx.load.image('#hero', '/protected/photo.archx', { key: window.__ARCHX_STATIC
 ### 6 · Prove a leaked copy is yours (StegoMark detection)
 
 ```bash
-# Static/CLI marks. ARCHX_STEGO_KEY should be the embed-time key (for the
-# example above, the value of ARCHX_SCRAMBLE_KEY unless you set one separately).
+# Static/CLI marks. Detection uses the SAME private StegoMark key used
+# at embed time (the ARCHX_STEGO_KEY above) — never the scramble key,
+# which browsers legitimately hold and which the CLIs reject for this
+# purpose:
 # Geometry search and --profile auto (standard + robust) are on by default;
 # add --no-geometry for a faster uncropped-only pass; add --tilt to also
 # search small-angle rotations (±6°, slow forensic mode):
-ARCHX_STEGO_KEY="$ARCHX_SCRAMBLE_KEY" \
+ARCHX_STEGO_KEY="$ARCHX_STEGO_KEY" \
   npx archx-detect suspect-screenshot.png --expect "ORDER-1042"
 
 # Token-server marks (derive the same detector key from your server secret):
@@ -415,6 +422,43 @@ npx archx-detect suspect.jpg --expect-fingerprint 0123456789abcdef --max-distanc
 A confident result prints a 12-hex fingerprint, the detected profile, and the recovered crop geometry. With the token server, persist that value from `onStegoIssue` next to image, viewer, buyer, order, delivery, trace ID, profile, signing `keyId`, and issuance time, then look the detected fingerprint up. `standard` is the redundant keyed 48-bit ID + a keyed HMAC-16 acceptance tag (codeword v2; pre-1.12 marks carried a CRC-16 and are still detected, flagged `tagScheme:'crc'`) with soft correction. `robust` uses larger 20×14 macro-cells, about 1.35× amplitude, a 96-bit codeword (the same fingerprint + a first CRC kept only as a repair oracle + the keyed HMAC-16 tag + marker), median cell/segment voting, syndrome-guided repair, and stricter acceptance for heavily corrected candidates. Because acceptance is a keyed MAC rather than a linear CRC, a majority hybrid averaged from several buyers' marks cannot validate as a fingerprint nobody was issued; mirrored suspects are probed by default in every profile. Since 1.16 the detector also probes 90°/270° rotations, seeds one-axis reframe geometries (3:2 → 1:1, 4:5, …), and **erasure-decodes** deep crops: code bits whose every repetition was cropped away are recovered algebraically instead of failing the tag, flagged `erasureDecoded` with the erased-bit count. Since 1.17 it also undoes EXIF 5/7 diagonal transposes, evaluates MAC-tagged candidates under signal-based correction gates, and offers an opt-in ±6° deskew search (`--tilt`, `deskewed` in the result) plus `assayStegoCollusion()` for ranking candidate recipients when an averaged multi-recipient copy no longer decodes at bit level (investigative aid, not proof). On the three-photo 800 px robust matrix at strength 6 (17 transforms per photo), 42/51 suspects recover (42/48 excluding opt-in tilt rows) with 18/18 negative controls clean; smooth product photography wants strength 8 for the deepest crops (`docs/RESEARCH.md` §2.25). On the synthetic 21-transform matrix (robust, forensic geometry mode) recovery went from 7/21 to 21/21 — center/corner crops to 60% retained, both reframes, all three right-angle rotations — with zero false positives across 20 unmarked/wrong-key controls (`docs/RESEARCH.md` §2.24). In the earlier three-photo, 800 px standard-profile matrix it survived ordinary resize/JPEG, mild blur, photometric changes, 90% center crops (3/3), 15% left-edge removal (3/3), 10% bottom removal (3/3), and 80% center crops (2/3); it failed a 2° rotation (0/3). The robust regression additionally recovers direct copies, a 448 px JPEG-q82 resize, brightness/saturation + mild blur JPEG-q80 edits, and a photographic 90% center crop resized back to 640×420. A non-match is **not proof that a copy is unrelated**: aggressive denoising/diffusion regeneration, severe/asymmetric geometry, rotation/perspective, wrong key/grid/profile, or heavy filtering can produce a false negative. It is attribution evidence, **not** permanent, impossible to remove, or standalone legal proof. For a phone photo, first crop tightly to the displayed rectangle and correct perspective manually (small rotations can now be searched with `--tilt`), then run the detector.
 
 The perceptual soft binding is a separate 64-bit DCT fingerprint of image structure. It is useful as a C2PA-style lookup key when metadata and pixel marks are separated from a copy, and the unit suite verifies a resized/JPEG copy within the default distance threshold. It can collide or drift under crops, compositing, heavy edits, adversarial perturbation, or semantic regeneration; corroborate a match with issuance records and the original before making an ownership claim.
+
+### 7 · Make copies carry your name: signed ownership claims (v1.18)
+
+StegoMark proves it *in the pixels*; an **ownership claim** additionally
+states it in the file's metadata — cryptographically. Generate a key
+pair once, keep the private half on the server, and every derivative
+embeds an Ed25519-signed claim `ARCHX1.<owner, image id, perceptual
+hash, stego fingerprint>.<signature>` in its EXIF/XMP (plus
+human-readable Copyright/Artist fields you choose):
+
+```bash
+npx archx-protect --gen-ownership-key     # prints both PEMs once — store the private one
+export ARCHX_OWNERSHIP_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----...'
+# offline precompute:
+ARCHX_STEGO_KEY='...' npx archx-protect hero.jpg out.archx --key "$ARCHX_SCRAMBLE_KEY" --stego recipient-42 --ownership-owner "Studio Example"
+```
+
+```js
+// …or live in the middleware:
+createArchxMiddleware({ …, ownership: { owner: 'Studio Example', privateKey: process.env.ARCHX_OWNERSHIP_PRIVATE_KEY } });
+```
+
+Rescanning a suspect no longer depends on metadata surviving:
+
+```bash
+ARCHX_OWNERSHIP_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----...' npx archx-detect suspect.jpg --verify-ownership
+# {"verdict":"verified", "layers": {"signature": …, "content": {"perceptualDistance": 2, "stego": {...}}}}
+```
+
+Three evidence layers, weakest to strongest tie to the pixels: the
+declarative metadata claim (strippable — its absence proves nothing),
+the perceptual soft binding (survives re-encode/resize; pairs a
+stripped copy with a claim you pass via `--claim`), and StegoMark
+inside the pixels themselves. This is provenance evidence in the
+spirit of C2PA's model, **not** a C2PA implementation and not legal
+title: keep the issuance registry (`docs/IP_HOLDER_GUIDE.md`) and let
+the layers corroborate each other.
 
 ## How the protection works (defence in depth)
 
@@ -641,7 +685,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - Cold-transform cost is dominated by Sharp decode/resize/encode, not scrambling (the fused pad+scramble pass is ~2 ms at 960 px): the latest `npm run bench:opt` on the 1408×768 demo master (2-vCPU test box) measured quality-first q95 at **~78 ms/120 KiB (640 px)** and **~158 ms/248 KiB (960 px)**, versus catalog q88/effort-2 at **~31 ms/83 KiB** and **~54 ms/172 KiB**—about 2.9× faster and one-third smaller at 960 px. The v1.9 optimization round fused pad+scramble+encode-input into one pass (no intermediate frame copies), skips EXIF autorotate when the master has no orientation, drops the synthesized alpha band before WebP/PNG encoding for opaque masters, and prunes sliding-window limiters in place; interleaved old/new A/B runs on this machine measured cold transforms ~3–10% faster (PNG: −34% time, −11% bytes), peak transform RSS a few MB lower, and warm mint+redeem throughput up from **859 to 915 flows/s** over 6,000 loopback requests — with byte-identical WebP/JPEG output (verified against 21 fixture hashes). Reproduce with `npm run bench:opt -- --out=after.json` before/after a change and `--compare=before.json,after.json`. A separate loopback catalog fixture generated six cold canonical derivatives at p50 **87 ms**, then repeated authorized flows from memory and, after a handler restart, from the persistent disk cache at p50 **2.8 ms** per flow. Those loopback numbers exclude a real authorization database, TLS, network, Redis latency, and browser proof signing; use them as regression signals, not a production capacity claim. Precomputed `archx-build` variants remove cold Sharp work from the request path altogether
 - Quality: on the detailed 800 px watch benchmark, q95 reconstruction measured **41.0 dB PSNR / 1.43 MAD** versus 36.6 dB / 2.56 MAD at the old q82. `lossless:true` is exact at the delivered size (800 px test payload ~360 kB lossless WebP vs ~128 kB q95), so use it selectively for hero/product detail.
 - Per image in the standard browser path: 1 fetch + 1 `createImageBitmap` decode + 64 tile copies at native/oversampled resolution + one high-quality final resample. No general per-pixel JavaScript is required to un-scramble. Static WebGL requests no depth/stencil/MSAA buffers and uses a low-power preference; permanent 4xx/aborted fetches are not retried. Temporal work is the deliberate exception: shader interlace evaluates a small phase mask per fragment (plus one extra sample for inactive `lowres` fragments), while the frames engine spends one clamped-array pixel pass and one extra backing store per phase at setup, then only `drawImage`s. Either way, an interlaced image must present continuously while visible, so reserve it for selected hero/paid views rather than hundreds of thumbnails. In the Chromium interlace fixture, screenshots from opposite black-fill strip phases differed by **about 96 mean absolute channel value** in recent runs, confirming that the compositor was actually presenting materially different incomplete frames
-- Server caches and security stores are entry- **and byte-bounded**, limiter clients expire, nonce claims fail closed when saturated, and image jobs pass through a bounded semaphore/queue. Trade-offs remain: per-token/dynamic server watermarks, viewer-scoped forensics/StegoMarks, and `scrambleKeyMode:'per-token'` intentionally defeat cross-viewer output-cache reuse; Fortress strict memory bypasses the shared bitmap cache, but with default `cachePayload:true` it can decode privately retained scrambled bytes locally instead of reminting. Use the strongest per-viewer settings on valuable items, not every thumbnail.
+- Server caches and security stores are entry- **and byte-bounded**, limiter clients expire, nonce claims degrade by an explicit policy when saturated (`replaySaturation: 'evict'` default drops the oldest live claims under sustained pressure and emits `archx.replay_store_evicted`; `'strict'` never drops a live claim and instead rejects new redemptions until space frees — see `docs/OPERATIONS.md` for sizing), and image jobs pass through a bounded semaphore/queue. Trade-offs remain: per-token/dynamic server watermarks, viewer-scoped forensics/StegoMarks, and `scrambleKeyMode:'per-token'` intentionally defeat cross-viewer output-cache reuse; Fortress strict memory bypasses the shared bitmap cache, but with default `cachePayload:true` it can decode privately retained scrambled bytes locally instead of reminting. Use the strongest per-viewer settings on valuable items, not every thumbnail.
 - Scrambled pixels compress worse than natural images (tile edges), so payloads run larger than an equivalent plain WebP. Lower `grid` (e.g. 6) if bytes matter more than shuffle strength. For precomputed catalogs, opt-in AVIF claws bandwidth back: on the scrambled 960 px demo master, AVIF q55 measured **76 KiB vs 171 KiB WebP q88 (−56%)**, at 311 ms (effort 2) to ~3 s (effort 4) encode time per image — a one-time build cost, not a per-request one.
 - v1.10 hardening cost ≈ zero: re-running `bench:opt` against the v1.9 after-state shows identical payload bytes and all timings within noise (gallery −4.7%); the browser bundle grew 1.1 kB (0.4 kB gzip) for the plan-v2 derivation, and each disk/shared cache entry carries a 34-byte HMAC integrity tag. Default (plan v1) derivatives remain byte-identical to v1.9.0.
 
@@ -649,7 +693,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 1. **The analog hole is real.** Anything visible can be screenshotted or photographed at screen resolution. Only DRM *video* pipelines (Widevine/EME + HDCP output protection) can black out screenshots, and browsers offer no equivalent for still images. Archx's answer: never ship more than display resolution, bake the watermark in, trace the session.
 2. **A skilled reverse-engineer controls the receiving browser.** Someone who instruments below JavaScript, patches the browser, forges native-function fingerprints before Archx loads, uses CDP/Juggler to pierce a closed shadow root, captures composited frames/GPU memory, or simply photographs the display can obtain some form of the visible pixels. Captured native references and audits catch ordinary post-load hooking and naive pre-hooks; they cannot create a trusted execution environment inside an attacker-owned browser. Stealth-automation fingerprints are likewise spoofable and must never replace authorization/quotas.
-3. **Payload + session key reconstruction is deliberately made low-value, not mathematically impossible.** The open-source decoder must run for legitimate viewers, so a determined viewer can reassemble the one web-size derivative they were sent. One-time/proof-bound entitled tokens stop external replay and oversized requests; proof of possession does not stop script or a browser operator in the legitimate page from causing that page to sign and load. Server-baked marks mean the reconstructed derivative is still watermarked/traced. They never recover the master resolution, metadata, or pixels the server withheld.
+3. **Payload + session key reconstruction is deliberately made low-value, not mathematically impossible.** The open-source decoder must run for legitimate viewers, so a determined viewer can reassemble the one web-size derivative they were sent. One-time/proof-bound entitled tokens stop external replay and oversized requests; proof of possession does not stop script or a browser operator in the legitimate page from causing that page to sign and load. Server-baked marks mean the reconstructed derivative is still watermarked/traced. They never recover the master FILE, its metadata, or pixels the server withheld. Note the precise boundary: if your entitlement's caps reach the master's own dimensions they DO receive full-resolution pixels (as a re-encoded derivative, without master metadata). `maxWidthFraction: 0.6` (fraction of the master's own width, enforced at mint and redemption) makes "preview only" a server property rather than a hope; the startup audit warns when lossless full-size delivery is configured.
 4. **Lens + capture trace + temporal/camera shields/interlace are friction, not screenshot-proofing.** They prevent a single ordinary screenshot/photo from containing the whole sharp, unmarked frame and make scripted sweeps harder/noisier, but a patient person can move a real pointer and stitch discs, record/average temporal frames, capture and recombine every interlace phase, or use a camera. Likewise, page JavaScript cannot veto the OS compositor, a screenshot extension's privileged visible-tab capture, DevTools/CDP capture, or another device's camera; shortcut/blur reactions only help when the browser exposes a signal in time. Expect attribution and delay—not impossibility.
 5. **AI regeneration and invisible-mark removal are real attacks.** Research on diffusion-based regeneration shows many pixel-level invisible watermarks can be weakened/removed while preserving the scene's semantics; perceptual fingerprints can also drift or be adversarially evaded, and an upscaler can invent plausible detail from a degraded capture. StegoMark, forensic blocks, C2PA-style provenance, and soft bindings are therefore evidence/discovery layers—not DRM. Your durable controls are not shipping the master, server authorization/entitlement, visible marks where appropriate, issuance logs, monitoring, and enforcement.
 6. **Authorization headers are not identity.** Origin/Referer help with CORS/CSRF context; IP and User-Agent are spoofable/changeable and can cause false rejects behind NAT, VPNs, mobile network changes, or browser updates. Your authenticated session and object-level `authorize()` decision are the security boundary, and Archx checks that boundary again at redemption.

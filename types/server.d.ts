@@ -95,6 +95,19 @@ export interface ArchxStegoOptions {
   legacyCode?: boolean;
 }
 
+export interface ArchxOwnershipOptions {
+  /** Public owner identity recorded in the signed claim. */
+  owner: string;
+  /** Logical image identifier recorded in the claim (<=128 chars). */
+  imageId?: string;
+  /** Ed25519 private key: KeyObject or PKCS#8 PEM/DER. Never browser-delivered. */
+  privateKey: import('node:crypto').KeyObject | string | Uint8Array;
+  /** Human-readable EXIF/XMP copyright string (default: copyright <owner>). */
+  copyright?: string;
+  /** Human-readable EXIF Artist string (default: <owner>). */
+  artist?: string;
+}
+
 export interface ArchxServerOptions {
   /** HMAC/signing secret (>= 32 chars or bytes). Falls back to ARCHX_SECRET. */
   secret?: string | Uint8Array;
@@ -140,6 +153,21 @@ export interface ArchxServerOptions {
   lossless?: boolean;
   allowClientQuality?: boolean;
   maxWidthCap?: number;
+  /**
+   * Hard ceiling on delivered width as a fraction (0.05-1) of each
+   * master's own width, enforced at mint and redemption. Values < 1
+   * make "preview, never full-resolution pixels" server-enforceable.
+   */
+  maxWidthFraction?: number;
+  /**
+   * Replay-store pressure policy: 'evict' (default, availability —
+   * oldest live claims dropped, archx.replay_store_evicted emitted)
+   * or 'strict' (never drops a live claim; new redemptions rejected
+   * while saturated).
+   */
+  replaySaturation?: 'evict' | 'strict';
+  /** Embed a signed ownership claim in every derivative (see ArchxOwnershipOptions). */
+  ownership?: ArchxOwnershipOptions;
   widthBuckets?: number[];
   /** Serve the non-CORS 1x1 taint pixel at `{basePath}/taint.png` (default on). */
   taintImage?: boolean;
@@ -235,6 +263,8 @@ export interface ArchxDerivativeResult {
   header: string;
   stegoFingerprint: string | null;
   perceptualFingerprint?: unknown;
+  /** Signed ownership claim token embedded in the derivative, when configured. Log it in your issuance registry. */
+  ownershipToken?: string | null;
 }
 
 /** Opaque stage-1 result of prepareDerivativeBase(); pass to finishDerivative(). */
@@ -260,6 +290,8 @@ export interface ArchxScrambleImageOptions {
   watermark?: string | { text?: string; opacity?: number; color?: string; [key: string]: unknown } | null | false;
   forensic?: boolean | ArchxForensicOptions;
   forensicSeed?: string;
+  /** Embed an Ed25519-signed ownership claim (EXIF/XMP) in the derivative. */
+  ownership?: ArchxOwnershipOptions;
   stegoPayload?: string;
   stegoKey?: string;
   steganography?: ArchxStegoOptions & { key?: string };
@@ -309,7 +341,13 @@ export function detectStegoFingerprintInWorker(
 /** Bound the forensic worker queue (default 64 pending) and per-job timeout (default 120s). */
 export function configureStegoDetectWorker(options?: {
   maxPending?: number; timeoutMs?: number;
-}): { maxPending: number; timeoutMs: number; pending: number };
+  /** Cap on total RGBA bytes held by active + queued jobs (default 512 MiB). */
+  maxQueuedBytes?: number;
+  /** Per-suspect pixel cap (default 50 MP). */
+  maxPixels?: number;
+  /** Reject a job that waited in queue longer than this (default 300s; 0 disables). */
+  queueTimeoutMs?: number;
+}): { maxPending: number; timeoutMs: number; maxQueuedBytes: number; maxPixels: number; queueTimeoutMs: number; pending: number; queuedBytes: number };
 /**
  * Screen one suspect against many keys in a single worker job:
  * shared planes, cheap native screen per key, full search only for
@@ -392,3 +430,63 @@ export function deriveStegoFingerprint(args: {
   perToken?: boolean;
 }): string;
 export function deriveStegoKey(id: string, secret: string | Uint8Array): string;
+
+export interface ArchxOwnershipClaimPayload {
+  v: 1;
+  own: string;
+  img: string;
+  /** 16-hex perceptual fingerprint of the unscrambled derivative. */
+  ph: string;
+  /** 12-hex per-image stego fingerprint, or '' when unmarked. */
+  sfp: string;
+}
+/** Sign a deterministic ownership claim token (ARCHX1.<b64url>.<sig>). */
+export function signOwnershipClaim(
+  claim: { owner: string; imageId?: string; perceptualFingerprint: string; stegoFingerprint?: string },
+  privateKey: import('node:crypto').KeyObject | string | Uint8Array,
+): string;
+/** Structural decode only — no signature check. */
+export function parseOwnershipClaim(token: string): ArchxOwnershipClaimPayload | null;
+/** Verify the Ed25519 signature over a claim token. */
+export function verifyOwnershipClaim(
+  token: string,
+  publicKey: import('node:crypto').KeyObject | string | Uint8Array,
+): { ok: boolean; payload: ArchxOwnershipClaimPayload | null; token: string | null };
+/** Find a claim token in encoded image bytes (EXIF/XMP scan). */
+export function extractOwnershipClaim(encodedBytes: Uint8Array): string | null;
+/** SHA-256 of the SPKI DER encoding, first 32 hex chars — publish alongside the key. */
+export function ownershipPublicKeyFingerprint(
+  publicKey: import('node:crypto').KeyObject | string | Uint8Array,
+): string;
+export interface ArchxOwnershipVerification {
+  verdict: 'verified' | 'claim-only' | 'content-match' | 'no-evidence';
+  layers: {
+    metadata: { found: boolean; source: 'metadata' | 'provided' | null; token: string | null; payload: ArchxOwnershipClaimPayload | null };
+    signature: { checked: boolean; valid: boolean | null };
+    content: {
+      perceptualFingerprint: string;
+      perceptualDistance: number | null;
+      perceptualMatch: boolean;
+      stego: Record<string, unknown> | null;
+      stegoFingerprint: string | null;
+      stegoMatchesClaim: boolean | null;
+    };
+  };
+  note: string;
+}
+/**
+ * Layered ownership rescan: metadata claim + signature + perceptual
+ * soft binding + (optionally) StegoMark detection with a private key.
+ */
+export function verifyOwnership(
+  encodedBytes: Uint8Array | ArrayBuffer,
+  options?: {
+    publicKey?: import('node:crypto').KeyObject | string | Uint8Array;
+    claimToken?: string;
+    stegoKey?: string;
+    stegoProfile?: string;
+    searchGeometry?: boolean;
+    searchTilt?: boolean;
+    maxTimeMs?: number;
+  },
+): Promise<ArchxOwnershipVerification>;

@@ -106,16 +106,27 @@ async function chromiumEnv() {
   } catch { return process.env; }
 }
 
-const browser = await puppeteer.launch({
-  executablePath: await chromium.executablePath(),
-  // Real web security stays ON: CORS/origin-taint behavior under test is
-  // exactly what production browsers enforce, and the Lambda-oriented
-  // '--disable-web-security' bundled default would hide it.
-  args: [...chromium.args.filter((a) => a !== '--disable-web-security'),
-    '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader'],
-  headless: true,
-  env: await chromiumEnv(),
-});
+// ARCHX_BROWSER=firefox (with ARCHX_FIREFOX_PATH set to a Puppeteer-
+// managed Firefox) runs the same checks under Firefox/WebDriver-BiDi;
+// the default remains the bundled Chromium. Other engines are honestly
+// "expected but unverified" until a run exists (docs/COMPATIBILITY.md).
+const browser = process.env.ARCHX_BROWSER === 'firefox'
+  ? await puppeteer.launch({
+    product: 'firefox',
+    executablePath: process.env.ARCHX_FIREFOX_PATH || undefined,
+    headless: true,
+    args: ['--no-sandbox'],
+  })
+  : await puppeteer.launch({
+    executablePath: await chromium.executablePath(),
+    // Real web security stays ON: CORS/origin-taint behavior under test is
+    // exactly what production browsers enforce, and the Lambda-oriented
+    // '--disable-web-security' bundled default would hide it.
+    args: [...chromium.args.filter((a) => a !== '--disable-web-security'),
+      '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader'],
+    headless: true,
+    env: await chromiumEnv(),
+  });
 const page = await browser.newPage();
 await page.setViewport({ width: 1200, height: 900 });
 const pageErrors = [];
@@ -914,6 +925,54 @@ try {
     reflectHook.loaded === true, JSON.stringify(reflectHook));
   check('integrity audit flags a hooked Reflect.apply',
     reflectHook.audit.includes('Reflect.apply'), JSON.stringify(reflectHook.audit));
+
+  // v1.18 accessibility (review #7 P1.18): temporal effects must yield
+  // to prefers-reduced-motion with a usable static image, and the
+  // viewer host must expose image semantics to assistive tech.
+  const a11y = await page.evaluate(async () => {
+    const out = { loaded: false, temporalOn: null, role: null, label: null, reduced: null };
+    try {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id: 'gallery-001' },
+        { mode: 'fortress', debug: true, lazy: false, automation: 'monitor', alt: 'Aurora over a valley at dusk' });
+      await inst.ready;
+      const dbg = inst._debug();
+      out.loaded = inst.loaded === true;
+      out.temporalOn = dbg?.temporalOn;
+      out.role = host.getAttribute('role');
+      out.label = host.getAttribute('aria-label');
+      out.reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      inst.destroy(); host.remove();
+    } catch (err) { out.error = String((err && err.message) || err); }
+    return out;
+  });
+  check('viewer host exposes role=img with the author alt as its accessible name',
+    a11y.role === 'img' && a11y.label === 'Aurora over a valley at dusk', JSON.stringify(a11y));
+  let a11yReduced = null;
+  try {
+    await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+    a11yReduced = await page.evaluate(async () => {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:300px;height:190px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id: 'gallery-002' },
+        { mode: 'fortress', debug: true, lazy: false, automation: 'monitor' });
+      await inst.ready;
+      const out = {
+        loaded: inst.loaded === true,
+        temporalOn: inst._debug()?.temporalOn,
+        reduced: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      };
+      inst.destroy(); host.remove();
+      return out;
+    });
+    await page.emulateMediaFeatures([]);
+  } catch { /* media emulation unsupported on this engine; reported below */ }
+  check('prefers-reduced-motion disables temporal interlace but still displays the image',
+    a11yReduced === null || (a11yReduced.reduced === true && a11yReduced.loaded === true && a11yReduced.temporalOn === false),
+    JSON.stringify(a11yReduced));
 
   const webglIntegrity = await page.evaluate(async () => {
     const events = [];

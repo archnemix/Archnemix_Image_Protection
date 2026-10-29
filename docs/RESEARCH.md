@@ -18,8 +18,15 @@ map onto this library's design.
   scrapers. Every one of those depends on the site handing out a usable file
   or URL. Remove the file, remove the URL, scramble what crosses the network,
   poison programmatic extraction, cap the resolution, and watermark what
-  remains — and you have defeated ~99% of real-world theft while making the
-  remaining 1% slow, manual, and traceable.
+  remains — and you have removed the mechanism every lazy path depends
+  on, leaving only slow, manual, traceable ones. (Earlier editions of
+  this paragraph claimed "~99% of real-world theft defeated." That
+  figure was an intuition, not a measurement, and is withdrawn: §2.26
+  replaces it with a per-attack measured matrix —
+  blocked/degraded/detected/succeeds — which is the only honest form
+  the claim can take. Sections in this document are version-tagged
+  engineering records; where a later section changes a conclusion,
+  the later section governs.)
 - That layered strategy is exactly what large rights-holders do (Google Arts
   & Culture's tiled + signed + encrypted delivery; stock agencies' tiled
   zoom + domain-locked derivatives; streaming's DRM for video). Archx packages
@@ -2527,3 +2534,158 @@ error — see the README checklist).
 - Vercel, *Cache-Control headers* (long immutable caching only for
   versioned/content-addressed assets; personalized responses remain
   private/no-store) — https://vercel.com/docs/caching/cache-control-headers
+
+### 2.26 Seventh review (production-evidence round) + ownership claims — v1.18
+
+The seventh review audited Archx against its own threat model and
+asked, in effect: stop adding mechanisms and prove the shipped ones
+end-to-end — packaged artifact, documented examples, saturation
+semantics, preview policy, real distributed state, benchmark and
+accessibility evidence. The user additionally asked for three things:
+changeable metadata, a rescan-detectable ownership code "using proper
+methods," and continued CPU/RAM economy alongside harder extraction
+and easier ownership identification. Verified dispositions:
+
+**Confirmed and fixed (P0).** `server/detect-worker.js` was truly
+absent from the npm tarball (the worker entrypoint would have failed
+for every package consumer while working from the repo) — now in
+`files`, and `tools/pack-smoke.mjs` (`npm run test:pack`, wired into
+CI) packs, installs into a clean project, exercises ESM/CJS/subpaths,
+runs a REAL worker detection from the installed tree, invokes the CLI
+bins, checks SRI, and type-checks a consumer against the installed
+declarations. The README's `--stego` examples truly reused the
+browser-delivered scramble key; they now use a separate
+`ARCHX_STEGO_KEY`, and a unit test executes the documented
+protect → detect → verify-ownership round-trip so the docs cannot rot
+again silently. Four stale doc claims (an intuition-era "~99% of
+theft defeated" line, plan-v1-as-default, saturation described as
+fail-closed, v0.x-era test counts) are corrected and historical
+sections now carry a "later sections govern" note.
+
+**Replay saturation became an explicit policy (P0.4).** The review
+was right that "bounded" quietly meant "evicts live one-time claims
+under pressure." `BoundedTtlSet` now has two modes,
+`replaySaturation: 'evict' | 'strict'`: evict (default, availability)
+drops oldest live claims and emits `archx.replay_store_evicted`;
+strict never drops a live claim and instead rejects new redemptions
+while saturated. Both emit counters (`handler.stats().replaySets`),
+OPERATIONS documents the sizing formula
+(peak claims/sec × TTL × 4) and the equivalent Redis hazard
+(`maxmemory-policy` must be `noeviction` for security state). A
+subtlety worth recording: strict mode must keep sweeping expired
+entries past the first live one, or it rejects claims a legitimate
+sweep could have accommodated.
+
+**Preview policy became server-enforceable (P0.5).** The master
+file/metadata were never served, but "full-resolution pixels" could
+be. `maxWidthFraction` (fraction of the master's own width) is now a
+hard ceiling enforced at mint AND re-clamped at redemption, and the
+startup audit warns when lossless full-size delivery is configured.
+README/OPERATIONS now distinguish original file vs full-res pixels vs
+downscaled derivative precisely.
+
+**Worker + detector budgets (P1.6, user CPU/RAM ask).** Count caps
+do not bound memory: the detect worker now accounts total queued
+RGBA bytes (`maxQueuedBytes`, 512 MiB default), per-suspect pixels
+(`maxPixels`), queue wait (`queueTimeoutMs`), validates dimensions
+BEFORE copying, and caps batch key bytes. The core detector gained a
+wall-clock `maxTimeMs` budget shared across every search layer
+(measured 1502 ms against a 1500 ms budget) returning best-so-far
+with `timedOut: true` — "not found yet" is now distinguishable from
+"not present," and untrusted-input screening has a hard CPU contract.
+
+**Ownership claims (user ask; C2PA-shaped, honestly not C2PA).** New
+`server/ownership.js`: an Ed25519-signed token
+`ARCHX1.<b64url payload>.<signature>` where the payload binds
+`{owner, imageId, perceptualFingerprint, stegoFingerprint}`. It is
+written into derivative EXIF + XMP together with chosen
+Copyright/Artist strings (the "change the metadata" ask, with
+cosmetic fields user-controlled and the signed claim machine-held).
+No timestamp is embedded: Ed25519 is deterministic, so the claim is a
+pure function of the derivative — cache bytes stay reproducible —
+and issuance time belongs in the operator registry (schema now in
+`IP_HOLDER_GUIDE.md`). `verifyOwnership()` rescans in three layers —
+metadata signature, perceptual soft binding (the claim's pHash is of
+the UNSCRAMBLED derivative, i.e. what a leak actually looks like),
+and optional StegoMark detection — returning
+`verified | claim-only | content-match | no-evidence` with the full
+layer breakdown. End-to-end: a metadata-stripped, re-encoded
+"leaked" derivative verifies (`verified`, perceptual distance 2,
+stego fingerprint match) in the test suite. Boundaries said out loud
+everywhere the feature is mentioned: metadata is strippable, absence
+proves nothing, this is provenance evidence not legal title and not
+a C2PA implementation.
+
+**Evidence round (P1.11–P1.19, measured locally).**
+New `tools/stego-bench.mjs` (`npm run bench:stego`) runs an 8-image
+mixed corpus (3 photos, 3 graphics, flat, periodic-text synthetic)
+× 11 transforms × 2 profiles under time budgets. At strength 6:
+robust **75/88** (photos 33/33, graphics 31/33, flat 11/11,
+**periodic-text 0/11 — a genuine weak class**: high-contrast binary
+patterns near the band pitch swamp the estimator phase; real
+screenshot text on flat backgrounds behaves like the flat fixture,
+but adversarial periodic graphics can defeat embedding entirely,
+including identity); standard without geometry search 56/88 by
+construction (crops need geometry — the unit suite covers that
+combination). False-positive sweep: **0/329** wrong-key checks
+(320 native + 9 full-geometry), giving a rule-of-three 95% upper
+bound ≈ 0.9% for that configuration — still not 10⁻⁶ and not claimed
+as such. Collusion assay bench: averaged+JPEG85 copies of k=2/3/4
+recipients rank ALL participants exactly in the top k (top innocent
+z ≤ 2.07). Load workloads now separate honestly
+(`tools/load-test.mjs --images/--viewers`): in-process loopback,
+800 px — warm single-image **406 flows/s**, cold 20-image rotation
+**53 flows/s**, per-viewer personalized **25 flows/s** (p95
+21/577/637 ms respectively). Independent verification that these are
+sandbox loopback numbers, not capacity claims. Crypto
+self-verification now includes FIPS 180-4 and RFC 4231 known-answer
+tests plus IV-uniqueness and tamper tests; no FIPS-validation claim
+is made. Legacy-mark migration is covered (layouts v1/v2/v3 ×
+CRC/MAC eras decode under the current detector, wrong keys quiet).
+Proof-of-possession wording ("DPoP-style subset") and versioned
+standards mapping now live in `STANDARDS.md` §F with per-requirement
+owners; SECURITY.md states the real support window (current minor,
+no backports) and the two operator-visible trade-offs above.
+
+**Environmental truths, stated plainly.** Real-Redis integration
+tests (`tests/redis-integration.test.mjs`: cross-instance
+mint/redeem/replay denial, 4-way race = exactly one winner, shared
+quotas, dead-store fail-closed) could not run in the sandbox (no
+Redis binary, release CDNs blocked); they run in CI against a real
+`redis:7` service and skip cleanly without `ARCHX_TEST_REDIS_URL`.
+Firefox could not run locally for the same CDN reason; the browser
+harness is parameterized (`ARCHX_BROWSER=firefox`), and
+COMPATIBILITY's Tested/Expected/Unsupported language stands — this
+release adds Chromium-verified accessibility checks:
+`prefers-reduced-motion` disables temporal interlace while still
+displaying the image, and viewer hosts expose `role="img"` with the
+author's `alt` as the accessible name. Independent cryptographic
+review (P1.9) remains a recommendation, not something this repo can
+self-certify.
+
+**Extraction posture after v1.18 (measured or code-proven, no
+global percentages).**
+
+| Attack | Mode | Result |
+|---|---|---|
+| Right-click save / open-image / copy-URL | all | Blocked (no `<img>` URL exists) |
+| Page-source / network-tab reuse of payload URL | server modes | Fails without bearer header + fresh proof; one-time |
+| Token replay (same or other instance) | server modes | Denied after first redemption (Redis race-tested in CI) |
+| Replay under sustained mint pressure | server | Policy choice: `strict` denies new redemptions; `evict` admits a bounded replay window with telemetry |
+| Entitlement widening (bigger width than entitled) | server | Clamped at mint AND redemption; `maxWidthFraction` additionally caps vs master pixels |
+| Script readback (canvas `toDataURL`/`getImageData`) | 2D modes | Poisoned decoy or browser `SecurityError` (origin taint, cross-origin) |
+| WebGL readback/`captureStream` | fortress | Black (non-preserved buffer), texture holds scrambled pixels |
+| Single screenshot / phone photo | fortress | Lens-limited region + dynamic trace + one temporal phase ≠ clean full frame |
+| Bulk scraping | server | Quotas, distinct-image abuse detection, per-viewer marks for attribution |
+| Recipient collusion (averaging) | forensic | Participants ranked top-k of 8 in bench (k=2..4); no unique decode by design |
+| Strip metadata from a leak | ownership | Claim lost; perceptual + stego layers still identify it (distance 2 verified) |
+| Forge an ownership claim | ownership | Requires the Ed25519 private key; tampering fails signature in tests |
+| OS/CDP/GPU-level capture, camera stitch | any | **Succeeds** at display resolution — designed residue; marks + traces carry attribution |
+
+Regression state at ship: 119/119 Node tests (112 unit + 7 seeded
+fuzz), 122/122 Chromium checks, packaged-artifact smoke test green,
+types clean, audit clean; displayed pixels unchanged (detector,
+worker, ownership-metadata, and policy changes do not alter
+rendering; ownership only appends EXIF/XMP to derivative payloads
+when configured, and cache scopes are byte-identical when it is
+not).

@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -58,12 +58,14 @@
     "src/index.js",
     "src/scramble.js",
     "server/middleware.js",
+    "server/ownership.js",
     "server/build-assets.js",
     "server/build-assets-cli.js",
     "server/redis-state-store.js",
     "server/scramble-image.js",
     "server/detect-worker.js",
     "server/scramble-cli.js",
+    "server/detect-worker.js",
     "server/detect-stego-cli.js",
     "CHANGELOG.md",
     "README.md",
@@ -90,7 +92,10 @@
     "load-test": "node tools/load-test.mjs",
     "lint": "node tools/lint.mjs",
     "verify": "npm run lint && npm run build && npm run test:types && npm test && npm run test:browser && npm audit --audit-level=high",
-    "test:types": "tsc --noEmit -p tsconfig.json"
+    "test:types": "tsc --noEmit -p tsconfig.json",
+    "test:pack": "node tools/pack-smoke.mjs",
+    "test:redis": "node --test tests/redis-integration.test.mjs",
+    "bench:stego": "node tools/stego-bench.mjs"
   },
   "keywords": [
     "image-protection",
@@ -111,6 +116,7 @@
     "@sparticuz/chromium": "^138.0.0",
     "@types/node": "^22.20.5",
     "esbuild": "^0.25.0",
+    "ioredis": "^5.11.1",
     "puppeteer-core": "^25.16.0",
     "sharp": "^0.35.5",
     "typescript": "^5.9.3"

@@ -11,6 +11,7 @@ import {
   createArchxMiddleware, withHardenedProductionDefaults,
   scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
   validateWatermarkValue, detectStegoFingerprintInWorker, closeStegoDetectWorker,
+  signOwnershipClaim, verifyOwnership, ownershipPublicKeyFingerprint,
   type ArchxDerivativeResult,
 } from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
@@ -100,3 +101,12 @@ void buildArchxAssets({
   key: 'k', planVersion: 2, format: 'avif',
 });
 void createRedisStateStore({ client: { eval: async () => 1 } });
+
+// v1.18: strict replay saturation, fraction ceiling, ownership claims.
+const claimToken: string = signOwnershipClaim(
+  { owner: 'Type Smoke', imageId: 'img-1', perceptualFingerprint: '0123456789abcdef', stegoFingerprint: '0123456789ab' },
+  'not-a-real-key',
+);
+const verificationPromise = verifyOwnership(new Uint8Array(4), { claimToken, maxTimeMs: 5000 });
+const keyFingerprint: string = ownershipPublicKeyFingerprint('not-a-real-key');
+void [claimToken, verificationPromise, keyFingerprint];

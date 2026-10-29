@@ -33,6 +33,7 @@ import {
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
   batchDetectStegoInWorker, configureStegoDetectWorker,
+  generateOwnershipKeyPair, verifyOwnershipClaim, extractOwnershipClaim, verifyOwnership,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -3571,4 +3572,325 @@ test('v1.17 detect worker: batch screening, queue cap, config validation', async
   );
   await slow;
   configureStegoDetectWorker({ maxPending: 64 });
+});
+
+/* ---------- v1.18: saturation policy, preview policy, worker budgets, ownership ---------- */
+
+test('v1.18 crypto known-answer vectors and AES-GCM nonce uniqueness', async () => {
+  const hex = (bytes) => Buffer.from(bytes).toString('hex');
+  const enc = new TextEncoder();
+  // FIPS 180-4 examples
+  assert.equal(hex(sha256Bytes(enc.encode(''))),
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.equal(hex(sha256Bytes(enc.encode('abc'))),
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(hex(sha256Bytes(enc.encode('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'))),
+    '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1');
+  // RFC 4231 HMAC-SHA-256 cases 1, 2, and 6 (key longer than block size)
+  assert.equal(hex(hmacSha256Bytes(new Uint8Array(20).fill(0x0b), enc.encode('Hi There'))),
+    'b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7');
+  assert.equal(hex(hmacSha256Bytes(enc.encode('Jefe'), enc.encode('what do ya want for nothing?'))),
+    '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
+  assert.equal(hex(hmacSha256Bytes(new Uint8Array(131).fill(0xaa),
+    enc.encode('Test Using Larger Than Block-Size Key - Hash Key First'))),
+    '60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54');
+  // Cross-check the pure implementation against Node on random inputs
+  for (let i = 0; i < 24; i++) {
+    const msg = crypto.randomBytes(i * 37 % 512);
+    assert.equal(hex(sha256Bytes(msg)), crypto.createHash('sha256').update(msg).digest('hex'));
+    const key = crypto.randomBytes(1 + (i * 13) % 100);
+    assert.equal(hex(hmacSha256Bytes(key, msg)), crypto.createHmac('sha256', key).update(msg).digest('hex'));
+  }
+  // AES-GCM IVs never repeat under one key (nonce reuse would be fatal)
+  const aesKey = generateKeyBase64();
+  const ivs = new Set();
+  for (let i = 0; i < 200; i++) {
+    const { cipher, iv } = await encryptPayload(new Uint8Array([1, 2, 3, i & 255]), aesKey);
+    ivs.add(iv);
+    assert.ok(cipher.length > 4);
+  }
+  assert.equal(ivs.size, 200, 'every encryption used a distinct IV');
+});
+
+test('v1.18 legacy marks (layout v1/v2, CRC tag) still decode under auto settings', () => {
+  const w = 480, h = 320;
+  const gradient = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    gradient[i * 4] = (x * 3 + y) & 255; gradient[i * 4 + 1] = (x + y * 5) & 255;
+    gradient[i * 4 + 2] = 128 + ((x ^ y) & 63); gradient[i * 4 + 3] = 255;
+  }
+  for (const [layoutVersion, legacyCode, scheme] of [
+    [1, true, 'crc'], [2, true, 'crc'], [1, false, 'mac'], [2, false, 'mac'], [3, false, 'mac'],
+  ]) {
+    const marked = embedStegoFingerprint(gradient, w, h, 'legacy-buyer', {
+      key: 'legacy-key', profile: 'robust', strength: 7, layoutVersion, legacyCode,
+    });
+    const hit = detectStegoFingerprint(marked, w, h, { key: 'legacy-key', profile: 'auto' });
+    assert.equal(hit.found, true, `layout v${layoutVersion} legacyCode=${legacyCode} decodes`);
+    assert.equal(hit.tagScheme, scheme);
+    assert.equal(hit.fingerprint, stegoFingerprint('legacy-buyer'));
+  }
+});
+
+test('v1.18 replay saturation: strict rejects new claims, evict keeps availability', async () => {
+  const now = Date.now();
+  const strictSet = new BoundedTtlSet({ maxEntries: 2, cleanupIntervalMs: 0, saturation: 'strict' });
+  assert.equal(strictSet.claim('a', now + 60000), true);
+  assert.equal(strictSet.claim('b', now + 60000), true);
+  assert.equal(strictSet.claim('c', now + 60000), false, 'strict: saturated store rejects new claims');
+  assert.equal(strictSet.claim('a', now + 60000), false, 'strict: earlier claim was NOT evicted (replay still blocked)');
+  assert.equal(strictSet.stats().saturationRejections, 1);
+  assert.equal(strictSet.stats().liveEvictions, 0);
+  strictSet.close();
+
+  const evictSet = new BoundedTtlSet({ maxEntries: 2, cleanupIntervalMs: 0 });
+  assert.equal(evictSet.claim('a', now + 60000), true);
+  assert.equal(evictSet.claim('b', now + 60000), true);
+  assert.equal(evictSet.claim('c', now + 60000), true, 'evict: availability preserved');
+  assert.equal(evictSet.stats().liveEvictions, 1);
+  evictSet.close();
+
+  const strictStore = createMemoryStateStore({ maxEntries: 2, cleanupIntervalMs: 0, saturation: 'strict' });
+  assert.equal(await strictStore.claimOnce('nonce:1', 60000), true);
+  assert.equal(await strictStore.claimOnce('nonce:2', 60000), true);
+  assert.equal(await strictStore.claimOnce('nonce:3', 60000), false);
+  assert.equal(strictStore.stats().replaySets.nonce.saturation, 'strict');
+  strictStore.close();
+});
+
+test('v1.18 strict replay mode + preview fraction are wired through middleware and audit', async (t) => {
+  const { base, handler } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'v18' }),
+    replaySaturation: 'strict',
+    maxWidthFraction: 0.5,
+    widthBuckets: [],
+  }, { cat: [640, 420] });
+  assert.equal(handler.configAudit.summary.replaySaturation, 'strict');
+  const tok = await (await postToken(base + '/archx/token/cat?w=640')).json();
+  const claims = tokenPayloadForTest(tok.token);
+  assert.ok(claims.w <= 320, `mint clamped to half the master width (got ${claims.w})`);
+  const res = await redeemToken(base, tok);
+  assert.equal(res.status, 200);
+  const header = decodeContainer(new Uint8Array(await res.arrayBuffer())).header;
+  assert.ok(header.w <= 320, `delivered derivative respects the fraction (got ${header.w})`);
+  const stats = handler.stats();
+  assert.equal(stats.replaySets?.nonce?.saturation, 'strict', 'live replay-store counters are exposed');
+  assert.equal(stats.replaySets?.nonce?.maxEntries, 250000);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v18-preview-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const warned = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, authorize: async () => ({ viewerId: 'x' }),
+    lossless: true, maxWidthCap: 4096,
+  });
+  assert.ok(warned.warnings.some((w) => /FULL-RESOLUTION/.test(w)), 'audit warns about full-resolution lossless delivery');
+  const quiet = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, authorize: async () => ({ viewerId: 'x' }),
+    lossless: true, maxWidthCap: 4096, maxWidthFraction: 0.6,
+  });
+  assert.ok(!quiet.warnings.some((w) => /FULL-RESOLUTION/.test(w)), 'fraction policy silences the warning deliberately');
+  assert.throws(() => createArchxMiddleware({
+    secret: TEST_SECRET, imagesDir: dir, authorize: async () => ({ viewerId: 'x' }), maxWidthFraction: 1.5,
+  }), /maxWidthFraction/);
+});
+
+test('v1.18 entitlement can only tighten: width downgrade between mint and redemption applies', async (t) => {
+  let cap = 640;
+  const { base } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'shrink', maxWidth: cap }),
+    widthBuckets: [],
+  }, { cat: [640, 420] });
+  const tok = await (await postToken(base + '/archx/token/cat?w=640')).json();
+  assert.equal(tokenPayloadForTest(tok.token).w, 640);
+  cap = 200; // plan downgraded after issuance
+  const res = await redeemToken(base, tok);
+  assert.equal(res.status, 200);
+  const header = decodeContainer(new Uint8Array(await res.arrayBuffer())).header;
+  assert.ok(header.w <= 200, `redemption honors the CURRENT tighter cap (got ${header.w})`);
+});
+
+test('v1.18 mixed batch: allowed, denied, unknown, and malformed items are partitioned', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    authorize: async (req, id) => (id === 'dog' ? null : { viewerId: 'batchy' }),
+  }, { cat: [320, 240], dog: [320, 240] });
+  const res = await fetch(base + '/archx/tokens', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-archx-request': 'token' },
+    body: JSON.stringify({
+      items: [
+        { ref: 'ok', id: 'cat', w: 200 },
+        { ref: 'denied', id: 'dog', w: 200 },
+        { ref: 'ghost', id: 'ghost', w: 200 },
+        { ref: 'bad', id: 'cat', w: 200, evil: true },
+      ],
+    }),
+  });
+  assert.equal(res.status, 200);
+  const batch = await res.json();
+  assert.ok(batch.tokens.ok?.token, 'authorized item minted');
+  assert.equal(batch.tokens.denied, undefined);
+  assert.equal(batch.errors.denied?.status, 403, 'denied item reports 403');
+  assert.equal(batch.errors.ghost?.status, 404, 'unknown image reports 404');
+  assert.equal(batch.errors.bad?.status, 400, 'malformed item reports 400');
+});
+
+test('v1.18 proof-of-possession negatives: wrong path and expired proof are rejected', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'pop' }),
+    proofOfPossession: 'required',
+    oneTimeTokens: false,
+  });
+  const proofKey = makeProofKeyForTest();
+  const mintRes = await postToken(base + '/archx/token/cat?w=160', {
+    headers: { 'x-archx-proof-key': proofKey.header },
+  });
+  assert.equal(mintRes.status, 200);
+  const minted = await mintRes.json();
+  const wrongPath = makeProofForTest(proofKey, minted.token, { target: '/archx/i/dog' });
+  assert.equal((await fetch(base + minted.cleanUrl, {
+    headers: { 'x-archx-token': minted.token, 'x-archx-proof': wrongPath },
+  })).status, 403, 'proof bound to a different path is rejected');
+  const expired = makeProofForTest(proofKey, minted.token, { iat: Date.now() - 120000, exp: Date.now() - 60000 });
+  assert.equal((await fetch(base + minted.cleanUrl, {
+    headers: { 'x-archx-token': minted.token, 'x-archx-proof': expired },
+  })).status, 403, 'expired proof is rejected');
+  const good = makeProofForTest(proofKey, minted.token);
+  assert.equal((await fetch(base + minted.cleanUrl, {
+    headers: { 'x-archx-token': minted.token, 'x-archx-proof': good },
+  })).status, 200, 'fresh correct proof still passes after the failures');
+});
+
+test('v1.18 worker budgets: RGBA validation, pixel cap, queued-byte cap, batch key bounds', async (t) => {
+  t.after(() => closeStegoDetectWorker());
+  const w = 320, h = 240;
+  const rgb = new Uint8Array(w * h * 3);
+  await assert.rejects(
+    detectStegoFingerprintInWorker(rgb, w, h, { key: 'k' }),
+    /RGBA w\*h\*4/, 'RGB-sized buffers are rejected before any copy',
+  );
+  const rgba = new Uint8Array(w * h * 4).fill(120);
+  configureStegoDetectWorker({ maxPixels: 4096 });
+  await assert.rejects(
+    detectStegoFingerprintInWorker(rgba, w, h, { key: 'k' }),
+    /at most 4096 pixels/, 'pixel cap is enforced pre-queue',
+  );
+  configureStegoDetectWorker({ maxPixels: 50_000_000, maxPending: 8, maxQueuedBytes: rgba.length + 1000 });
+  const slow = detectStegoFingerprintInWorker(rgba, w, h, { key: 'none', profile: 'robust', searchGeometry: true, searchTilt: true });
+  await assert.rejects(
+    detectStegoFingerprintInWorker(rgba, w, h, { key: 'k' }),
+    /queued-byte budget/, 'second job exceeds the total queued-byte budget',
+  );
+  await slow;
+  configureStegoDetectWorker({ maxQueuedBytes: 512 * 1024 * 1024 });
+  await assert.rejects(
+    batchDetectStegoInWorker(rgba, w, h, ['x'.repeat(1025)], {}),
+    /1024 chars/, 'oversized batch keys are rejected',
+  );
+  assert.equal(configureStegoDetectWorker().queuedBytes, 0, 'byte accounting drains to zero');
+});
+
+test('v1.18 detector maxTimeMs bounds forensic search and reports timedOut', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const clean = new Uint8Array(data);
+  const t0 = Date.now();
+  const bounded = detectStegoFingerprint(clean, info.width, info.height, {
+    key: 'none', profile: 'robust', searchGeometry: true, maxTimeMs: 900,
+  });
+  const elapsed = Date.now() - t0;
+  assert.equal(bounded.found, false);
+  assert.equal(bounded.timedOut, true, 'budget expiry is reported, not silent');
+  assert.ok(elapsed < 6000, `returned near the budget (took ${elapsed}ms)`);
+  const marked = embedStegoFingerprint(clean, info.width, info.height, 'budget-buyer', { key: 'bk', profile: 'robust', strength: 6 });
+  const hit = detectStegoFingerprint(marked, info.width, info.height, {
+    key: 'bk', profile: 'robust', searchGeometry: true, maxTimeMs: 900,
+  });
+  assert.equal(hit.found, true, 'native hits are unaffected by the budget');
+  assert.ok(!hit.timedOut);
+});
+
+test('v1.18 ownership: signed claim in metadata verifies a stripped leaked copy', async (t) => {
+  const keyPair = generateOwnershipKeyPair();
+  const master = await syntheticMaster(640, 420);
+  const result = await scrambleImage(master, {
+    key: 'own-scramble', format: 'png', lossless: true, maxWidth: 640,
+    stegoPayload: 'ORDER-OWN-1', stegoKey: 'own-stego', stegoProfile: 'robust', stegoStrength: 7,
+    ownership: { owner: 'Studio Example', imageId: 'cat', privateKey: keyPair.privateKey },
+  });
+  assert.ok(result.ownershipToken?.startsWith('ARCHX1.'), 'claim token issued');
+  const { payload } = decodeContainer(result.bytes);
+  assert.equal(extractOwnershipClaim(payload), result.ownershipToken, 'claim rides in payload metadata');
+  assert.equal(verifyOwnershipClaim(result.ownershipToken, keyPair.publicKey).valid, true);
+  const tampered = result.ownershipToken.slice(0, -4) + 'AAAA';
+  assert.equal(verifyOwnershipClaim(tampered, keyPair.publicKey).valid, false, 'tampered signature rejected');
+
+  // Simulate the leak: display (unscramble) then screenshot-reencode (metadata gone).
+  const restored = await unscrambleImage(Buffer.from(payload), {
+    grid: result.header.grid, key: 'own-scramble', w: result.header.w, h: result.header.h, planVersion: result.header.pv,
+  });
+  assert.equal(extractOwnershipClaim(restored), null, 'leaked copy has no metadata claim');
+  const report = await verifyOwnership(restored, {
+    publicKey: keyPair.publicKey, stegoKey: 'own-stego', claim: result.ownershipToken,
+  });
+  assert.equal(report.verdict, 'verified', JSON.stringify(report));
+  assert.equal(report.owner, 'Studio Example');
+  assert.equal(report.stego.matchesClaim, true);
+
+  // Middleware: audit summarizes ownership without leaking key material.
+  const { handler } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'owner-viewer' }),
+    ownership: { owner: 'Studio Example', privateKey: keyPair.privateKey },
+  });
+  const summary = handler.configAudit.summary;
+  assert.equal(summary.ownership.owner, 'Studio Example');
+  assert.equal(summary.ownership.signed, true);
+  assert.equal(JSON.stringify(summary).includes('PRIVATE KEY'), false, 'audit never echoes the private key');
+});
+
+test('v1.18 documented CLI flow: protect with separate keys, detect, verify ownership', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v18-cli-'));
+  const masterPath = path.join(dir, 'photo.jpg');
+  fs.writeFileSync(masterPath, await syntheticMaster(640, 420));
+  const keyPair = generateOwnershipKeyPair();
+  const pubPath = path.join(dir, 'owner.pub.pem');
+  fs.writeFileSync(pubPath, keyPair.publicKey);
+  const env = {
+    ...process.env,
+    ARCHX_SCRAMBLE_KEY: 'readme-scramble-secret-value-0001',
+    ARCHX_STEGO_KEY: 'readme-stego-secret-DIFFERENT-0002',
+    ARCHX_OWNERSHIP_PRIVATE_KEY: keyPair.privateKey,
+  };
+  const repoRoot = path.resolve('.');
+  const protect = spawnSync('node', [
+    path.join(repoRoot, 'server/scramble-cli.js'), masterPath, path.join(dir, 'photo.archx'),
+    '--stego', 'ORDER-README-1', '--stego-profile', 'robust',
+    '--ownership-owner', 'Studio Example',
+  ], { env, encoding: 'utf8' });
+  assert.equal(protect.status, 0, protect.stderr || protect.stdout);
+  assert.match(protect.stdout, /ownership claim embedded/);
+
+  const container = decodeContainer(new Uint8Array(fs.readFileSync(path.join(dir, 'photo.archx'))));
+  const restored = await unscrambleImage(Buffer.from(container.payload), {
+    grid: container.header.grid, key: env.ARCHX_SCRAMBLE_KEY,
+    w: container.header.w, h: container.header.h, planVersion: container.header.pv,
+  });
+  const suspectPath = path.join(dir, 'suspect.png');
+  fs.writeFileSync(suspectPath, restored);
+
+  const detect = spawnSync('node', [
+    path.join(repoRoot, 'server/detect-stego-cli.js'), suspectPath,
+    '--expect', 'ORDER-README-1', '--profile', 'robust', '--json',
+  ], { env, encoding: 'utf8' });
+  assert.equal(detect.status, 0, detect.stderr || detect.stdout);
+  assert.equal(JSON.parse(detect.stdout).found, true);
+
+  const verify = spawnSync('node', [
+    path.join(repoRoot, 'server/detect-stego-cli.js'), suspectPath,
+    '--verify-ownership', '--ownership-pubkey', pubPath,
+    '--claim', extractOwnershipClaim(new Uint8Array(container.payload)),
+    '--json',
+  ], { env, encoding: 'utf8' });
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  assert.equal(JSON.parse(verify.stdout).ownership.verdict, 'verified');
 });

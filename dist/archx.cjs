@@ -1352,6 +1352,7 @@ function rotateRgba(src, w, h, angleRad) {
   }
   return out;
 }
+var STEGO_TIMEOUT = Symbol("archx-stego-timeout");
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
   gridX,
@@ -1368,6 +1369,11 @@ function detectStegoFingerprint(rgba, w, h, {
   // ±6° on a downscaled proxy, refines by raw signal, then confirms
   // at full resolution. Off by default (cost); the CLI exposes --tilt.
   searchTilt = false,
+  // Optional wall-clock budget for the WHOLE search (all layouts,
+  // profiles, and probes share one deadline). On expiry the best
+  // candidate so far is returned with `timedOut: true` instead of
+  // running unbounded forensic stages. 0 (default) = unlimited.
+  maxTimeMs = 0,
   // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
   // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
   // (halves worst-case cost on unmarked suspects).
@@ -1375,8 +1381,11 @@ function detectStegoFingerprint(rgba, w, h, {
   _mirrorProbe = false,
   _tiltProbe = false,
   _layoutVersion = 0,
-  _planes = null
+  _planes = null,
+  _deadline = 0
 } = {}) {
+  const deadline = _deadline > 0 ? _deadline : Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0;
+  const deadlineHit = () => deadline > 0 && Date.now() > deadline;
   const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 ? _layoutVersion : layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 ? layoutVersion : 0;
   const planesCache = _planes || /* @__PURE__ */ new Map();
   const srcTop = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
@@ -1389,12 +1398,16 @@ function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache };
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache, _deadline: deadline };
     let best2 = null;
     for (const version of [3, 2, 1]) {
       const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
       if (attempt?.found) return attempt;
       if (!best2 || (attempt?.confidence ?? 0) > (best2.confidence ?? 0)) best2 = attempt;
+      if (attempt?.timedOut || deadlineHit()) {
+        if (best2 && !best2.timedOut) best2 = { ...best2, timedOut: true };
+        break;
+      }
     }
     return best2;
   }
@@ -1412,7 +1425,8 @@ function detectStegoFingerprint(rgba, w, h, {
       _mirrorProbe: true,
       _tiltProbe: true,
       _layoutVersion: concreteLayout,
-      _planes: planesCache
+      _planes: planesCache,
+      _deadline: deadline
     });
     if (standard?.found && standard.confidence >= 0.9 && !searchGeometry) return standard;
     const robust2 = detectStegoFingerprint(srcTop, w, h, {
@@ -1428,10 +1442,12 @@ function detectStegoFingerprint(rgba, w, h, {
       _mirrorProbe: true,
       _tiltProbe: true,
       _layoutVersion: concreteLayout,
-      _planes: planesCache
+      _planes: planesCache,
+      _deadline: deadline
     });
     const initial = robust2?.found && !standard?.found ? robust2 : standard?.found && !robust2?.found ? standard : (robust2?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust2 : standard;
     if (!searchGeometry || initial?.found) return initial;
+    if (deadlineHit()) return initial?.timedOut ? initial : { ...initial, timedOut: true };
     const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
       key,
       gridX,
@@ -1444,7 +1460,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchTilt,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
-      _planes: planesCache
+      _planes: planesCache,
+      _deadline: deadline
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(srcTop, w, h, {
@@ -1459,7 +1476,8 @@ function detectStegoFingerprint(rgba, w, h, {
       searchTilt,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
-      _planes: planesCache
+      _planes: planesCache,
+      _deadline: deadline
     });
     if (robustGeometry?.found) return robustGeometry;
     if ((searchMirror || searchRotation) && !_mirrorProbe) try {
@@ -1481,7 +1499,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
           }
@@ -1502,7 +1521,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (fast?.found) return { ...fast, rotated: clockwise ? 270 : 90 };
           }
@@ -1523,7 +1543,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (fast?.found) return { ...fast, transposed: anti ? "anti" : "main" };
           }
@@ -1545,7 +1566,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
           }
@@ -1566,7 +1588,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
           }
@@ -1587,7 +1610,8 @@ function detectStegoFingerprint(rgba, w, h, {
               _mirrorProbe: true,
               _tiltProbe: true,
               _layoutVersion: concreteLayout,
-              _planes: planesCache
+              _planes: planesCache,
+              _deadline: deadline
             });
             if (transposed?.found) return { ...transposed, transposed: anti ? "anti" : "main" };
           }
@@ -1628,7 +1652,9 @@ function detectStegoFingerprint(rgba, w, h, {
   const _voteScores = new Float64Array(codeLength);
   const _groups = Array.from({ length: codeLength }, () => []);
   const _segmentResponses = [];
+  let _evalTick = 0;
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
+    if (deadline && (++_evalTick & 15) === 0 && Date.now() > deadline) throw STEGO_TIMEOUT;
     const cellW0 = cw * scaleX;
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
@@ -1905,51 +1931,34 @@ function detectStegoFingerprint(rgba, w, h, {
     if (better) best = candidate;
     return candidate;
   };
-  for (const fx of fractions) for (const fy of fractions) {
-    consider(evaluate({ fx, fy }));
-    if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
-  }
-  if (searchGeometry && !best?.found) {
-    const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.2, 1.25];
-    const unique = (values) => [...new Set(values.map((v) => Math.round(v * 1e3) / 1e3))];
-    const originRange = (span, extent) => {
-      const min = Math.min(0, extent - span);
-      const max = Math.max(0, extent - span);
-      return { min, max, center: (min + max) / 2 };
-    };
-    const scaleCandidates = [];
-    for (let cellX = -4; cellX <= 4; cellX++) {
-      for (let cellY = -4; cellY <= 4; cellY++) {
-        if (cellX === 0 && cellY === 0) continue;
-        scaleCandidates.push(consider(evaluate({
-          scaleX: 1,
-          scaleY: 1,
-          originX: cellX * cw,
-          originY: cellY * ch
-        })));
-      }
+  try {
+    for (const fx of fractions) for (const fy of fractions) {
+      consider(evaluate({ fx, fy }));
+      if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
     }
-    for (const scaleX of scaleValues) {
-      const rangeX = originRange(gx * cw * scaleX, w);
-      for (const scaleY of scaleValues) {
-        const rangeY = originRange(gy * ch * scaleY, h);
-        for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
-          for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
-            scaleCandidates.push(consider(evaluate({
-              scaleX,
-              scaleY,
-              originX,
-              originY
-            })));
-          }
+    if (searchGeometry && !best?.found) {
+      const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.2, 1.25];
+      const unique = (values) => [...new Set(values.map((v) => Math.round(v * 1e3) / 1e3))];
+      const originRange = (span, extent) => {
+        const min = Math.min(0, extent - span);
+        const max = Math.max(0, extent - span);
+        return { min, max, center: (min + max) / 2 };
+      };
+      const scaleCandidates = [];
+      for (let cellX = -4; cellX <= 4; cellX++) {
+        for (let cellY = -4; cellY <= 4; cellY++) {
+          if (cellX === 0 && cellY === 0) continue;
+          scaleCandidates.push(consider(evaluate({
+            scaleX: 1,
+            scaleY: 1,
+            originX: cellX * cw,
+            originY: cellY * ch
+          })));
         }
       }
-    }
-    if (!best?.found) {
-      const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1.38, 1 / 0.7, 1 / 0.65];
-      for (const scaleX of deepScales) {
+      for (const scaleX of scaleValues) {
         const rangeX = originRange(gx * cw * scaleX, w);
-        for (const scaleY of deepScales) {
+        for (const scaleY of scaleValues) {
           const rangeY = originRange(gy * ch * scaleY, h);
           for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
             for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
@@ -1963,355 +1972,414 @@ function detectStegoFingerprint(rgba, w, h, {
           }
         }
       }
-    }
-    if (!best?.found) {
-      const seedPairs = [];
-      for (const s of [0.55, 0.6, 2 / 3, 1.5, 1 / 0.6, 16 / 9, 1 / 0.55]) seedPairs.push([s, s]);
-      for (const s of [1 / 0.75, 1 / 0.7, 1.5, 1 / 0.65, 1 / 0.6, 16 / 9]) {
-        seedPairs.push([s, 1], [1, s]);
-      }
-      for (const s of [0.65, 0.7, 0.75]) seedPairs.push([s, 1], [1, s]);
-      for (const [scaleX, scaleY] of seedPairs) {
-        const rangeX = originRange(gx * cw * scaleX, w);
-        const rangeY = originRange(gy * ch * scaleY, h);
-        for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
-          for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
-            scaleCandidates.push(consider(evaluate({ scaleX, scaleY, originX, originY })));
+      if (!best?.found) {
+        const deepScales = [0.65, 0.7, 0.75, 1 / 0.88, 1 / 0.75, 1.38, 1 / 0.7, 1 / 0.65];
+        for (const scaleX of deepScales) {
+          const rangeX = originRange(gx * cw * scaleX, w);
+          for (const scaleY of deepScales) {
+            const rangeY = originRange(gy * ch * scaleY, h);
+            for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+              for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+                scaleCandidates.push(consider(evaluate({
+                  scaleX,
+                  scaleY,
+                  originX,
+                  originY
+                })));
+              }
+            }
           }
         }
-        if (best?.found) break;
       }
-    }
-    const originCandidates = [];
-    const seenPairs = /* @__PURE__ */ new Set();
-    for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
-      const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}`;
-      if (seenPairs.has(key2)) continue;
-      seenPairs.add(key2);
-      const rangeX = originRange(gx * cw * candidate._scaleX, w);
-      const rangeY = originRange(gy * ch * candidate._scaleY, h);
-      const quarter = (range) => unique([
-        range.min,
-        range.min + (range.max - range.min) * 0.25,
-        range.center,
-        range.min + (range.max - range.min) * 0.75,
-        range.max
-      ]);
-      for (const originX of quarter(rangeX)) {
-        for (const originY of quarter(rangeY)) {
-          originCandidates.push(consider(evaluate({
-            scaleX: candidate._scaleX,
-            scaleY: candidate._scaleY,
-            originX,
-            originY
-          })));
+      if (!best?.found) {
+        const seedPairs = [];
+        for (const s of [0.55, 0.6, 2 / 3, 1.5, 1 / 0.6, 16 / 9, 1 / 0.55]) seedPairs.push([s, s]);
+        for (const s of [1 / 0.75, 1 / 0.7, 1.5, 1 / 0.65, 1 / 0.6, 16 / 9]) {
+          seedPairs.push([s, 1], [1, s]);
+        }
+        for (const s of [0.65, 0.7, 0.75]) seedPairs.push([s, 1], [1, s]);
+        for (const [scaleX, scaleY] of seedPairs) {
+          const rangeX = originRange(gx * cw * scaleX, w);
+          const rangeY = originRange(gy * ch * scaleY, h);
+          for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+            for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+              scaleCandidates.push(consider(evaluate({ scaleX, scaleY, originX, originY })));
+            }
+          }
+          if (best?.found) break;
         }
       }
-      if (seenPairs.size >= 4) break;
-    }
-    const refinements = [];
-    const seenGeometries = /* @__PURE__ */ new Set();
-    for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
-      const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}:${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
-      if (seenGeometries.has(key2)) continue;
-      seenGeometries.add(key2);
-      refinements.push(candidate);
-      if (refinements.length >= 3) break;
-    }
-    for (const coarseCandidate of refinements) {
-      for (const fx of fractions) for (const fy of fractions) {
-        consider(evaluate({
-          scaleX: coarseCandidate._scaleX,
-          scaleY: coarseCandidate._scaleY,
-          originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
-          originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY
-        }));
+      const originCandidates = [];
+      const seenPairs = /* @__PURE__ */ new Set();
+      for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
+        const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}`;
+        if (seenPairs.has(key2)) continue;
+        seenPairs.add(key2);
+        const rangeX = originRange(gx * cw * candidate._scaleX, w);
+        const rangeY = originRange(gy * ch * candidate._scaleY, h);
+        const quarter = (range) => unique([
+          range.min,
+          range.min + (range.max - range.min) * 0.25,
+          range.center,
+          range.min + (range.max - range.min) * 0.75,
+          range.max
+        ]);
+        for (const originX of quarter(rangeX)) {
+          for (const originY of quarter(rangeY)) {
+            originCandidates.push(consider(evaluate({
+              scaleX: candidate._scaleX,
+              scaleY: candidate._scaleY,
+              originX,
+              originY
+            })));
+          }
+        }
+        if (seenPairs.size >= 4) break;
       }
-    }
-    if (!best?.found) {
-      const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
-      const leaders = refinements.slice(0, 2);
-      for (const leader of leaders) {
-        for (const fxScale of [1, ...fineFactors]) {
-          for (const fyScale of [1, ...fineFactors]) {
-            if (fxScale === 1 && fyScale === 1) continue;
-            const scaleX = leader._scaleX * fxScale;
-            const scaleY = leader._scaleY * fyScale;
+      const refinements = [];
+      const seenGeometries = /* @__PURE__ */ new Set();
+      for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
+        const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}:${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
+        if (seenGeometries.has(key2)) continue;
+        seenGeometries.add(key2);
+        refinements.push(candidate);
+        if (refinements.length >= 3) break;
+      }
+      for (const coarseCandidate of refinements) {
+        for (const fx of fractions) for (const fy of fractions) {
+          consider(evaluate({
+            scaleX: coarseCandidate._scaleX,
+            scaleY: coarseCandidate._scaleY,
+            originX: coarseCandidate._originX + fx * cw * coarseCandidate._scaleX,
+            originY: coarseCandidate._originY + fy * ch * coarseCandidate._scaleY
+          }));
+        }
+      }
+      if (!best?.found) {
+        const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
+        const leaders = refinements.slice(0, 2);
+        for (const leader of leaders) {
+          for (const fxScale of [1, ...fineFactors]) {
+            for (const fyScale of [1, ...fineFactors]) {
+              if (fxScale === 1 && fyScale === 1) continue;
+              const scaleX = leader._scaleX * fxScale;
+              const scaleY = leader._scaleY * fyScale;
+              consider(evaluate({
+                scaleX,
+                scaleY,
+                originX: leader._originX + gx * cw * (leader._scaleX - scaleX) / 2,
+                originY: leader._originY + gy * ch * (leader._scaleY - scaleY) / 2
+              }));
+              if (best?.found) break;
+            }
+            if (best?.found) break;
+          }
+        }
+      }
+      if (!best?.found) {
+        const descendFrom = (seed) => {
+          let cur = seed;
+          for (let round = 0; round < 2 && cur && !best?.found; round++) {
+            const beforeScaleX = cur._scaleX, beforeScaleY = cur._scaleY;
+            for (const f of [0.9, 0.94, 0.97, 1.03, 1.06, 1.11]) {
+              const sx = cur._scaleX * f;
+              consider(evaluate({
+                scaleX: sx,
+                scaleY: cur._scaleY,
+                originX: cur._originX + gx * cw * (cur._scaleX - sx) / 2,
+                originY: cur._originY
+              }));
+              const sy = cur._scaleY * f;
+              consider(evaluate({
+                scaleX: cur._scaleX,
+                scaleY: sy,
+                originX: cur._originX,
+                originY: cur._originY + gy * ch * (cur._scaleY - sy) / 2
+              }));
+              if (best?.found) return;
+            }
+            cur = best;
+            if (cur._scaleX === beforeScaleX && cur._scaleY === beforeScaleY) break;
+          }
+        };
+        const descentSeeds = [];
+        const descentSeen = /* @__PURE__ */ new Set();
+        for (const cand of [best, ...originCandidates, ...scaleCandidates].filter(Boolean).sort((a, b) => b.meanSignal - a.meanSignal || b._evidence - a._evidence)) {
+          const k = `${Math.round(cand._scaleX * 100)}:${Math.round(cand._scaleY * 100)}`;
+          if (descentSeen.has(k)) continue;
+          descentSeen.add(k);
+          descentSeeds.push(cand);
+          if (descentSeeds.length >= 6) break;
+        }
+        for (const leader of descentSeeds) {
+          descendFrom(leader);
+          if (best?.found) break;
+        }
+        if (!best?.found && best) {
+          const rangeX = originRange(gx * cw * best._scaleX, w);
+          const rangeY = originRange(gy * ch * best._scaleY, h);
+          const roam = (r) => unique([r.min, r.min + (r.max - r.min) * 0.25, r.center, r.min + (r.max - r.min) * 0.75, r.max]);
+          for (const originX of roam(rangeX)) {
+            for (const originY of roam(rangeY)) {
+              consider(evaluate({ scaleX: best._scaleX, scaleY: best._scaleY, originX, originY }));
+            }
+          }
+        }
+        if (!best?.found && best) {
+          const landed = best;
+          for (const fx of fractions) for (const fy of fractions) {
             consider(evaluate({
-              scaleX,
-              scaleY,
-              originX: leader._originX + gx * cw * (leader._scaleX - scaleX) / 2,
-              originY: leader._originY + gy * ch * (leader._scaleY - scaleY) / 2
+              scaleX: landed._scaleX,
+              scaleY: landed._scaleY,
+              originX: landed._originX + fx * cw * landed._scaleX,
+              originY: landed._originY + fy * ch * landed._scaleY
             }));
             if (best?.found) break;
           }
-          if (best?.found) break;
         }
       }
     }
-    if (!best?.found) {
-      const descendFrom = (seed) => {
-        let cur = seed;
-        for (let round = 0; round < 2 && cur && !best?.found; round++) {
-          const beforeScaleX = cur._scaleX, beforeScaleY = cur._scaleY;
-          for (const f of [0.9, 0.94, 0.97, 1.03, 1.06, 1.11]) {
-            const sx = cur._scaleX * f;
-            consider(evaluate({
-              scaleX: sx,
-              scaleY: cur._scaleY,
-              originX: cur._originX + gx * cw * (cur._scaleX - sx) / 2,
-              originY: cur._originY
-            }));
-            const sy = cur._scaleY * f;
-            consider(evaluate({
-              scaleX: cur._scaleX,
-              scaleY: sy,
-              originX: cur._originX,
-              originY: cur._originY + gy * ch * (cur._scaleY - sy) / 2
-            }));
-            if (best?.found) return;
+    if (best && !best.found && best.cells >= 96 && (robust && best.meanSignal >= 2 && best.agreement >= 0.8 || !robust && best.meanSignal >= 2 && best.agreement >= 0.85 && best.observedBits >= 60)) {
+      consider(evaluate({
+        scaleX: best._scaleX,
+        scaleY: best._scaleY,
+        originX: best._originX,
+        originY: best._originY,
+        erasure: true
+      }));
+    }
+    if (best) {
+      delete best._evidence;
+      delete best._originX;
+      delete best._originY;
+      delete best._scaleX;
+      delete best._scaleY;
+    }
+    if (!best?.found && searchTilt && !_tiltProbe) {
+      try {
+        if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+          const entry = planesEntry(srcTop);
+          const confirmAt = (degreesCw, variants = false) => {
+            const warpedFull = rotateRgba(srcTop, w, h, -degreesCw * Math.PI / 180);
+            return detectStegoFingerprint(warpedFull, w, h, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets: true,
+              searchGeometry,
+              searchMirror: variants && searchMirror,
+              searchRotation: variants && searchRotation,
+              searchTilt: false,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+          };
+          let tiltCandidates = entry.tiltCandidates || null;
+          let tiltScreenHit = null;
+          if (!tiltCandidates) {
+            const proxyScale = Math.min(1, 960 / w);
+            const pw = Math.max(64, Math.round(w * proxyScale));
+            const ph = Math.max(64, Math.round(h * proxyScale));
+            const proxy = proxyScale < 1 ? resampleRgba(srcTop, w, h, pw, ph) : srcTop;
+            const cropCenter = (buf, bw, bh, frac) => {
+              if (frac >= 1) return { buf, w: bw, h: bh };
+              const cw2 = Math.max(64, Math.round(bw * frac));
+              const ch2 = Math.max(64, Math.round(bh * frac));
+              const ox = Math.round((bw - cw2) / 2), oy = Math.round((bh - ch2) / 2);
+              const out = new Uint8Array(cw2 * ch2 * 4);
+              for (let y = 0; y < ch2; y++) {
+                out.set(buf.subarray(((oy + y) * bw + ox) * 4, ((oy + y) * bw + ox + cw2) * 4), y * cw2 * 4);
+              }
+              return { buf: out, w: cw2, h: ch2 };
+            };
+            const quickDetect = (degreesCw) => {
+              const warped = rotateRgba(proxy, pw, ph, -degreesCw * Math.PI / 180);
+              let bestHit = null;
+              for (const frac of [1, 0.96, 0.92]) {
+                const view = cropCenter(warped, pw, ph, frac);
+                const hit = detectStegoFingerprint(view.buf, view.w, view.h, {
+                  key,
+                  gridX,
+                  gridY,
+                  profile,
+                  searchOffsets: true,
+                  searchGeometry: false,
+                  searchMirror: false,
+                  searchRotation: false,
+                  searchTilt: false,
+                  _mirrorProbe: true,
+                  _tiltProbe: true,
+                  _layoutVersion: concreteLayout,
+                  _planes: planesCache,
+                  _deadline: deadline
+                });
+                if (hit?.found) return hit;
+                if (!bestHit || (hit?.meanSignal ?? 0) > (bestHit.meanSignal ?? 0)) bestHit = hit;
+              }
+              return bestHit;
+            };
+            const samples = [];
+            for (let angle = -6; angle <= 6.001; angle += 0.5) {
+              if (deadlineHit()) throw STEGO_TIMEOUT;
+              if (Math.abs(angle) < 1e-9) continue;
+              const hit = quickDetect(angle);
+              if (hit?.found) {
+                tiltScreenHit = { hit, angle };
+                break;
+              }
+              samples.push([angle, hit?.meanSignal ?? 0]);
+            }
+            if (tiltScreenHit) {
+              tiltCandidates = [tiltScreenHit.angle];
+            } else if (samples.length >= 5) {
+              const signals = samples.map((s) => s[1]);
+              const sorted = [...signals].sort((a, b) => a - b);
+              const baseline = sorted[Math.floor(sorted.length / 2)] ?? 0;
+              let maxIdx = 0;
+              for (let i = 1; i < signals.length; i++) if (signals[i] > signals[maxIdx]) maxIdx = i;
+              const peak = signals[maxIdx];
+              if (peak >= 1.2 && peak > baseline + 0.15) {
+                const thresh = baseline + 0.25 * (peak - baseline);
+                let lo = maxIdx, hi = maxIdx;
+                while (lo > 0 && signals[lo - 1] > thresh) lo--;
+                while (hi < signals.length - 1 && signals[hi + 1] > thresh) hi++;
+                let wSum = 0, aSum = 0;
+                for (let i = lo; i <= hi; i++) {
+                  const weight = (signals[i] - baseline) ** 2;
+                  wSum += weight;
+                  aSum += weight * samples[i][0];
+                }
+                const centroid = wSum > 0 ? aSum / wSum : samples[maxIdx][0];
+                tiltCandidates = [...new Set([
+                  centroid,
+                  samples[maxIdx][0],
+                  centroid - 0.3,
+                  centroid + 0.3
+                ].map((a) => Math.round(a * 100) / 100))];
+              }
+            }
+            entry.tiltCandidates = tiltCandidates;
           }
-          cur = best;
-          if (cur._scaleX === beforeScaleX && cur._scaleY === beforeScaleY) break;
+          if (tiltCandidates) {
+            for (const angle of tiltCandidates) {
+              const full = confirmAt(angle);
+              if (full?.found) return { ...full, deskewed: Math.round(angle * 100) / 100 };
+            }
+            if (searchMirror || searchRotation) {
+              const full = confirmAt(tiltCandidates[0], true);
+              if (full?.found) return { ...full, deskewed: Math.round(tiltCandidates[0] * 100) / 100 };
+            }
+            if (tiltScreenHit) return { ...tiltScreenHit.hit, deskewed: Math.round(tiltScreenHit.angle * 100) / 100 };
+          }
         }
+      } catch (tiltErr) {
+        if (tiltErr === STEGO_TIMEOUT) throw tiltErr;
+      }
+    }
+    if (!best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
+      try {
+        if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+          const entry = planesEntry(srcTop);
+          for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
+            const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+            const mirrored = detectStegoFingerprint(variant, w, h, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+          }
+          for (const clockwise of searchRotation ? [false, true] : []) {
+            const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+            const rotated = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
+          }
+          for (const anti of searchRotation ? [false, true] : []) {
+            const variant = transposedVariant(entry, srcTop, w, h, anti);
+            const transposed = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (transposed?.found) return { ...transposed, transposed: anti ? "anti" : "main" };
+          }
+        }
+      } catch (probeErr) {
+        if (probeErr === STEGO_TIMEOUT) throw probeErr;
+      }
+    }
+  } catch (err) {
+    if (err !== STEGO_TIMEOUT) throw err;
+    if (!best) {
+      return {
+        found: false,
+        fingerprint: "",
+        profile: effectiveProfile,
+        tagScheme: null,
+        layoutVersion: concreteLayout,
+        erasureDecoded: false,
+        erasedBits: 0,
+        observedBits: 0,
+        minBitRepetitions: 0,
+        crcValid: false,
+        corrections: 0,
+        confidence: 0,
+        agreement: 0,
+        meanSignal: 0,
+        cells: 0,
+        offset: { x: 0, y: 0 },
+        geometry: { scaleX: 1, scaleY: 1, originX: 0, originY: 0 },
+        grid: { x: gx, y: gy },
+        timedOut: true
       };
-      const descentSeeds = [];
-      const descentSeen = /* @__PURE__ */ new Set();
-      for (const cand of [best, ...originCandidates, ...scaleCandidates].filter(Boolean).sort((a, b) => b.meanSignal - a.meanSignal || b._evidence - a._evidence)) {
-        const k = `${Math.round(cand._scaleX * 100)}:${Math.round(cand._scaleY * 100)}`;
-        if (descentSeen.has(k)) continue;
-        descentSeen.add(k);
-        descentSeeds.push(cand);
-        if (descentSeeds.length >= 6) break;
-      }
-      for (const leader of descentSeeds) {
-        descendFrom(leader);
-        if (best?.found) break;
-      }
-      if (!best?.found && best) {
-        const rangeX = originRange(gx * cw * best._scaleX, w);
-        const rangeY = originRange(gy * ch * best._scaleY, h);
-        const roam = (r) => unique([r.min, r.min + (r.max - r.min) * 0.25, r.center, r.min + (r.max - r.min) * 0.75, r.max]);
-        for (const originX of roam(rangeX)) {
-          for (const originY of roam(rangeY)) {
-            consider(evaluate({ scaleX: best._scaleX, scaleY: best._scaleY, originX, originY }));
-          }
-        }
-      }
-      if (!best?.found && best) {
-        const landed = best;
-        for (const fx of fractions) for (const fy of fractions) {
-          consider(evaluate({
-            scaleX: landed._scaleX,
-            scaleY: landed._scaleY,
-            originX: landed._originX + fx * cw * landed._scaleX,
-            originY: landed._originY + fy * ch * landed._scaleY
-          }));
-          if (best?.found) break;
-        }
-      }
     }
-  }
-  if (best && !best.found && best.cells >= 96 && (robust && best.meanSignal >= 2 && best.agreement >= 0.8 || !robust && best.meanSignal >= 2 && best.agreement >= 0.85 && best.observedBits >= 60)) {
-    consider(evaluate({
-      scaleX: best._scaleX,
-      scaleY: best._scaleY,
-      originX: best._originX,
-      originY: best._originY,
-      erasure: true
-    }));
-  }
-  if (best) {
     delete best._evidence;
     delete best._originX;
     delete best._originY;
     delete best._scaleX;
     delete best._scaleY;
-  }
-  if (!best?.found && searchTilt && !_tiltProbe) {
-    try {
-      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const entry = planesEntry(srcTop);
-        const confirmAt = (degreesCw, variants = false) => {
-          const warpedFull = rotateRgba(srcTop, w, h, -degreesCw * Math.PI / 180);
-          return detectStegoFingerprint(warpedFull, w, h, {
-            key,
-            gridX,
-            gridY,
-            profile,
-            searchOffsets: true,
-            searchGeometry,
-            searchMirror: variants && searchMirror,
-            searchRotation: variants && searchRotation,
-            searchTilt: false,
-            _tiltProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-        };
-        let tiltCandidates = entry.tiltCandidates || null;
-        let tiltScreenHit = null;
-        if (!tiltCandidates) {
-          const proxyScale = Math.min(1, 960 / w);
-          const pw = Math.max(64, Math.round(w * proxyScale));
-          const ph = Math.max(64, Math.round(h * proxyScale));
-          const proxy = proxyScale < 1 ? resampleRgba(srcTop, w, h, pw, ph) : srcTop;
-          const cropCenter = (buf, bw, bh, frac) => {
-            if (frac >= 1) return { buf, w: bw, h: bh };
-            const cw2 = Math.max(64, Math.round(bw * frac));
-            const ch2 = Math.max(64, Math.round(bh * frac));
-            const ox = Math.round((bw - cw2) / 2), oy = Math.round((bh - ch2) / 2);
-            const out = new Uint8Array(cw2 * ch2 * 4);
-            for (let y = 0; y < ch2; y++) {
-              out.set(buf.subarray(((oy + y) * bw + ox) * 4, ((oy + y) * bw + ox + cw2) * 4), y * cw2 * 4);
-            }
-            return { buf: out, w: cw2, h: ch2 };
-          };
-          const quickDetect = (degreesCw) => {
-            const warped = rotateRgba(proxy, pw, ph, -degreesCw * Math.PI / 180);
-            let bestHit = null;
-            for (const frac of [1, 0.96, 0.92]) {
-              const view = cropCenter(warped, pw, ph, frac);
-              const hit = detectStegoFingerprint(view.buf, view.w, view.h, {
-                key,
-                gridX,
-                gridY,
-                profile,
-                searchOffsets: true,
-                searchGeometry: false,
-                searchMirror: false,
-                searchRotation: false,
-                searchTilt: false,
-                _mirrorProbe: true,
-                _tiltProbe: true,
-                _layoutVersion: concreteLayout,
-                _planes: planesCache
-              });
-              if (hit?.found) return hit;
-              if (!bestHit || (hit?.meanSignal ?? 0) > (bestHit.meanSignal ?? 0)) bestHit = hit;
-            }
-            return bestHit;
-          };
-          const samples = [];
-          for (let angle = -6; angle <= 6.001; angle += 0.5) {
-            if (Math.abs(angle) < 1e-9) continue;
-            const hit = quickDetect(angle);
-            if (hit?.found) {
-              tiltScreenHit = { hit, angle };
-              break;
-            }
-            samples.push([angle, hit?.meanSignal ?? 0]);
-          }
-          if (tiltScreenHit) {
-            tiltCandidates = [tiltScreenHit.angle];
-          } else if (samples.length >= 5) {
-            const signals = samples.map((s) => s[1]);
-            const sorted = [...signals].sort((a, b) => a - b);
-            const baseline = sorted[Math.floor(sorted.length / 2)] ?? 0;
-            let maxIdx = 0;
-            for (let i = 1; i < signals.length; i++) if (signals[i] > signals[maxIdx]) maxIdx = i;
-            const peak = signals[maxIdx];
-            if (peak >= 1.2 && peak > baseline + 0.15) {
-              const thresh = baseline + 0.25 * (peak - baseline);
-              let lo = maxIdx, hi = maxIdx;
-              while (lo > 0 && signals[lo - 1] > thresh) lo--;
-              while (hi < signals.length - 1 && signals[hi + 1] > thresh) hi++;
-              let wSum = 0, aSum = 0;
-              for (let i = lo; i <= hi; i++) {
-                const weight = (signals[i] - baseline) ** 2;
-                wSum += weight;
-                aSum += weight * samples[i][0];
-              }
-              const centroid = wSum > 0 ? aSum / wSum : samples[maxIdx][0];
-              tiltCandidates = [...new Set([
-                centroid,
-                samples[maxIdx][0],
-                centroid - 0.3,
-                centroid + 0.3
-              ].map((a) => Math.round(a * 100) / 100))];
-            }
-          }
-          entry.tiltCandidates = tiltCandidates;
-        }
-        if (tiltCandidates) {
-          for (const angle of tiltCandidates) {
-            const full = confirmAt(angle);
-            if (full?.found) return { ...full, deskewed: Math.round(angle * 100) / 100 };
-          }
-          if (searchMirror || searchRotation) {
-            const full = confirmAt(tiltCandidates[0], true);
-            if (full?.found) return { ...full, deskewed: Math.round(tiltCandidates[0] * 100) / 100 };
-          }
-          if (tiltScreenHit) return { ...tiltScreenHit.hit, deskewed: Math.round(tiltScreenHit.angle * 100) / 100 };
-        }
-      }
-    } catch {
-    }
-  }
-  if (!best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
-    try {
-      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
-        const entry = planesEntry(srcTop);
-        for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
-          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
-          const mirrored = detectStegoFingerprint(variant, w, h, {
-            key,
-            gridX,
-            gridY,
-            profile,
-            searchOffsets,
-            searchGeometry,
-            searchMirror: false,
-            searchRotation: false,
-            searchTilt: false,
-            _mirrorProbe: true,
-            _tiltProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-          if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
-        }
-        for (const clockwise of searchRotation ? [false, true] : []) {
-          const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
-          const rotated = detectStegoFingerprint(variant, h, w, {
-            key,
-            gridX,
-            gridY,
-            profile,
-            searchOffsets,
-            searchGeometry,
-            searchMirror: false,
-            searchRotation: false,
-            searchTilt: false,
-            _mirrorProbe: true,
-            _tiltProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-          if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
-        }
-        for (const anti of searchRotation ? [false, true] : []) {
-          const variant = transposedVariant(entry, srcTop, w, h, anti);
-          const transposed = detectStegoFingerprint(variant, h, w, {
-            key,
-            gridX,
-            gridY,
-            profile,
-            searchOffsets,
-            searchGeometry,
-            searchMirror: false,
-            searchRotation: false,
-            searchTilt: false,
-            _mirrorProbe: true,
-            _tiltProbe: true,
-            _layoutVersion: concreteLayout,
-            _planes: planesCache
-          });
-          if (transposed?.found) return { ...transposed, transposed: anti ? "anti" : "main" };
-        }
-      }
-    } catch {
-    }
+    best.timedOut = true;
+    return best;
   }
   return best;
 }
@@ -2870,7 +2938,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
 }
 
 // src/archx.js
-var VERSION = "1.17.0";
+var VERSION = "1.18.0";
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {

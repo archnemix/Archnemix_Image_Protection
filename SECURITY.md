@@ -2,9 +2,12 @@
 
 ## Supported versions
 
-Security fixes target the latest 1.11.x release and the current development
-branch. Older releases should be upgraded, especially because image decoding
-depends on current Sharp/libvips security fixes.
+Security fixes land on the current 1.x minor release (this branch) and
+are released as new minors; there is no long-term-support branch and
+older minors do not receive backports. Pin a version only together
+with an upgrade cadence, especially because image decoding depends on
+current Sharp/libvips security fixes. State your exact version in
+every report so applicability can be judged.
 
 ## Reporting a vulnerability
 
@@ -114,3 +117,18 @@ with the vintage reported as `layoutVersion`), so the same
 detectors-first rule applies to layout v2 marks; embed with
 `layoutVersion: 1` only where an unupgraded detector must read new
 marks, and prefer re-issuance.
+
+Two deliberate, configurable trade-offs deserve explicit operator
+choices rather than defaults discovered by accident:
+
+- **Replay-store saturation.** One-time claims live in a bounded
+  store. `replaySaturation: 'evict'` (default) favors availability by
+  evicting the oldest LIVE claims under sustained mint pressure
+  (emitting `archx.replay_store_evicted`); `'strict'` preserves
+  one-time semantics absolutely and instead rejects new redemptions
+  while saturated. Size `oneTimeTokenMaxEntries` for
+  peak-claims-per-second × token TTL × margin in either mode.
+- **Full-resolution pixels.** The master file and its metadata are
+  never served, but an entitlement whose caps reach the master's own
+  dimensions receives full-resolution PIXELS. `maxWidthFraction < 1`
+  makes "preview only" a server-enforced property.

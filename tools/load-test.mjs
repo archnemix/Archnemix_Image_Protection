@@ -8,8 +8,15 @@
  * same tool against staging (`--base-url`) with the real state store, load
  * balancer, image sizes, authorization callback, and CDN configuration.
  *
+ * Workload shapes (review #7 P1.15): default = one hot image (warm
+ * caches — the easiest possible case, never quote it as capacity);
+ * --images=N rotates over N distinct masters so transforms stay
+ * cold; --viewers=N rotates per-viewer watermarks so every
+ * derivative is personalized (cold finish + no cross-viewer reuse).
+ *
  * Examples:
  *   npm run load-test -- --requests=500 --concurrency=50 --width=1200
+ *   npm run load-test -- --images=25 --viewers=10 --requests=250
  *   npm run load-test -- --base-url=https://staging.example.test \
  *     --image-id=catalog-001 --requests=5000 --concurrency=100 \
  *     --confirm-load-test --json
@@ -37,6 +44,8 @@ function parseArgs(argv) {
     confirmLoadTest: false,
     json: false,
     help: false,
+    images: 1,
+    viewers: 1,
   };
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') options.help = true;
@@ -47,6 +56,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--width=')) options.width = Number(arg.slice('--width='.length));
     else if (arg.startsWith('--warmup=')) options.warmup = Number(arg.slice('--warmup='.length));
     else if (arg.startsWith('--base-url=')) options.baseUrl = arg.slice('--base-url='.length);
+    else if (arg.startsWith('--images=')) options.images = Number(arg.slice('--images='.length));
+    else if (arg.startsWith('--viewers=')) options.viewers = Number(arg.slice('--viewers='.length));
     else if (arg.startsWith('--base-path=')) options.basePath = arg.slice('--base-path='.length);
     else if (arg.startsWith('--image-id=')) options.imageId = arg.slice('--image-id='.length);
     else if (arg.startsWith('--header=')) {
@@ -70,6 +81,11 @@ function parseArgs(argv) {
   integerInRange('concurrency', options.concurrency, 1, 500);
   integerInRange('width', options.width, 64, 4096);
   integerInRange('warmup', options.warmup, 0, 1000);
+  integerInRange('images', options.images, 1, 500);
+  integerInRange('viewers', options.viewers, 1, 1000);
+  if (options.baseUrl && (options.images > 1 || options.viewers > 1)) {
+    throw new Error('--images/--viewers shape the local synthetic server only; against staging, vary --image-id/--header yourself');
+  }
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(options.imageId)) throw new Error('--image-id is invalid');
   options.basePath = '/' + String(options.basePath || '').replace(/^\/+|\/+$/g, '');
   if (!/^\/[A-Za-z0-9._~/-]+$/.test(options.basePath) || options.basePath.includes('..')) {
@@ -93,26 +109,35 @@ function percentile(sorted, p) {
   return sorted[index];
 }
 
-async function syntheticMaster() {
+async function syntheticMaster(seed = 0) {
+  const hue = (seed * 47) % 360;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000">
     <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#e84d2a"/><stop offset="0.5" stop-color="#f4c542"/>
-      <stop offset="1" stop-color="#2743b8"/>
+      <stop offset="0" stop-color="hsl(${hue} 80% 55%)"/><stop offset="0.5" stop-color="hsl(${(hue + 60) % 360} 85% 60%)"/>
+      <stop offset="1" stop-color="hsl(${(hue + 160) % 360} 70% 45%)"/>
     </linearGradient></defs>
     <rect width="1600" height="1000" fill="url(#g)"/>
-    ${Array.from({ length: 80 }, (_, i) => `<circle cx="${(i * 173) % 1600}" cy="${(i * 211) % 1000}" r="${18 + (i % 7) * 9}" fill="rgba(255,255,255,0.30)"/>`).join('')}
-    <text x="70" y="910" font-family="sans-serif" font-size="110" font-weight="bold" fill="white">ARCHX LOAD TEST</text>
+    ${Array.from({ length: 80 }, (_, i) => `<circle cx="${((i + seed) * 173) % 1600}" cy="${((i + seed * 3) * 211) % 1000}" r="${18 + (i % 7) * 9}" fill="rgba(255,255,255,0.30)"/>`).join('')}
+    <text x="70" y="910" font-family="sans-serif" font-size="110" font-weight="bold" fill="white">ARCHX LOAD ${seed}</text>
   </svg>`;
-  return sharp(Buffer.from(svg)).jpeg({ quality: 92 }).toBuffer(); // file is saved as load.jpg — bytes must be JPEG
+  return sharp(Buffer.from(svg)).jpeg({ quality: 92 }).toBuffer(); // files are saved as load*.jpg — bytes must be JPEG
 }
 
-async function startLocalServer() {
+async function startLocalServer(options) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-load-'));
-  fs.writeFileSync(path.join(dir, 'load.jpg'), await syntheticMaster());
+  fs.writeFileSync(path.join(dir, 'load.jpg'), await syntheticMaster(0));
+  for (let i = 1; i < options.images; i++) {
+    fs.writeFileSync(path.join(dir, `load-${i}.jpg`), await syntheticMaster(i));
+  }
   const handler = createArchxMiddleware({
     secret: crypto.randomBytes(32).toString('base64url'),
     imagesDir: dir,
-    allowAnonymous: true,
+    // Per-viewer mode uses a REAL authorize callback (per-viewer
+    // watermark => personalized derivative per viewer), because that
+    // is the expensive production shape being measured.
+    ...(options.viewers > 1
+      ? { authorize: async (req) => ({ viewerId: String(req.headers['x-load-viewer'] || 'v0'), watermark: `© load ${req.headers['x-load-viewer'] || 'v0'}` }) }
+      : { allowAnonymous: true }),
     allowQueryTokens: false,
     rateLimitPerMinute: 1000000,
     tokenRateLimitPerMinute: 1000000,
@@ -134,19 +159,25 @@ async function startLocalServer() {
 async function run() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log('Usage: npm run load-test -- [--requests=N] [--concurrency=N] [--width=N] [--warmup=N] [--json]');
+    console.log('Usage: npm run load-test -- [--requests=N] [--concurrency=N] [--width=N] [--warmup=N] [--images=N] [--viewers=N] [--json]');
     console.log('Staging: --base-url=https://staging.example.test [--base-path=/archx] --image-id=id [--header="Cookie: ..."] --confirm-load-test');
     return;
   }
 
-  const local = options.baseUrl ? null : await startLocalServer();
+  const local = options.baseUrl ? null : await startLocalServer(options);
   const baseUrl = options.baseUrl || local.baseUrl;
 
+  let sequence = 0;
   async function mintAndRedeem() {
+    const index = sequence++;
+    const imageId = options.images > 1
+      ? (index % options.images === 0 ? 'load' : `load-${index % options.images}`)
+      : options.imageId;
+    const viewer = `v${index % options.viewers}`;
     const started = performance.now();
-    const tokenResponse = await fetch(`${baseUrl}${options.basePath}/token/${encodeURIComponent(options.imageId)}?w=${options.width}`, {
+    const tokenResponse = await fetch(`${baseUrl}${options.basePath}/token/${encodeURIComponent(imageId)}?w=${options.width}`, {
       method: 'POST',
-      headers: { ...options.headers, 'x-archx-request': 'token' },
+      headers: { ...options.headers, 'x-archx-request': 'token', ...(options.viewers > 1 ? { 'x-load-viewer': viewer } : {}) },
       signal: AbortSignal.timeout(30000),
     });
     if (!tokenResponse.ok) {
@@ -160,7 +191,7 @@ async function run() {
       ? new URL(token.cleanUrl, baseUrl).toString()
       : new URL(token.url, baseUrl).toString();
     const imageResponse = await fetch(imageUrl, {
-      headers: { ...options.headers, ...(token.token ? { 'x-archx-token': token.token } : {}) },
+      headers: { ...options.headers, ...(options.viewers > 1 ? { 'x-load-viewer': viewer } : {}), ...(token.token ? { 'x-archx-token': token.token } : {}) },
       signal: AbortSignal.timeout(30000),
     });
     const bytes = await imageResponse.arrayBuffer();
@@ -202,6 +233,10 @@ async function run() {
     latencies.sort((a, b) => a - b);
     const result = {
       target: options.baseUrl ? 'external' : 'in-process-local',
+      workload: options.viewers > 1 ? 'personalized-per-viewer' : options.images > 1 ? 'cold-multi-image' : 'warm-single-image',
+      images: options.images,
+      viewers: options.viewers,
+      peakRssMb: Number((process.memoryUsage().rss / 1048576).toFixed(1)),
       imageId: options.imageId,
       width: options.width,
       requests: options.requests,

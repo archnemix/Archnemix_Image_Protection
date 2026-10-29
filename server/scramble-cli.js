@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scrambleImage, generateKeyBase64 } from './scramble-image.js';
+import { generateOwnershipKeyPair } from './ownership.js';
 
 function parseArgs(argv, booleanFlags = new Set()) {
   const out = { _: [] };
@@ -41,6 +42,15 @@ function parseArgs(argv, booleanFlags = new Set()) {
 
 const args = parseArgs(process.argv.slice(2), new Set(['encrypt', 'lossless', 'help']));
 const [input, output] = args._;
+if (args['gen-ownership-key']) {
+  const pair = generateOwnershipKeyPair();
+  console.log('# Archx ownership key pair — store the PRIVATE key like a signing secret.');
+  console.log('# ARCHX_OWNERSHIP_PRIVATE_KEY (server/CLI only, never ship to browsers):');
+  console.log(pair.privateKey);
+  console.log('# ARCHX_OWNERSHIP_PUBLIC_KEY (publish freely; used by archx-detect --verify-ownership):');
+  console.log(pair.publicKey);
+  process.exit(0);
+}
 if (!input || !output || args.help) {
   console.log(`Usage: archx-protect <input image|folder> <output .archx|folder> [options]
   --key <secret>       scramble key (prefer ARCHX_SCRAMBLE_KEY; argv secrets can leak)
@@ -54,6 +64,10 @@ if (!input || !output || args.help) {
   --watermark <text>   bake a visible watermark in before scrambling
   --forensic-seed <s>  forensic seed (prefer ARCHX_FORENSIC_SEED)
   --stego <payload>    bake a blind StegoMark ownership fingerprint (detect later with archx-detect)
+  --ownership-owner <name> embed signed ownership metadata (needs
+                       ARCHX_OWNERSHIP_PRIVATE_KEY, an Ed25519 PEM; verify
+                       later with archx-detect --verify-ownership)
+  --gen-ownership-key  print a fresh Ed25519 ownership key pair and exit
   --stego-key <s>      StegoMark key (required with --stego; prefer ARCHX_STEGO_KEY; MUST differ from the scramble key)
   --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
   --stego-profile <p> standard (default) or robust low-frequency forensic profile
@@ -81,6 +95,9 @@ if (!['standard', 'robust'].includes(stegoProfile) ||
   console.error('Archx protect: --stego-profile must be standard or robust; StegoMark grid values must be integers from 4 to 64');
   process.exit(1);
 }
+if (args['ownership-owner'] && !process.env.ARCHX_OWNERSHIP_PRIVATE_KEY) {
+  console.warn('⚠  --ownership-owner without ARCHX_OWNERSHIP_PRIVATE_KEY: embedding UNSIGNED copyright metadata only (no verifiable claim). Generate a key with --gen-ownership-key.');
+}
 if (args.stego && !(process.env.ARCHX_STEGO_KEY || args['stego-key'])) {
   console.error('Archx protect: --stego requires a dedicated forensic key (ARCHX_STEGO_KEY or --stego-key). It is never defaulted to the scramble key: wherever a client can unscramble, that key is public, and keying the watermark with it would let anyone remove or forge marks.');
   process.exit(1);
@@ -97,6 +114,10 @@ const opts = {
   watermark: args.watermark || null,
   forensicSeed: process.env.ARCHX_FORENSIC_SEED || args['forensic-seed'] || null,
   stegoPayload: args.stego || null,
+  ownership: args['ownership-owner'] ? {
+    owner: String(args['ownership-owner']),
+    privateKey: process.env.ARCHX_OWNERSHIP_PRIVATE_KEY || null,
+  } : null,
   stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || null,
   stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
   stegoProfile,
@@ -124,10 +145,13 @@ async function protectOne(inPath, outPath) {
     }
     inputBytes = fs.readFileSync(inputFd);
   } finally { fs.closeSync(inputFd); }
-  const { bytes, header, stegoFingerprint, perceptualFingerprint } = await scrambleImage(inputBytes, opts);
+  const fileOpts = opts.ownership
+    ? { ...opts, ownership: { ...opts.ownership, imageId: path.basename(inPath) } }
+    : opts;
+  const { bytes, header, stegoFingerprint, perceptualFingerprint, ownershipToken } = await scrambleImage(inputBytes, fileOpts);
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, bytes);
-  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB${stegoFingerprint ? `, StegoMark ${stegoFingerprint} (${stegoProfile})` : ''}${perceptualFingerprint ? `, soft-binding ${perceptualFingerprint}` : ''})`);
+  console.log(`✔ ${inPath} -> ${outPath}  (${header.w}×${header.h}, grid ${header.grid}, ${(bytes.length / 1024).toFixed(0)} kB${stegoFingerprint ? `, StegoMark ${stegoFingerprint} (${stegoProfile})` : ''}${perceptualFingerprint ? `, soft-binding ${perceptualFingerprint}` : ''}${ownershipToken ? ', ownership claim embedded' : ''})`);
 }
 
 const stat = fs.statSync(input);

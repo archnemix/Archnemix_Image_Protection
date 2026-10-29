@@ -3,6 +3,67 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.18.0] — Unreleased
+
+Seventh-review response + ownership claims (`docs/RESEARCH.md` §2.26):
+packaged-artifact proof, explicit replay-saturation and preview
+policies, worker/detector resource budgets, Ed25519-signed ownership
+metadata with layered rescan, and a measured benchmark round.
+
+### Added
+
+- **Signed ownership claims** (`server/ownership.js`): Ed25519 token
+  binding owner + image id + perceptual hash + stego fingerprint,
+  embedded in derivative EXIF/XMP alongside chosen Copyright/Artist
+  metadata. `verifyOwnership()` + `archx-detect --verify-ownership`
+  rescan in three layers (signature, perceptual soft binding,
+  StegoMark) — metadata-stripped leaks still identify. Middleware
+  `ownership` option and `archx-protect --ownership-owner` /
+  `--gen-ownership-key`. Provenance evidence, not C2PA, not title.
+- **`replaySaturation: 'evict' | 'strict'`**: explicit policy for
+  one-time-claim store pressure, with saturation counters in
+  `handler.stats().replaySets`.
+- **`maxWidthFraction`**: hard ceiling on delivered width as a
+  fraction of the master's own width, enforced at mint and
+  redemption; startup audit warns on lossless full-size delivery.
+- **Detect-worker byte budgets**: `maxQueuedBytes`, `maxPixels`,
+  `queueTimeoutMs`, pre-copy RGBA validation, batch key-byte caps.
+- **Detector `maxTimeMs`**: shared wall-clock budget across all
+  search layers; expired searches return best-so-far + `timedOut`.
+- **`tools/pack-smoke.mjs`** (`npm run test:pack`, in CI): packs and
+  clean-installs the tarball, runs worker detection + CLIs + SRI +
+  consumer type-check from the installed tree.
+- **Real-Redis integration tests** (`npm run test:redis`, CI):
+  cross-instance one-time semantics, redemption races, shared
+  quotas, dead-store fail-closed.
+- **`tools/stego-bench.mjs`** (`npm run bench:stego`, `--fp`,
+  `--collusion`): mixed-corpus matrix (robust 75/88 @ strength 6;
+  periodic-text identified as a weak class), 0/329 false positives,
+  collusion participants ranked top-k for k=2..4.
+- **Load-test workload shapes** (`--images`, `--viewers`): warm vs
+  cold vs per-viewer-personalized throughput measured separately
+  (406 / 53 / 25 flows/s loopback @800 px).
+- Crypto known-answer tests (FIPS 180-4, RFC 4231) + IV uniqueness;
+  legacy-mark migration tests (layouts v1–v3, CRC/MAC eras);
+  entitlement downgrade + batch partition + PoP negative tests.
+- Chromium accessibility checks: `prefers-reduced-motion` disables
+  temporal interlace with a usable static image; viewer host role/alt
+  semantics. Browser harness parameterized for Firefox
+  (`ARCHX_BROWSER=firefox`).
+
+### Fixed
+
+- **`server/detect-worker.js` missing from the npm tarball** (worker
+  detection would have failed for package consumers). `files` now
+  includes it plus `server/ownership.js`, guarded by the pack smoke
+  test's required-files assertion.
+- README `--stego` examples reused the browser-delivered scramble
+  key; they now use a private `ARCHX_STEGO_KEY`, and a test executes
+  the documented protect → detect → verify round-trip.
+- Stale documentation: withdrawn "~99% of theft" figure, plan-v1
+  "default", saturation "fail closed", obsolete test counts.
+
+
 ## [1.17.0] — Unreleased
 
 Sixth-review response (`docs/RESEARCH.md` §2.25): client dispatch

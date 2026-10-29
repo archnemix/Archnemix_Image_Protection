@@ -5,6 +5,7 @@
  * inside an .archx container. The master file itself is never sent.
  */
 import { createRequire } from 'node:module';
+import { signOwnershipClaim, applyOwnershipMetadata } from './ownership.js';
 import { Worker } from 'node:worker_threads';
 import {
   buildScramblePlan, paddedSize, scramblePixels, scramblePixelsPadded,
@@ -714,9 +715,27 @@ export async function finishDerivative(base, opts = {}, owned = false) {
     resolvedStegoFingerprint = stegoFingerprint(stegoPayload);
   }
 
-  const contentFingerprint = opts.contentFingerprint
+  const ownershipCfg = (opts.ownership && typeof opts.ownership === 'object' && opts.ownership.owner)
+    ? opts.ownership : null;
+  const contentFingerprint = (opts.contentFingerprint || ownershipCfg)
     ? computePerceptualFingerprint(rawPixels, w, h)
     : null;
+  // Ownership metadata (v1.18): the signed claim binds THIS finished
+  // derivative's perceptual hash + stego fingerprint. It is computed
+  // over the final pre-scramble pixels — exactly what a leaked copy
+  // looks like — and written into the payload's EXIF/XMP. Metadata
+  // is the declarative layer only; see server/ownership.js.
+  let ownershipToken = null;
+  if (ownershipCfg) {
+    ownershipToken = ownershipCfg.privateKey
+      ? signOwnershipClaim({
+        owner: String(ownershipCfg.owner),
+        imageId: ownershipCfg.imageId ?? base.imageId ?? '',
+        perceptualHash: contentFingerprint,
+        stegoFingerprint: resolvedStegoFingerprint,
+      }, ownershipCfg.privateKey)
+      : null;
+  }
 
   const { pw, ph } = paddedSize(w, h, grid);
   const plan = buildScramblePlan(grid, key, planVersion);
@@ -761,6 +780,14 @@ export async function finishDerivative(base, opts = {}, owned = false) {
       effort: limits.webpEffort,
     });
   }
+  if (ownershipCfg) {
+    encoder = applyOwnershipMetadata(encoder, {
+      owner: String(ownershipCfg.owner),
+      copyright: ownershipCfg.copyright,
+      artist: ownershipCfg.artist,
+      token: ownershipToken,
+    });
+  }
   let payload;
   try { payload = await encoder.toBuffer(); }
   catch (err) { throw mapSharpError(err); }
@@ -782,13 +809,14 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   }
   if (opts.container === false) {
     if (header.encrypted) throw new Error('encrypted output requires an .archx container');
-    return { bytes: payload, header, stegoFingerprint: resolvedStegoFingerprint, perceptualFingerprint: contentFingerprint };
+    return { bytes: payload, header, stegoFingerprint: resolvedStegoFingerprint, perceptualFingerprint: contentFingerprint, ownershipToken };
   }
   return {
     bytes: bufferView(encodeContainer(header, payload)),
     header,
     stegoFingerprint: resolvedStegoFingerprint,
     perceptualFingerprint: contentFingerprint,
+    ownershipToken,
   };
 }
 
@@ -838,7 +866,19 @@ let detectWorker = null;
 let detectSeq = 0;
 const detectQueue = [];
 let detectActive = null;
-let detectWorkerConfig = { maxPending: 64, timeoutMs: 120_000 };
+let detectWorkerConfig = {
+  maxPending: 64,
+  timeoutMs: 120_000,
+  // A job-COUNT cap alone does not bound memory: every queued job
+  // holds a full RGBA copy. Queued bytes are capped too (default
+  // 512 MiB across active + queued jobs), single suspects are capped
+  // at 50 MP, and a job that waits longer than queueTimeoutMs is
+  // rejected at dispatch instead of starting stale forensic work.
+  maxQueuedBytes: 512 * 1024 * 1024,
+  maxPixels: 50_000_000,
+  queueTimeoutMs: 300_000,
+};
+let detectQueuedBytes = 0;
 
 /**
  * Bound the forensic detect worker: pending jobs (active + queued)
@@ -847,7 +887,7 @@ let detectWorkerConfig = { maxPending: 64, timeoutMs: 120_000 };
  * recycled (a pathological suspect must not wedge forensic
  * capacity forever). Returns the effective config + live depth.
  */
-export function configureStegoDetectWorker({ maxPending, timeoutMs } = {}) {
+export function configureStegoDetectWorker({ maxPending, timeoutMs, maxQueuedBytes, maxPixels, queueTimeoutMs } = {}) {
   if (maxPending !== undefined) {
     if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > 4096) {
       throw new TypeError('Archx stego detection: maxPending must be an integer in [1, 4096]');
@@ -860,7 +900,36 @@ export function configureStegoDetectWorker({ maxPending, timeoutMs } = {}) {
     }
     detectWorkerConfig.timeoutMs = timeoutMs;
   }
-  return { ...detectWorkerConfig, pending: detectQueue.length + (detectActive ? 1 : 0) };
+  if (maxQueuedBytes !== undefined) {
+    if (!Number.isSafeInteger(maxQueuedBytes) || maxQueuedBytes < 16_384 || maxQueuedBytes > 16 * 1024 * 1024 * 1024) {
+      throw new TypeError('Archx stego detection: maxQueuedBytes must be an integer in [16384, 16GiB]');
+    }
+    detectWorkerConfig.maxQueuedBytes = maxQueuedBytes;
+  }
+  if (maxPixels !== undefined) {
+    if (!Number.isSafeInteger(maxPixels) || maxPixels < 4096 || maxPixels > 268_402_689) {
+      throw new TypeError('Archx stego detection: maxPixels must be an integer in [4096, 268402689]');
+    }
+    detectWorkerConfig.maxPixels = maxPixels;
+  }
+  if (queueTimeoutMs !== undefined) {
+    if (!Number.isFinite(queueTimeoutMs) || queueTimeoutMs < 0 || queueTimeoutMs > 3_600_000) {
+      throw new TypeError('Archx stego detection: queueTimeoutMs must be in [0, 3600000]');
+    }
+    detectWorkerConfig.queueTimeoutMs = queueTimeoutMs;
+  }
+  return {
+    ...detectWorkerConfig,
+    pending: detectQueue.length + (detectActive ? 1 : 0),
+    queuedBytes: detectQueuedBytes,
+  };
+}
+
+function releaseJobBytes(job) {
+  if (job && job.bytesLen) {
+    detectQueuedBytes = Math.max(0, detectQueuedBytes - job.bytesLen);
+    job.bytesLen = 0;
+  }
 }
 
 function failDetectWorker(err) {
@@ -873,6 +942,7 @@ function failDetectWorker(err) {
   }
   for (const job of jobs) {
     if (job.timer) clearTimeout(job.timer);
+    releaseJobBytes(job);
     job.reject(err);
   }
 }
@@ -880,12 +950,19 @@ function failDetectWorker(err) {
 function pumpDetectQueue() {
   if (detectActive || detectQueue.length === 0) return;
   const job = detectQueue.shift();
+  if (detectWorkerConfig.queueTimeoutMs > 0 && Date.now() - job.enqueuedAt > detectWorkerConfig.queueTimeoutMs) {
+    releaseJobBytes(job);
+    job.reject(new Error(`Archx stego detection queue wait exceeded ${detectWorkerConfig.queueTimeoutMs}ms`));
+    pumpDetectQueue();
+    return;
+  }
   detectActive = job;
   let worker;
   try {
     worker = ensureDetectWorker();
   } catch (err) {
     detectActive = null;
+    releaseJobBytes(job);
     job.reject(err);
     pumpDetectQueue();
     return;
@@ -893,6 +970,7 @@ function pumpDetectQueue() {
   job.timer = setTimeout(() => {
     if (detectActive !== job) return;
     detectActive = null;
+    releaseJobBytes(job);
     try { worker.terminate(); } catch { /* already gone */ }
     if (detectWorker === worker) detectWorker = null;
     job.reject(new Error(`Archx stego detection timed out after ${job.timeoutMs}ms`));
@@ -904,6 +982,7 @@ function pumpDetectQueue() {
   } catch (err) {
     clearTimeout(job.timer);
     detectActive = null;
+    releaseJobBytes(job);
     job.reject(err);
     pumpDetectQueue();
   }
@@ -917,6 +996,7 @@ function ensureDetectWorker() {
     const job = detectActive;
     if (!job || msg?.id !== job.id) return;
     detectActive = null;
+    releaseJobBytes(job);
     if (job.timer) clearTimeout(job.timer);
     if (msg.ok) job.resolve(msg.result);
     else job.reject(new Error(`Archx stego detection failed: ${msg.error || 'worker error'}`));
@@ -939,10 +1019,25 @@ function ensureDetectWorker() {
 }
 
 function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
+  // All size validation happens BEFORE the defensive copy: an
+  // oversized or inconsistent request must fail without allocating
+  // or queueing anything. The detector consumes RGBA (w*h*4).
+  const pixels = w * h;
+  if (!Number.isSafeInteger(pixels) || pixels < 1 || pixels > detectWorkerConfig.maxPixels
+      || !Number.isSafeInteger(pixels * 4) || messageBytes.length < pixels * 4) {
+    return Promise.reject(new TypeError(
+      `Archx stego detection: rgba must hold w*h*4 bytes and at most ${detectWorkerConfig.maxPixels} pixels`,
+    ));
+  }
   const pending = detectQueue.length + (detectActive ? 1 : 0);
   if (pending >= detectWorkerConfig.maxPending) {
     return Promise.reject(new Error(
       `Archx stego detection queue is full (${detectWorkerConfig.maxPending} pending); retry later or raise maxPending`,
+    ));
+  }
+  if (detectQueuedBytes + messageBytes.length > detectWorkerConfig.maxQueuedBytes) {
+    return Promise.reject(new Error(
+      `Archx stego detection queued-byte budget exceeded (${detectWorkerConfig.maxQueuedBytes} bytes); retry later or raise maxQueuedBytes`,
     ));
   }
   const id = ++detectSeq;
@@ -954,8 +1049,10 @@ function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
     // the worker, then TRANSFER it (zero-copy handoff).
     const copy = new Uint8Array(messageBytes.length);
     copy.set(messageBytes);
+    detectQueuedBytes += copy.length;
     detectQueue.push({
       id, resolve, reject, timeoutMs, timer: null,
+      enqueuedAt: Date.now(), bytesLen: copy.length,
       message: { id, kind, rgba: copy, w, h, ...payload },
       transfer: [copy.buffer],
     });
@@ -965,8 +1062,9 @@ function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
 
 export function detectStegoFingerprintInWorker(rgba, w, h, options = {}) {
   const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || bytes.length < w * h * 3) {
-    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent'));
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1
+      || !Number.isSafeInteger(w * h * 4) || bytes.length < w * h * 4) {
+    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent (RGBA w*h*4 required)'));
   }
   const { timeoutMs, ...detectOptions } = options || {};
   return enqueueDetectJob(bytes, w, h, 'detect', { options: detectOptions }, { timeoutMs });
@@ -982,12 +1080,14 @@ export function detectStegoFingerprintInWorker(rgba, w, h, options = {}) {
  */
 export function batchDetectStegoInWorker(rgba, w, h, keys, options = {}) {
   const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || bytes.length < w * h * 3) {
-    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent'));
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1
+      || !Number.isSafeInteger(w * h * 4) || bytes.length < w * h * 4) {
+    return Promise.reject(new TypeError('Archx stego detection: rgba/w/h are inconsistent (RGBA w*h*4 required)'));
   }
   if (!Array.isArray(keys) || keys.length === 0 || keys.length > 512
-      || keys.some((k) => typeof k !== 'string')) {
-    return Promise.reject(new TypeError('Archx stego detection: keys must be an array of 1..512 strings'));
+      || keys.some((k) => typeof k !== 'string' || k.length > 1024)
+      || keys.reduce((sum, k) => sum + k.length, 0) > 262_144) {
+    return Promise.reject(new TypeError('Archx stego detection: keys must be 1..512 strings of at most 1024 chars (256K total)'));
   }
   const { timeoutMs, escalateTop, ...detectOptions } = options || {};
   return enqueueDetectJob(bytes, w, h, 'batch', {
