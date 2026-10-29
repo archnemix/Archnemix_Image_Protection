@@ -169,6 +169,8 @@ export interface StegoDetectOptions {
   searchGeometry?: boolean;
   /** Also probe a horizontally flipped copy of the suspect (default true, all profiles). */
   searchMirror?: boolean;
+  /** Probe 90°/270°-rotated variants of the suspect (default true). */
+  searchRotation?: boolean;
   /**
    * Restrict detection to one cell-layout vintage (1 = legacy 32-bit
    * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
@@ -199,6 +201,13 @@ export interface StegoDetection {
   /** True when the mark was recovered from a horizontally flipped suspect (mirror probe, all profiles). */
   mirrored?: boolean;
   mirrorAxis?: 'x' | 'y' | 'xy';
+  /** Degrees the suspect was rotated clockwise from the marked original. */
+  rotated?: 90 | 270;
+  /** True when unobserved (erased) code bits were recovered algebraically
+   *  (robust: payload-erasure enumeration; standard: bounded assist). */
+  erasureDecoded?: boolean;
+  /** Code bits with zero surviving cell votes in the accepted geometry. */
+  erasedBits?: number;
   agreement: number;
   meanSignal: number;
   cells: number;

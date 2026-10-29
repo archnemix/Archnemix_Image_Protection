@@ -1184,6 +1184,28 @@ function mirroredVariant(entry, srcTop, w, h, axis, flipX, flipY) {
   if (!entry[slot]) entry[slot] = flipPixels(srcTop, w, h, flipX, flipY);
   return entry[slot];
 }
+function rotatePixels90(src, w, h, clockwise) {
+  const out = new Uint8Array(w * h * 4);
+  const nw = h;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4;
+      const dx = clockwise ? h - 1 - y : y;
+      const dy = clockwise ? x : w - 1 - x;
+      const di = (dy * nw + dx) * 4;
+      out[di] = src[si];
+      out[di + 1] = src[si + 1];
+      out[di + 2] = src[si + 2];
+      out[di + 3] = src[si + 3];
+    }
+  }
+  return out;
+}
+function rotatedVariant(entry, srcTop, w, h, clockwise) {
+  const slot = clockwise ? "rotCw" : "rotCcw";
+  if (!entry[slot]) entry[slot] = rotatePixels90(srcTop, w, h, clockwise);
+  return entry[slot];
+}
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
   gridX,
@@ -1195,6 +1217,7 @@ function detectStegoFingerprint(rgba, w, h, {
   // extra bounded pass on flipped pixels, only when the forward pass
   // found nothing); set false to disable.
   searchMirror = true,
+  searchRotation = true,
   // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
   // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
   // (halves worst-case cost on unmarked suspects).
@@ -1215,7 +1238,7 @@ function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, _mirrorProbe, _planes: planesCache };
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, _mirrorProbe, _planes: planesCache };
     let best2 = null;
     for (const version of [3, 2, 1]) {
       const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
@@ -1233,6 +1256,7 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: false,
       searchMirror: false,
+      searchRotation: false,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
       _planes: planesCache
@@ -1246,6 +1270,7 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: false,
       searchMirror: false,
+      searchRotation: false,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
       _planes: planesCache
@@ -1260,6 +1285,7 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: true,
       searchMirror: false,
+      searchRotation: false,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
       _planes: planesCache
@@ -1273,15 +1299,16 @@ function detectStegoFingerprint(rgba, w, h, {
       searchOffsets,
       searchGeometry: true,
       searchMirror: false,
+      searchRotation: false,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
       _planes: planesCache
     });
     if (robustGeometry?.found) return robustGeometry;
-    if (searchMirror && !_mirrorProbe) try {
+    if ((searchMirror || searchRotation) && !_mirrorProbe) try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        for (const [axis, fx, fy] of MIRROR_AXES) {
+        for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
           const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
           for (const candidateProfile of ["standard", "robust"]) {
             const fast = detectStegoFingerprint(variant, w, h, {
@@ -1292,6 +1319,7 @@ function detectStegoFingerprint(rgba, w, h, {
               searchOffsets,
               searchGeometry: false,
               searchMirror: false,
+              searchRotation: false,
               _mirrorProbe: true,
               _layoutVersion: concreteLayout,
               _planes: planesCache
@@ -1299,7 +1327,26 @@ function detectStegoFingerprint(rgba, w, h, {
             if (fast?.found) return { ...fast, mirrored: true, mirrorAxis: axis };
           }
         }
-        for (const [axis, fx, fy] of MIRROR_AXES) {
+        if (searchRotation) for (const clockwise of [false, true]) {
+          const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+          for (const candidateProfile of ["standard", "robust"]) {
+            const fast = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile: candidateProfile,
+              searchOffsets,
+              searchGeometry: false,
+              searchMirror: false,
+              searchRotation: false,
+              _mirrorProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache
+            });
+            if (fast?.found) return { ...fast, rotated: clockwise ? 270 : 90 };
+          }
+        }
+        for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
           if (axis !== "x" && !searchGeometry) continue;
           const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
           for (const candidateProfile of ["standard", "robust"]) {
@@ -1311,11 +1358,31 @@ function detectStegoFingerprint(rgba, w, h, {
               searchOffsets,
               searchGeometry: true,
               searchMirror: false,
+              searchRotation: false,
               _mirrorProbe: true,
               _layoutVersion: concreteLayout,
               _planes: planesCache
             });
             if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+          }
+        }
+        if (searchRotation && searchGeometry) for (const clockwise of [false, true]) {
+          const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+          for (const candidateProfile of ["robust"]) {
+            const rotated = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile: candidateProfile,
+              searchOffsets,
+              searchGeometry: true,
+              searchMirror: false,
+              searchRotation: false,
+              _mirrorProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache
+            });
+            if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
           }
         }
       }
@@ -1354,7 +1421,7 @@ function detectStegoFingerprint(rgba, w, h, {
   const _voteScores = new Float64Array(codeLength);
   const _groups = Array.from({ length: codeLength }, () => []);
   const _segmentResponses = [];
-  const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null } = {}) => {
+  const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
     const cellW0 = cw * scaleX;
     const cellH0 = ch * scaleY;
     const ox = originX ?? fx * cw;
@@ -1472,7 +1539,98 @@ function detectStegoFingerprint(rgba, w, h, {
       agreementBound = (preAgreeing + gainSum) / cellScores.length;
     }
     const repairable = meanAbsPre >= 1.2 && cellScores.length >= 96 && coverageOkPre && agreementBound >= 0.72;
-    const corrected = !repairable ? { bits: votedBits, corrections: -1, tagScheme: null } : robust ? (() => {
+    const erasureDecode = () => {
+      const erasedPayload = [];
+      let erasedTotal = 0;
+      for (let i = 0; i < codeLength; i++) {
+        if (bitCounts[i] === 0) {
+          erasedTotal++;
+          if (i < 48) erasedPayload.push(i);
+        }
+      }
+      if (!erasedTotal || erasedTotal > 32 || erasedPayload.length > 20) return null;
+      const deep = erasedTotal > 24;
+      if (meanAbsPre < 2 || preAgreement < (deep ? 0.9 : 0.8) || cellScores.length < 96) return null;
+      const budget = deep ? 2 : 3;
+      const weak = [];
+      for (let i = 0; i < 48; i++) if (bitCounts[i] > 0) weak.push(i);
+      weak.sort((a, b) => reliability[a] - reliability[b]);
+      const weakPool = weak.slice(0, 16);
+      const bits2 = Uint8Array.from(votedBits);
+      const payload = new Uint8Array(6);
+      const tryCandidate = (flips) => {
+        for (let i = 0; i < 6; i++) {
+          let byte = 0;
+          for (let b = 0; b < 8; b++) byte = byte << 1 | bits2[i * 8 + b];
+          payload[i] = byte;
+        }
+        const crc = stegoCrc16(payload);
+        let mismatches = 0;
+        for (let i = 48; i < 64 && mismatches + flips <= budget; i++) {
+          if (!bitCounts[i]) continue;
+          const byte = i < 56 ? crc >> 8 & 255 : crc & 255;
+          if ((byte >> 7 - (i & 7) & 1) !== votedBits[i]) mismatches++;
+        }
+        if (flips + mismatches > budget) return null;
+        const mac = stegoMac16(key, payload);
+        const checkBytes = [crc >> 8 & 255, crc & 255, mac >> 8 & 255, mac & 255];
+        for (let i = 64; i < 80 && mismatches + flips <= budget; i++) {
+          if (!bitCounts[i]) continue;
+          const expected = checkBytes[i - 48 >> 3] >> 7 - (i & 7) & 1;
+          if (expected !== votedBits[i]) mismatches++;
+        }
+        for (let i = 80; i < 96 && mismatches + flips <= budget; i++) {
+          if (bitCounts[i] && ROBUST_MARKER_BITS[i - 80] !== votedBits[i]) mismatches++;
+        }
+        if (flips + mismatches > budget) return null;
+        const decoded = new Uint8Array(96);
+        decoded.set(bits2.subarray(0, 48), 0);
+        for (let i = 48; i < 80; i++) decoded[i] = checkBytes[i - 48 >> 3] >> 7 - (i & 7) & 1;
+        for (let i = 80; i < 96; i++) decoded[i] = ROBUST_MARKER_BITS[i - 80];
+        return { bits: decoded, corrections: flips + mismatches, tagScheme: "mac", erasureDecoded: true, erasedBits: erasedTotal };
+      };
+      const enumerate = (flipSet) => {
+        for (const i of flipSet) bits2[i] ^= 1;
+        const combos = 1 << erasedPayload.length;
+        for (let mask = 0; mask < combos; mask++) {
+          for (let j = 0; j < erasedPayload.length; j++) {
+            bits2[erasedPayload[j]] = mask >> j & 1;
+          }
+          const hit2 = tryCandidate(flipSet.length);
+          if (hit2) return hit2;
+        }
+        for (const i of flipSet) bits2[i] ^= 1;
+        return null;
+      };
+      let hit = enumerate([]);
+      if (!hit && erasedPayload.length <= 16) {
+        for (const i of weakPool) {
+          hit = enumerate([i]);
+          if (hit) break;
+        }
+      }
+      if (!hit && erasedPayload.length <= 12) {
+        outer: for (let a = 0; a < weakPool.length; a++) {
+          for (let b = a + 1; b < weakPool.length; b++) {
+            hit = enumerate([weakPool[a], weakPool[b]]);
+            if (hit) break outer;
+          }
+        }
+      }
+      return hit;
+    };
+    const standardErasureAssist = () => {
+      let sparse = 0;
+      for (let i = 0; i < codeLength; i++) if (bitCounts[i] < 2) sparse++;
+      const erased = codeLength - observedBitsPre;
+      if (sparse < 1 || sparse > 6 || observedBitsPre < 60) return null;
+      if (meanAbsPre < 2 || preAgreement < 0.85 || cellScores.length < codeLength * 3) return null;
+      const fixed = correctStegoBits(votedBits, reliability, key, 3);
+      if (fixed.corrections < 0 || fixed.tagScheme !== "mac") return null;
+      return { ...fixed, erasureDecoded: true, erasedBits: erased };
+    };
+    let corrected = erasure ? robust ? erasureDecode() : standardErasureAssist() : null;
+    if (!corrected) corrected = !repairable ? { bits: votedBits, corrections: -1, tagScheme: null } : robust ? (() => {
       const macDepth = meanAbsPre >= 3.5 && agreementBound >= 0.95 ? 5 : 3;
       const repaired = repairRobustStegoBits(reliability, votedBits, key, macDepth, "mac") || repairRobustStegoBits(reliability, votedBits, key, 3, "crc");
       return repaired ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme } : { bits: votedBits, corrections: -1, tagScheme: null };
@@ -1487,7 +1645,11 @@ function detectStegoFingerprint(rgba, w, h, {
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 : minBitCount >= 2 && cellScores.length >= codeLength * 3;
+    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 || // Erasure decodes trade coverage for cryptographic certainty:
+    // the payload + recomputed CRC/MAC/marker must agree with every
+    // observed check bit (<=3 disagreements), which noise cannot
+    // manufacture — but a floor of 76 observed bits stays.
+    corrected.erasureDecoded === true && observedBits >= 64 : minBitCount >= 2 && cellScores.length >= codeLength * 3 || corrected.erasureDecoded === true && observedBits >= 60 && cellScores.length >= codeLength * 3;
     const correctionCount = Math.max(0, corrected.corrections);
     const legacyScheme = corrected.tagScheme === "crc";
     const robustCorrectionOk = !robust || correctionCount <= 3 || !legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.95;
@@ -1499,6 +1661,8 @@ function detectStegoFingerprint(rgba, w, h, {
       profile: effectiveProfile,
       tagScheme: corrected.tagScheme ?? null,
       layoutVersion: concreteLayout,
+      erasureDecoded: corrected.erasureDecoded === true,
+      erasedBits: codeLength - observedBits,
       observedBits,
       minBitRepetitions: minBitCount,
       crcValid,
@@ -1593,6 +1757,24 @@ function detectStegoFingerprint(rgba, w, h, {
         }
       }
     }
+    if (!best?.found) {
+      const seedPairs = [];
+      for (const s of [0.55, 0.6, 2 / 3, 1.5, 1 / 0.6, 16 / 9, 1 / 0.55]) seedPairs.push([s, s]);
+      for (const s of [1 / 0.75, 1 / 0.7, 1.5, 1 / 0.65, 1 / 0.6, 16 / 9]) {
+        seedPairs.push([s, 1], [1, s]);
+      }
+      for (const s of [0.65, 0.7, 0.75]) seedPairs.push([s, 1], [1, s]);
+      for (const [scaleX, scaleY] of seedPairs) {
+        const rangeX = originRange(gx * cw * scaleX, w);
+        const rangeY = originRange(gy * ch * scaleY, h);
+        for (const originX of unique([rangeX.min, rangeX.center, rangeX.max])) {
+          for (const originY of unique([rangeY.min, rangeY.center, rangeY.max])) {
+            scaleCandidates.push(consider(evaluate({ scaleX, scaleY, originX, originY })));
+          }
+        }
+        if (best?.found) break;
+      }
+    }
     const originCandidates = [];
     const seenPairs = /* @__PURE__ */ new Set();
     for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
@@ -1660,6 +1842,77 @@ function detectStegoFingerprint(rgba, w, h, {
         }
       }
     }
+    if (!best?.found) {
+      const descendFrom = (seed) => {
+        let cur = seed;
+        for (let round = 0; round < 2 && cur && !best?.found; round++) {
+          const beforeScaleX = cur._scaleX, beforeScaleY = cur._scaleY;
+          for (const f of [0.9, 0.94, 0.97, 1.03, 1.06, 1.11]) {
+            const sx = cur._scaleX * f;
+            consider(evaluate({
+              scaleX: sx,
+              scaleY: cur._scaleY,
+              originX: cur._originX + gx * cw * (cur._scaleX - sx) / 2,
+              originY: cur._originY
+            }));
+            const sy = cur._scaleY * f;
+            consider(evaluate({
+              scaleX: cur._scaleX,
+              scaleY: sy,
+              originX: cur._originX,
+              originY: cur._originY + gy * ch * (cur._scaleY - sy) / 2
+            }));
+            if (best?.found) return;
+          }
+          cur = best;
+          if (cur._scaleX === beforeScaleX && cur._scaleY === beforeScaleY) break;
+        }
+      };
+      const descentSeeds = [];
+      const descentSeen = /* @__PURE__ */ new Set();
+      for (const cand of [best, ...originCandidates, ...scaleCandidates].filter(Boolean).sort((a, b) => b.meanSignal - a.meanSignal || b._evidence - a._evidence)) {
+        const k = `${Math.round(cand._scaleX * 100)}:${Math.round(cand._scaleY * 100)}`;
+        if (descentSeen.has(k)) continue;
+        descentSeen.add(k);
+        descentSeeds.push(cand);
+        if (descentSeeds.length >= 6) break;
+      }
+      for (const leader of descentSeeds) {
+        descendFrom(leader);
+        if (best?.found) break;
+      }
+      if (!best?.found && best) {
+        const rangeX = originRange(gx * cw * best._scaleX, w);
+        const rangeY = originRange(gy * ch * best._scaleY, h);
+        const roam = (r) => unique([r.min, r.min + (r.max - r.min) * 0.25, r.center, r.min + (r.max - r.min) * 0.75, r.max]);
+        for (const originX of roam(rangeX)) {
+          for (const originY of roam(rangeY)) {
+            consider(evaluate({ scaleX: best._scaleX, scaleY: best._scaleY, originX, originY }));
+          }
+        }
+      }
+      if (!best?.found && best) {
+        const landed = best;
+        for (const fx of fractions) for (const fy of fractions) {
+          consider(evaluate({
+            scaleX: landed._scaleX,
+            scaleY: landed._scaleY,
+            originX: landed._originX + fx * cw * landed._scaleX,
+            originY: landed._originY + fy * ch * landed._scaleY
+          }));
+          if (best?.found) break;
+        }
+      }
+    }
+  }
+  if (best && !best.found && best.cells >= 96 && (robust && best.meanSignal >= 2 && best.agreement >= 0.8 || !robust && best.meanSignal >= 2 && best.agreement >= 0.85 && best.observedBits >= 60)) {
+    consider(evaluate({
+      scaleX: best._scaleX,
+      scaleY: best._scaleY,
+      originX: best._originX,
+      originY: best._originY,
+      erasure: true
+    }));
   }
   if (best) {
     delete best._evidence;
@@ -1668,11 +1921,11 @@ function detectStegoFingerprint(rgba, w, h, {
     delete best._scaleX;
     delete best._scaleY;
   }
-  if (!best?.found && searchMirror && !_mirrorProbe) {
+  if (!best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
     try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);
-        for (const [axis, fx, fy] of MIRROR_AXES) {
+        for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
           const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
           const mirrored = detectStegoFingerprint(variant, w, h, {
             key,
@@ -1682,11 +1935,29 @@ function detectStegoFingerprint(rgba, w, h, {
             searchOffsets,
             searchGeometry,
             searchMirror: false,
+            searchRotation: false,
             _mirrorProbe: true,
             _layoutVersion: concreteLayout,
             _planes: planesCache
           });
           if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+        }
+        for (const clockwise of searchRotation ? [false, true] : []) {
+          const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+          const rotated = detectStegoFingerprint(variant, h, w, {
+            key,
+            gridX,
+            gridY,
+            profile,
+            searchOffsets,
+            searchGeometry,
+            searchMirror: false,
+            searchRotation: false,
+            _mirrorProbe: true,
+            _layoutVersion: concreteLayout,
+            _planes: planesCache
+          });
+          if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
         }
       }
     } catch {

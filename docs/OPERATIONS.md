@@ -530,7 +530,9 @@ bounded by their own byte caps. Keep AVIF (`processing.avifEffort > 2`
 warns at construction) on the offline `archx-build` path: at high effort
 it is seconds-per-image CPU that no cache-hit ratio fixes on a cold tier.
 Forensic detection is several seconds of single-core CPU on unmarked
-images under auto/geometry search — run it offline via
+images under auto/geometry search (~7 s typical photos, up to ~30 s
+worst case on noise-like suspects since the 1.16 rotation/reframe/
+erasure stages; roughly resolution-independent) — run it offline via
 `detectStegoFingerprintInWorker()` or the `archx-detect` CLI, never in a
 request handler.
 

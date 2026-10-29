@@ -3,6 +3,48 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.16.0] — Unreleased
+
+StegoMark forensic-envelope release (`docs/RESEARCH.md` §2.24). The
+§2.20 "sync-template mark v2" item was re-measured before redesigning
+any embed: deep-crop suspects were already registering exactly and
+then failing the decode, so the entire fix is detector-side — **every
+already-issued mark gains the new envelope; nothing needs re-embedding.**
+
+### Added
+
+- **Erasure decoding (robust).** Deep crops erase every repetition of
+  10–32 code bits, beyond flip-repair depth. The detector now treats
+  zero-vote bits as erasures at known positions: only erased *payload*
+  bits are enumerated (check bytes recomputed, CRC-prefiltered, MACand marker-verified against observed bits), behind strong-signal
+  gates, with stricter budgets as erasures grow. Results carry
+  `erasureDecoded` + `erasedBits`. Center/corner crops now recover to
+  60% retained (was ~80%).
+- **Standard-profile erasure assist.** A single sparse bit (<2 votes)
+  no longer blocks the MAC-first flip corrector behind the coverage
+  pre-gate (≤6 sparse bits, MAC-acceptance only).
+- **Rotation recovery.** 90°/270° rotated suspects are probed by
+  default (`rotated: 90 | 270` reported; `searchRotation: false` opts
+  out). 180° was already covered by the xy-mirror probe.
+- **Reframe registration.** Stage-3 one-axis/diagonal scale seeds
+  ((1.5, 1), (16/9, 1), uniform to 55% …) plus a coordinate-descent
+  scale escape seeded by raw signal instead of self-agreement —
+  3:2 → 1:1 and 4:5 reframes now recover at exact geometry.
+
+### Notes
+
+- Measured on a 21-transform synthetic matrix (robust, forensic
+  mode): 7/21 → 21/21 recovered; 20 unmarked/wrong-key controls,
+  zero false positives. Synthetic-fixture numbers — calibrate on
+  your own catalog before relying on the deep end of the envelope.
+- Not-found worst case in auto forensic mode rose (~7 s photos,
+  ~30 s noise-like suspects, roughly resolution-independent). Pin
+  `profile`/`layoutVersion` or use `detectStegoFingerprintInWorker`
+  for pipelines. Small-angle rotation, perspective, sub-55% crops
+  and rotate+flip transposes remain out of envelope (future
+  sync-template mark version; see §2.24).
+- Tests: 99 Node (+1 comprehensive detector-envelope test).
+
 ## [1.15.0] — Unreleased
 
 Fifth external adversarial-review response (claim-by-claim verification

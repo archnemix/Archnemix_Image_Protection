@@ -1801,6 +1801,95 @@ Nothing in this review changed the fundamental limits stated since
 defence-in-depth, and attribution is probabilistic forensic evidence —
 not proof on its own.
 
+### 2.24 Mark-v2 envelope work — erasure decoding instead of a sync template (v1.16)
+
+§2.20 scoped the remaining detector dead end — deep and asymmetric
+crops — as needing "a sync template in the mark itself: a v2 mark
+redesign." Before redesigning the embed, the failure was re-measured
+end-to-end (480×320 synthetic, robust strength 8, layout v3, forensic
+geometry mode; 21 transforms). The result changed the plan: on the
+failing cases the geometry search was usually **already registering
+exactly** (correct scale/origin, repetition agreement 1.0, strong
+signal) and the decode died afterwards for four distinct,
+detector-side reasons. Fixing those recovered the whole measured
+envelope without touching a single embedded byte — so every mark ever
+issued benefits, which an embed redesign could never do.
+
+**Failure decomposition (measured).**
+
+1. *Erasures beyond repair depth.* A 70% center crop deletes every
+   repetition of 10–13 of the 96 robust code bits. Those bits are not
+   *wrong* — they are *unknown* — but the decoder only had flip-repair
+   (≤5), so exactly-registered candidates failed MAC verification.
+   The robust codeword, however, carries CRC-16 + MAC-16 + a constant
+   16-bit marker around a 48-bit payload: only erased *payload* bits
+   are free variables (check bytes are recomputed and compared
+   against whichever check bits were observed, ≤3 disagreements, ≤2
+   past 24 total erasures where near-unanimous consensus is also
+   required). Enumerating 2^(erased payload bits) × small flip sets
+   on weak observed bits, CRC-prefiltered before any MAC runs,
+   recovers erasures exactly. False-positive arithmetic: ~2^17
+   enumerated candidates in the worst staged configuration against
+   ≥30 observed check/marker bits behind signal gates
+   (mean |median| ≥ 2.0, consensus ≥ 0.8) that unmarked suspects do
+   not reach (measured ~0.6–0.68 / < 1.4); results are flagged
+   `erasureDecoded` with the erased-bit count so downstream tooling
+   can weigh them. The standard profile got the bounded analogue: a
+   single sparse bit (0–1 votes) previously stopped its corrector
+   from *running at all* via the coverage pre-gate; with ≤6 sparse
+   bits the existing MAC-first flip search now runs behind the same
+   strong-signal gates, MAC-acceptance only.
+2. *Missing scale pairs.* Stage-1 scales cap at 1.25 and stage-2
+   crosses deep scales only with each other, so (1.5, 1.0) — a 3:2 →
+   1:1 reframe — and every (s, 1)/(1, s) one-axis pair beyond 1.25
+   were never evaluated. A compact stage 3 seeds uniform diagonals
+   to 55% retained plus one-axis reframe pairs; no table replaces
+   search, these merely enter basins the refinement can polish.
+3. *Diagonal basins + seed starvation.* Aspect crops pull the coarse
+   search into "average" basins (1.43, 1.33) that ±3.5% fine steps
+   cannot leave, and ranking refinement seeds by `_evidence` starved
+   the true basin — evidence rewards majority self-agreement, which
+   best-of-thousands noise basins win tautologically (the spurious
+   4:5 winner had agreement 0.97 at signal 0.62). A coordinate
+   descent (one axis at a time, up to ±11% steps, centre-anchored
+   origins, then an origin re-roam) now runs from the top diverse
+   scale pairs **ranked by raw signal** (`meanSignal`), the quantity
+   partial alignment actually raises. The 4:5 case converged
+   (1.78, 1) → (1.884, 1) in one step once seeded this way.
+4. *90°/270° rotation* was simply never probed (180° arrived with
+   the xy-mirror in 1.15). Transposed-buffer probes join the mirror
+   probes in both detector branches (`rotated: 90 | 270`,
+   `searchRotation: false` to opt out); in auto-profile triage the
+   rotation+geometry compound probes robust only, bounding fan-out.
+
+**Measured outcome.** Robust: 7/21 → **21/21** on the matrix
+(identity, 90°/180°/270°, center/corner crops at 85/80/75/70/65/60%,
+1:1 both native and upscaled, 4:5 native, 0.5× resize, 80% crop +
+JPEG-75), all at confidence 0.99 with exact recovered geometry; most
+positives now resolve in ~0.3–0.5 s because the erasure stage answers
+before the mirror/rotation fan-out. Standard additionally recovers
+its 80% center crop. Twenty negative controls (noise, two
+checkerboard periods, sinusoidal bands, gradients, flat, wrong-key
+marks) under the full auto+geometry+offsets stack: **zero false
+positives**. The price is the not-found worst case: pure-noise
+suspects take ~30 s in auto forensic mode (~7 s on smooth photos) —
+cell-bound, roughly resolution-independent, and precisely why
+`detectStegoFingerprintInWorker` and profile/layout pinning exist.
+Unit suite: 99 tests, the new one pinning rotation flags, deep-crop
+erasure recovery, both reframes, the standard assist, opt-out, and a
+not-found control.
+
+**What the sync template is still for.** Everything above assumes
+axis-aligned geometry. Small-angle rotation (the historical 2°
+rotation failure stands), perspective/keystone, sub-55% crops, and
+transpose compounds (rotate+flip) remain outside the envelope:
+registration itself fails there, not the decode, and *that* is what
+an embed-side periodic pilot (autocorrelation/Fourier-Mellin
+sync) would address. It stays scoped as a future mark version; 1.16
+claims only the axis-aligned envelope measured here. A non-match
+remains weak evidence of unrelatedness, and an erasure-decoded match
+is flagged so it is never silently equated with a full-evidence one.
+
 ## 3. Threat model
 
 | Adversary | Goal | Archx outcome |

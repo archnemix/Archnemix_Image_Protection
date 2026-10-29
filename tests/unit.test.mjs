@@ -3288,3 +3288,67 @@ test('CLI parsers never eat positional paths and honour --flag=value', async (t)
   const parsed = JSON.parse(detectOut);
   assert.equal(parsed.file, input, 'detect CLI saw the real suspect path');
 });
+
+test('detector recovers rotations, deep crops and reframes via erasure decoding', async () => {
+  const w = 480, h = 320;
+  const gradient = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    gradient[i] = (x * 255 / w) | 0; gradient[i + 1] = (y * 255 / h) | 0;
+    gradient[i + 2] = (x ^ y) % 256; gradient[i + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(gradient, w, h, 'buyer-9', { key: 'g16-key', profile: 'robust', strength: 8, layoutVersion: 3 });
+  const basePipe = () => sharp(Buffer.from(marked), { raw: { width: w, height: h, channels: 4 } });
+  const toRaw = async (pipe) => {
+    const { data, info } = await pipe.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    return { buf: new Uint8Array(data), w: info.width, h: info.height };
+  };
+  const detect = (s, extra = {}) => detectStegoFingerprint(s.buf, s.w, s.h,
+    { key: 'g16-key', profile: 'robust', searchGeometry: true, ...extra });
+
+  const rot90 = await toRaw(basePipe().rotate(90));
+  const rotHit = detect(rot90);
+  assert.equal(rotHit.found, true, '90°-rotated suspect recovered');
+  assert.equal(rotHit.rotated, 90);
+  const rot270 = await toRaw(basePipe().rotate(270));
+  const rotHit2 = detect(rot270);
+  assert.equal(rotHit2.found, true, '270°-rotated suspect recovered');
+  assert.equal(rotHit2.rotated, 270);
+
+  // 65% center crop: >20 code bits lose every repetition — recoverable
+  // only because erased payload bits are enumerated against the
+  // recomputed CRC/MAC/marker (erasure decoding, not flip repair).
+  const deep = await toRaw(basePipe()
+    .extract({ left: 84, top: 56, width: 312, height: 208 }).resize(w, h));
+  const deepHit = detect(deep);
+  assert.equal(deepHit.found, true, '65% center crop recovered');
+  assert.equal(deepHit.erasureDecoded, true, 'recovery path is flagged as erasure-decoded');
+  assert.ok(deepHit.erasedBits >= 8, `erased bit count reported (got ${deepHit.erasedBits})`);
+
+  // Aspect reframes (the social-media shapes): 1:1 and 4:5 crops of a
+  // 3:2 original need one-axis scale pairs the old tables never tried.
+  const square = await toRaw(basePipe().extract({ left: 80, top: 0, width: 320, height: 320 }));
+  assert.equal(detect(square).found, true, '1:1 native reframe recovered');
+  const portrait = await toRaw(basePipe().extract({ left: 112, top: 0, width: 256, height: 320 }));
+  assert.equal(detect(portrait).found, true, '4:5 native reframe recovered');
+
+  // Standard profile: a single erased bit previously blocked the flip
+  // corrector behind the coverage pre-gate; the assist is MAC-only.
+  const markedStd = embedStegoFingerprint(gradient, w, h, 'buyer-9', { key: 'g16-key', profile: 'standard', strength: 6, layoutVersion: 3 });
+  const stdPipe = sharp(Buffer.from(markedStd), { raw: { width: w, height: h, channels: 4 } })
+    .extract({ left: 48, top: 32, width: 384, height: 256 }).resize(w, h);
+  const stdSuspect = await toRaw(stdPipe);
+  const stdHit = detectStegoFingerprint(stdSuspect.buf, stdSuspect.w, stdSuspect.h,
+    { key: 'g16-key', profile: 'standard', searchGeometry: true });
+  assert.equal(stdHit.found, true, 'standard 80% center crop recovered');
+
+  // Negative control under the full forensic stack (mirrors, rotations,
+  // erasure stage): an unmarked suspect must stay not-found.
+  const clean = detectStegoFingerprint(gradient, w, h,
+    { key: 'g16-key', profile: 'robust', searchGeometry: true });
+  assert.equal(clean.found, false, 'unmarked suspect is not manufactured into a match');
+
+  // Rotation probes are opt-out for callers bounding worst-case time.
+  const noRot = detect(rot90, { searchRotation: false });
+  assert.equal(noRot.found, false, 'searchRotation:false disables rotation recovery');
+});
