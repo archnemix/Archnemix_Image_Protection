@@ -20,7 +20,7 @@ import { detectStegoFingerprint } from './stego-detect.js';
  * (PSNR at YOUR settings on YOUR images), not an adjective.
  */
 export function assayStegoEmbed(rgba, w, h, {
-  key = '', profile = 'robust', strength = 6, gridX, gridY, verify = false,
+  key = '', profile = 'robust', strength = 6, gridX, gridY, verify = false, layoutVersion = 3,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   const robust = profile === 'robust';
@@ -49,7 +49,7 @@ export function assayStegoEmbed(rgba, w, h, {
         for (let x = x0; x < x1; x += 2 * step) {
           const v = luma[y * w + x];
           sq += (v - mean) * (v - mean);
-          if (v < 32 || v > 224) extreme++;
+          if (v < 64 || v > 191) extreme++;
           sampled++;
         }
       }
@@ -62,7 +62,7 @@ export function assayStegoEmbed(rgba, w, h, {
   const binaryFraction = cells ? binaryCells / cells : 0;
   const measure = (atStrength) => {
     const marked = embedStegoFingerprint(src, w, h, 'archx-assay', {
-      key, profile, strength: atStrength, gridX, gridY,
+      key, profile, strength: atStrength, gridX, gridY, layoutVersion,
     });
     let mse = 0, maxDelta = 0;
     for (let i = 0; i < src.length; i += 4) {
@@ -78,7 +78,7 @@ export function assayStegoEmbed(rgba, w, h, {
   };
   const base = measure(strength);
   const result = {
-    profile, strength,
+    profile, strength, layoutVersion,
     grid: { x: gx, y: gy },
     psnr: base.psnr,
     maxChannelDelta: base.maxDelta,
@@ -90,6 +90,10 @@ export function assayStegoEmbed(rgba, w, h, {
     recommendedStrength: strength,
     warnings: [],
   };
+  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
+  if (gx * gy < codeBits) {
+    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size — use a larger delivery size`);
+  }
   if (result.contentClass === 'binary-graphic') {
     result.warnings.push('near-binary high-contrast content (UI/text/periodic graphics) is StegoMark\'s documented weak class; expect poor recovery without much higher strength');
   }
@@ -100,7 +104,7 @@ export function assayStegoEmbed(rgba, w, h, {
     for (const candidate of [strength, strength + 2, strength + 4, 16]) {
       if (candidate > 16) break;
       const trial = candidate === strength ? base : measure(candidate);
-      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY });
+      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY, layoutVersion });
       if (hit.found) {
         result.verifiedAtStrength = candidate;
         result.recommendedStrength = candidate;

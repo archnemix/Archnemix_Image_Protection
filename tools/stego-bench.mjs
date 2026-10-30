@@ -3,7 +3,7 @@
  * Repeatable StegoMark benchmark (review #7 P1.11-13). Emits
  * machine-readable JSON with per-case outcomes plus a human summary.
  * Modes:
- *   node tools/stego-bench.mjs [--json out.json] [--strength N]
+ *   node tools/stego-bench.mjs [--json out.json] [--strength N] [--layout 3|4]
  *   node tools/stego-bench.mjs --fp         false-positive sweep
  *   node tools/stego-bench.mjs --collusion  assay ranking benchmark
  * Detector calls run under maxTimeMs budgets; timedOut cases are
@@ -23,8 +23,9 @@ const opt = (name, fallback) => {
   return i >= 0 ? argv[i + 1] : fallback;
 };
 const STRENGTH = Number(opt('--strength', '6'));
+const LAYOUT = Number(opt('--layout', '3'));
 const KEY = 'bench-stego-key';
-const results = { config: { strength: STRENGTH, layoutVersion: 3, key: '(fixed bench key)' }, cases: [] };
+const results = { config: { strength: STRENGTH, layoutVersion: LAYOUT, key: '(fixed bench key)' }, cases: [] };
 
 async function loadRaw(file, width = 800) {
   const { data, info } = await sharp(file).resize(width).ensureAlpha().raw()
@@ -50,6 +51,33 @@ const toRaw = async (pipe) => {
   return { buf: new Uint8Array(data), w: info.width, h: info.height };
 };
 
+
+async function documentImage() {
+  const W = 1000, H = 700;
+  const paras = [
+    'Quarterly results exceeded expectations across every region, with',
+    'recurring revenue up 18 percent year over year. The board approved',
+    'a new dividend and authorized the buyback program through 2028.',
+    'Operating margins improved as infrastructure costs fell sharply.',
+    '', 'function renderInvoice(order) {',
+    '  const total = order.items.reduce((s, i) => s + i.price, 0);',
+    '  return { id: order.id, total, currency: "USD" };', '}', '',
+    'Figure 3: watermark recovery rate by content class and transform.',
+    'All measurements were taken at strength 6 on the 800px corpus.',
+  ];
+  let y = 120, rows = '';
+  for (const p of paras) { if (p) rows += `<text x="60" y="${y}" font-family="monospace" font-size="21" fill="#15181d">${p}</text>`; y += 34; }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">
+    <rect width="${W}" height="${H}" fill="#fdfdfa"/>
+    <text x="60" y="64" font-family="sans-serif" font-size="34" font-weight="bold" fill="#15181d">CONFIDENTIAL - Internal Review</text>
+    <text x="60" y="92" font-family="sans-serif" font-size="16" fill="#4a5260">Distribution: named recipients only - Doc 7f3a - Page 1 of 4</text>
+    ${rows}
+    <rect x="60" y="${y + 10}" width="880" height="60" fill="none" stroke="#4a5260" stroke-width="2"/>
+    <text x="76" y="${y + 48}" font-family="sans-serif" font-size="18" fill="#15181d">SKU-8841    Qty 240    Unit $19.99    Total $4,797.60</text>
+  </svg>`;
+  return toRaw(sharp(Buffer.from(svg)));
+}
+
 async function corpus() {
   const items = [];
   for (const f of ['aurora-valley.jpg', 'luxury-watch.jpg', 'neon-portrait.jpg']) {
@@ -62,7 +90,16 @@ async function corpus() {
     }
   }
   items.push({ name: 'synthetic-flat', kind: 'flat', ...synthetic('flat') });
-  items.push({ name: 'synthetic-text', kind: 'text', ...synthetic('text') });
+  // The periodic bar pattern is an ADVERSARIAL stress host: its own
+  // third-difference response saturates the detector statistic at
+  // clip level (unmarked meanSignal ~= a real mark's), so no
+  // amplitude exists that marks it invisibly. Kept as its own kind
+  // so the envelope stays honest and visible.
+  items.push({ name: 'synthetic-text', kind: 'text-periodic', ...synthetic('text') });
+  // A realistic document (rendered text, like the screenshots and
+  // exports operators actually protect) — the class the periodic
+  // pattern was long (mis)read as representing.
+  items.push({ name: 'document', kind: 'text', ...(await documentImage()) });
   return items;
 }
 
@@ -98,7 +135,7 @@ async function runMatrix() {
   for (const item of items) {
     for (const profile of ['robust', 'standard']) {
       const marked = embedStegoFingerprint(item.buf, item.w, item.h, `bench-${item.name}`, {
-        key: KEY, profile, strength: STRENGTH, layoutVersion: 3,
+        key: KEY, profile, strength: STRENGTH, layoutVersion: LAYOUT,
       });
       const quality = psnr(item.buf, marked);
       for (const [tName, suspect] of await transforms(marked, item.w, item.h)) {
@@ -139,7 +176,7 @@ async function runFp() {
   // Full-geometry wrong-key on marked suspects (slow path, small N).
   for (const item of items.slice(0, 3)) {
     const marked = embedStegoFingerprint(item.buf, item.w, item.h, 'fp-victim', {
-      key: KEY, profile: 'robust', strength: STRENGTH,
+      key: KEY, profile: 'robust', strength: STRENGTH, layoutVersion: LAYOUT,
     });
     for (let k = 0; k < 3; k++) {
       const hit = detectStegoFingerprint(marked, item.w, item.h, {
@@ -193,6 +230,12 @@ if (results.cases.length) {
     const byKind = {};
     for (const c of mine) { byKind[c.kind] ??= [0, 0]; byKind[c.kind][1]++; if (c.found) byKind[c.kind][0]++; }
     for (const [kind, [f, n]] of Object.entries(byKind)) console.log(`  ${kind}: ${f}/${n}`);
+    const psnrByKind = {};
+    for (const c of mine) { psnrByKind[c.kind] ??= []; if (!psnrByKind[c.kind].includes(c.psnr)) psnrByKind[c.kind].push(c.psnr); }
+    console.log('  psnr: ' + Object.entries(psnrByKind).map(([k, v]) => `${k} ${v.join('/')}`).join('  '));
+    const slow = mine.filter((c) => c.timedOut).length;
+    const maxMs = Math.max(...mine.map((c) => c.ms));
+    console.log(`  detect time: max ${maxMs} ms, ${slow} timed out`);
   }
 }
 const out = opt('--json', null);

@@ -2803,3 +2803,166 @@ stale and are corrected).
   remains the durable strategy.
 - *C2PA*: spec is now 2.4 (April 2026) with a young conformance
   program; the "not C2PA, provenance-compatible" stance stands.
+
+## 2.28 Review-response — StegoMark code upgrade, detection economics, and evidence discipline (v1.20)
+
+A post-release critique of v1.19 restated four concerns: (1) the
+measured StegoMark recovery envelope itself (robust 75/88,
+standard 56/88, "text 0/11", and robust-profile analyses "timing
+out"), (2) the 28.6 dB robust-mode PSNR being a quality trade
+purchasers must evaluate, (3) replay-store saturation defaulting
+to `evict`, leaving a security-relevant policy to operator
+vigilance, and (4) browser-test tooling requiring Node ≥22.12
+against a declared ≥20.9 floor. Each was verified against the
+shipped code before acting; the numbers in (1) reproduce exactly
+(75/88, 56/88 re-measured bit-for-bit), so this release treats
+them as engineering targets rather than disputing them.
+
+### What "text 0/11" actually was
+
+The bench's historical text item is an adversarial periodic bar
+pattern whose own third-difference response saturates the
+detector statistic at clip level while completely unmarked
+(meanSignal ≈ 8.6, the strength of a real mark) — the host is
+the noise, and no amplitude exists that marks it invisibly
+(strength 10 ≡ 16 by 0/255 clamping). Three binary-aware
+embeddings from the document-watermarking literature were built
+and measured against rendered documents: blind Wu–Liu-style
+pixel flips (PSNR ≈ 15, still missed), closed-loop
+flip-to-target (recovered the adversarial synthetic only at
+PSNR ≈ 12 — visible vandalism), and a locality-scored hybrid
+(PSNR 24.6–26.0 vs the shipped additive mark's 28.9–32.9, and it
+*lost* cases the additive mark won). All three were deleted. The
+operationally important measurement: **the shipped additive mark
+already recovers realistic rendered text documents** — light and
+dark themes, both profiles, through JPEG 80/50 and 0.85-scale
+crops. What defeats every variant tried is 1-bit
+re-binarization of a document and the periodic synthetic itself.
+The bench corpus now separates the classes (`text` = rendered
+documents; `text-periodic` = the adversary) so the headline
+number stops conflating them. Binarization survival is a
+documented envelope limit, not an open bug.
+
+### Layout version 4: spend redundancy on algebra (BCH + ML/ISD)
+
+Following the current literature direction — a 2026 ECC
+comparison for watermark robustness (BCH + repetition was the
+most robust concatenation tested), SpreadMark (2026) on dense
+spreading, and SynthID-Image (2025) on the
+robustness/quality/payload trilemma — layout v4 keeps v3's
+damped, topology-locked grid, cell seeds and detection statistic
+byte-for-byte, and replaces the 96-bit parity+MAC word with a
+**shortened BCH(188,64)** code (BCH(255,131,37) over GF(2⁸)):
+the same 48-bit fingerprint + 16-bit keyed MAC, 124 parity bits,
+key-seeded bit interleaving, guaranteed radius 2e+s ≤ 36. The
+detector decode ladder per candidate is now: bounded-distance
+Berlekamp–Massey with widened erasure sets → maximum-likelihood
+erasure solve over the generator matrix (recovers from any 64
+independent surviving bits; measured recovery with **70 of 188
+bits erased**, twice the algebraic radius) → OSD-1/2
+reprocessing (flip ≤2 least-reliable basis bits) → inline
+information-set decoding on strongly coherent candidates → a
+deep forensic pass (4,000 ISD trials) over the three strongest
+failed candidate geometries stashed during the sweep. All
+randomized steps use input-seeded deterministic PRNGs: same
+suspect, same options, same verdict.
+
+Two honesty constraints shaped the ladder. First, the payload
+MAC is 16 bits, and ISD tests thousands of candidate words:
+with a deliberately loose mismatch cap (40 at 119 observed bits)
+a **wrong MAC-valid fingerprint was manufactured within ~8,000
+trials**. The operative cap is 0.30·(observed−64) mismatches —
+≥7σ from the noise-solve rate at every length — with a hard
+clamp at 0.34 inside the solve entry point so no future caller
+can widen it into lottery territory. Second, acceptance tiers
+for ML-family decodes are normalized by mismatch *rate* over
+the check equations: absolute budgets double-count erasures,
+and standard-profile vote magnitudes at 188 bits never reach
+robust-profile thresholds even for genuine identity suspects
+(measured: MAC-valid decode at meanAbs 2.1 rejected by the old
+tiers). ISD implementation traps were measured and documented
+in code: in-place reshuffling destroys the reliability prior
+(2,000 failures on a case fresh-copy sampling solves in 19
+trials), and parameter cycling halved the per-salt success rate
+(20/24 → 11/24).
+
+### Detection economics: two-phase auto, dihedral screens, budgets
+
+Adding a fourth layout exposed a latent flaw in auto-detection:
+the first layout's exhaustive geometry search consumed the
+entire shared deadline, so suspects belonging to later layouts
+timed out *at identity* (robust bench collapsed to 40/99,
+photos 3/33). Auto-detection is now two-phase: cheap native
+screens for every layout first (160–735 ms each), then geometry
+searches with the remaining budget sliced fairly across layouts
+(successful crop searches resolve in 0.4–3.6 s, so slices rarely
+cost a recovery; pinning a layout still restores the full
+budget to one search). Separately, mirrored/rotated/transposed
+suspects used to wait behind the full forward geometry sweep
+before their (already implemented) native probes ran: those
+screens now run *before* the sweep, cutting dihedral suspects
+from 5.6–13.9 s to 0.5–0.85 s. The forensic CLI gains
+`--max-time-ms`; `timedOut` remains distinct from a miss in
+every result. Worst-case full sweeps on an unmarked hostile
+800×520 suspect: v4 17.9 s, v3 20.4 s — exhaustive by design,
+bounded by budget.
+
+### Measured A/B (same detector, same corpus, strength 6)
+
+| layout | profile | recovered | photo | graphic | flat | text | text-periodic | FP |
+|---|---|---|---|---|---|---|---|---|
+| 3 (default) | robust | 85/99 | 33/33 | 31/33 | 11/11 | 10/11 | 0/11 | 0/369 |
+| 4 (opt-in) | robust | 84/99 | 30/33 | 33/33 | 11/11 | 10/11 | 0/11 | 0/369 |
+| 3 | standard | 63/99 | 24/33 | 24/33 | 8/11 | 7/11 | 0/11 | — |
+| 4 | standard | 63/99 | 24/33 | 24/33 | 8/11 | 7/11 | 0/11 | — |
+
+PSNR at the same strength (robust): photos 29.3–30.3 dB (v4) vs
+27.9–28.9 (v3); graphics ≈34.1 vs 33.4; flat 37.2 = 37.2;
+documents 32.0 vs 30.8. Detection budgets unchanged from the
+critiqued setup (robust 20 s with geometry, standard 5 s
+native); robust runs report 14–15 budget timeouts per 99,
+essentially all in the adversarial periodic class plus the
+deep-crop cases below.
+
+**Decision: layout 3 remains the embed default; layout 4 ships
+opt-in** (`steganography.layoutVersion: 4`). The bar set in
+advance for changing what every deployment embeds by default
+was "≥ v3 in every class, PSNR better, FP still 0". v4 clears
+PSNR (+1.4 dB photos, +0.7 graphics, +1.2 text) and ties
+standard mode exactly, but trails robust mode by one case net (photo deep crops
+−3, graphics +2), concentrated in 0.7-scale photo crops where its geometry refinement plus
+decode ladder does not finish inside a 20 s auto-layout budget
+even though pinned searches recover them. Operators who value
+the quality headroom or the deep-erasure algebra can select v4
+per site; the pre-flight assay now reports layout, PSNR and
+self-verification for whichever they choose. Layouts 1–3 are
+byte-frozen — embeds verified bit-identical to v1.19 and pinned
+by a golden-hash regression test — and v1.19/v1.20 detectors
+cross-read each other's marks in both directions.
+
+### Saturation policy and the Node floor
+
+The `hardened` preset now selects replay saturation `strict`
+(a preset named hardened should fail closed); explicit host
+configuration still wins, the library default remains `evict`
+for availability-first deployments, and OPERATIONS gained the
+evict-vs-strict decision table. Neither policy substitutes for
+sizing: `oneTimeTokenMaxEntries ≥ peak redemptions/sec × TTL ×
+margin`. For (4): the ≥20.9 floor covers the library, which has
+**zero runtime dependencies** (Sharp is a peer). Pinning
+Puppeteer 24 for Node 20 was evaluated and rejected — its
+dependency chain (`basic-ftp`, `extract-zip`) fails the repo's
+`npm audit --audit-level=high` CI gate and only Puppeteer 25
+escapes it — so the repo pins `.nvmrc` to 22 and documents the
+runtime/dev split plainly (CI already encodes it: browser suite
+on Node 22, library suites on 20 and 22).
+
+### What did not change
+
+Every previously issued marked image verifies exactly as
+before (golden-hash test). The displayed-pixel pipeline, token
+and abuse layers, and envelopes are untouched. Remaining honest
+limits, by measurement: 1-bit re-binarization, the adversarial
+periodic class, 0.7-scale photo crops of v4 marks inside tight
+auto-detection budgets (pin the layout or raise the budget),
+regeneration attacks, and the analog hole.

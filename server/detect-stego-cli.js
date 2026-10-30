@@ -58,6 +58,9 @@ if (!input || args.help) {
   --expect-fingerprint <16hex> registered perceptual soft-binding fingerprint
   --max-distance <n> maximum perceptual Hamming distance 0–64 (default 10)
   --profile <p>      auto (default), standard, or robust
+  --layout <n>       pin codeword layout 1-4 (default auto: tries 3, 4, 2, 1)
+  --max-time-ms <n>  wall-clock budget for the whole search (default 0 = unlimited;
+                       on expiry the best candidate so far returns with timedOut)
   --grid-x <n>       detector grid columns, integer 4–64 (profile default)
   --grid-y <n>       detector grid rows, integer 4–64 (profile default)
   --max-input-bytes <n> reject files above this size before reading (default 52428800)
@@ -84,6 +87,8 @@ if (!key && !args.json) {
 }
 
 const profile = args.profile || 'auto';
+const layoutArg = args['layout'] ? Number(args['layout']) : 'auto';
+if (layoutArg !== 'auto' && ![1, 2, 3, 4].includes(layoutArg)) { console.error('Archx detect: --layout must be 1, 2, 3 or 4'); process.exit(1); }
 const gridX = args['grid-x'] ? Number(args['grid-x']) : undefined;
 const gridY = args['grid-y'] ? Number(args['grid-y']) : undefined;
 const maxInputBytes = args['max-input-bytes'] ? Number(args['max-input-bytes']) : 50 * 1024 * 1024;
@@ -171,11 +176,13 @@ try {
   result = detectStegoFingerprint(data, info.width, info.height, {
     key,
     profile,
+    layoutVersion: layoutArg,
     gridX,
     gridY,
     searchOffsets: !args['no-search'],
     searchTilt: !!args.tilt,
     searchGeometry: !args['no-geometry'],
+    maxTimeMs: args['max-time-ms'] ? Number(args['max-time-ms']) : 0,
   });
   // Compute the soft binding from a bounded thumbnail rather than walking a
   // possible 100 MP suspect image a second time in JavaScript.

@@ -4,7 +4,7 @@
  * the multi-recipient collusion assay. Bounded by maxTimeMs.
  */
 
-import { STEGO_ROW_SEGMENTS, stegoCodeBits, robustStegoCodeBits, stegoLayout, robustStegoLayout, stegoGrid, robustStegoBytesValid, robustStegoFingerprintFromBits, stegoBitsToBytes, correctStegoBits, stegoFingerprint, stegoCrc16, stegoMac16, ROBUST_MARKER_BITS } from './stego-code.js';
+import { STEGO_ROW_SEGMENTS, stegoCodeBits, robustStegoCodeBits, bchStegoDecode, bchStegoSolveObserved, bchStegoCodeBits, STEGO_V4_CODE_BITS, stegoLayout, robustStegoLayout, stegoGrid, robustStegoBytesValid, robustStegoFingerprintFromBits, stegoBitsToBytes, correctStegoBits, stegoFingerprint, stegoCrc16, stegoMac16, ROBUST_MARKER_BITS } from './stego-code.js';
 import { buildLumaIntegral, mirroredVariant, rotatedVariant, transposedVariant, resampleRgba, rotateRgba, MIRROR_AXES } from './pixels.js';
 
 function repairRobustViaFirstCrc(scores, hard, key, tag = 'mac') {
@@ -173,9 +173,12 @@ export function detectStegoFingerprint(rgba, w, h, {
   // candidate so far is returned with `timedOut: true` instead of
   // running unbounded forensic stages. 0 (default) = unlimited.
   maxTimeMs = 0,
-  // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
-  // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
-  // (halves worst-case cost on unmarked suspects).
+  // Layout space: 'auto' (default) screens v3 (SHA-256-seeded),
+  // v4 (v1.20 BCH code over the v3 layout), then v2/v1 legacy
+  // seeds — native screens for all layouts first, then geometry
+  // searches with the deadline sliced fairly across layouts;
+  // pass 1-4 to pin one space (full budget to that one search,
+  // roughly proportionally lower worst-case cost).
   layoutVersion = 'auto',
   _mirrorProbe = false,
   _tiltProbe = false,
@@ -186,9 +189,9 @@ export function detectStegoFingerprint(rgba, w, h, {
   const deadline = _deadline > 0 ? _deadline
     : (Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0);
   const deadlineHit = () => deadline > 0 && Date.now() > deadline;
-  const concreteLayout = (_layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3)
+  const concreteLayout = (_layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 || _layoutVersion === 4)
     ? _layoutVersion
-    : (layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 ? layoutVersion : 0);
+    : (layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 || layoutVersion === 4 ? layoutVersion : 0);
   // Shared read-only pixel planes for every recursive probe of this
   // top-level call: layout/profile/geometry/mirror fan-out used to
   // rebuild the luma plane + summed-area table (and the flipped copy)
@@ -203,16 +206,53 @@ export function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache, _deadline: deadline };
+    // Two-phase auto-detection. Phase 1 screens every layout
+    // natively (no geometry/tilt sweep): identity, re-encode,
+    // resize, brightness and mirror suspects resolve in well
+    // under a second per layout. Phase 2 runs the exhaustive
+    // geometry searches. The split exists because of budget
+    // starvation, measured on the v1.20 bench: a single-phase
+    // loop let the FIRST layout's hopeless 20 s crop search
+    // consume the entire shared deadline, so suspects belonging
+    // to later layouts timed out even at identity. Phase 2 also
+    // slices the remaining budget fairly (remaining / layouts
+    // left): successful crop searches resolve in 0.4-3.6 s
+    // (bench p90), so a fair slice rarely costs a real recovery
+    // but guarantees every layout is reached. Pinning a layout
+    // still restores the full budget to that one search.
+    const order = [3, 4, 2, 1];
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, _mirrorProbe, _tiltProbe, _planes: planesCache };
     let best = null;
-    for (const version of [3, 2, 1]) {
-      const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
+    const consider = (attempt) => {
+      if (attempt && (!best || (attempt.confidence ?? 0) > (best.confidence ?? 0))) best = attempt;
+    };
+    for (const version of order) {
+      const attempt = detectStegoFingerprint(srcTop, w, h, {
+        ...shared, searchGeometry: false, searchTilt: false, _layoutVersion: version, _deadline: deadline,
+      });
       if (attempt?.found) return attempt;
-      if (!best || (attempt?.confidence ?? 0) > (best.confidence ?? 0)) best = attempt;
+      consider(attempt);
       if (attempt?.timedOut || deadlineHit()) {
         if (best && !best.timedOut) best = { ...best, timedOut: true };
-        break;
+        return best;
       }
+    }
+    if (searchGeometry || searchTilt) {
+      for (let i = 0; i < order.length; i++) {
+        let slice = deadline;
+        if (deadline > 0) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) break;
+          slice = Math.min(deadline, Date.now() + Math.max(1500, Math.ceil(remainingMs / (order.length - i))));
+        }
+        const attempt = detectStegoFingerprint(srcTop, w, h, {
+          ...shared, searchGeometry, searchTilt, _layoutVersion: order[i], _deadline: slice,
+        });
+        if (attempt?.found) return attempt;
+        consider(attempt);
+        if (deadlineHit()) break;
+      }
+      if (best && deadlineHit() && !best.timedOut) best = { ...best, timedOut: true };
     }
     return best;
   }
@@ -325,7 +365,12 @@ export function detectStegoFingerprint(rgba, w, h, {
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
   const robust = profile === 'robust';
   const effectiveProfile = robust ? 'robust' : 'standard';
-  const codeLength = robust ? 96 : 64;
+  // Layout v4: same cells/statistic, BCH(188,64) codeword instead of
+  // the 96/64-bit repetition codes. Everything downstream that is
+  // parameterized by codeLength follows automatically; the repair
+  // and coverage gates branch explicitly below.
+  const isV4 = concreteLayout === 4;
+  const codeLength = isV4 ? STEGO_V4_CODE_BITS : robust ? 96 : 64;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const effectiveGridX = gridX ?? (robust ? 20 : 24);
@@ -333,8 +378,8 @@ export function detectStegoFingerprint(rgba, w, h, {
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
   const { order, polarity, segmentPolarity } = robust
-    ? robustStegoLayout(cellCount, key, concreteLayout)
-    : stegoLayout(cellCount, key, concreteLayout);
+    ? robustStegoLayout(cellCount, key, isV4 ? 3 : concreteLayout)
+    : stegoLayout(cellCount, key, isV4 ? 3 : concreteLayout);
   const cw = w / gx, ch = h / gy;
   // One luma plane + summed-area table per source buffer, shared by
   // every recursive probe of this top-level call (see planesCache):
@@ -370,6 +415,63 @@ export function detectStegoFingerprint(rgba, w, h, {
   const _disagreeByBit = new Uint16Array(codeLength);
   const _segmentResponses = [];
   let _evalTick = 0;
+  // OSD reprocessing budget for this detect call: the ML fallback
+  // may run inside thousands of geometry probes, so escalations
+  // (each up to ~70 solves) are capped per top-level search.
+  let osdEscalations = 0;
+  let isdEscalations = 0;
+  // Forensic stash: votes+cell evidence of the strongest FAILED
+  // v4 candidates (up to 3, distinct geometries), kept for deep
+  // end-of-search decodes. Inline escalation budgets are spent in
+  // encounter order, but geometry refinement produces its best
+  // candidates late (measured: true candidate at probe ~1500 of
+  // 16000, budgets long gone); and evidence ranking alone is an
+  // imperfect decodability proxy (the max-evidence candidate
+  // measured 15 bit errors with one inside the trusted top-24
+  // reliability ranks — the worst case for biased ISD — while a
+  // sibling geometry had 13 errors, none in the top 27). Three
+  // distinct geometries decoded deeply beat one anointed winner.
+  const forensicStash = [];
+  // One deep decode attempt on a stashed candidate: full ladder
+  // (OSD + ISD) with acceptance recomputed exactly as evaluate()
+  // computes it — agreement against the corrected bits over the
+  // stashed cell readings, mismatch-rate tiers, evidence and
+  // confidence formulas. Returns a finished result or null.
+  const deepForensicTry = (s, trials, salt) => {
+    const cap = Math.max(4, Math.floor((s.order.length - 64) * 0.30));
+    const hit = bchStegoSolveObserved(s.votes, s.order, key, {
+      maxMismatches: cap, osd: true, isdTrials: trials, seedSalt: salt,
+    });
+    if (!hit) return null;
+    let agreeing = 0;
+    for (let ci = 0; ci < s.cellLen; ci++) {
+      if ((s.cellScore[ci] >= 0) === !!hit.bits[s.cellBitIdx[ci]]) agreeing++;
+    }
+    const agreement = s.cellLen ? agreeing / s.cellLen : 0;
+    const mismRate = hit.mismatches / Math.max(1, s.order.length - 64);
+    const tierOk = mismRate <= 0.10 ||
+      (mismRate <= 0.20 && s.meanAbs >= 2.0 && agreement >= 0.82) ||
+      (s.meanAbs >= 2.5 && agreement >= 0.82);
+    if (!(agreement >= 0.72 && s.meanAbs >= 1.2 && tierOk)) return null;
+    const bchBudget = Math.round(120 * mismRate);
+    const evidence2 = Math.max(0, agreement - 0.64) * 2.4 +
+      Math.min(0.55, Math.max(0, s.meanAbs - 1.4) / 8) - (bchBudget / 6) * 0.04;
+    const deep = {
+      ...s.result, found: true, fingerprint: hit.fingerprint,
+      tagScheme: 'mac', erasureDecoded: true, crcValid: true,
+      corrections: hit.mismatches,
+      agreement: Math.round(agreement * 1000) / 1000,
+      confidence: Math.round(Math.max(0, Math.min(0.99, 0.42 + evidence2)) * 1000) / 1000,
+    };
+    delete deep._evidence; delete deep._originX; delete deep._originY;
+    delete deep._scaleX; delete deep._scaleY;
+    return deep;
+  };
+  // Deep decodes are evidence-gated (genuine best candidates
+  // measured 0.94-1.16; failed searches over unmarked content
+  // stash self-agreement artifacts around <=0.55) so screening
+  // unmarked suspects does not pay seconds of ISD per layout.
+  const STASH_DEEP_MIN_EVIDENCE = 0.6;
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
     // Every search stage funnels through evaluate(); checking the
     // shared deadline here (amortized) bounds total forensic time
@@ -513,7 +615,9 @@ export function detectStegoFingerprint(rgba, w, h, {
     // "not evaluated": corrections -1, tagScheme null).
     const minBitCountPre = Math.min(...bitCounts);
     const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const coverageOkPre = robust
+    const coverageOkPre = isV4
+      ? observedBitsPre >= 88 && cellLen >= 96
+      : robust
       ? observedBitsPre >= 88 && cellLen >= 128
       : minBitCountPre >= 2 && cellLen >= codeLength * 3;
     let agreementBound = preAgreement;
@@ -528,7 +632,13 @@ export function detectStegoFingerprint(rgba, w, h, {
       for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
       agreementBound = (preAgreeing + gainSum) / cellLen;
     }
-    const repairable = meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
+    // v4's BCH attempt is cheap (0.1 ms algebraic decode vs the
+    // combinatorial flip searches) and its pre-gate lives in
+    // bchAttempt below; the agreement-bound logic above models the
+    // <=5-flip correctors and does not apply.
+    const repairable = isV4
+      ? meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre
+      : meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
     // Erasure decoding (robust, MAC only): bits with zero cell votes
     // are UNKNOWN, not wrong — flipping <=5 of them cannot recover a
     // crop that erased 10-20. But only the erased PAYLOAD bits are
@@ -642,8 +752,115 @@ export function detectStegoFingerprint(rgba, w, h, {
       if (fixed.corrections < 0 || fixed.tagScheme !== 'mac') return null;
       return { ...fixed, erasureDecoded: true, erasedBits: erased };
     };
-    let corrected = erasure ? (robust ? erasureDecode() : standardErasureAssist()) : null;
-    if (!corrected) corrected = !repairable
+    // v4 decode: BCH corrects errors AND erasures algebraically, so
+    // the flip-search correctors and erasure enumeration above are
+    // v1-v3 machinery. Erasure candidates are the zero-vote bits,
+    // widened to the weakest-reliability bits on retry — each costs
+    // one syndrome decode, so at most three bounded attempts.
+    const bchAttempt = () => {
+      if (!repairable) return null;
+      const zeroVote = [];
+      const byReliability = [];
+      for (let i = 0; i < codeLength; i++) {
+        if (bitCounts[i] === 0) zeroVote.push(i);
+        else byReliability.push(i);
+      }
+      byReliability.sort((a, b) => reliability[a] - reliability[b]);
+      // Bounded-distance passes first (exact error counts, cheapest
+      // acceptance story), erasure sets widened by unreliability.
+      if (zeroVote.length <= 36) {
+        const erasureSets = [zeroVote];
+        if (zeroVote.length <= 28) erasureSets.push([...zeroVote, ...byReliability.slice(0, 8)]);
+        if (zeroVote.length <= 20) erasureSets.push([...zeroVote, ...byReliability.slice(0, 16)]);
+        for (const set of erasureSets) {
+          const hit = bchStegoDecode(votedBits, set, key);
+          if (hit) {
+            return {
+              bits: hit.bits,
+              corrections: hit.errors,
+              tagScheme: 'mac',
+              erasureDecoded: hit.erasures > 0,
+              _bchBudget: 2 * hit.errors + hit.erasures,
+              _fingerprint: hit.fingerprint,
+            };
+          }
+        }
+      }
+      // ML erasure fallback (deep crops): solve the 64 data bits
+      // from the most reliable observed bits; acceptance needs the
+      // solved codeword to agree with (nearly) every OTHER observed
+      // bit plus the MAC — noise solves to ~50% disagreement, far
+      // outside the mismatch cap, long before the MAC matters.
+      // Gated to erasure-shaped damage (several zero-vote bits) or
+      // already-coherent candidates: during geometry search this
+      // runs inside thousands of probes, and pure-error rescue is
+      // the bounded-distance pass's job, not the solver's.
+      const observedOrder = [...byReliability].reverse(); // reliability DESC
+      if (observedOrder.length >= 72 && (zeroVote.length >= 4 || preAgreement >= 0.8)) {
+        // Mismatch cap at 30% of the check equations (observed-64):
+        // a noise solve disagrees with ~50% (7+ sigma beyond the
+        // cap at these lengths), while genuine post-resampling
+        // error counts measured 15-25% — a 15% cap rejected TRUE
+        // codewords (v1.20 bench: watch crops and a standard-mode
+        // identity suspect, all MAC-correct, all over the cap).
+        // The MAC is verified inside the solve either way; the
+        // rate tiers below scale evidence demands with the
+        // mismatch rate actually consumed. OSD reprocessing
+        // escalates only for already-coherent candidates and is
+        // budgeted per search (see osdEscalations).
+        const mismCap = Math.max(4, Math.floor((observedOrder.length - 64) * 0.30));
+        // Escalation budgets were retuned after measuring budget
+        // starvation on small-grid suspects: at ~1.5 cells/bit
+        // (640px graphics) preAgreement inflates for nearly every
+        // probe, so a 24-deep OSD budget evaporated on sweep junk
+        // before the true candidate (1-3 bit errors!) arrived.
+        // OSD itself is ~2 ms worst-case; 48 escalations bound
+        // the added worst case to ~0.1 s per search while still
+        // covering the late-arriving true candidates.
+        const allowOsd = preAgreement >= 0.85 && osdEscalations < 48;
+        if (allowOsd) osdEscalations++;
+        // ISD escalation (randomized information sets) is the last
+        // rung: measured crop damage put ~5 errors inside the
+        // most-reliable basis — beyond OSD's 2 flips, trivial for
+        // resampling. The gate is deliberately strict, calibrated
+        // on a full 16,490-candidate geometry sweep of the failing
+        // bench case: preAgreement>=0.95 && meanAbs>=3.5 admitted
+        // just 28 candidates, 16 of them decodable, the FIRST of
+        // them already the true geometry — while the looser
+        // 0.92/2.5 gate admitted 1,117 and would burn any budget
+        // on near-misses. The salt varies per escalation so
+        // repeated refinement encounters explore fresh
+        // information sets instead of replaying failures.
+        // The signal floor is 2.0, not the 3.5 calibrated on 800px
+        // photos: genuine graphic-class candidates measure
+        // meanAbs 2.0-2.9 (their votes average fewer, larger
+        // cells), and preAgreement>=0.95 remains the strict axis.
+        const allowIsd = preAgreement >= 0.95 && meanAbsPre >= 2.0 &&
+          observedOrder.length >= 100 && isdEscalations < 8;
+        if (allowIsd) isdEscalations++;
+        const ml = bchStegoSolveObserved(votedBits, observedOrder, key, {
+          maxMismatches: mismCap, osd: allowOsd,
+          isdTrials: allowIsd ? 600 : 0, seedSalt: isdEscalations,
+        });
+        if (ml && ml.mismatches <= mismCap) {
+          const mismRate = ml.mismatches / Math.max(1, observedOrder.length - 64);
+          return {
+            bits: ml.bits,
+            corrections: ml.mismatches,
+            tagScheme: 'mac',
+            erasureDecoded: true,
+            _mismRate: mismRate,
+            _bchBudget: Math.round(120 * mismRate),
+            _fingerprint: ml.fingerprint,
+          };
+        }
+      }
+      return null;
+    };
+    let corrected = isV4 ? bchAttempt() : erasure ? (robust ? erasureDecode() : standardErasureAssist()) : null;
+    if (!corrected) corrected = isV4
+      ? { bits: votedBits, corrections: -1, tagScheme: null }
+      : !repairable
       ? { bits: votedBits, corrections: -1, tagScheme: null }
       : robust
       ? (() => {
@@ -667,7 +884,9 @@ export function detectStegoFingerprint(rgba, w, h, {
         })()
       : correctStegoBits(votedBits, reliability, key, standardDepth);
     const bits = corrected.bits;
-    const fingerprint = robust
+    const fingerprint = isV4
+      ? (corrected._fingerprint || '')
+      : robust
       ? robustStegoFingerprintFromBits(bits)
       : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, '0')).join('');
     // The correctors only return corrections >= 0 for a candidate that
@@ -683,7 +902,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     // vote bias) and weak mean signal; genuine marks sit far above both.
     const evidence = Math.max(0, agreement - 0.64) * 2.4 +
       Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) -
-      Math.max(0, corrected.corrections) * 0.04;
+      (isV4 ? (corrected._bchBudget || 0) / 6 : Math.max(0, corrected.corrections)) * 0.04;
     const confidence = crcValid
       ? Math.max(0, Math.min(0.99, 0.42 + evidence))
       : Math.max(0, Math.min(0.49, evidence));
@@ -697,7 +916,10 @@ export function detectStegoFingerprint(rgba, w, h, {
     // "agreement" is near-tautological and the CRC corrector can flip
     // low-reliability bits into a false positive on unmarked noise (found
     // by fuzzing; genuine marks measure ~6 cells/bit, agreement >= 0.84).
-    const bitCoverageOk = robust
+    const bitCoverageOk = isV4
+      ? (observedBits >= 150 && cellLen >= 128) ||
+        (corrected.erasureDecoded === true && observedBits >= 96 && cellLen >= 110)
+      : robust
       ? (observedBits >= 88 && cellLen >= 128) ||
         // Erasure decodes trade coverage for cryptographic certainty:
         // the payload + recomputed CRC/MAC/marker must agree with every
@@ -716,17 +938,48 @@ export function detectStegoFingerprint(rgba, w, h, {
     // so a legacy standard decode must be nearly repair-free with very
     // high agreement, and a legacy robust decode loses the 4-5 tier.
     const legacyScheme = corrected.tagScheme === 'crc';
-    const robustCorrectionOk = !robust || correctionCount <= 3 ||
+    const robustCorrectionOk = isV4 || !robust || correctionCount <= 3 ||
       (!legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.85);
     // Same principle for the standard decoder: a candidate needing 2+
     // repaired bits must carry clearly genuine raw signal, or the repair
     // search itself manufactures the CRC match (false attribution).
-    const standardCorrectionOk = robust || (legacyScheme
+    const standardCorrectionOk = isV4 || robust || (legacyScheme
       ? correctionCount <= 1 && agreement >= 0.95
       : correctionCount <= 1 || (meanAbs >= 2.0 && agreement >= 0.85));
+    // v4 correction tiers mirror the v1-v3 philosophy (heavy repair
+    // needs strong raw signal), scaled to the BCH budget 2e+s<=36:
+    // the MAC inside the payload already rejects miscorrections,
+    // these gates keep confidence honest on marginal decodes.
+    const bchBudget = corrected._bchBudget || 0;
+    // Bounded-distance decodes keep the 2e+s budget tiers. ML/OSD
+    // decodes are tiered by mismatch RATE over the check
+    // equations instead: an absolute budget double-counts
+    // erasures (deep crops shrink the denominator), and vote
+    // magnitudes in the standard profile (1-2 cells/bit at 188
+    // bits) never reach the robust-profile thresholds even for
+    // genuine identity suspects (measured meanAbs 2.1, MAC-valid,
+    // rejected by the old top tier). The MAC + 30% cap carry
+    // attribution safety (~7 sigma from the noise-solve rate);
+    // these tiers keep confidence honest on marginal decodes.
+    // Top ML tier agreement is 0.82, not 0.88: agreement is scored
+    // against the CORRECTED bits, so the cells that manufactured
+    // each wrong vote flip to "disagreeing" after correction —
+    // at ~1.2 cells/bit after a deep crop, a genuine 13-mismatch
+    // MAC-verified decode lands at ~0.87 and an 0.88 tier rejects
+    // the recovery for the very damage the code just repaired
+    // (measured, bench watch center0.7). Attribution safety at
+    // this rung is the MAC plus the 30% mismatch cap; agreement
+    // remains a corroborating floor, not a second wall.
+    const v4CorrectionOk = !isV4 || (corrected._mismRate != null
+      ? corrected._mismRate <= 0.10 ||
+        (corrected._mismRate <= 0.20 && meanAbs >= 2.0 && agreement >= 0.82) ||
+        (meanAbs >= 2.5 && agreement >= 0.82)
+      : bchBudget <= 12 ||
+        (bchBudget <= 24 && meanAbs >= 2.5 && agreement >= 0.82) ||
+        (meanAbs >= 3.5 && agreement >= 0.88));
     const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
-      cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
-    return {
+      cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk;
+    const _result = {
       found,
       fingerprint,
       profile: effectiveProfile,
@@ -762,6 +1015,26 @@ export function detectStegoFingerprint(rgba, w, h, {
       _scaleX: scaleX,
       _scaleY: scaleY,
     };
+    if (isV4 && !found && observedBits >= 96 && cellLen >= 110 && meanAbs >= 1.2 &&
+        (forensicStash.length < 3 || evidence > forensicStash[forensicStash.length - 1].evidence)) {
+      const geoKey = `${_result.geometry.scaleX}|${_result.geometry.scaleY}|${Math.round(_result.geometry.originX / 4)}|${Math.round(_result.geometry.originY / 4)}`;
+      const dup = forensicStash.findIndex((e) => e.geoKey === geoKey);
+      if (dup < 0 || evidence > forensicStash[dup].evidence) {
+        const ord = [];
+        for (let i = 0; i < codeLength; i++) if (bitCounts[i] > 0) ord.push(i);
+        ord.sort((a, b) => reliability[b] - reliability[a]);
+        const entry = {
+          result: _result, evidence, meanAbs, cellLen, geoKey,
+          votes: Uint8Array.from(votedBits), order: ord,
+          cellScore: _cellScore.slice(0, cellLen),
+          cellBitIdx: _cellBitIdx.slice(0, cellLen),
+        };
+        if (dup >= 0) forensicStash[dup] = entry; else forensicStash.push(entry);
+        forensicStash.sort((a, b) => b.evidence - a.evidence);
+        if (forensicStash.length > 3) forensicStash.length = 3;
+      }
+    }
+    return _result;
   };
 
   let best = null;
@@ -778,6 +1051,47 @@ export function detectStegoFingerprint(rgba, w, h, {
   for (const fx of fractions) for (const fy of fractions) {
     consider(evaluate({ fx, fy }));
     if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
+  }
+
+  // Fast dihedral screens BEFORE the exhaustive geometry sweep:
+  // mirrored / rotated / transposed suspects resolve natively in
+  // a few hundred ms, but sequenced after the geometry search
+  // they cost 5-14 s of hopeless forward sweeping first (bench:
+  // transposeMain successes at 9.9-13.9 s). Compound suspects
+  // (flip AND crop) still reach the geometry-inheriting probes
+  // at the end of the search; these early probes are pure
+  // latency work and run only when geometry was requested (when
+  // it is off, the end probes already run natively).
+  if (searchGeometry && !best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
+    try {
+      if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+        const entry = planesEntry(srcTop);
+        for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
+          const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+          const mirrored = detectStegoFingerprint(variant, w, h, {
+            key, gridX, gridY, profile, searchOffsets, searchGeometry: false,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+          });
+          if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+        }
+        for (const clockwise of searchRotation ? [false, true] : []) {
+          const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+          const rotated = detectStegoFingerprint(variant, h, w, {
+            key, gridX, gridY, profile, searchOffsets, searchGeometry: false,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+          });
+          if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
+        }
+        for (const anti of searchRotation ? [false, true] : []) {
+          const variant = transposedVariant(entry, srcTop, w, h, anti);
+          const transposed = detectStegoFingerprint(variant, h, w, {
+            key, gridX, gridY, profile, searchOffsets, searchGeometry: false,
+            searchMirror: false, searchRotation: false, searchTilt: false, _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+          });
+          if (transposed?.found) return { ...transposed, transposed: anti ? 'anti' : 'main' };
+        }
+      }
+    } catch (probeErr) { if (probeErr === STEGO_TIMEOUT) throw probeErr; /* fast variant screens are best-effort */ }
   }
 
   // Uniform crop+resize changes the suspect-pixel size and origin of the
@@ -1218,6 +1532,17 @@ export function detectStegoFingerprint(rgba, w, h, {
         timedOut: true,
       };
     }
+    // One bounded deep decode even past the deadline: a search
+    // that timed out during geometry refinement is exactly where
+    // the best candidate already exists but never received decode
+    // budget. Top stash only, evidence-gated, ~100 ms overrun.
+    if (isV4 && !best?.found && forensicStash.length && !_mirrorProbe && !_tiltProbe &&
+        forensicStash[0].evidence >= STASH_DEEP_MIN_EVIDENCE) {
+      try {
+        const deep = deepForensicTry(forensicStash[0], 2500, 97);
+        if (deep) return deep;
+      } catch { /* forensic escalation is best-effort */ }
+    }
     delete best._evidence;
     delete best._originX;
     delete best._originY;
@@ -1225,6 +1550,19 @@ export function detectStegoFingerprint(rgba, w, h, {
     delete best._scaleY;
     best.timedOut = true;
     return best;
+  }
+  // Deep forensic decodes on the stashed candidates, strongest
+  // first, while deadline headroom remains.
+  if (!best?.found && isV4 && !_mirrorProbe && !_tiltProbe) {
+    for (let si = 0; si < forensicStash.length; si++) {
+      if (deadlineHit()) break;
+      const s = forensicStash[si];
+      if (s.evidence < STASH_DEEP_MIN_EVIDENCE) continue;
+      try {
+        const deep = deepForensicTry(s, 4000, 77 + si);
+        if (deep) return deep;
+      } catch { /* forensic escalation is best-effort */ }
+    }
   }
   return best;
 }
@@ -1268,7 +1606,8 @@ export function assayStegoCollusion(rgba, w, h, candidates, {
     throw new Error('Archx stego assay: candidates must be an array of 1..4096 entries');
   }
   const robust = profile === 'robust';
-  const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3;
+  const v4 = layoutVersion === 4;
+  const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3; // v4 reuses v3 seeds
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const effectiveGridX = gridX ?? (robust ? 20 : 24);
@@ -1352,7 +1691,9 @@ export function assayStegoCollusion(rgba, w, h, candidates, {
     const candKey = candidate?.key ?? key;
     if (!readingsByKey.has(candKey)) readingsByKey.set(candKey, readCells(candKey));
     const fingerprint = stegoFingerprint(candidate?.payload ?? '');
-    const bits = robust
+    const bits = v4
+      ? bchStegoCodeBits(fingerprint, candKey)
+      : robust
       ? robustStegoCodeBits(fingerprint, candKey, 'mac')
       : stegoCodeBits(fingerprint, candKey, 'mac');
     return { candidate, candKey, fingerprint, bits };

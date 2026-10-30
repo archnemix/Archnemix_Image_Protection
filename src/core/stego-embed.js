@@ -3,7 +3,7 @@
  * texture-adaptive amplitude masking. Embed-side only — detectors
  * for shipped marks must keep reading them (see stego-code.js).
  */
-import { stegoFingerprint, stegoCodeBits, robustStegoCodeBits, stegoLayout, robustStegoLayout, stegoGrid, STEGO_ROW_SEGMENTS } from './stego-code.js';
+import { stegoFingerprint, stegoCodeBits, robustStegoCodeBits, bchStegoCodeBits, stegoLayout, robustStegoLayout, stegoGrid, STEGO_ROW_SEGMENTS } from './stego-code.js';
 
 
 export function embedStegoFingerprint(rgba, w, h, payload, {
@@ -11,8 +11,10 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
   // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
   legacyCode = false,
-  // Layout seed space: 2 = 128-bit (default since 1.13); 1 reproduces
-  // the pre-1.13 32-bit-truncated layout for compatibility testing.
+  // Layout space: 3 = SHA-256-seeded repetition code (default),
+  // 2 = 128-bit cyrb128, 1 = pre-1.13 32-bit-truncated (both kept
+  // for compatibility testing), 4 = v1.20 BCH(188,64) code over the
+  // v3 cell layout (corrects 2e+s <= 36; needs a v1.20+ detector).
   layoutVersion = 3,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
@@ -24,13 +26,20 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
+  const v4 = layoutVersion === 4;
+  if (v4 && legacyCode) throw new Error('Archx stego: layoutVersion 4 always uses the keyed MAC payload (legacyCode is v1-v3 only)');
   const tag = legacyCode ? 'crc' : 'mac';
-  const bits = robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
+  const bits = v4
+    ? bchStegoCodeBits(fingerprint, key)
+    : robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
+  // v4 reuses the v3 layout seed space verbatim; only the codeword
+  // assigned to the cells changes (see bchStegoCodeBits).
+  const seedVersion = v4 || layoutVersion === 3 ? 3 : layoutVersion === 2 ? 2 : 1;
   const { order, polarity, segmentPolarity } = robust
-    ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3)
-    : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3);
+    ? robustStegoLayout(cellCount, key, seedVersion)
+    : stegoLayout(cellCount, key, seedVersion);
   // The server pipeline owns a disposable Sharp buffer, so it may opt out of
   // this full-frame copy. Cell statistics are computed before that cell is
   // written, which makes the in-place path byte-for-byte equivalent.
@@ -69,7 +78,16 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
       // textured cells may now exceed nominal amplitude, where the
       // energy is perceptually hidden. Sign pattern is unchanged, so
       // older detectors still read marks embedded with the new curve.
-      const cellAmp = Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
+      // v4 curve (1.20): BCH headroom pays for a gentler texture cap
+      // (1.2 vs 1.4), where most of the v1-v3 distortion energy sat.
+      // The flat-cell floor stays at the shipped 0.4: a 0.3 floor
+      // measured fine at identity but flat hosts lost every crop
+      // case (resampling attenuates what little signal flat cells
+      // carry). v1-v3 embeds keep the shipped curve byte-for-byte;
+      // byte-for-byte.
+      const cellAmp = v4
+        ? Math.min(16, amp * Math.max(0.4, Math.min(1.2, 0.4 + std / 40)))
+        : Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
       const cellW = x1 - x0;
       const cellH = y1 - y0;
 

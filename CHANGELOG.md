@@ -3,7 +3,62 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-## [1.19.0] — Unreleased
+## [1.20.0] — 2026-10-31
+
+Critique response (`docs/RESEARCH.md` §2.28): a measured answer to
+the four post-release concerns about StegoMark recovery, the
+28.6 dB robust PSNR, replay-saturation policy, and the
+Node/Puppeteer floor. Headline: a new opt-in BCH codeword layout
+with a four-rung decode ladder, two-phase auto-detection, and
+byte-frozen layouts 1–3 (golden-hash regression test).
+
+### Added
+
+- **StegoCode layout version 4 (opt-in, `steganography.layoutVersion: 4`)**:
+  shortened BCH(188,64) code (48-bit fingerprint + keyed MAC-16 +
+  124 parity, key-seeded interleaving, guaranteed radius 2e+s ≤ 36)
+  over the unchanged v3 cell layout, with a gentler texture-cap
+  amplitude curve. Detector ladder: bounded-distance decoding →
+  ML erasure solve (recovers with 70/188 bits erased) → OSD-1/2
+  reprocessing → inline information-set decoding → deep forensic
+  ISD over the strongest failed candidates. Deterministic
+  (input-seeded) sampling throughout. Requires a v1.20+ detector;
+  layouts 1–3 remain the default and are byte-identical to v1.19.
+- **Two-phase auto-detection**: native screens for all layouts
+  before geometry searches, with the time budget sliced fairly
+  across layouts; fast dihedral (mirror/rotate/transpose) screens
+  now run before the geometry sweep (13.9 s → 0.6 s class).
+- `archx-detect --max-time-ms` and `--layout 4`; assay reports
+  `layoutVersion`, gained a cells-per-codeword warning, and its
+  extreme-luma diagnostic now matches the embedder (`<64`/`>191`).
+- `.nvmrc` (Node 22 for contributors/browser suite).
+
+### Changed
+
+- `hardened` preset now selects replay saturation `strict`
+  (explicit host choice still wins); OPERATIONS documents the
+  evict-vs-strict decision. Neither policy replaces sizing.
+- Bench corpus distinguishes realistic rendered `text` documents
+  from the adversarial `text-periodic` class.
+
+### Measured
+
+- Same-detector A/B at strength 6 (99 cases/profile):
+  robust v4 84/99 vs v3 85/99 (photos 30 vs 33, graphics 33 vs
+  31, flat/text tied), standard tied at 63/99, FP 0/369, PSNR
+  +1.4 dB photos / +0.7 graphics / +1.2 documents.
+  v4 therefore ships opt-in rather than as the new default.
+- Realistic text documents recover under the *shipped* additive
+  mark (10/11 robust incl. JPEG/crop cases); three binary-aware
+  flip embeddings were built, measured worse (PSNR 15 / 12 /
+  24.6–26 vs 28.9–32.9), and removed. 1-bit re-binarization
+  remains a documented envelope limit.
+- Puppeteer 24 pin for Node 20 evaluated and rejected: its
+  `basic-ftp`/`extract-zip` chain fails the audit-high CI gate.
+  The library floor (≥20.9, zero runtime deps) vs browser-suite
+  floor (≥22.12) split is documented in README/REVIEW_GUIDE.
+
+## [1.19.0] — 2026-10-30
 
 Eighth-review response + modularity (`docs/RESEARCH.md` §2.27): ownership
 trust hardening, fail-closed width fractions, mixed-TTL replay

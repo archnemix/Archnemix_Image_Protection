@@ -58,6 +58,8 @@ if (args.assay) {
   // recovery, before committing a catalog to StegoMark settings. Exit 0 =
   // verified (or --assay-no-verify), 2 = no self-verifying strength found.
   if (!input) { console.error('Usage: archx-protect <input image> --assay [--stego-profile robust] [--stego-strength 6] [--json]'); process.exit(1); }
+  const assayLayout = args['stego-layout'] ? Number(args['stego-layout']) : 3;
+  if (![1, 2, 3, 4].includes(assayLayout)) { console.error('Archx assay: --stego-layout must be 1, 2, 3 or 4'); process.exit(1); }
   const assayProfile = args['stego-profile'] || 'robust';
   const assayStrength = args['stego-strength'] ? Number(args['stego-strength']) : 6;
   const assayGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
@@ -84,7 +86,7 @@ if (args.assay) {
   const { data, info } = await pipe.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const report = assayStegoEmbed(new Uint8Array(data), info.width, info.height, {
     key: process.env.ARCHX_STEGO_KEY || args['stego-key'] || 'archx-assay-probe',
-    profile: assayProfile, strength: assayStrength,
+    profile: assayProfile, strength: assayStrength, layoutVersion: assayLayout,
     gridX: assayGridX, gridY: assayGridY,
     verify: !args['assay-no-verify'],
   });
@@ -121,6 +123,7 @@ if (!input || !output || args.help) {
   --stego-key <s>      StegoMark key (required with --stego; prefer ARCHX_STEGO_KEY; MUST differ from the scramble key)
   --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
   --stego-profile <p> standard (default) or robust low-frequency forensic profile
+  --stego-layout <n>  codeword layout 1-4 (default 3; 4 = BCH error correction, needs a v1.20+ detector)
   --stego-grid-x <n>  StegoMark grid columns 4–64 (profile default)
   --stego-grid-y <n>  StegoMark grid rows 4–64 (profile default)
   --max-input-bytes <n> reject masters above this size (default 52428800)
@@ -142,6 +145,10 @@ const generatedAesKey = !!args.encrypt && !process.env.ARCHX_AES_KEY;
 const stegoProfile = args['stego-profile'] || 'standard';
 const stegoGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
 const stegoGridY = args['stego-grid-y'] ? Number(args['stego-grid-y']) : undefined;
+if (args['stego-layout'] && ![1, 2, 3, 4].includes(Number(args['stego-layout']))) {
+  console.error('Archx protect: --stego-layout must be 1, 2, 3 or 4');
+  process.exit(1);
+}
 if (!['standard', 'robust'].includes(stegoProfile) ||
     (stegoGridX !== undefined && (!Number.isInteger(stegoGridX) || stegoGridX < 4 || stegoGridX > 64)) ||
     (stegoGridY !== undefined && (!Number.isInteger(stegoGridY) || stegoGridY < 4 || stegoGridY > 64))) {
@@ -173,6 +180,7 @@ const opts = {
   } : null,
   stegoKey: process.env.ARCHX_STEGO_KEY || args['stego-key'] || null,
   stegoStrength: args['stego-strength'] ? Number(args['stego-strength']) : 6,
+  stegoLayoutVersion: args['stego-layout'] ? Number(args['stego-layout']) : undefined,
   stegoProfile,
   steganography: {
     profile: stegoProfile,

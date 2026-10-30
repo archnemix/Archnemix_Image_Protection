@@ -89,8 +89,8 @@ export interface ArchxStegoOptions {
   strength?: number;
   gridX?: number;
   gridY?: number;
-  /** Embed-layout vintage: 1 = legacy 32-bit, 2 = 128-bit cyrb128, 3 = SHA-256-seeded (default). */
-  layoutVersion?: 1 | 2 | 3;
+  /** Codeword layout: 1 = legacy 32-bit, 2 = 128-bit cyrb128, 3 = SHA-256-seeded (default), 4 = BCH error correction (v1.20+, needs a v1.20+ detector). */
+  layoutVersion?: 1 | 2 | 3 | 4;
   /** Keep the pre-1.12 CRC tag instead of the keyed MAC tag. */
   legacyCode?: boolean;
 }
@@ -312,7 +312,7 @@ export interface ArchxScrambleImageOptions {
   stegoPayload?: string;
   stegoKey?: string;
   steganography?: ArchxStegoOptions & { key?: string };
-  stegoLayoutVersion?: 1 | 2 | 3;
+  stegoLayoutVersion?: 1 | 2 | 3 | 4;
   stegoLegacyCode?: boolean;
   processing?: ArchxProcessingOptions & Record<string, unknown>;
   [key: string]: unknown;

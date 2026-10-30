@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "Archnemix (Archx) \u2014 layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "MIT",
   "author": "Archnemix",
@@ -62,6 +62,7 @@
     "src/core/sniff.js",
     "src/core/container.js",
     "src/core/forensic.js",
+    "src/core/bch.js",
     "src/core/stego-code.js",
     "src/core/pixels.js",
     "src/core/stego-embed.js",

@@ -1056,6 +1056,357 @@ function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}
   return best;
 }
 
+// src/core/bch.js
+var GF_POLY = 285;
+var N = 255;
+var K = 131;
+var T = 18;
+var DATA_BITS = 64;
+var PAD = K - DATA_BITS;
+var BCH_CODE_BITS = N - PAD;
+var BCH_MAX_2E_PLUS_S = 2 * T;
+var EXP = new Uint8Array(512);
+var LOG = new Uint8Array(256);
+{
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    EXP[i] = x;
+    LOG[x] = i;
+    x <<= 1;
+    if (x & 256) x ^= GF_POLY;
+  }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+}
+var gfMul = (a, b) => a && b ? EXP[LOG[a] + LOG[b]] : 0;
+var gfDiv = (a, b) => a ? EXP[LOG[a] - LOG[b] + 255] : 0;
+var gfPow = (a, p) => a ? EXP[LOG[a] * p % 255] : 0;
+var GENERATOR = (() => {
+  let g = [1];
+  for (let j = 1; j <= 2 * T; j++) {
+    const root = EXP[j];
+    const next = new Array(g.length + 1).fill(0);
+    for (let i = 0; i < g.length; i++) {
+      next[i] ^= gfMul(g[i], root);
+      next[i + 1] ^= g[i];
+    }
+    g = next;
+  }
+  const seen = /* @__PURE__ */ new Set();
+  let gen = [1];
+  for (let j = 1; j <= 2 * T; j++) {
+    if (seen.has(j)) continue;
+    const coset = [];
+    let c = j;
+    while (!seen.has(c)) {
+      seen.add(c);
+      coset.push(c);
+      c = c * 2 % 255;
+    }
+    for (const member of coset) {
+      const root = EXP[member];
+      const next = new Array(gen.length + 1).fill(0);
+      for (let i = 0; i < gen.length; i++) {
+        next[i] ^= gfMul(gen[i], root);
+        next[i + 1] ^= gen[i];
+      }
+      gen = next;
+    }
+  }
+  const degree = gen.length - 1;
+  const bits = new Uint8Array(degree + 1);
+  for (let i = 0; i <= degree; i++) {
+    const coef = gen[degree - i];
+    if (coef !== 0 && coef !== 1) throw new Error("Archx BCH: generator is not binary");
+    bits[i] = coef;
+  }
+  if (degree !== N - K) throw new Error(`Archx BCH: generator degree ${degree}, expected ${N - K}`);
+  return bits;
+})();
+function syndromes(codeword) {
+  const out = new Uint8Array(2 * T);
+  for (let j = 1; j <= 2 * T; j++) {
+    let s = 0;
+    for (let i = 0; i < N; i++) {
+      if (!codeword[i]) continue;
+      s ^= EXP[j * (254 - i) % 255];
+    }
+    out[j - 1] = s;
+  }
+  return out;
+}
+function bchEncode64(dataBits) {
+  if (!dataBits || dataBits.length !== DATA_BITS) {
+    throw new Error(`Archx BCH: data must be exactly ${DATA_BITS} bits`);
+  }
+  const work = new Uint8Array(N);
+  work.set(dataBits, PAD);
+  for (let i = 0; i < K; i++) {
+    if (!work[i]) continue;
+    for (let j = 0; j <= N - K; j++) work[i + j] ^= GENERATOR[j];
+  }
+  const out = new Uint8Array(BCH_CODE_BITS);
+  out.set(dataBits, 0);
+  out.set(work.subarray(K), DATA_BITS);
+  return out;
+}
+function berlekampMassey(seq) {
+  let C = [1];
+  let B = [1];
+  let L = 0;
+  let m = 1;
+  let b = 1;
+  for (let n = 0; n < seq.length; n++) {
+    let d = seq[n];
+    for (let i = 1; i <= L; i++) d ^= gfMul(C[i] || 0, seq[n - i]);
+    if (d === 0) {
+      m++;
+      continue;
+    }
+    const prevC = C.slice();
+    const scale = gfDiv(d, b);
+    while (C.length < B.length + m) C.push(0);
+    for (let i = 0; i < B.length; i++) C[i + m] ^= gfMul(scale, B[i]);
+    if (2 * L <= n) {
+      L = n + 1 - L;
+      B = prevC;
+      b = d;
+      m = 1;
+    } else {
+      m++;
+    }
+  }
+  C.length = L + 1;
+  return C;
+}
+function evalPolyAscending(coefs, x) {
+  let acc = 0;
+  for (let i = coefs.length - 1; i >= 0; i--) acc = gfMul(acc, x) ^ (coefs[i] || 0);
+  return acc;
+}
+function bchDecode188(received, erasures = []) {
+  if (!received || received.length !== BCH_CODE_BITS) return null;
+  const erasureList = [...new Set(erasures)].filter((i) => i >= 0 && i < BCH_CODE_BITS);
+  if (erasureList.length > 2 * T) return null;
+  const full = new Uint8Array(N);
+  full.set(received, PAD);
+  const syn = syndromes(full);
+  const s = erasureList.length;
+  if (syn.every((v) => v === 0)) {
+    return { data: Uint8Array.from(full.subarray(PAD, PAD + DATA_BITS)), errors: 0, erasures: s };
+  }
+  let gamma = [1];
+  for (const ti of erasureList) {
+    const X = EXP[(254 - (ti + PAD)) % 255];
+    const next = new Array(gamma.length + 1).fill(0);
+    for (let i = 0; i < gamma.length; i++) {
+      next[i] ^= gamma[i];
+      next[i + 1] ^= gfMul(gamma[i], X);
+    }
+    gamma = next;
+  }
+  const fsyn = [];
+  for (let i = s; i < 2 * T; i++) {
+    let acc = 0;
+    for (let j = 0; j <= Math.min(i, gamma.length - 1); j++) {
+      acc ^= gfMul(gamma[j], syn[i - j]);
+    }
+    fsyn.push(acc);
+  }
+  const errLoc = berlekampMassey(fsyn);
+  const errDeg = errLoc.length - 1;
+  if (2 * errDeg + s > 2 * T) return null;
+  const lambda = new Array(errLoc.length + gamma.length - 1).fill(0);
+  for (let i = 0; i < errLoc.length; i++) {
+    for (let j = 0; j < gamma.length; j++) lambda[i + j] ^= gfMul(errLoc[i], gamma[j]);
+  }
+  const lambdaDeg = lambda.length - 1;
+  const positions = [];
+  for (let i = 0; i < N; i++) {
+    if (evalPolyAscending(lambda, EXP[(i + 1) % 255]) === 0) positions.push(i);
+  }
+  if (positions.length !== lambdaDeg) return null;
+  const deg = lambdaDeg;
+  const locators = positions.map((pos) => EXP[(254 - pos) % 255]);
+  const rows = [];
+  for (let j = 0; j < deg; j++) {
+    const row = new Array(deg + 1);
+    for (let l = 0; l < deg; l++) row[l] = gfPow(locators[l], j + 1);
+    row[deg] = syn[j];
+    rows.push(row);
+  }
+  for (let col = 0, row = 0; col < deg && row < deg; col++) {
+    let pivot = -1;
+    for (let r = row; r < deg; r++) if (rows[r][col] !== 0) {
+      pivot = r;
+      break;
+    }
+    if (pivot < 0) return null;
+    [rows[row], rows[pivot]] = [rows[pivot], rows[row]];
+    const inv = gfDiv(1, rows[row][col]);
+    for (let c = col; c <= deg; c++) rows[row][c] = gfMul(rows[row][c], inv);
+    for (let r = 0; r < deg; r++) {
+      if (r === row || rows[r][col] === 0) continue;
+      const factor = rows[r][col];
+      for (let c = col; c <= deg; c++) rows[r][c] ^= gfMul(factor, rows[row][c]);
+    }
+    row++;
+  }
+  const erasureSet = new Set(erasureList.map((ti) => ti + PAD));
+  let errors = 0;
+  for (let l = 0; l < deg; l++) {
+    const Y = rows[l][deg];
+    if (Y !== 0 && Y !== 1) return null;
+    const pos = positions[l];
+    if (!erasureSet.has(pos)) {
+      if (Y !== 1) return null;
+      errors++;
+    }
+    if (Y === 1) full[pos] ^= 1;
+  }
+  if (2 * errors + s > 2 * T) return null;
+  if (!syndromes(full).every((v) => v === 0)) return null;
+  for (let i = 0; i < PAD; i++) if (full[i]) return null;
+  return { data: Uint8Array.from(full.subarray(PAD, PAD + DATA_BITS)), errors, erasures: s };
+}
+function highestBit(mask) {
+  const hi = Number(mask >> 32n);
+  return hi ? 63 - Math.clz32(hi) : 31 - Math.clz32(Number(mask & 0xffffffffn));
+}
+var GEN_ROWS = (() => {
+  const rows = new Array(BCH_CODE_BITS).fill(0n);
+  for (let i = 0; i < DATA_BITS; i++) {
+    const unit = new Uint8Array(DATA_BITS);
+    unit[i] = 1;
+    const code = bchEncode64(unit);
+    for (let j = 0; j < BCH_CODE_BITS; j++) if (code[j]) rows[j] |= 1n << BigInt(i);
+  }
+  return rows;
+})();
+function bchSolveObserved(received, observedOrder) {
+  if (!received || received.length !== BCH_CODE_BITS) return null;
+  const basis = new Array(DATA_BITS).fill(null);
+  let rank = 0;
+  const used = [];
+  for (const j of observedOrder) {
+    if (rank === DATA_BITS) break;
+    if (j < 0 || j >= BCH_CODE_BITS) continue;
+    let mask = GEN_ROWS[j];
+    let value = received[j] ? 1 : 0;
+    while (mask !== 0n) {
+      const pivot = highestBit(mask);
+      if (!basis[pivot]) {
+        basis[pivot] = { mask, value };
+        rank++;
+        used.push(j);
+        mask = 0n;
+        break;
+      }
+      mask ^= basis[pivot].mask;
+      value ^= basis[pivot].value;
+    }
+  }
+  if (rank < DATA_BITS) return null;
+  const data = new Uint8Array(DATA_BITS);
+  for (let col = 0; col < DATA_BITS; col++) {
+    const row = basis[col];
+    if (!row) return null;
+    let v = row.value;
+    let mask = row.mask & ~(1n << BigInt(col));
+    while (mask !== 0n) {
+      const bit = highestBit(mask);
+      v ^= data[bit] & 1;
+      mask &= ~(1n << BigInt(bit));
+    }
+    data[col] = v;
+  }
+  const code = bchEncode64(data);
+  let mismatches = 0;
+  for (const j of observedOrder) {
+    if (j >= 0 && j < BCH_CODE_BITS && (code[j] ? 1 : 0) !== (received[j] ? 1 : 0)) mismatches++;
+  }
+  return { data, mismatches, basis: used };
+}
+function bchIsdSolve(received, observedOrder, { maxMismatches = Infinity, verify = null, trials = 400, seedSalt = 0 } = {}) {
+  if (!received || received.length !== BCH_CODE_BITS) return null;
+  if (!observedOrder || observedOrder.length < DATA_BITS + 8) return null;
+  let seed = 2166136261 ^ Math.imul(seedSalt + 1, 2654435769);
+  for (let i = 0; i < observedOrder.length; i++) {
+    seed ^= (observedOrder[i] + 1) * 257 + (received[observedOrder[i]] ? 1 : 0);
+    seed = Math.imul(seed, 16777619);
+  }
+  const rnd = () => {
+    seed |= 0;
+    seed = seed + 1831565813 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  const score = (sol) => {
+    if (!sol) return null;
+    const code = bchEncode64(sol.data);
+    let mismatches = 0;
+    for (const j of observedOrder) {
+      if (j >= 0 && j < BCH_CODE_BITS && (code[j] ? 1 : 0) !== (received[j] ? 1 : 0)) mismatches++;
+    }
+    if (mismatches > maxMismatches) return null;
+    if (verify && !verify(sol.data)) return null;
+    return { data: sol.data, mismatches };
+  };
+  const keepTop = Math.min(24, Math.max(0, observedOrder.length - DATA_BITS));
+  const shuffleTo = Math.min(observedOrder.length, 110);
+  for (let t = 0; t < trials; t++) {
+    const order = [...observedOrder];
+    const lo = t % 10 === 9 ? 0 : keepTop;
+    for (let i = shuffleTo - 1; i > lo; i--) {
+      const j = lo + Math.floor(rnd() * (i - lo + 1));
+      const tmp = order[i];
+      order[i] = order[j];
+      order[j] = tmp;
+    }
+    const hit = score(bchSolveObserved(received, order));
+    if (hit) return { ...hit, isdTrials: t + 1 };
+  }
+  return null;
+}
+function bchOsdSolve(received, observedOrder, { maxMismatches = Infinity, verify = null } = {}) {
+  if (!received || received.length !== BCH_CODE_BITS) return null;
+  const score = (sol) => {
+    if (!sol) return null;
+    const code = bchEncode64(sol.data);
+    let mismatches = 0;
+    for (const j of observedOrder) {
+      if (j >= 0 && j < BCH_CODE_BITS && (code[j] ? 1 : 0) !== (received[j] ? 1 : 0)) mismatches++;
+    }
+    if (mismatches > maxMismatches) return null;
+    if (verify && !verify(sol.data)) return null;
+    return { data: sol.data, mismatches };
+  };
+  const s0 = bchSolveObserved(received, observedOrder);
+  const direct = score(s0);
+  if (direct) return { ...direct, osdFlips: 0 };
+  if (!s0 || !s0.basis || s0.basis.length < DATA_BITS) return null;
+  const weakest = s0.basis.slice(-24);
+  const rx = Uint8Array.from(received);
+  const trial = (positions) => {
+    for (const p of positions) rx[p] ^= 1;
+    const out = score(bchSolveObserved(rx, observedOrder));
+    for (const p of positions) rx[p] ^= 1;
+    return out;
+  };
+  for (const p of weakest) {
+    const hit = trial([p]);
+    if (hit) return { ...hit, osdFlips: 1 };
+  }
+  const pairZone = weakest.slice(-10);
+  for (let i = 0; i < pairZone.length; i++) {
+    for (let j = i + 1; j < pairZone.length; j++) {
+      const hit = trial([pairZone[i], pairZone[j]]);
+      if (hit) return { ...hit, osdFlips: 2 };
+    }
+  }
+  return null;
+}
+
 // src/core/stego-code.js
 function stegoFingerprint(value) {
   const s = String(value ?? "");
@@ -1256,6 +1607,102 @@ function robustStegoLayout(cellCount, key, version = 2) {
   }
   return { order, polarity, segmentPolarity };
 }
+var STEGO_V4_CODE_BITS = BCH_CODE_BITS;
+var _v4PermCache = /* @__PURE__ */ new Map();
+function stegoV4InterleaveOrder(key) {
+  const cacheKey = String(key ?? "");
+  let perm = _v4PermCache.get(cacheKey);
+  if (perm) return perm;
+  const rand = sha256SeededPrng("archx-stego-v4-interleave:" + cacheKey);
+  perm = Array.from({ length: BCH_CODE_BITS }, (_, i) => i);
+  for (let i = perm.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [perm[i], perm[j]] = [perm[j], perm[i]];
+  }
+  if (_v4PermCache.size >= 64) _v4PermCache.clear();
+  _v4PermCache.set(cacheKey, perm);
+  return perm;
+}
+function bchStegoCodeBits(fingerprint, key) {
+  const payload = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
+  const mac = stegoMac16(key, payload);
+  const data = stegoBytesToBits(new Uint8Array([...payload, mac >> 8 & 255, mac & 255]));
+  const code = bchEncode64(data);
+  const perm = stegoV4InterleaveOrder(key);
+  const wire = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) wire[i] = code[perm[i]];
+  return wire;
+}
+function bchStegoDecode(wireBits, erasures, key) {
+  if (!wireBits || wireBits.length !== BCH_CODE_BITS) return null;
+  const perm = stegoV4InterleaveOrder(key);
+  const plain = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) plain[perm[i]] = wireBits[i] ? 1 : 0;
+  const plainErasures = (erasures || []).map((i) => perm[i]).filter((i) => i !== void 0);
+  const decoded = bchDecode188(plain, plainErasures);
+  if (!decoded) return null;
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | decoded.data[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (stegoMac16(key, bytes.subarray(0, 6)) !== (bytes[6] << 8 | bytes[7])) return null;
+  const code = bchEncode64(decoded.data);
+  const bits = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) bits[i] = code[perm[i]];
+  let fingerprint = "";
+  for (let i = 0; i < 6; i++) fingerprint += bytes[i].toString(16).padStart(2, "0");
+  return { fingerprint, bits, errors: decoded.errors, erasures: decoded.erasures };
+}
+function bchStegoSolveObserved(wireBits, observedOrderWire, key, { maxMismatches = Infinity, osd = true, isdTrials = 0, seedSalt = 0 } = {}) {
+  if (!wireBits || wireBits.length !== BCH_CODE_BITS) return null;
+  if (!observedOrderWire || observedOrderWire.length < 65) return null;
+  const capLimit = Math.max(3, Math.floor((observedOrderWire.length - 64) * 0.34));
+  if (maxMismatches > capLimit) maxMismatches = capLimit;
+  const perm = stegoV4InterleaveOrder(key);
+  const plain = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) plain[perm[i]] = wireBits[i] ? 1 : 0;
+  const plainOrder = observedOrderWire.map((i) => perm[i]).filter((i) => i !== void 0);
+  const macOk = (dataBits) => {
+    let mac = 0;
+    const fpBytes = new Uint8Array(6);
+    for (let i = 0; i < 6; i++) {
+      let byte = 0;
+      for (let b = 0; b < 8; b++) byte = byte << 1 | dataBits[i * 8 + b];
+      fpBytes[i] = byte;
+    }
+    for (let b = 0; b < 16; b++) mac = mac << 1 | dataBits[48 + b];
+    return stegoMac16(key, fpBytes) === mac;
+  };
+  let solved = osd ? bchOsdSolve(plain, plainOrder, { maxMismatches, verify: macOk }) : (() => {
+    const d = bchSolveObserved(plain, plainOrder);
+    return d && macOk(d.data) ? d : null;
+  })();
+  if (!solved && isdTrials > 0) {
+    solved = bchIsdSolve(plain, plainOrder, { maxMismatches, verify: macOk, trials: isdTrials, seedSalt });
+  }
+  if (!solved) return null;
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | solved.data[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (stegoMac16(key, bytes.subarray(0, 6)) !== (bytes[6] << 8 | bytes[7])) return null;
+  const code = bchEncode64(solved.data);
+  const bits = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) bits[i] = code[perm[i]];
+  let fingerprint = "";
+  for (let i = 0; i < 6; i++) fingerprint += bytes[i].toString(16).padStart(2, "0");
+  return {
+    fingerprint,
+    bits,
+    mismatches: solved.mismatches,
+    erasures: BCH_CODE_BITS - plainOrder.length
+  };
+}
 
 // src/core/stego-embed.js
 function embedStegoFingerprint(rgba, w, h, payload, {
@@ -1268,8 +1715,10 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   // Codeword v2 (keyed MAC acceptance tag) is the default; legacyCode
   // reproduces pre-v1.12 CRC-tagged codewords for compatibility testing.
   legacyCode = false,
-  // Layout seed space: 2 = 128-bit (default since 1.13); 1 reproduces
-  // the pre-1.13 32-bit-truncated layout for compatibility testing.
+  // Layout space: 3 = SHA-256-seeded repetition code (default),
+  // 2 = 128-bit cyrb128, 1 = pre-1.13 32-bit-truncated (both kept
+  // for compatibility testing), 4 = v1.20 BCH(188,64) code over the
+  // v3 cell layout (corrects 2e+s <= 36; needs a v1.20+ detector).
   layoutVersion = 3
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
@@ -1281,11 +1730,14 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
+  const v4 = layoutVersion === 4;
+  if (v4 && legacyCode) throw new Error("Archx stego: layoutVersion 4 always uses the keyed MAC payload (legacyCode is v1-v3 only)");
   const tag = legacyCode ? "crc" : "mac";
-  const bits = robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
+  const bits = v4 ? bchStegoCodeBits(fingerprint, key) : robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3) : stegoLayout(cellCount, key, layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3);
+  const seedVersion = v4 || layoutVersion === 3 ? 3 : layoutVersion === 2 ? 2 : 1;
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, seedVersion) : stegoLayout(cellCount, key, seedVersion);
   const out = inPlace ? src : new Uint8Array(src);
   const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
   const amp = robust ? Math.min(16, baseAmp * 1.35) : baseAmp;
@@ -1311,7 +1763,7 @@ function embedStegoFingerprint(rgba, w, h, payload, {
       }
       const mean = n ? sum / n : 0;
       const std = n ? Math.sqrt(Math.max(0, sum2 / n - mean * mean)) : 0;
-      const cellAmp = Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
+      const cellAmp = v4 ? Math.min(16, amp * Math.max(0.4, Math.min(1.2, 0.4 + std / 40))) : Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
       const cellW = x1 - x0;
       const cellH = y1 - y0;
       for (let y = y0; y < y1; y++) {
@@ -1606,9 +2058,12 @@ function detectStegoFingerprint(rgba, w, h, {
   // candidate so far is returned with `timedOut: true` instead of
   // running unbounded forensic stages. 0 (default) = unlimited.
   maxTimeMs = 0,
-  // Layout seed space: 'auto' (default) tries the 128-bit v2 layouts,
-  // then the pre-1.13 32-bit layouts; pass 1 or 2 to pin one space
-  // (halves worst-case cost on unmarked suspects).
+  // Layout space: 'auto' (default) screens v3 (SHA-256-seeded),
+  // v4 (v1.20 BCH code over the v3 layout), then v2/v1 legacy
+  // seeds — native screens for all layouts first, then geometry
+  // searches with the deadline sliced fairly across layouts;
+  // pass 1-4 to pin one space (full budget to that one search,
+  // roughly proportionally lower worst-case cost).
   layoutVersion = "auto",
   _mirrorProbe = false,
   _tiltProbe = false,
@@ -1618,7 +2073,7 @@ function detectStegoFingerprint(rgba, w, h, {
 } = {}) {
   const deadline = _deadline > 0 ? _deadline : Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0;
   const deadlineHit = () => deadline > 0 && Date.now() > deadline;
-  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 ? _layoutVersion : layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 ? layoutVersion : 0;
+  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 || _layoutVersion === 4 ? _layoutVersion : layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 || layoutVersion === 4 ? layoutVersion : 0;
   const planesCache = _planes || /* @__PURE__ */ new Map();
   const srcTop = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   const planesEntry = (buf) => {
@@ -1630,16 +2085,47 @@ function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchGeometry, searchMirror, searchRotation, searchTilt, _mirrorProbe, _tiltProbe, _planes: planesCache, _deadline: deadline };
+    const order2 = [3, 4, 2, 1];
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, _mirrorProbe, _tiltProbe, _planes: planesCache };
     let best2 = null;
-    for (const version of [3, 2, 1]) {
-      const attempt = detectStegoFingerprint(srcTop, w, h, { ...shared, _layoutVersion: version });
+    const consider2 = (attempt) => {
+      if (attempt && (!best2 || (attempt.confidence ?? 0) > (best2.confidence ?? 0))) best2 = attempt;
+    };
+    for (const version of order2) {
+      const attempt = detectStegoFingerprint(srcTop, w, h, {
+        ...shared,
+        searchGeometry: false,
+        searchTilt: false,
+        _layoutVersion: version,
+        _deadline: deadline
+      });
       if (attempt?.found) return attempt;
-      if (!best2 || (attempt?.confidence ?? 0) > (best2.confidence ?? 0)) best2 = attempt;
+      consider2(attempt);
       if (attempt?.timedOut || deadlineHit()) {
         if (best2 && !best2.timedOut) best2 = { ...best2, timedOut: true };
-        break;
+        return best2;
       }
+    }
+    if (searchGeometry || searchTilt) {
+      for (let i = 0; i < order2.length; i++) {
+        let slice = deadline;
+        if (deadline > 0) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) break;
+          slice = Math.min(deadline, Date.now() + Math.max(1500, Math.ceil(remainingMs / (order2.length - i))));
+        }
+        const attempt = detectStegoFingerprint(srcTop, w, h, {
+          ...shared,
+          searchGeometry,
+          searchTilt,
+          _layoutVersion: order2[i],
+          _deadline: slice
+        });
+        if (attempt?.found) return attempt;
+        consider2(attempt);
+        if (deadlineHit()) break;
+      }
+      if (best2 && deadlineHit() && !best2.timedOut) best2 = { ...best2, timedOut: true };
     }
     return best2;
   }
@@ -1857,14 +2343,15 @@ function detectStegoFingerprint(rgba, w, h, {
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
   const robust = profile === "robust";
   const effectiveProfile = robust ? "robust" : "standard";
-  const codeLength = robust ? 96 : 64;
+  const isV4 = concreteLayout === 4;
+  const codeLength = isV4 ? STEGO_V4_CODE_BITS : robust ? 96 : 64;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const effectiveGridX = gridX ?? (robust ? 20 : 24);
   const effectiveGridY = gridY ?? (robust ? 14 : 16);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, concreteLayout) : stegoLayout(cellCount, key, concreteLayout);
+  const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, isV4 ? 3 : concreteLayout) : stegoLayout(cellCount, key, isV4 ? 3 : concreteLayout);
   const cw = w / gx, ch = h / gy;
   const planes = planesEntry(src);
   if (!planes.luma) {
@@ -1888,6 +2375,47 @@ function detectStegoFingerprint(rgba, w, h, {
   const _disagreeByBit = new Uint16Array(codeLength);
   const _segmentResponses = [];
   let _evalTick = 0;
+  let osdEscalations = 0;
+  let isdEscalations = 0;
+  const forensicStash = [];
+  const deepForensicTry = (s, trials, salt) => {
+    const cap = Math.max(4, Math.floor((s.order.length - 64) * 0.3));
+    const hit = bchStegoSolveObserved(s.votes, s.order, key, {
+      maxMismatches: cap,
+      osd: true,
+      isdTrials: trials,
+      seedSalt: salt
+    });
+    if (!hit) return null;
+    let agreeing = 0;
+    for (let ci = 0; ci < s.cellLen; ci++) {
+      if (s.cellScore[ci] >= 0 === !!hit.bits[s.cellBitIdx[ci]]) agreeing++;
+    }
+    const agreement = s.cellLen ? agreeing / s.cellLen : 0;
+    const mismRate = hit.mismatches / Math.max(1, s.order.length - 64);
+    const tierOk = mismRate <= 0.1 || mismRate <= 0.2 && s.meanAbs >= 2 && agreement >= 0.82 || s.meanAbs >= 2.5 && agreement >= 0.82;
+    if (!(agreement >= 0.72 && s.meanAbs >= 1.2 && tierOk)) return null;
+    const bchBudget = Math.round(120 * mismRate);
+    const evidence2 = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, s.meanAbs - 1.4) / 8) - bchBudget / 6 * 0.04;
+    const deep = {
+      ...s.result,
+      found: true,
+      fingerprint: hit.fingerprint,
+      tagScheme: "mac",
+      erasureDecoded: true,
+      crcValid: true,
+      corrections: hit.mismatches,
+      agreement: Math.round(agreement * 1e3) / 1e3,
+      confidence: Math.round(Math.max(0, Math.min(0.99, 0.42 + evidence2)) * 1e3) / 1e3
+    };
+    delete deep._evidence;
+    delete deep._originX;
+    delete deep._originY;
+    delete deep._scaleX;
+    delete deep._scaleY;
+    return deep;
+  };
+  const STASH_DEEP_MIN_EVIDENCE = 0.6;
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
     if (deadline && (++_evalTick & 15) === 0 && Date.now() > deadline) throw STEGO_TIMEOUT;
     const cellW0 = cw * scaleX;
@@ -1998,7 +2526,7 @@ function detectStegoFingerprint(rgba, w, h, {
     const standardDepth = meanAbsPre >= 2 && preAgreement >= 0.82 ? 3 : 1;
     const minBitCountPre = Math.min(...bitCounts);
     const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const coverageOkPre = robust ? observedBitsPre >= 88 && cellLen >= 128 : minBitCountPre >= 2 && cellLen >= codeLength * 3;
+    const coverageOkPre = isV4 ? observedBitsPre >= 88 && cellLen >= 96 : robust ? observedBitsPre >= 88 && cellLen >= 128 : minBitCountPre >= 2 && cellLen >= codeLength * 3;
     let agreementBound = preAgreement;
     if (cellLen) {
       const disagreeByBit = _disagreeByBit.fill(0);
@@ -2011,7 +2539,7 @@ function detectStegoFingerprint(rgba, w, h, {
       for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
       agreementBound = (preAgreeing + gainSum) / cellLen;
     }
-    const repairable = meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
+    const repairable = isV4 ? meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre : meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
     const erasureDecode = () => {
       const erasedPayload = [];
       let erasedTotal = 0;
@@ -2102,14 +2630,69 @@ function detectStegoFingerprint(rgba, w, h, {
       if (fixed.corrections < 0 || fixed.tagScheme !== "mac") return null;
       return { ...fixed, erasureDecoded: true, erasedBits: erased };
     };
-    let corrected = erasure ? robust ? erasureDecode() : standardErasureAssist() : null;
-    if (!corrected) corrected = !repairable ? { bits: votedBits, corrections: -1, tagScheme: null } : robust ? (() => {
+    const bchAttempt = () => {
+      if (!repairable) return null;
+      const zeroVote = [];
+      const byReliability = [];
+      for (let i = 0; i < codeLength; i++) {
+        if (bitCounts[i] === 0) zeroVote.push(i);
+        else byReliability.push(i);
+      }
+      byReliability.sort((a, b) => reliability[a] - reliability[b]);
+      if (zeroVote.length <= 36) {
+        const erasureSets = [zeroVote];
+        if (zeroVote.length <= 28) erasureSets.push([...zeroVote, ...byReliability.slice(0, 8)]);
+        if (zeroVote.length <= 20) erasureSets.push([...zeroVote, ...byReliability.slice(0, 16)]);
+        for (const set of erasureSets) {
+          const hit = bchStegoDecode(votedBits, set, key);
+          if (hit) {
+            return {
+              bits: hit.bits,
+              corrections: hit.errors,
+              tagScheme: "mac",
+              erasureDecoded: hit.erasures > 0,
+              _bchBudget: 2 * hit.errors + hit.erasures,
+              _fingerprint: hit.fingerprint
+            };
+          }
+        }
+      }
+      const observedOrder = [...byReliability].reverse();
+      if (observedOrder.length >= 72 && (zeroVote.length >= 4 || preAgreement >= 0.8)) {
+        const mismCap = Math.max(4, Math.floor((observedOrder.length - 64) * 0.3));
+        const allowOsd = preAgreement >= 0.85 && osdEscalations < 48;
+        if (allowOsd) osdEscalations++;
+        const allowIsd = preAgreement >= 0.95 && meanAbsPre >= 2 && observedOrder.length >= 100 && isdEscalations < 8;
+        if (allowIsd) isdEscalations++;
+        const ml = bchStegoSolveObserved(votedBits, observedOrder, key, {
+          maxMismatches: mismCap,
+          osd: allowOsd,
+          isdTrials: allowIsd ? 600 : 0,
+          seedSalt: isdEscalations
+        });
+        if (ml && ml.mismatches <= mismCap) {
+          const mismRate = ml.mismatches / Math.max(1, observedOrder.length - 64);
+          return {
+            bits: ml.bits,
+            corrections: ml.mismatches,
+            tagScheme: "mac",
+            erasureDecoded: true,
+            _mismRate: mismRate,
+            _bchBudget: Math.round(120 * mismRate),
+            _fingerprint: ml.fingerprint
+          };
+        }
+      }
+      return null;
+    };
+    let corrected = isV4 ? bchAttempt() : erasure ? robust ? erasureDecode() : standardErasureAssist() : null;
+    if (!corrected) corrected = isV4 ? { bits: votedBits, corrections: -1, tagScheme: null } : !repairable ? { bits: votedBits, corrections: -1, tagScheme: null } : robust ? (() => {
       const macDepth = meanAbsPre >= 3.5 ? 5 : 3;
       const repaired = repairRobustStegoBits(reliability, votedBits, key, macDepth, "mac") || repairRobustStegoBits(reliability, votedBits, key, 3, "crc");
       return repaired ? { bits: repaired.bits, corrections: repaired.flips, tagScheme: repaired.tagScheme } : { bits: votedBits, corrections: -1, tagScheme: null };
     })() : correctStegoBits(votedBits, reliability, key, standardDepth);
     const bits = corrected.bits;
-    const fingerprint = robust ? robustStegoFingerprintFromBits(bits) : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const fingerprint = isV4 ? corrected._fingerprint || "" : robust ? robustStegoFingerprintFromBits(bits) : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
     const crcValid = corrected.corrections >= 0;
     let agreeing = 0;
     for (let ci = 0; ci < cellLen; ci++) {
@@ -2117,21 +2700,23 @@ function detectStegoFingerprint(rgba, w, h, {
     }
     const agreement = cellLen ? agreeing / cellLen : 0;
     const meanAbs = meanAbsPre;
-    const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - Math.max(0, corrected.corrections) * 0.04;
+    const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - (isV4 ? (corrected._bchBudget || 0) / 6 : Math.max(0, corrected.corrections)) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const bitCoverageOk = robust ? observedBits >= 88 && cellLen >= 128 || // Erasure decodes trade coverage for cryptographic certainty:
+    const bitCoverageOk = isV4 ? observedBits >= 150 && cellLen >= 128 || corrected.erasureDecoded === true && observedBits >= 96 && cellLen >= 110 : robust ? observedBits >= 88 && cellLen >= 128 || // Erasure decodes trade coverage for cryptographic certainty:
     // the payload + recomputed CRC/MAC/marker must agree with every
     // observed check bit (<=3 disagreements), which noise cannot
     // manufacture — but a floor of 76 observed bits stays.
     corrected.erasureDecoded === true && observedBits >= 64 : minBitCount >= 2 && cellLen >= codeLength * 3 || corrected.erasureDecoded === true && observedBits >= 60 && cellLen >= codeLength * 3;
     const correctionCount = Math.max(0, corrected.corrections);
     const legacyScheme = corrected.tagScheme === "crc";
-    const robustCorrectionOk = !robust || correctionCount <= 3 || !legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.85;
-    const standardCorrectionOk = robust || (legacyScheme ? correctionCount <= 1 && agreement >= 0.95 : correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85);
-    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
-    return {
+    const robustCorrectionOk = isV4 || !robust || correctionCount <= 3 || !legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.85;
+    const standardCorrectionOk = isV4 || robust || (legacyScheme ? correctionCount <= 1 && agreement >= 0.95 : correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85);
+    const bchBudget = corrected._bchBudget || 0;
+    const v4CorrectionOk = !isV4 || (corrected._mismRate != null ? corrected._mismRate <= 0.1 || corrected._mismRate <= 0.2 && meanAbs >= 2 && agreement >= 0.82 || meanAbs >= 2.5 && agreement >= 0.82 : bchBudget <= 12 || bchBudget <= 24 && meanAbs >= 2.5 && agreement >= 0.82 || meanAbs >= 3.5 && agreement >= 0.88);
+    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk;
+    const _result = {
       found,
       fingerprint,
       profile: effectiveProfile,
@@ -2167,6 +2752,31 @@ function detectStegoFingerprint(rgba, w, h, {
       _scaleX: scaleX,
       _scaleY: scaleY
     };
+    if (isV4 && !found && observedBits >= 96 && cellLen >= 110 && meanAbs >= 1.2 && (forensicStash.length < 3 || evidence > forensicStash[forensicStash.length - 1].evidence)) {
+      const geoKey = `${_result.geometry.scaleX}|${_result.geometry.scaleY}|${Math.round(_result.geometry.originX / 4)}|${Math.round(_result.geometry.originY / 4)}`;
+      const dup = forensicStash.findIndex((e) => e.geoKey === geoKey);
+      if (dup < 0 || evidence > forensicStash[dup].evidence) {
+        const ord = [];
+        for (let i = 0; i < codeLength; i++) if (bitCounts[i] > 0) ord.push(i);
+        ord.sort((a, b) => reliability[b] - reliability[a]);
+        const entry = {
+          result: _result,
+          evidence,
+          meanAbs,
+          cellLen,
+          geoKey,
+          votes: Uint8Array.from(votedBits),
+          order: ord,
+          cellScore: _cellScore.slice(0, cellLen),
+          cellBitIdx: _cellBitIdx.slice(0, cellLen)
+        };
+        if (dup >= 0) forensicStash[dup] = entry;
+        else forensicStash.push(entry);
+        forensicStash.sort((a, b) => b.evidence - a.evidence);
+        if (forensicStash.length > 3) forensicStash.length = 3;
+      }
+    }
+    return _result;
   };
   let best = null;
   const consider = (candidate) => {
@@ -2178,6 +2788,75 @@ function detectStegoFingerprint(rgba, w, h, {
     for (const fx of fractions) for (const fy of fractions) {
       consider(evaluate({ fx, fy }));
       if (best.found && best.confidence >= 0.92 && fx === 0 && fy === 0) break;
+    }
+    if (searchGeometry && !best?.found && (searchMirror || searchRotation) && !_mirrorProbe) {
+      try {
+        if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+          const entry = planesEntry(srcTop);
+          for (const [axis, fx, fy] of searchMirror ? MIRROR_AXES : []) {
+            const variant = mirroredVariant(entry, srcTop, w, h, axis, fx, fy);
+            const mirrored = detectStegoFingerprint(variant, w, h, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry: false,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (mirrored?.found) return { ...mirrored, mirrored: true, mirrorAxis: axis };
+          }
+          for (const clockwise of searchRotation ? [false, true] : []) {
+            const variant = rotatedVariant(entry, srcTop, w, h, clockwise);
+            const rotated = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry: false,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (rotated?.found) return { ...rotated, rotated: clockwise ? 270 : 90 };
+          }
+          for (const anti of searchRotation ? [false, true] : []) {
+            const variant = transposedVariant(entry, srcTop, w, h, anti);
+            const transposed = detectStegoFingerprint(variant, h, w, {
+              key,
+              gridX,
+              gridY,
+              profile,
+              searchOffsets,
+              searchGeometry: false,
+              searchMirror: false,
+              searchRotation: false,
+              searchTilt: false,
+              _mirrorProbe: true,
+              _tiltProbe: true,
+              _layoutVersion: concreteLayout,
+              _planes: planesCache,
+              _deadline: deadline
+            });
+            if (transposed?.found) return { ...transposed, transposed: anti ? "anti" : "main" };
+          }
+        }
+      } catch (probeErr) {
+        if (probeErr === STEGO_TIMEOUT) throw probeErr;
+      }
     }
     if (searchGeometry && !best?.found) {
       const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.2, 1.25];
@@ -2616,6 +3295,13 @@ function detectStegoFingerprint(rgba, w, h, {
         timedOut: true
       };
     }
+    if (isV4 && !best?.found && forensicStash.length && !_mirrorProbe && !_tiltProbe && forensicStash[0].evidence >= STASH_DEEP_MIN_EVIDENCE) {
+      try {
+        const deep = deepForensicTry(forensicStash[0], 2500, 97);
+        if (deep) return deep;
+      } catch {
+      }
+    }
     delete best._evidence;
     delete best._originX;
     delete best._originY;
@@ -2623,6 +3309,18 @@ function detectStegoFingerprint(rgba, w, h, {
     delete best._scaleY;
     best.timedOut = true;
     return best;
+  }
+  if (!best?.found && isV4 && !_mirrorProbe && !_tiltProbe) {
+    for (let si = 0; si < forensicStash.length; si++) {
+      if (deadlineHit()) break;
+      const s = forensicStash[si];
+      if (s.evidence < STASH_DEEP_MIN_EVIDENCE) continue;
+      try {
+        const deep = deepForensicTry(s, 4e3, 77 + si);
+        if (deep) return deep;
+      } catch {
+      }
+    }
   }
   return best;
 }
@@ -2643,6 +3341,7 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     throw new Error("Archx stego assay: candidates must be an array of 1..4096 entries");
   }
   const robust = profile === "robust";
+  const v4 = layoutVersion === 4;
   const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
@@ -2715,7 +3414,7 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     const candKey = candidate?.key ?? key;
     if (!readingsByKey.has(candKey)) readingsByKey.set(candKey, readCells(candKey));
     const fingerprint = stegoFingerprint(candidate?.payload ?? "");
-    const bits = robust ? robustStegoCodeBits(fingerprint, candKey, "mac") : stegoCodeBits(fingerprint, candKey, "mac");
+    const bits = v4 ? bchStegoCodeBits(fingerprint, candKey) : robust ? robustStegoCodeBits(fingerprint, candKey, "mac") : stegoCodeBits(fingerprint, candKey, "mac");
     return { candidate, candKey, fingerprint, bits };
   });
   const constantBitsByKey = /* @__PURE__ */ new Map();
@@ -2783,7 +3482,8 @@ function assayStegoEmbed(rgba, w, h, {
   strength = 6,
   gridX,
   gridY,
-  verify = false
+  verify = false,
+  layoutVersion = 3
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   const robust = profile === "robust";
@@ -2811,7 +3511,7 @@ function assayStegoEmbed(rgba, w, h, {
         for (let x = x0; x < x1; x += 2 * step) {
           const v = luma[y * w + x];
           sq += (v - mean) * (v - mean);
-          if (v < 32 || v > 224) extreme++;
+          if (v < 64 || v > 191) extreme++;
           sampled++;
         }
       }
@@ -2828,7 +3528,8 @@ function assayStegoEmbed(rgba, w, h, {
       profile,
       strength: atStrength,
       gridX,
-      gridY
+      gridY,
+      layoutVersion
     });
     let mse = 0, maxDelta = 0;
     for (let i = 0; i < src.length; i += 4) {
@@ -2846,6 +3547,7 @@ function assayStegoEmbed(rgba, w, h, {
   const result = {
     profile,
     strength,
+    layoutVersion,
     grid: { x: gx, y: gy },
     psnr: base.psnr,
     maxChannelDelta: base.maxDelta,
@@ -2856,6 +3558,10 @@ function assayStegoEmbed(rgba, w, h, {
     recommendedStrength: strength,
     warnings: []
   };
+  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
+  if (gx * gy < codeBits) {
+    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size \u2014 use a larger delivery size`);
+  }
   if (result.contentClass === "binary-graphic") {
     result.warnings.push("near-binary high-contrast content (UI/text/periodic graphics) is StegoMark's documented weak class; expect poor recovery without much higher strength");
   }
@@ -2866,7 +3572,7 @@ function assayStegoEmbed(rgba, w, h, {
     for (const candidate of [strength, strength + 2, strength + 4, 16]) {
       if (candidate > 16) break;
       const trial = candidate === strength ? base : measure(candidate);
-      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY });
+      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY, layoutVersion });
       if (hit.found) {
         result.verifiedAtStrength = candidate;
         result.recommendedStrength = candidate;
@@ -8814,7 +9520,7 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.19.0";
+var VERSION2 = "1.20.0";
 var Archx = {
   version: VERSION2,
   ProtectedImage,

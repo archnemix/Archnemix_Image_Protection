@@ -37,6 +37,8 @@ import {
   embedOwnershipMetadata, createIssuanceLog, verifyIssuanceChain,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
+import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from '../src/core/bch.js';
+import { bchStegoCodeBits, bchStegoDecode, bchStegoSolveObserved } from '../src/core/stego-code.js';
 import * as archxServerModule from '../server/middleware.js';
 
 function signTokenForTest(payload, secret) {
@@ -4104,4 +4106,269 @@ test('v1.19 type declarations match the runtime export surface (no declaration d
       }
     }
   }
+});
+
+/* ---------- v1.20: BCH layout v4, hardened saturation, review-#9 ---------- */
+
+test('v1.20 BCH(188,64): full-radius errors+erasures decode; beyond radius rejects', () => {
+  let seed = 4242;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const trial = (errors, erasures, runs, mustPass) => {
+    for (let r = 0; r < runs; r++) {
+      const data = Uint8Array.from({ length: 64 }, () => (rnd() < 0.5 ? 1 : 0));
+      const rx = Uint8Array.from(bchEncode64(data));
+      const idx = [...Array(BCH_CODE_BITS).keys()];
+      for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+      const era = idx.slice(errors, errors + erasures);
+      for (const p of idx.slice(0, errors)) rx[p] ^= 1;
+      for (const p of era) rx[p] = rnd() < 0.5 ? 1 : 0;
+      const dec = bchDecode188(rx, era);
+      if (mustPass) {
+        assert.ok(dec, `e=${errors} s=${erasures} must decode`);
+        assert.deepEqual([...dec.data], [...data]);
+        assert.equal(dec.errors, errors);
+      } else if (dec) {
+        // Bounded-distance decoders may miscorrect past the radius,
+        // but must never claim a small correction count for it.
+        assert.ok(2 * dec.errors + dec.erasures <= 36);
+      }
+    }
+  };
+  trial(18, 0, 60, true);
+  trial(0, 36, 60, true);
+  trial(9, 18, 60, true);
+  trial(12, 12, 60, true);
+  trial(19, 0, 60, false);
+  assert.equal(bchDecode188(new Uint8Array(188), [...Array(37).keys()]), null, '>36 erasures rejected up front');
+  assert.throws(() => bchEncode64(new Uint8Array(10)), /exactly 64 bits/);
+  // ML erasure solve: 90 erased bits, 3 corrupted low-reliability ones.
+  for (let r = 0; r < 30; r++) {
+    const data = Uint8Array.from({ length: 64 }, () => (rnd() < 0.5 ? 1 : 0));
+    const rx = Uint8Array.from(bchEncode64(data));
+    const order = [...Array(BCH_CODE_BITS).keys()];
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    const observed = order.slice(0, 98); // most reliable first
+    for (const p of observed.slice(-3)) rx[p] ^= 1; // errors among the least reliable
+    const solved = bchSolveObserved(rx, observed);
+    assert.ok(solved, 'ML solve must recover from 90 erasures');
+    assert.deepEqual([...solved.data], [...data]);
+    assert.equal(solved.mismatches, 3);
+  }
+  // Stego wrapper: interleave + MAC roundtrip and wrong-key rejection.
+  const wire = bchStegoCodeBits('a1b2c3d4e5f6', 'k');
+  assert.equal(wire.length, 188);
+  const hit = bchStegoDecode(wire, [], 'k');
+  assert.equal(hit.fingerprint, 'a1b2c3d4e5f6');
+  assert.equal(bchStegoDecode(wire, [], 'other-key'), null, 'wrong key cannot validate (MAC inside payload)');
+});
+
+test('v1.20 layout v4: auto-detects, reports vintage, isolated from v3 pins', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const raw = new Uint8Array(data);
+  for (const profile of ['standard', 'robust']) {
+    const marked = embedStegoFingerprint(raw, info.width, info.height, 'ORDER-V4-1', {
+      key: 'v4-key', profile, strength: 6, layoutVersion: 4,
+    });
+    const auto = detectStegoFingerprint(marked, info.width, info.height, { key: 'v4-key', profile });
+    assert.equal(auto.found, true, `${profile} v4 must auto-detect (${JSON.stringify(auto)})`);
+    assert.equal(auto.fingerprint, stegoFingerprint('ORDER-V4-1'));
+    assert.equal(auto.layoutVersion, 4);
+    const pinnedV3 = detectStegoFingerprint(marked, info.width, info.height, { key: 'v4-key', profile, layoutVersion: 3 });
+    assert.equal(pinnedV3.found, false, 'v4 mark must not validate under a v3 pin');
+    // And the reverse: a v3 mark must not validate under a v4 pin,
+    // nor may legacyCode be combined with v4.
+    const markedV3 = embedStegoFingerprint(raw, info.width, info.height, 'ORDER-V4-1', {
+      key: 'v4-key', profile, strength: 6, layoutVersion: 3,
+    });
+    assert.equal(detectStegoFingerprint(markedV3, info.width, info.height, { key: 'v4-key', profile, layoutVersion: 4 }).found, false);
+  }
+  assert.throws(
+    () => embedStegoFingerprint(raw, info.width, info.height, 'X', { layoutVersion: 4, legacyCode: true }),
+    /layoutVersion 4 always uses the keyed MAC/,
+  );
+});
+
+test('v1.20 layout v4: deep crop recovers through ML erasure solving', async () => {
+  const photoBytes = fs.readFileSync(new URL('../demo-masters/aurora-valley.jpg', import.meta.url));
+  const { data, info } = await sharp(photoBytes).resize(800).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'BUYER-DEEP-CROP', {
+    key: 'v4-crop-key', profile: 'robust', strength: 6, layoutVersion: 4,
+  });
+  const keepW = Math.round(info.width * 0.7), keepH = Math.round(info.height * 0.7);
+  const cropped = await sharp(Buffer.from(marked), { raw: { width: info.width, height: info.height, channels: 4 } })
+    .extract({ left: Math.round((info.width - keepW) / 2), top: Math.round((info.height - keepH) / 2), width: keepW, height: keepH })
+    .resize(info.width, info.height).jpeg({ quality: 80 }).toBuffer();
+  const back = await sharp(cropped).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const hit = detectStegoFingerprint(new Uint8Array(back.data), back.info.width, back.info.height, {
+    key: 'v4-crop-key', profile: 'robust', layoutVersion: 4, searchGeometry: true, maxTimeMs: 60_000,
+  });
+  assert.equal(hit.found, true, JSON.stringify(hit));
+  assert.equal(hit.fingerprint, stegoFingerprint('BUYER-DEEP-CROP'));
+  assert.equal(hit.erasureDecoded, true, 'recovery must come through the erasure channel');
+  assert.ok(hit.erasedBits > 36, `erased ${hit.erasedBits} bits: beyond the bounded-distance radius, so the ML solve did the work`);
+});
+
+test('v1.20 assay reports layoutVersion and self-verifies a v4 embed', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const report = assayStegoEmbed(new Uint8Array(data), info.width, info.height, {
+    key: 'assay-v4', profile: 'robust', strength: 6, layoutVersion: 4, verify: true,
+  });
+  assert.equal(report.layoutVersion, 4);
+  assert.notEqual(report.verifiedAtStrength, null);
+});
+
+test('v1.20 hardened preset fails closed on replay saturation; layout 4 is valid server config', async () => {
+  const hardened = withHardenedProductionDefaults({ secret: TEST_SECRET, imagesDir: '/nonexistent', allowAnonymous: true });
+  assert.equal(hardened.replaySaturation, 'strict', 'hardened preset must not silently reopen replay windows under saturation');
+  assert.equal(withHardenedProductionDefaults({ replaySaturation: 'evict' }).replaySaturation, 'evict',
+    'explicit host availability choice is preserved, not silently rewritten');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v120-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const okAudit = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    steganography: { profile: 'robust', strength: 6, layoutVersion: 4 },
+  });
+  assert.equal(okAudit.ok, true, okAudit.issues?.join('; '));
+  const badAudit = auditArchxServerConfig({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    steganography: { profile: 'robust', layoutVersion: 5 },
+  });
+  assert.equal(badAudit.ok, false, 'layout 5 does not exist and must stay rejected');
+});
+
+test('v1.20 golden freeze: layouts 1-3 embeds stay byte-identical to shipped v1.19', () => {
+  // Golden SHA-256 values computed with the shipped v1.19.0 code.
+  // If this test fails, someone changed the embedding physics of a
+  // SHIPPED layout — every previously issued marked image would
+  // stop verifying identically. New physics must ship as a new
+  // layout version, never as an edit to 1-3.
+  const w = 512, h = 384;
+  const buf = new Uint8Array(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0; const v = 90 + ((x * 7 + y * 13) % 80);
+    buf[i * 4] = v; buf[i * 4 + 1] = v + 20; buf[i * 4 + 2] = 200 - v; buf[i * 4 + 3] = 255;
+  }
+  const fp = stegoFingerprint('golden-freeze');
+  const golden = {
+    '1:robust': 'edccf824dbf67902eb082b4fee9f71b7d4d4204318c01c3b0b65334b62166bdc',
+    '1:standard': '2da23a49f1d775c3672476f04718d6f7a06475cd62110ba106b710ecee55be48',
+    '2:robust': 'dec61ecc431494a10355c518722927167b45e7211e29853a54811e7bebad3da2',
+    '2:standard': '2dad0a4ece4f7b9de62f96eac3ca5a685472c36187e6b5baffc54cc77762dac8',
+    '3:robust': '714d2500f1f251663ebf325e22453d1becea75d27358fc30e7b1edbc2ec6eb4c',
+    '3:standard': '66424874cf6e0ed09b14bb6b9362759ad7cc3c1c8ccaa44ee9d0f00cdea74bc9',
+  };
+  for (const layoutVersion of [1, 2, 3]) for (const profile of ['robust', 'standard']) {
+    const out = embedStegoFingerprint(new Uint8Array(buf), w, h, fp,
+      { key: 'golden-key', strength: 6, profile, layoutVersion });
+    assert.equal(crypto.createHash('sha256').update(out).digest('hex'), golden[layoutVersion + ':' + profile],
+      `layout ${layoutVersion} ${profile} embed drifted from shipped bytes`);
+  }
+});
+
+test('v1.20 two-phase auto: a v4 suspect is not starved by the v3 geometry search', async () => {
+  // Regression for the measured v1.20 bench collapse: single-phase
+  // auto-detection let the first layout's exhaustive crop search
+  // consume the whole shared deadline, so even an untouched v4
+  // suspect timed out. Phase-1 native screens must resolve it.
+  const photoBytes = fs.readFileSync(new URL('../demo-masters/aurora-valley.jpg', import.meta.url));
+  const { data, info } = await sharp(photoBytes).resize(800).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'BUYER-STARVE', {
+    key: 'two-phase-key', profile: 'robust', strength: 6, layoutVersion: 4,
+  });
+  const jpeg = await sharp(Buffer.from(marked), { raw: { width: info.width, height: info.height, channels: 4 } })
+    .jpeg({ quality: 80 }).toBuffer();
+  const back = await sharp(jpeg).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const hit = detectStegoFingerprint(new Uint8Array(back.data), back.info.width, back.info.height, {
+    key: 'two-phase-key', profile: 'robust', searchGeometry: true, searchOffsets: true, maxTimeMs: 10_000,
+  });
+  assert.equal(hit.found, true, JSON.stringify(hit));
+  assert.equal(hit.layoutVersion, 4);
+  assert.equal(hit.fingerprint, stegoFingerprint('BUYER-STARVE'));
+  assert.ok(!hit.timedOut, 'phase-1 screen must resolve well inside the budget');
+});
+
+test('v1.20 fast dihedral screens: transposed suspect resolves without the geometry sweep', async () => {
+  // Transpose/rotation probes used to run only after the full
+  // forward geometry search failed (9.9-13.9 s on bench photos).
+  // The native screens now run first; an 8 s budget separates the
+  // two orders on this image size.
+  const photoBytes = fs.readFileSync(new URL('../demo-masters/aurora-valley.jpg', import.meta.url));
+  const { data, info } = await sharp(photoBytes).resize(800).ensureAlpha().raw()
+    .toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'BUYER-TRANSPOSE', {
+    key: 'dihedral-key', profile: 'robust', strength: 6, layoutVersion: 3,
+  });
+  const transposed = await sharp(Buffer.from(marked), { raw: { width: info.width, height: info.height, channels: 4 } })
+    .rotate(90).flip().png().toBuffer();
+  const back = await sharp(transposed).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const hit = detectStegoFingerprint(new Uint8Array(back.data), back.info.width, back.info.height, {
+    key: 'dihedral-key', profile: 'robust', searchGeometry: true, searchOffsets: true, maxTimeMs: 8_000,
+  });
+  assert.equal(hit.found, true, JSON.stringify(hit));
+  assert.equal(hit.transposed, 'main');
+  assert.ok(!hit.timedOut);
+});
+
+test('v1.20 OSD: two poisoned basis bits defeat the plain ML solve; reprocessing recovers', () => {
+  // The ML erasure solve trusts its 64-bit basis absolutely: any
+  // wrong basis bit scrambles the whole solution. OSD flips the
+  // least-reliable basis bits (singly, then in pairs) — this test
+  // poisons exactly two WEAK basis bits, the case OSD-2 exists for.
+  let seed = 777;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let trial = 0; trial < 8; trial++) {
+    const data = Uint8Array.from({ length: 64 }, () => (rnd() < 0.5 ? 1 : 0));
+    const code = bchEncode64(data);
+    const order = [...Array(BCH_CODE_BITS).keys()];
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    const observed = order.slice(0, 140); // 48 erasures
+    const clean = bchSolveObserved(code, observed);
+    assert.ok(clean && clean.basis, 'clean solve exposes its basis');
+    const rx = Uint8Array.from(code);
+    const weakest = clean.basis.slice(-6);
+    rx[weakest[1]] ^= 1; rx[weakest[4]] ^= 1;
+    const verify = (d) => d.every((v, i) => v === data[i]);
+    const plainSol = bchSolveObserved(rx, observed);
+    assert.ok(!plainSol || !verify(plainSol.data), 'plain solve must NOT recover through 2 basis errors');
+    const osd = bchOsdSolve(rx, observed, { maxMismatches: 10, verify });
+    assert.ok(osd, 'OSD must recover');
+    assert.equal(osd.osdFlips, 2);
+    assert.equal(osd.mismatches, 2);
+    assert.ok(verify(osd.data));
+  }
+});
+
+test('v1.20 ISD: 69 erasures + 13 tail-biased errors recover via information sets (watch-crop channel)', () => {
+  // Channel measured on the bench's luxury-watch center0.7 suspect:
+  // 119/188 bits observed, 13 voted-bit errors with NONE in the top
+  // 27 reliability ranks — beyond OSD (several basis errors),
+  // routine for reliability-biased information-set resampling.
+  const key = 'isd-test-key';
+  const fp = stegoFingerprint('ISD-CHANNEL');
+  const truth = bchStegoCodeBits(fp, key);
+  const rx = Uint8Array.from(truth);
+  const order = [...Array(BCH_CODE_BITS).keys()];
+  const errRanks = [27, 28, 57, 62, 86, 91, 104, 108, 109, 110, 114, 115, 117];
+  for (const rk of errRanks) rx[order[rk]] ^= 1;
+  const observed = order.slice(0, 119);
+  // Plain ML and OSD are not asserted to fail (seed-dependent), but
+  // the mismatch cap IS asserted: 13 true mismatches can never
+  // pass an 8-mismatch cap, MAC or not.
+  assert.equal(bchStegoSolveObserved(rx, observed, key, { maxMismatches: 8, isdTrials: 4000, seedSalt: 1 }), null);
+  let recovered = null;
+  for (let salt = 1; salt <= 6 && !recovered; salt++) {
+    recovered = bchStegoSolveObserved(rx, observed, key, { maxMismatches: 16, isdTrials: 1500, seedSalt: salt });
+  }
+  assert.ok(recovered, 'ISD must recover within a few salted escalations');
+  assert.equal(recovered.fingerprint, fp);
+  assert.equal(recovered.mismatches, 13);
+  // Wrong key: the deinterleave differs, no MAC-valid word exists.
+  assert.equal(bchStegoSolveObserved(rx, observed, 'isd-WRONG-key', { maxMismatches: 16, isdTrials: 800, seedSalt: 1 }), null);
+  // ISD on pure noise must come back empty, not invent a codeword.
+  const noise = Uint8Array.from({ length: BCH_CODE_BITS }, (_, i) => ((i * 2654435761) >>> 13) & 1);
+  assert.equal(bchIsdSolve(noise, order, { maxMismatches: 20, verify: () => false, trials: 600, seedSalt: 3 }), null);
 });

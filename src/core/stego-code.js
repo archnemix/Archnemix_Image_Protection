@@ -4,6 +4,7 @@
  * SHIPPED BIT FORMATS ARE FROZEN — new layouts get new versions.
  */
 import { utf8Encode } from './bytes.js';
+import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from './bch.js';
 import { sha256Bytes, hmacSha256Bytes, hashSeed, mulberry32, cyrb128, sfc32, sha256SeededPrng } from './crypto.js';
 
 /**
@@ -314,4 +315,146 @@ export function robustStegoLayout(cellCount, key, version = 2) {
     }
   }
   return { order, polarity, segmentPolarity };
+}
+
+/* ---------- Layout v4: BCH error correction (v1.20) ---------- */
+
+/**
+ * Layout v4 keeps the v3 cell layout (grid, third-difference
+ * statistic, keyed polarities) and replaces the repetition+tag
+ * codeword with a shortened binary BCH(188,64) code: the same
+ * 48-bit fingerprint + keyed MAC-16 payload, protected by 124
+ * parity bits correcting any 2e+s <= 36 errors+erasures, then
+ * keyed-interleaved across the cell grid so spatially clustered
+ * damage (crops, overlays, scratches) lands on scattered codeword
+ * positions instead of concentrated ones. Detector "auto" tries v4
+ * alongside the shipped v1-v3 layouts; older detectors simply do
+ * not see v4 marks (forward compatibility is one-directional, as
+ * with every prior layout step).
+ */
+export const STEGO_V4_CODE_BITS = BCH_CODE_BITS;
+
+// Keyed bit interleaver. wire[i] = plain[perm[i]]. Cached per key:
+// the detector may attempt thousands of decodes under one key and a
+// SHA-256-seeded shuffle per attempt dominated its geometry search.
+const _v4PermCache = new Map();
+export function stegoV4InterleaveOrder(key) {
+  const cacheKey = String(key ?? '');
+  let perm = _v4PermCache.get(cacheKey);
+  if (perm) return perm;
+  const rand = sha256SeededPrng('archx-stego-v4-interleave:' + cacheKey);
+  perm = Array.from({ length: BCH_CODE_BITS }, (_, i) => i);
+  for (let i = perm.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [perm[i], perm[j]] = [perm[j], perm[i]];
+  }
+  if (_v4PermCache.size >= 64) _v4PermCache.clear();
+  _v4PermCache.set(cacheKey, perm);
+  return perm;
+}
+
+/** 188-bit interleaved BCH codeword for a 12-hex fingerprint. */
+export function bchStegoCodeBits(fingerprint, key) {
+  const payload = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) payload[i] = parseInt(fingerprint.slice(i * 2, i * 2 + 2), 16);
+  const mac = stegoMac16(key, payload);
+  const data = stegoBytesToBits(new Uint8Array([...payload, (mac >> 8) & 255, mac & 255]));
+  const code = bchEncode64(data);
+  const perm = stegoV4InterleaveOrder(key);
+  const wire = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) wire[i] = code[perm[i]];
+  return wire;
+}
+
+/**
+ * Decode voted v4 bits (interleaved domain). `erasures` are
+ * interleaved-domain indices with no/weak votes. On success returns
+ * { fingerprint, bits (corrected, interleaved domain), errors,
+ * erasures }; the embedded MAC-16 must verify, so a BCH
+ * miscorrection onto a neighbouring codeword is still rejected.
+ */
+export function bchStegoDecode(wireBits, erasures, key) {
+  if (!wireBits || wireBits.length !== BCH_CODE_BITS) return null;
+  const perm = stegoV4InterleaveOrder(key);
+  const plain = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) plain[perm[i]] = wireBits[i] ? 1 : 0;
+  const plainErasures = (erasures || []).map((i) => perm[i]).filter((i) => i !== undefined);
+  const decoded = bchDecode188(plain, plainErasures);
+  if (!decoded) return null;
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | decoded.data[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (stegoMac16(key, bytes.subarray(0, 6)) !== ((bytes[6] << 8) | bytes[7])) return null;
+  const code = bchEncode64(decoded.data);
+  const bits = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) bits[i] = code[perm[i]];
+  let fingerprint = '';
+  for (let i = 0; i < 6; i++) fingerprint += bytes[i].toString(16).padStart(2, '0');
+  return { fingerprint, bits, errors: decoded.errors, erasures: decoded.erasures };
+}
+
+
+/**
+ * Deep-crop fallback for v4: ML erasure solve over the observed
+ * (voted) bits in reliability order. Recovers when crops erase far
+ * more than the 36-erasure bounded-distance radius, as long as 64+
+ * independent observed bits survive. Acceptance evidence is the
+ * caller's mismatch accounting + the embedded MAC verified here.
+ */
+export function bchStegoSolveObserved(wireBits, observedOrderWire, key, { maxMismatches = Infinity, osd = true, isdTrials = 0, seedSalt = 0 } = {}) {
+  if (!wireBits || wireBits.length !== BCH_CODE_BITS) return null;
+  if (!observedOrderWire || observedOrderWire.length < 65) return null;
+  // Defensive cap clamp. The payload MAC is 16 bits: with OSD+ISD
+  // testing thousands of candidate words per suspect, a loose
+  // mismatch cap becomes a MAC lottery — measured: cap 40 at 119
+  // observed bits produced a WRONG MAC-valid fingerprint within
+  // ~8000 trials (24 mismatches vs the votes; noise solves sit at
+  // ~59). The detector's operative cap is 0.30*(observed-64),
+  // ~8 sigma from the noise mean; this clamp keeps any future
+  // caller from widening past 0.34 by accident.
+  const capLimit = Math.max(3, Math.floor((observedOrderWire.length - 64) * 0.34));
+  if (maxMismatches > capLimit) maxMismatches = capLimit;
+  const perm = stegoV4InterleaveOrder(key);
+  const plain = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) plain[perm[i]] = wireBits[i] ? 1 : 0;
+  const plainOrder = observedOrderWire.map((i) => perm[i]).filter((i) => i !== undefined);
+  // MAC verification shared by the direct solve and every OSD retry.
+  const macOk = (dataBits) => {
+    let mac = 0;
+    const fpBytes = new Uint8Array(6);
+    for (let i = 0; i < 6; i++) {
+      let byte = 0;
+      for (let b = 0; b < 8; b++) byte = (byte << 1) | dataBits[i * 8 + b];
+      fpBytes[i] = byte;
+    }
+    for (let b = 0; b < 16; b++) mac = (mac << 1) | dataBits[48 + b];
+    return stegoMac16(key, fpBytes) === mac;
+  };
+  let solved = osd
+    ? bchOsdSolve(plain, plainOrder, { maxMismatches, verify: macOk })
+    : (() => { const d = bchSolveObserved(plain, plainOrder); return d && macOk(d.data) ? d : null; })();
+  if (!solved && isdTrials > 0) {
+    solved = bchIsdSolve(plain, plainOrder, { maxMismatches, verify: macOk, trials: isdTrials, seedSalt });
+  }
+  if (!solved) return null;
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | solved.data[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (stegoMac16(key, bytes.subarray(0, 6)) !== ((bytes[6] << 8) | bytes[7])) return null;
+  const code = bchEncode64(solved.data);
+  const bits = new Uint8Array(BCH_CODE_BITS);
+  for (let i = 0; i < BCH_CODE_BITS; i++) bits[i] = code[perm[i]];
+  let fingerprint = '';
+  for (let i = 0; i < 6; i++) fingerprint += bytes[i].toString(16).padStart(2, '0');
+  return {
+    fingerprint, bits,
+    mismatches: solved.mismatches,
+    erasures: BCH_CODE_BITS - plainOrder.length,
+  };
 }

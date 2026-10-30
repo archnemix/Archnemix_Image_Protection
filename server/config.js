@@ -123,7 +123,7 @@ function validateStegoConfig(value) {
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
     if (value.gridY !== undefined && (!Number.isInteger(value.gridY) || value.gridY < 4 || value.gridY > 64)) return false;
-    if (value.layoutVersion !== undefined && ![1, 2, 3].includes(value.layoutVersion)) return false;
+    if (value.layoutVersion !== undefined && ![1, 2, 3, 4].includes(value.layoutVersion)) return false;
     if (value.legacyCode !== undefined && typeof value.legacyCode !== 'boolean') return false;
     return true;
   } catch { return false; }
@@ -849,6 +849,12 @@ export function withHardenedProductionDefaults(options = {}) {
     allowQueryTokens: false,
     proofOfPossession: 'required',
     oneTimeTokens: true,
+    // Fail-closed replay semantics: when the one-time claim store
+    // saturates, the hardened preset rejects NEW claims rather than
+    // evicting live ones (availability cost belongs to the operator
+    // who sized the store; a silent replay window does not). Size
+    // oneTimeTokenMaxEntries >= peak mints x token TTL x margin.
+    replaySaturation: 'strict',
     ttlSec: 120,
     callbackTimeoutMs: 10000,
     scramblePlanVersion: 2, // 128-bit permutation seed (see buildScramblePlan)

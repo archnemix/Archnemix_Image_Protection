@@ -44,7 +44,7 @@ const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
 const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true, layoutVersion: 'auto' });
-const layoutVintage: 0 | 1 | 2 | 3 = detection.layoutVersion;
+const layoutVintage: 0 | 1 | 2 | 3 | 4 = detection.layoutVersion;
 void layoutVintage;
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;

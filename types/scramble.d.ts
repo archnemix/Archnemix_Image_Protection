@@ -154,11 +154,12 @@ export interface StegoEmbedOptions {
    */
   legacyCode?: boolean;
   /**
-   * Cell-layout derivation: 2 (default, 128-bit SHA-256 seed) or 1
-   * (legacy 32-bit seed, for reproducing pre-v1.13 marks). Detectors
-   * dual-read both vintages by default.
+   * Codeword layout: 3 (default, SHA-256-seeded repetition code),
+   * 2/1 legacy seed spaces (for reproducing pre-v1.14 marks), or 4
+   * (v1.20 BCH(188,64) error correction over the v3 layout —
+   * needs a v1.20+ detector). Detectors read all vintages by default.
    */
-  layoutVersion?: 1 | 2 | 3;
+  layoutVersion?: 1 | 2 | 3 | 4;
 }
 export function embedStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, payload: string,
@@ -182,11 +183,11 @@ export interface StegoDetectOptions {
    *  On expiry the best-so-far candidate returns with `timedOut`. */
   maxTimeMs?: number;
   /**
-   * Restrict detection to one cell-layout vintage (1 = legacy 32-bit
-   * seed, 2 = 128-bit seed). Default 'auto' tries both; the result's
-   * `layoutVersion` reports which vintage matched.
+   * Restrict detection to one codeword layout (1/2 legacy seed
+   * spaces, 3 = SHA-256-seeded, 4 = BCH). Default 'auto' tries
+   * 3, 4, 2, 1; the result's `layoutVersion` reports the match.
    */
-  layoutVersion?: 1 | 2 | 3 | 'auto';
+  layoutVersion?: 1 | 2 | 3 | 4 | 'auto';
 }
 export interface StegoDetection {
   found: boolean;
@@ -199,8 +200,8 @@ export interface StegoDetection {
    * no tag validated.
    */
   tagScheme: 'mac' | 'crc' | null;
-  /** Cell-layout vintage that matched (0 when neither layout was concrete). */
-  layoutVersion: 0 | 1 | 2 | 3;
+  /** Codeword layout that matched (0 when no layout was concrete). */
+  layoutVersion: 0 | 1 | 2 | 3 | 4;
   observedBits: number;
   minBitRepetitions: number;
   /** Acceptance tag validated (MAC-16 for codeword v2, keyed CRC for legacy). Name kept for compatibility; see `tagScheme`. */
@@ -235,9 +236,9 @@ export interface StegoDetection {
 /** Measured pre-flight for a planned embed: real PSNR, content class, optional self-verified strength. */
 export function assayStegoEmbed(
   rgba: Uint8Array, w: number, h: number,
-  options?: { key?: string; profile?: 'standard' | 'robust'; strength?: number; gridX?: number; gridY?: number; verify?: boolean },
+  options?: { key?: string; profile?: 'standard' | 'robust'; strength?: number; gridX?: number; gridY?: number; verify?: boolean; layoutVersion?: 1 | 2 | 3 | 4 },
 ): Readonly<{
-  profile: string; strength: number; grid: { x: number; y: number };
+  profile: string; strength: number; layoutVersion: number; grid: { x: number; y: number };
   psnr: number; maxChannelDelta: number;
   smoothFraction: number; binaryFraction: number;
   contentClass: 'binary-graphic' | 'flat-minimal' | 'photo-textured';
@@ -281,7 +282,7 @@ export function assayStegoCollusion(
   candidates: StegoCollusionCandidate[],
   options?: {
     key?: string; profile?: 'standard' | 'robust';
-    gridX?: number; gridY?: number; layoutVersion?: 1 | 2 | 3;
+    gridX?: number; gridY?: number; layoutVersion?: 1 | 2 | 3 | 4;
     geometry?: { scaleX?: number; scaleY?: number; originX?: number; originY?: number } | null;
   },
 ): StegoCollusionAssay;

@@ -31,7 +31,7 @@ therefore distinguish:
 
 Requirements:
 
-- Node.js 20.9+ or 22.x;
+- Node.js 20.9+ (library + unit/fuzz suites) — Node 22.12+ if you also run `npm run test:browser` (Puppeteer floor; `.nvmrc` pins 22);
 - npm;
 - for the exact browser-test environment used by CI, Linux or WSL is the
   most faithful setup.

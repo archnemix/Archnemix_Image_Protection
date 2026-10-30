@@ -130,7 +130,16 @@ Contract requirements:
    in-memory store makes the same trade-off explicit instead:
    `replaySaturation: 'evict' | 'strict'` plus live counters in
    `handler.stats().replaySets` and the `archx.replay_store_evicted`
-   event. Sizing: `oneTimeTokenMaxEntries` >= peak redemptions/sec ×
+   event. **Decide this one deliberately** (v1.20): the library
+   default stays `'evict'` for availability, `withHardenedProductionDefaults`
+   now sets `'strict'`, and neither is "the secure one" in isolation:
+
+   | Policy | When the store is full of live claims | Failure you accept |
+   | --- | --- | --- |
+   | `'evict'` (library default) | Oldest live JTI is dropped; new redemption proceeds | A narrow replay window reopens for that one already-redeemed token until its expiry — still signed, still re-authorized at redemption, still PoP-bound where configured |
+   | `'strict'` (hardened preset) | New claims are rejected until entries expire | Legitimate redemptions fail under sustained mint pressure (availability incident) |
+
+   Sizing makes either safe: `oneTimeTokenMaxEntries` >= peak redemptions/sec ×
    token TTL seconds × 4 (burst + clock-skew margin); the production
    audit blocks < 10,000 entries.
 
