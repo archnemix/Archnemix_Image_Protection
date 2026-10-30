@@ -2689,3 +2689,117 @@ worker, ownership-metadata, and policy changes do not alter
 rendering; ownership only appends EXIF/XMP to derivative payloads
 when configured, and cache scopes are byte-identical when it is
 not).
+
+### 2.27 Eighth review + modularization — v1.19
+
+The eighth review mixed real defects with measurement errors and
+already-fixed items. Verified claim-by-claim before editing; verdicts:
+
+**Confirmed and fixed.**
+
+- *Ownership trust.* Unverified embedded claims were usable as their
+  own soft-binding evidence (self-attestation loop); a malformed
+  perceptual hash could crash verification; a decoy claim could shadow
+  a real one; the detect CLI's exit semantics allowed false success.
+  Now `contentTrusted` gates every downstream use, malformed material
+  is rejected not thrown, all claim candidates are evaluated, and CLI
+  exit codes are honest (non-zero on no-detection unless `--json`-style
+  machine consumers ask otherwise — see CLI help).
+- *Fail-open fraction.* With `maxWidthFraction < 1`, a dimension
+  measurement failure could mint an uncapped token. Measurement errors
+  now fail closed with 503; a null measurement (missing master) still
+  flows to the existing 404/415 path where no derivative exists.
+- *Mixed-TTL saturation.* `BoundedTtlSet.claim()`'s budget-bounded head
+  scan treated expiry disorder (long-TTL heads, expired short-TTL
+  tail) as saturation: strict mode rejected legitimate claims, evict
+  mode dropped live ones. A three-pass claim (bounded head sweep →
+  full expired sweep → evict/strict) makes both modes exact; covered
+  by a 3,000-live-head regression test.
+- *Unaudited temporal natives.* The temporal interlace path called
+  `putImageData` through the (page-patchable) prototype; all canvas
+  natives it uses are now captured at load and included in the
+  integrity audit, matching the 2D draw path.
+- *Type drift.* ~10 declaration/runtime mismatches across
+  `types/*.d.ts` (wrong arities, missing fields, phantom exports).
+  Fixed, and pinned by a runtime contract test that parses the
+  declarations and asserts the runtime surface.
+- *Automation-signal gaps* (client) closed to parity with the
+  integrity report's documented surface.
+
+**Refuted with measurements.**
+
+- *"Detection spawns a process per call."* Detection runs in
+  `worker_threads` since v1.17; v1.19 adds an optional pool
+  (`maxWorkers` 1–16, default 1) with per-slot crash isolation.
+- *"Tilt search peaks at 755 MiB RSS."* Measured ≈ 84–90 MiB on the
+  800×436 geometry sweep (Uint32 integrals halve the plane bytes
+  further). The 755 figure was not reproduced on any input tried.
+- *"Cross-tier cache poisoning via `variantKeyScope`."* The variant key
+  includes the post-downgrade width; a lower tier cannot be served a
+  higher tier's cached bytes. Pinned by existing entitlement tests.
+- *"Uniform stego strength ignores content."* Per-cell texture masking
+  (0.4×–1.4×) predates the review; what was missing was operator
+  visibility, now provided by the assay (below).
+
+**New layers.**
+
+- *Step-up challenge* (`abuseDetection.action: 'challenge'`): the
+  Turnstile/WebAuthn pattern as a host hook rather than a hard
+  dependency — server-side verify → short-lived process-local
+  clearance → mint proceeds. Batch mints share the gate (regression-
+  tested: no batch bypass). *Limitation, stated plainly:* the bundled
+  client's `onChallenge` auto-retry covers single-token loads; batch
+  loaders surface `errors[ref].status === 403` and must re-request
+  after the user solves the challenge.
+- *Tamper-evident issuance log*: HMAC-chained records
+  (`mac[i] = HMAC(secret, mac[i-1] ‖ canonical(entry))`) so an
+  attribution registry cannot be rewritten after the fact without
+  detection. Explicitly not a timestamp or blockchain; anchor heads
+  externally for time evidence.
+- *Embed assay* (`assayStegoEmbed()`, `archx-protect --assay`): runs
+  the real embedder + detector to report measured PSNR, content
+  class, and the minimum self-verifying strength. Aurora 800 px,
+  robust/6: 28.6 dB, verified. This replaces the adjective
+  "invisible" with a number per catalog. For context: neural marks
+  (TrustMark, ICCV 2025) report PSNR ~40–54 dB with ML decoders;
+  StegoMark trades imperceptibility for blind crop/erasure/geometry
+  recovery in pure JS. A JND/DCT layout-v4 could narrow the gap
+  (Watson-model JND-QIM reaches ~38–41 dB) but is new embedding
+  physics — R&D, not a patch.
+- *Detector micro-optimizations, honestly measured*: Uint32 integral
+  images, typed scratch, injectable Node HMAC (20k HMACs: 200 ms
+  pure-JS → ~70 ms). End-to-end detector wall time is
+  candidate-evaluation-bound and did not move materially (geometry
+  sweep ~2.0–2.2 s before/after). Earlier 15–20% / 3–8× projections
+  (ours and the review's) are withdrawn. One attempted optimization —
+  reusing the rotation scratch buffer — was a real correctness bug
+  (identity-keyed plane cache serving the previous angle) and was
+  reverted; `rotateRgba` now always allocates fresh, documented in
+  `docs/ARCHITECTURE.md`.
+
+**Modularization.** `src/scramble.js` → 12 modules under `src/core/`;
+`src/archx.js` → 15 under `src/client/`; `server/middleware.js` →
+`bounded.js`/`tokens.js`/`config.js` + factory. Public paths, package
+`exports`, and the full test surface are unchanged (128 Node tests,
+122 Chromium checks, pack smoke). `ProtectedImage` and the middleware
+factory remain intentionally cohesive single units. Bundle: 146.2 KiB
+minified / 47.0 KiB gzipped (the README's 137.7/44.5 figures were
+stale and are corrected).
+
+**Deferred, with rationale.**
+
+- *True tile streaming.* A single authorized request still yields one
+  display-resolution derivative. IIIF Image API 3.0-style tiered
+  access (tiles + scale factors, auth outside the core) is the
+  established pattern and the tracked design; it is a protocol change,
+  not a hardening patch, and matters only for deep-zoom catalogs.
+- *Blind collusion-proof decoding.* The Tardos/Boneh-Shaw bound
+  (~π²c₀²·ln(1/ε₁) independent symbols; ≈2,180 for c=4, ε=10⁻⁶)
+  exceeds the 96-bit channel by an order of magnitude; candidate-
+  ranking assay remains the honest offering.
+- *Regeneration resistance.* 2025 diffusion-removal work drops every
+  tested invisible mark (TrustMark, StegaStamp, VINE) to ~0–13%
+  decode; layered evidence (visible marks, issuance logs, monitoring)
+  remains the durable strategy.
+- *C2PA*: spec is now 2.4 (April 2026) with a young conformance
+  program; the "not C2PA, provenance-compatible" stance stands.

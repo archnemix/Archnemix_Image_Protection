@@ -385,6 +385,11 @@ replay test are the verification.
 | `request.route` | Route template; no token or query string |
 | `reason` | Bounded internal reason such as `token-replay` |
 
+Step-up challenges (v1.19) emit `archx.challenge_required` (403,
+`reason: challenge-required`) and `archx.challenge_passed` events in the
+same schema; alert on required-but-never-passed subjects, not on the gate
+itself — a healthy shared-NAT office will trip it occasionally.
+
 The legacy raw `viewerId` remains at top level because the host supplied it
 and existing consumers may use it. For SIEM export, prefer dropping raw
 `viewerId` and using `actor.viewerHash`; apply your IP-retention policy to
@@ -647,6 +652,14 @@ one very large payload. A future tile mode would:
   embedded before tiling, so a stitched screenshot still carries
   them; tile boundaries must not align to macro-cell boundaries).
 
+Alignment note (v1.19): this mirrors the IIIF Image API 3.0 pattern
+(tiles/scale factors served behind authorization handled outside the
+image API itself; tiered, resolution-capped access is the established
+museum/archive approach). If built, Archx tiles should stay `.archx`
+payloads as sketched above rather than becoming a general IIIF
+endpoint, and zoom tiers must respect `maxWidthFraction` against the
+master, not against the requested tile size.
+
 Open questions before building: tile-edge scramble seams, prefetch
 policy under quotas, per-tile PoP cost, and whether zoom beyond the
 master's delivered cap should ever be authorized. Recorded here so
@@ -695,3 +708,27 @@ default), per-suspect pixels (`maxPixels`, 50 MP), queue wait
 (`queueTimeoutMs`), and per-job time (`timeoutMs`). If detection is
 exposed to untrusted callers, those bounds plus the detector's own
 `maxTimeMs` are the contract; verify them in staging before launch.
+Since v1.19 the pool size is configurable (`maxWorkers`, 1–16, default
+1): per-slot crash isolation means a hostile suspect can kill at most
+one worker; the byte/pixel/time budgets stay shared across the pool,
+so raise `maxQueuedBytes` deliberately when raising workers.
+
+**Issuance-log custody (v1.19).** `createIssuanceLog({ secret })`
+HMAC-chains issuance records so registry tampering is detectable.
+Keep the log secret in the secret manager (like `secret`, but a
+*different* value), persist `entries()` wherever you keep issuance
+rows, verify on load, and anchor the daily `head()` externally
+(email/git/timestamping service) if you need time evidence. A broken
+chain means: freeze attribution decisions from that registry, restore
+from backup, and re-verify — `verifyIssuanceChain` names the first
+bad index.
+
+**Pre-flight assay (v1.19).** Before enabling StegoMark on a new
+catalog, run `archx-protect <sample> --assay` on representative
+images (photos, flat graphics, UI/slides). It measures the real
+embed PSNR at your settings, classifies content, and reports the
+minimum self-verifying strength (exit 2 = none; near-binary periodic
+graphics are the known weak class — prefer visible marks there).
+Record the assay output with the catalog's protection settings so a
+future "the watermark was invisible/destructive" dispute is settled
+by a number, not an adjective.

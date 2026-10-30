@@ -23,6 +23,7 @@
  * evidence tied to your issuance registry.
  */
 import crypto from 'node:crypto';
+import './node-crypto.js'; // verifyOwnership may run detection in-process
 import { createRequire } from 'node:module';
 import {
   perceptualFingerprint, perceptualFingerprintDistance, detectStegoFingerprint,
@@ -96,13 +97,33 @@ export function signOwnershipClaim({ owner, imageId, perceptualHash, stegoFinger
   return `${CLAIM_PREFIX}${segment}.${b64url(signature)}`;
 }
 
+const PH_RE = /^[0-9a-fA-F]{16}$/;
+const SFP_RE = /^[0-9a-fA-F]{12}$/;
+
 export function parseOwnershipClaim(token) {
   const match = CLAIM_RE.exec(String(token || ''));
   if (!match) return null;
   try {
-    const payload = JSON.parse(Buffer.from(match[1], 'base64url').toString('utf8'));
-    if (!payload || payload.v !== 1 || typeof payload.own !== 'string') return null;
-    return { payload, segment: match[1], signature: Buffer.from(match[2], 'base64url') };
+    const raw = JSON.parse(Buffer.from(match[1], 'base64url').toString('utf8'));
+    // Structurally validate EVERY field before it can touch a verdict:
+    // a forged payload with a malformed ph previously crashed the
+    // distance function, and unvalidated fields were copied straight
+    // into evidence reports.
+    if (!raw || raw.v !== 1) return null;
+    if (typeof raw.own !== 'string' || !raw.own || raw.own.length > 128) return null;
+    if (raw.img != null && (typeof raw.img !== 'string' || raw.img.length > 128)) return null;
+    if (raw.ph != null && (typeof raw.ph !== 'string' || !PH_RE.test(raw.ph))) return null;
+    if (raw.sfp != null && (typeof raw.sfp !== 'string' || !SFP_RE.test(raw.sfp))) return null;
+    const signature = Buffer.from(match[2], 'base64url');
+    if (signature.length !== 64) return null; // Ed25519 signatures are 64 bytes
+    const payload = {
+      v: 1,
+      own: raw.own,
+      img: raw.img || '',
+      ph: raw.ph ? raw.ph.toLowerCase() : null,
+      sfp: raw.sfp ? raw.sfp.toLowerCase() : null,
+    };
+    return { payload, segment: match[1], signature };
   } catch { return null; }
 }
 
@@ -115,12 +136,30 @@ export function verifyOwnershipClaim(token, publicKey) {
   return { valid, claim: parsed.payload, reason: valid ? null : 'signature-mismatch' };
 }
 
-/** Scan encoded image bytes for an embedded claim token (EXIF/XMP store it as ASCII). */
-export function extractOwnershipClaim(imageBytes) {
-  if (!imageBytes || typeof imageBytes.length !== 'number') return null;
+const CLAIM_RE_GLOBAL = /ARCHX1\.([A-Za-z0-9_-]{10,2000})\.([A-Za-z0-9_-]{40,120})/g;
+
+/**
+ * Scan encoded image bytes for ALL embedded claim tokens (bounded).
+ * A single first-match scan let an attacker shadow a genuine claim
+ * with a decoy `ARCHX1.` token placed earlier in the byte stream
+ * (e.g. a JPEG COM segment); verification now evaluates every
+ * candidate and prefers a signature-valid one.
+ */
+export function extractOwnershipClaims(imageBytes, maxCandidates = 8) {
+  if (!imageBytes || typeof imageBytes.length !== 'number') return [];
   const text = Buffer.from(imageBytes).toString('latin1');
-  const match = CLAIM_RE.exec(text);
-  return match ? match[0] : null;
+  const found = [];
+  const seen = new Set();
+  for (const match of text.matchAll(CLAIM_RE_GLOBAL)) {
+    if (!seen.has(match[0])) { seen.add(match[0]); found.push(match[0]); }
+    if (found.length >= maxCandidates) break;
+  }
+  return found;
+}
+
+/** First embedded claim token, if any (prefer extractOwnershipClaims for evidence). */
+export function extractOwnershipClaim(imageBytes) {
+  return extractOwnershipClaims(imageBytes, 1)[0] ?? null;
 }
 
 function xmpPacket({ owner, copyright, token }) {
@@ -129,8 +168,12 @@ function xmpPacket({ owner, copyright, token }) {
   return [
     '<x:xmpmeta xmlns:x="adobe:ns:meta/">',
     '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
-    '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">',
+    '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">',
     `<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">${rights}</rdf:li></rdf:Alt></dc:rights>`,
+    // Rights flags stock/library tooling actually reads: Marked=true
+    // declares the work rights-managed (not public domain).
+    '<xmpRights:Marked>True</xmpRights:Marked>',
+    `<xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang="x-default">${rights}</rdf:li></rdf:Alt></xmpRights:UsageTerms>`,
     `<dc:creator><rdf:Seq><rdf:li>${esc(owner)}</rdf:li></rdf:Seq></dc:creator>`,
     token ? `<dc:description><rdf:Alt><rdf:li xml:lang="x-default">${esc(token)}</rdf:li></rdf:Alt></dc:description>` : '',
     '</rdf:Description></rdf:RDF></x:xmpmeta>',
@@ -175,13 +218,22 @@ export async function verifyOwnership(imageBytes, {
     .rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const rgba = new Uint8Array(data);
 
-  const token = externalClaim || extractOwnershipClaim(bytes);
+  const candidates = externalClaim ? [externalClaim] : extractOwnershipClaims(bytes);
   const report = {
-    claimFound: !!token,
-    claimSource: externalClaim ? 'external' : (token ? 'metadata' : null),
+    claimFound: candidates.length > 0,
+    claimSource: externalClaim ? 'external' : (candidates.length ? 'metadata' : null),
+    claimCandidates: candidates.length,
+    signatureChecked: !!publicKey && candidates.length > 0,
     signatureValid: false,
+    // A claim payload may drive owner/perceptual evidence ONLY when
+    // trusted: signature verified, or supplied by the operator from
+    // their registry without a key to check against. Anything else
+    // is attacker-controlled text and is quarantined below.
+    claimTrusted: false,
+    contentTrusted: false,
     owner: null,
     imageId: null,
+    unverifiedClaim: null,
     perceptual: { hash: null, distanceToClaim: null, matchesClaim: false },
     stego: null,
     verdict: 'no-evidence',
@@ -191,26 +243,47 @@ export async function verifyOwnership(imageBytes, {
   report.perceptual.hash = ph;
 
   let claimPayload = null;
-  if (token && publicKey) {
-    const checked = verifyOwnershipClaim(token, publicKey);
-    report.signatureValid = checked.valid;
-    claimPayload = checked.claim;
-  } else if (token) {
-    claimPayload = parseOwnershipClaim(token)?.payload ?? null;
+  let firstParsed = null;
+  for (const candidate of candidates) {
+    const parsed = parseOwnershipClaim(candidate);
+    if (!parsed) continue;
+    firstParsed ??= parsed.payload;
+    if (publicKey) {
+      const checked = verifyOwnershipClaim(candidate, publicKey);
+      if (checked.valid) {
+        report.signatureValid = true;
+        claimPayload = checked.claim;
+        break; // a signature-valid claim outranks every decoy
+      }
+    } else if (externalClaim) {
+      claimPayload = parsed.payload; // trusted by operator provenance
+      break;
+    }
   }
+  report.claimTrusted = !!claimPayload;
   if (claimPayload) {
     report.owner = claimPayload.own;
     report.imageId = claimPayload.img || null;
     if (claimPayload.ph) {
-      const distance = perceptualFingerprintDistance(ph, claimPayload.ph);
+      let distance = null;
+      try { distance = perceptualFingerprintDistance(ph, claimPayload.ph); } catch { distance = null; }
       report.perceptual.distanceToClaim = distance;
       report.perceptual.matchesClaim = distance !== null && distance <= maxPhDistance;
     }
+  } else if (firstParsed) {
+    // Present for investigation, clearly quarantined: these strings
+    // came from the suspect file and failed (or skipped) signature
+    // verification. They must never be cited as the owner.
+    report.unverifiedClaim = { owner: firstParsed.own, imageId: firstParsed.img || null };
   }
 
   if (stegoKey !== undefined && stegoKey !== null) {
+    // Bounded by default: this runs IN-PROCESS, and an unbounded
+    // forensic search over an unmarked suspect blocks the event
+    // loop. Hosts screening untrusted queues should use the worker
+    // APIs (detectStegoFingerprintInWorker) instead.
     const hit = detectStegoFingerprint(rgba, info.width, info.height, {
-      key: stegoKey, profile: 'auto', searchGeometry: true, ...detectOptions,
+      key: stegoKey, profile: 'auto', searchGeometry: true, maxTimeMs: 120_000, ...detectOptions,
     });
     report.stego = {
       found: hit.found,
@@ -226,8 +299,15 @@ export async function verifyOwnership(imageBytes, {
     report.verdict = 'verified'; // signed claim + content layer agree
   } else if (report.signatureValid) {
     report.verdict = 'claim-only'; // authentic claim, content layers inconclusive
-  } else if (report.stego?.found || (claimPayload && report.perceptual.matchesClaim)) {
-    report.verdict = 'content-match'; // pixels match, claim signature unverified/absent
+  } else if (report.stego?.found || (report.claimTrusted && report.perceptual.matchesClaim)) {
+    // Keyed stego detection is independent evidence; a perceptual
+    // match counts only against a TRUSTED claim (never against a
+    // suspect-embedded claim's self-computed hash).
+    report.verdict = 'content-match';
   }
+  // The single "safe to act on this identification" signal: some
+  // layer the attacker cannot fabricate agreed (valid signature,
+  // keyed stego hit, or trusted-claim perceptual match).
+  report.contentTrusted = report.verdict === 'verified' || report.verdict === 'content-match';
   return report;
 }

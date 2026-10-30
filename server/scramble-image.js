@@ -5,6 +5,7 @@
  * inside an .archx container. The master file itself is never sent.
  */
 import { createRequire } from 'node:module';
+import './node-crypto.js'; // hardware SHA/HMAC for the shared stego core
 import { signOwnershipClaim, applyOwnershipMetadata } from './ownership.js';
 import { Worker } from 'node:worker_threads';
 import {
@@ -862,13 +863,18 @@ export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h
  * forensic cost; on a server it is a self-inflicted stall. This
  * wrapper runs the identical detector in a single reusable
  * worker_threads worker (lazily spawned, respawned after crashes). */
-let detectWorker = null;
 let detectSeq = 0;
 const detectQueue = [];
-let detectActive = null;
+// Bounded worker POOL: each slot owns one worker thread + at most
+// one active job. maxWorkers defaults to 1 (the historical behavior
+// and memory profile); forensic batch hosts can raise it to use
+// more cores, trading ~one worker baseline RSS per extra slot. The
+// queue/byte/timeout budgets are shared across the whole pool.
+const detectSlots = [];
 let detectWorkerConfig = {
   maxPending: 64,
   timeoutMs: 120_000,
+  maxWorkers: 1,
   // A job-COUNT cap alone does not bound memory: every queued job
   // holds a full RGBA copy. Queued bytes are capped too (default
   // 512 MiB across active + queued jobs), single suspects are capped
@@ -887,7 +893,13 @@ let detectQueuedBytes = 0;
  * recycled (a pathological suspect must not wedge forensic
  * capacity forever). Returns the effective config + live depth.
  */
-export function configureStegoDetectWorker({ maxPending, timeoutMs, maxQueuedBytes, maxPixels, queueTimeoutMs } = {}) {
+function detectPendingCount() {
+  let active = 0;
+  for (const slot of detectSlots) if (slot.active) active++;
+  return detectQueue.length + active;
+}
+
+export function configureStegoDetectWorker({ maxPending, timeoutMs, maxQueuedBytes, maxPixels, queueTimeoutMs, maxWorkers } = {}) {
   if (maxPending !== undefined) {
     if (!Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > 4096) {
       throw new TypeError('Archx stego detection: maxPending must be an integer in [1, 4096]');
@@ -918,10 +930,17 @@ export function configureStegoDetectWorker({ maxPending, timeoutMs, maxQueuedByt
     }
     detectWorkerConfig.queueTimeoutMs = queueTimeoutMs;
   }
+  if (maxWorkers !== undefined) {
+    if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 16) {
+      throw new TypeError('Archx stego detection: maxWorkers must be an integer in [1, 16]');
+    }
+    detectWorkerConfig.maxWorkers = maxWorkers;
+  }
   return {
     ...detectWorkerConfig,
-    pending: detectQueue.length + (detectActive ? 1 : 0),
+    pending: detectPendingCount(),
     queuedBytes: detectQueuedBytes,
+    workers: detectSlots.length,
   };
 }
 
@@ -932,13 +951,33 @@ function releaseJobBytes(job) {
   }
 }
 
-function failDetectWorker(err) {
-  const jobs = [...(detectActive ? [detectActive] : []), ...detectQueue];
-  detectActive = null;
+function removeDetectSlot(slot) {
+  const idx = detectSlots.indexOf(slot);
+  if (idx >= 0) detectSlots.splice(idx, 1);
+}
+
+/** Fail ONE slot's active job and retire its worker; queued jobs and
+ *  sibling slots are unaffected (they will be pumped/respawned). */
+function failDetectSlot(slot, err) {
+  removeDetectSlot(slot);
+  try { slot.worker.terminate(); } catch { /* already gone */ }
+  const job = slot.active;
+  slot.active = null;
+  if (job) {
+    if (job.timer) clearTimeout(job.timer);
+    releaseJobBytes(job);
+    job.reject(err);
+  }
+}
+
+/** Reject every queued/active job and terminate all workers (close path). */
+function shutdownDetectWorkers(err) {
+  const jobs = [...detectQueue];
   detectQueue.length = 0;
-  if (detectWorker) {
-    try { detectWorker.terminate(); } catch { /* already gone */ }
-    detectWorker = null;
+  for (const slot of [...detectSlots]) {
+    removeDetectSlot(slot);
+    try { slot.worker.terminate(); } catch { /* already gone */ }
+    if (slot.active) { jobs.push(slot.active); slot.active = null; }
   }
   for (const job of jobs) {
     if (job.timer) clearTimeout(job.timer);
@@ -947,55 +986,14 @@ function failDetectWorker(err) {
   }
 }
 
-function pumpDetectQueue() {
-  if (detectActive || detectQueue.length === 0) return;
-  const job = detectQueue.shift();
-  if (detectWorkerConfig.queueTimeoutMs > 0 && Date.now() - job.enqueuedAt > detectWorkerConfig.queueTimeoutMs) {
-    releaseJobBytes(job);
-    job.reject(new Error(`Archx stego detection queue wait exceeded ${detectWorkerConfig.queueTimeoutMs}ms`));
-    pumpDetectQueue();
-    return;
-  }
-  detectActive = job;
-  let worker;
-  try {
-    worker = ensureDetectWorker();
-  } catch (err) {
-    detectActive = null;
-    releaseJobBytes(job);
-    job.reject(err);
-    pumpDetectQueue();
-    return;
-  }
-  job.timer = setTimeout(() => {
-    if (detectActive !== job) return;
-    detectActive = null;
-    releaseJobBytes(job);
-    try { worker.terminate(); } catch { /* already gone */ }
-    if (detectWorker === worker) detectWorker = null;
-    job.reject(new Error(`Archx stego detection timed out after ${job.timeoutMs}ms`));
-    pumpDetectQueue();
-  }, job.timeoutMs);
-  job.timer.unref?.();
-  try {
-    worker.postMessage(job.message, job.transfer);
-  } catch (err) {
-    clearTimeout(job.timer);
-    detectActive = null;
-    releaseJobBytes(job);
-    job.reject(err);
-    pumpDetectQueue();
-  }
-}
-
-function ensureDetectWorker() {
-  if (detectWorker) return detectWorker;
+function spawnDetectSlot() {
   const worker = new Worker(new URL('./detect-worker.js', import.meta.url), { type: 'module' });
   worker.unref();
+  const slot = { worker, active: null };
   worker.on('message', (msg) => {
-    const job = detectActive;
+    const job = slot.active;
     if (!job || msg?.id !== job.id) return;
-    detectActive = null;
+    slot.active = null;
     releaseJobBytes(job);
     if (job.timer) clearTimeout(job.timer);
     if (msg.ok) job.resolve(msg.result);
@@ -1003,19 +1001,56 @@ function ensureDetectWorker() {
     pumpDetectQueue();
   });
   worker.on('error', (err) => {
-    if (detectWorker === worker) failDetectWorker(err);
+    if (detectSlots.includes(slot)) { failDetectSlot(slot, err); pumpDetectQueue(); }
   });
   worker.on('exit', (code) => {
-    // A recycled (timed-out) worker's exit can arrive AFTER its
-    // replacement is already serving jobs; only the CURRENT
-    // worker's exit may fail pending work.
-    if (detectWorker !== worker) return;
-    if (code !== 0 && (detectActive || detectQueue.length)) {
-      failDetectWorker(new Error(`Archx stego detection worker exited (${code})`));
-    } else detectWorker = null;
+    // A recycled (timed-out) worker's exit can arrive after its slot
+    // was already removed; only a still-registered slot matters.
+    if (!detectSlots.includes(slot)) return;
+    if (code !== 0 && slot.active) {
+      failDetectSlot(slot, new Error(`Archx stego detection worker exited (${code})`));
+    } else {
+      removeDetectSlot(slot);
+    }
+    pumpDetectQueue();
   });
-  detectWorker = worker;
-  return worker;
+  detectSlots.push(slot);
+  return slot;
+}
+
+function pumpDetectQueue() {
+  while (detectQueue.length > 0) {
+    let slot = detectSlots.find((candidate) => !candidate.active) || null;
+    if (!slot) {
+      if (detectSlots.length >= detectWorkerConfig.maxWorkers) return;
+      try { slot = spawnDetectSlot(); } catch { return; }
+    }
+    const job = detectQueue.shift();
+    if (detectWorkerConfig.queueTimeoutMs > 0 && Date.now() - job.enqueuedAt > detectWorkerConfig.queueTimeoutMs) {
+      releaseJobBytes(job);
+      job.reject(new Error(`Archx stego detection queue wait exceeded ${detectWorkerConfig.queueTimeoutMs}ms`));
+      continue;
+    }
+    slot.active = job;
+    job.timer = setTimeout(() => {
+      if (slot.active !== job) return;
+      slot.active = null;
+      removeDetectSlot(slot);
+      try { slot.worker.terminate(); } catch { /* already gone */ }
+      releaseJobBytes(job);
+      job.reject(new Error(`Archx stego detection timed out after ${job.timeoutMs}ms`));
+      pumpDetectQueue();
+    }, job.timeoutMs);
+    job.timer.unref?.();
+    try {
+      slot.worker.postMessage(job.message, job.transfer);
+    } catch (err) {
+      clearTimeout(job.timer);
+      slot.active = null;
+      releaseJobBytes(job);
+      job.reject(err);
+    }
+  }
 }
 
 function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
@@ -1029,7 +1064,7 @@ function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
       `Archx stego detection: rgba must hold w*h*4 bytes and at most ${detectWorkerConfig.maxPixels} pixels`,
     ));
   }
-  const pending = detectQueue.length + (detectActive ? 1 : 0);
+  const pending = detectPendingCount();
   if (pending >= detectWorkerConfig.maxPending) {
     return Promise.reject(new Error(
       `Archx stego detection queue is full (${detectWorkerConfig.maxPending} pending); retry later or raise maxPending`,
@@ -1098,5 +1133,7 @@ export function batchDetectStegoInWorker(rgba, w, h, keys, options = {}) {
 }
 
 export function closeStegoDetectWorker() {
-  if (detectWorker) failDetectWorker(new Error('Archx stego detection worker closed'));
+  if (detectSlots.length || detectQueue.length) {
+    shutdownDetectWorkers(new Error('Archx stego detection worker closed'));
+  }
 }

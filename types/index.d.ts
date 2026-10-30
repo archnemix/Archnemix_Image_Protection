@@ -114,7 +114,13 @@ export interface ArchxLoadOptions {
   retries?: number;
   credentials?: RequestCredentials;
   integrity?: string;
-  automation?: 'allow' | 'degrade' | 'block';
+  /**
+   * Headless/automation tripwire policy (signals are spoofable; this
+   * is friction, not identity): 'off' ignores, 'monitor' (default)
+   * reports via onAttempt, 'lock' refuses to load. Legacy aliases
+   * 'allow'|'warn'|'degrade'|'block' are normalized at runtime.
+   */
+  automation?: 'off' | 'monitor' | 'lock';
   memory?: 'strict' | 'standard';
   localScramble?: boolean;
   lens?: boolean | Record<string, unknown>;
@@ -123,6 +129,12 @@ export interface ArchxLoadOptions {
   debug?: boolean;
   guards?: Record<string, boolean>;
   onAttempt?: (event: ArchxClientEvent) => void;
+  /**
+   * Server step-up challenge hook: when a mint is answered with
+   * `x-archx-challenge: required`, return a proof token (e.g. a
+   * Turnstile token) and the mint retries once with it.
+   */
+  onChallenge?: (ctx: { id: string; reason: string }) => Promise<string | null> | string | null;
   onLoad?: (info: Record<string, unknown>) => void;
   onError?: (error: Error) => void;
   onClick?: (event: Event) => void;
@@ -159,9 +171,32 @@ export function normalizeTemporalInterlace(
 ): TemporalInterlaceProfile | null;
 
 export function auditIntegrity(): string[];
-export function auditIntegrityDetails(): Array<{ api: string; ok: boolean; detail?: string }>;
+/** One gallery entry: a plain source, or a source-shaped object with per-item options. */
+export type ArchxGalleryItem =
+  | ArchxSource
+  | ({ src?: string; id?: string; assetId?: string; asset?: unknown; alt?: string; options?: ArchxLoadOptions } & Record<string, unknown>);
+export interface ArchxGalleryResult {
+  instances: ProtectedImage[];
+  ready: Promise<Array<PromiseSettledResult<unknown>>>;
+}
+
+export interface ArchxIntegrityDetails {
+  ok: boolean;
+  issues: readonly string[];
+  /** Captured at module load but already non-native (pre-load hooks). */
+  capturedNonNative: readonly string[];
+  /** Replaced after module load (post-load hooks). */
+  changedSinceLoad: readonly string[];
+  checked: readonly string[];
+  note: string;
+}
+export function auditIntegrityDetails(): ArchxIntegrityDetails;
 export function captureEarlyIntegritySnapshot(): unknown;
-export function verifyEarlyIntegritySnapshot(snapshot: unknown): string[];
+export function verifyEarlyIntegritySnapshot(snapshot: unknown): {
+  ok: boolean;
+  issues: readonly string[];
+  snapshotAt: number | string | null;
+};
 export function detectAutomation(): string[];
 
 export function onClientEvent(listener: (event: ArchxClientEvent) => void): () => void;
@@ -194,16 +229,16 @@ export interface ArchxStatic {
     image(target: Element | string, source?: ArchxSource, options?: ArchxLoadOptions): ProtectedImage;
     gallery(
       container: Element | string,
-      items: Array<ArchxSource | { source: ArchxSource; options?: ArchxLoadOptions }>,
-      options?: ArchxLoadOptions,
-    ): ProtectedImage[];
+      items: readonly ArchxGalleryItem[],
+      options?: ArchxLoadOptions & { itemClass?: string },
+    ): ArchxGalleryResult;
   };
   image(target: Element | string, source?: ArchxSource, options?: ArchxLoadOptions): ProtectedImage;
   gallery(
     container: Element | string,
-    items: Array<ArchxSource | { source: ArchxSource; options?: ArchxLoadOptions }>,
-    options?: ArchxLoadOptions,
-  ): ProtectedImage[];
+    items: readonly ArchxGalleryItem[],
+    options?: ArchxLoadOptions & { itemClass?: string },
+  ): ArchxGalleryResult;
   protectAll(selectorOrNodes?: string | Iterable<Element>, options?: ArchxLoadOptions): ProtectedImage[];
   preloadAssets: typeof preloadAssets;
   defineElement(name?: string): void;
@@ -224,3 +259,9 @@ declare const Archx: ArchxStatic;
 export default Archx;
 
 export type { ArchxHeader };
+
+/**
+ * The package root also re-exports the scramble/container/stego
+ * primitives documented in `@archnemix/image-protection/scramble`.
+ */
+export * from './scramble.js';

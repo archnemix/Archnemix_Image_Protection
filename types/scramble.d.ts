@@ -102,6 +102,11 @@ export interface InjectedWebCrypto {
   getRandomValues?: ((array: Uint8Array) => Uint8Array) | null;
   cryptoObj?: object | null;
 }
+/** Inject exact synchronous SHA-256/HMAC-SHA256 (Node: node:crypto). Null restores built-ins. */
+export function useSyncCrypto(impl: {
+  sha256: (bytes: Uint8Array) => Uint8Array;
+  hmacSha256: (key: Uint8Array, message: Uint8Array) => Uint8Array;
+} | null): void;
 export function useWebCrypto(injected: InjectedWebCrypto | null): void;
 
 export function generateKeyBase64(): string;
@@ -227,6 +232,18 @@ export interface StegoDetection {
   geometry: { scaleX: number; scaleY: number; originX: number; originY: number };
   grid: { x: number; y: number };
 }
+/** Measured pre-flight for a planned embed: real PSNR, content class, optional self-verified strength. */
+export function assayStegoEmbed(
+  rgba: Uint8Array, w: number, h: number,
+  options?: { key?: string; profile?: 'standard' | 'robust'; strength?: number; gridX?: number; gridY?: number; verify?: boolean },
+): Readonly<{
+  profile: string; strength: number; grid: { x: number; y: number };
+  psnr: number; maxChannelDelta: number;
+  smoothFraction: number; binaryFraction: number;
+  contentClass: 'binary-graphic' | 'flat-minimal' | 'photo-textured';
+  verifiedAtStrength: number | null; recommendedStrength: number;
+  warnings: string[];
+}>;
 export function detectStegoFingerprint(
   rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, options?: StegoDetectOptions,
 ): StegoDetection;

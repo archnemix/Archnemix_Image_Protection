@@ -104,9 +104,9 @@ void createRedisStateStore({ client: { eval: async () => 1 } });
 
 // v1.18: strict replay saturation, fraction ceiling, ownership claims.
 const claimToken: string = signOwnershipClaim(
-  { owner: 'Type Smoke', imageId: 'img-1', perceptualFingerprint: '0123456789abcdef', stegoFingerprint: '0123456789ab' },
+  { owner: 'Type Smoke', imageId: 'img-1', perceptualHash: '0123456789abcdef', stegoFingerprint: '0123456789ab' },
   'not-a-real-key',
 );
-const verificationPromise = verifyOwnership(new Uint8Array(4), { claimToken, maxTimeMs: 5000 });
+const verificationPromise = verifyOwnership(new Uint8Array(4), { claim: claimToken, detectOptions: { maxTimeMs: 5000 } });
 const keyFingerprint: string = ownershipPublicKeyFingerprint('not-a-real-key');
 void [claimToken, verificationPromise, keyFingerprint];

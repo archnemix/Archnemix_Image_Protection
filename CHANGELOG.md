@@ -3,7 +3,89 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-## [1.18.0] — Unreleased
+## [1.19.0] — Unreleased
+
+Eighth-review response + modularity (`docs/RESEARCH.md` §2.27): ownership
+trust hardening, fail-closed width fractions, mixed-TTL replay
+saturation fix, step-up challenges, tamper-evident issuance log, an
+embed pre-flight assay, a detect worker pool, and a full
+responsibility-based module split with unchanged public paths.
+
+### Security fixes
+
+- **Ownership trust discipline**: unverified embedded claims no longer
+  count as their own evidence; `contentTrusted` is the only act-on-it
+  signal. Malformed perceptual hashes no longer crash verification,
+  a decoy claim can no longer shadow a real one, and the detect CLI
+  no longer reports false success (exit codes + `spawnSync`-friendly).
+- **`maxWidthFraction` fails closed**: invalid values are rejected at
+  startup; if master dimensions cannot be measured, minting returns
+  503 instead of issuing an uncapped token.
+- **Mixed-TTL replay saturation**: `BoundedTtlSet.claim()` now proves
+  expired space is exhausted (full sweep) before evicting a live claim
+  or strict-rejecting — expired short-TTL entries behind long-TTL heads
+  no longer cause false saturation. New non-mutating `has()`.
+- **Temporal canvas natives captured**: `putImageData` (and friends)
+  are captured at load and audited like the other canvas natives; a
+  prototype-level hook can no longer silently sit on the temporal path.
+
+### Added
+
+- **Step-up challenges** (`abuseDetection.action: 'challenge'` +
+  `challenge.verify`): suspicious subjects get `403` +
+  `x-archx-challenge: required` instead of a blunt deny; a host
+  verifier (Turnstile, WebAuthn, …) grants a process-local clearance
+  (`clearanceTtlSec`, default 600 s). Single and batch mints share the
+  gate; the bundled client's auto-retry (`onChallenge`) covers single
+  mints — batch keepers see `errors[ref].status === 403` and retry
+  after solving. Verifier outages return 503, never allow.
+- **Tamper-evident issuance log** (`createIssuanceLog`,
+  `verifyIssuanceChain`): HMAC-chained append-only issuance records;
+  edits, deletions, and reordering are detectable. Records ≤ 16 KiB;
+  keep the log secret separate from the data. Not a timestamp proof.
+- **Embed pre-flight assay** (`assayStegoEmbed()` +
+  `archx-protect --assay [--json]`): runs the real embedder to report
+  measured PSNR/max delta/content class and the minimum
+  self-verifying strength per image. CLI exit 2 = no verifying
+  strength (e.g. near-binary periodic graphics, the weak class).
+- **Detect worker pool**: `configureStegoDetectWorker({ maxWorkers })`
+  (1–16, default 1) with per-slot crash isolation and shared budgets;
+  `handler.stats()`-style config reporting includes live worker count.
+- **XMP rights flags**: ownership metadata now declares
+  `xmpRights:Marked=True` + usage terms so stock/IPTC tooling sees the
+  restriction even without the Archx claim token.
+- **Faster server-side HMAC for detection** via injectable Node crypto
+  (`server/node-crypto.js`, `useSyncCrypto()`), Uint32 integral images,
+  and typed scratch buffers — measured as micro-wins (detector wall
+  time is candidate-evaluation-bound; earlier projections withdrawn),
+  with peak RSS ≈ 90 MiB on the 800×436 geometry sweep.
+- Automation-signal aliases on the client (webdriver/CDP surface
+  parity with the integrity report).
+
+### Changed
+
+- **Modular split, same public surface**: `src/scramble.js` →
+  `src/core/` (12 modules), `src/archx.js` → `src/client/` (15
+  modules), `server/middleware.js` → `bounded.js` / `tokens.js` /
+  `config.js` + factory. `src/scramble.js` and `server/middleware.js`
+  re-export everything; package exports unchanged. A runtime contract
+  test now pins `types/*.d.ts` to the actual export surface.
+  See `docs/ARCHITECTURE.md` for the module map and dependency rules.
+- Bundle: 146.2 KiB minified / 47.0 KiB gzipped.
+
+### Refuted / deferred (with measurements, §2.27)
+
+- Per-call process spawn for detection (already `worker_threads`);
+  755 MiB tilt RSS (measured ≈ 90 MiB); cross-tier cache poisoning via
+  `variantKeyScope` (key includes the post-downgrade width).
+- True tile streaming / deep-zoom stays deferred: authorized-resolution
+  single-response delivery is the documented architectural limit;
+  IIIF-style tiered access is the tracked design (§2.27).
+- JND/DCT layout-v4 or Fourier-Mellin embedding remains R&D, not a
+  patch; the Tardos bound keeps blind collusion-proof decoding out of
+  reach of the 96-bit channel, so the assay framing stands.
+
+## [1.18.0]
 
 Seventh-review response + ownership claims (`docs/RESEARCH.md` §2.26):
 packaged-artifact proof, explicit replay-saturation and preview

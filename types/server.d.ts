@@ -183,7 +183,23 @@ export interface ArchxServerOptions {
   onSecurityEvent?: (event: ArchxSecurityEvent) => void;
   onDelivery?: (event: ArchxSecurityEvent) => void;
   onAbuse?: (event: ArchxSecurityEvent) => void;
-  abuseDetection?: Record<string, unknown> | false;
+  abuseDetection?: {
+    distinctImages?: number;
+    windowMs?: number;
+    /** 'event' (default) reports; 'deny' blocks 429; 'challenge' demands a step-up proof (requires challenge.verify). */
+    action?: 'event' | 'deny' | 'challenge';
+  } | false;
+  /**
+   * Step-up challenge verifier for abuseDetection.action 'challenge'.
+   * verify() receives the raw proof header value (e.g. forward it to
+   * Turnstile siteverify or check a WebAuthn assertion host-side)
+   * and returns true / { ok: true, ttlSec? } to clear the subject.
+   */
+  challenge?: {
+    verify: (req: IncomingMessage, proof: string) => Promise<boolean | { ok: boolean; ttlSec?: number }> | boolean | { ok: boolean; ttlSec?: number };
+    header?: string;
+    clearanceTtlSec?: number;
+  };
   quotas?: Record<string, unknown> | false;
   rateLimitPerMinute?: number;
   tokenRateLimitPerMinute?: number;
@@ -238,10 +254,11 @@ export interface ArchxHandlerStats {
 
 export interface ArchxConfigAudit {
   ok: boolean;
-  errors: string[];
-  warnings: string[];
-  recommendations?: string[];
-  [key: string]: unknown;
+  /** Blocking configuration problems (named `issues` at runtime). */
+  issues: readonly string[];
+  warnings: readonly string[];
+  /** Sanitized effective-configuration summary (never contains secrets), or null when invalid. */
+  summary: Readonly<Record<string, unknown>> | null;
 }
 
 export interface ArchxRequestHandler {
@@ -347,7 +364,9 @@ export function configureStegoDetectWorker(options?: {
   maxPixels?: number;
   /** Reject a job that waited in queue longer than this (default 300s; 0 disables). */
   queueTimeoutMs?: number;
-}): { maxPending: number; timeoutMs: number; maxQueuedBytes: number; maxPixels: number; queueTimeoutMs: number; pending: number; queuedBytes: number };
+  /** Worker-thread pool size (default 1; raise for multi-core forensic batch hosts). */
+  maxWorkers?: number;
+}): { maxPending: number; timeoutMs: number; maxQueuedBytes: number; maxPixels: number; queueTimeoutMs: number; maxWorkers: number; pending: number; queuedBytes: number; workers: number };
 /**
  * Screen one suspect against many keys in a single worker job:
  * shared planes, cheap native screen per key, full search only for
@@ -435,58 +454,117 @@ export interface ArchxOwnershipClaimPayload {
   v: 1;
   own: string;
   img: string;
-  /** 16-hex perceptual fingerprint of the unscrambled derivative. */
-  ph: string;
-  /** 12-hex per-image stego fingerprint, or '' when unmarked. */
-  sfp: string;
+  /** 16-hex perceptual fingerprint of the unscrambled derivative, or null. */
+  ph: string | null;
+  /** 12-hex per-image stego fingerprint, or null when unmarked. */
+  sfp: string | null;
 }
-/** Sign a deterministic ownership claim token (ARCHX1.<b64url>.<sig>). */
-export function signOwnershipClaim(
-  claim: { owner: string; imageId?: string; perceptualFingerprint: string; stegoFingerprint?: string },
-  privateKey: import('node:crypto').KeyObject | string | Uint8Array,
+/** Generate a fresh Ed25519 ownership key pair (PEM strings). */
+export function generateOwnershipKeyPair(): Readonly<{ privateKey: string; publicKey: string }>;
+/** Load an Ed25519 private key from PEM (throws for other key types). */
+export function loadOwnershipPrivateKey(pem: string): import('node:crypto').KeyObject;
+/** Load an Ed25519 public key from PEM (throws for other key types). */
+export function loadOwnershipPublicKey(pem: string): import('node:crypto').KeyObject;
+/** SHA-256 of the SPKI DER encoding, first 32 hex chars — publish alongside the key. */
+export function ownershipPublicKeyFingerprint(
+  publicKey: import('node:crypto').KeyObject | string,
 ): string;
-/** Structural decode only — no signature check. */
-export function parseOwnershipClaim(token: string): ArchxOwnershipClaimPayload | null;
+/**
+ * Sign a deterministic ownership claim token (ARCHX1.<b64url>.<sig>).
+ * No timestamp: identical derivative => identical token.
+ */
+export function signOwnershipClaim(
+  claim: { owner: string; imageId?: string; perceptualHash?: string | null; stegoFingerprint?: string | null },
+  privateKey: import('node:crypto').KeyObject | string,
+): string;
+/**
+ * Structural decode + strict field validation only — NO signature
+ * check. Returns null for anything malformed.
+ */
+export function parseOwnershipClaim(token: string): {
+  payload: ArchxOwnershipClaimPayload;
+  segment: string;
+  signature: Buffer;
+} | null;
 /** Verify the Ed25519 signature over a claim token. */
 export function verifyOwnershipClaim(
   token: string,
-  publicKey: import('node:crypto').KeyObject | string | Uint8Array,
-): { ok: boolean; payload: ArchxOwnershipClaimPayload | null; token: string | null };
-/** Find a claim token in encoded image bytes (EXIF/XMP scan). */
-export function extractOwnershipClaim(encodedBytes: Uint8Array): string | null;
-/** SHA-256 of the SPKI DER encoding, first 32 hex chars — publish alongside the key. */
-export function ownershipPublicKeyFingerprint(
-  publicKey: import('node:crypto').KeyObject | string | Uint8Array,
-): string;
+  publicKey: import('node:crypto').KeyObject | string,
+): { valid: boolean; claim: ArchxOwnershipClaimPayload | null; reason: string | null };
+/** First claim token found in encoded image bytes (EXIF/XMP scan). */
+export function extractOwnershipClaim(imageBytes: Uint8Array): string | null;
+/** All claim-token candidates in encoded bytes (bounded; decoy-resistant evidence should prefer this). */
+export function extractOwnershipClaims(imageBytes: Uint8Array, maxCandidates?: number): string[];
+/** Embed ownership metadata into already-encoded image bytes. */
+export function embedOwnershipMetadata(
+  imageBytes: Uint8Array | ArrayBuffer,
+  metadata: { owner?: string; copyright?: string; artist?: string; token?: string },
+): Promise<Buffer>;
 export interface ArchxOwnershipVerification {
+  claimFound: boolean;
+  claimSource: 'external' | 'metadata' | null;
+  claimCandidates: number;
+  signatureChecked: boolean;
+  signatureValid: boolean;
+  /** Claim payload may drive evidence (signature-valid or operator-supplied). */
+  claimTrusted: boolean;
+  /** Some layer an attacker cannot fabricate agreed — safe to act on. */
+  contentTrusted: boolean;
+  /** Set ONLY from a trusted claim; suspect-supplied strings go to unverifiedClaim. */
+  owner: string | null;
+  imageId: string | null;
+  unverifiedClaim: { owner: string; imageId: string | null } | null;
+  perceptual: { hash: string | null; distanceToClaim: number | null; matchesClaim: boolean };
+  stego: {
+    found: boolean;
+    fingerprint: string | null;
+    matchesClaim: boolean;
+    erasureDecoded: boolean;
+    corrections: number;
+    timedOut: boolean;
+  } | null;
   verdict: 'verified' | 'claim-only' | 'content-match' | 'no-evidence';
-  layers: {
-    metadata: { found: boolean; source: 'metadata' | 'provided' | null; token: string | null; payload: ArchxOwnershipClaimPayload | null };
-    signature: { checked: boolean; valid: boolean | null };
-    content: {
-      perceptualFingerprint: string;
-      perceptualDistance: number | null;
-      perceptualMatch: boolean;
-      stego: Record<string, unknown> | null;
-      stegoFingerprint: string | null;
-      stegoMatchesClaim: boolean | null;
-    };
-  };
-  note: string;
 }
 /**
- * Layered ownership rescan: metadata claim + signature + perceptual
- * soft binding + (optionally) StegoMark detection with a private key.
+ * Layered ownership rescan (runs in-process; stego detection is
+ * time-bounded by default). Verdicts: verified / claim-only /
+ * content-match / no-evidence — evidence, not legal proof.
  */
 export function verifyOwnership(
-  encodedBytes: Uint8Array | ArrayBuffer,
+  imageBytes: Uint8Array | ArrayBuffer,
   options?: {
-    publicKey?: import('node:crypto').KeyObject | string | Uint8Array;
-    claimToken?: string;
-    stegoKey?: string;
-    stegoProfile?: string;
-    searchGeometry?: boolean;
-    searchTilt?: boolean;
-    maxTimeMs?: number;
+    publicKey?: import('node:crypto').KeyObject | string;
+    stegoKey?: string | null;
+    /** Operator-supplied claim token from your issuance registry. */
+    claim?: string | null;
+    maxPhDistance?: number;
+    detectOptions?: Record<string, unknown>;
   },
 ): Promise<ArchxOwnershipVerification>;
+
+export interface ArchxIssuanceEntry {
+  seq: number;
+  ts: string;
+  record: Record<string, unknown>;
+  prev: string;
+  mac: string;
+}
+export interface ArchxIssuanceLog {
+  append(record: Record<string, unknown>): Readonly<ArchxIssuanceEntry>;
+  entries(): Array<Readonly<ArchxIssuanceEntry>>;
+  head(): string;
+  verify(): { ok: boolean; badIndex: number; reason: string | null; head?: string };
+  readonly size: number;
+}
+/** Tamper-evident hash-chained issuance registry (see docs/IP_HOLDER_GUIDE.md). */
+export function createIssuanceLog(options: {
+  secret: string | Buffer;
+  entries?: ArchxIssuanceEntry[];
+  allowBroken?: boolean;
+  now?: () => string;
+}): ArchxIssuanceLog;
+/** Verify a serialized issuance chain without constructing a log. */
+export function verifyIssuanceChain(
+  entries: ArchxIssuanceEntry[],
+  secret: string | Buffer,
+): { ok: boolean; badIndex: number; reason: string | null; head?: string };

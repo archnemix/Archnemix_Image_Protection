@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scrambleImage, generateKeyBase64 } from './scramble-image.js';
+import { assayStegoEmbed } from '../src/scramble.js';
 import { generateOwnershipKeyPair } from './ownership.js';
 
 function parseArgs(argv, booleanFlags = new Set()) {
@@ -40,7 +41,7 @@ function parseArgs(argv, booleanFlags = new Set()) {
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2), new Set(['encrypt', 'lossless', 'help']));
+const args = parseArgs(process.argv.slice(2), new Set(['encrypt', 'lossless', 'help', 'assay', 'assay-no-verify', 'json']));
 const [input, output] = args._;
 if (args['gen-ownership-key']) {
   const pair = generateOwnershipKeyPair();
@@ -50,6 +51,55 @@ if (args['gen-ownership-key']) {
   console.log('# ARCHX_OWNERSHIP_PUBLIC_KEY (publish freely; used by archx-detect --verify-ownership):');
   console.log(pair.publicKey);
   process.exit(0);
+}
+if (args.assay) {
+  // Pre-flight embed assay (v1.19): measure the REAL distortion of the
+  // current embedder on THIS image and optionally self-verify detector
+  // recovery, before committing a catalog to StegoMark settings. Exit 0 =
+  // verified (or --assay-no-verify), 2 = no self-verifying strength found.
+  if (!input) { console.error('Usage: archx-protect <input image> --assay [--stego-profile robust] [--stego-strength 6] [--json]'); process.exit(1); }
+  const assayProfile = args['stego-profile'] || 'robust';
+  const assayStrength = args['stego-strength'] ? Number(args['stego-strength']) : 6;
+  const assayGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
+  const assayGridY = args['stego-grid-y'] ? Number(args['stego-grid-y']) : undefined;
+  if (!['standard', 'robust'].includes(assayProfile) ||
+      !Number.isInteger(assayStrength) || assayStrength < 1 || assayStrength > 16 ||
+      (assayGridX !== undefined && (!Number.isInteger(assayGridX) || assayGridX < 4 || assayGridX > 64)) ||
+      (assayGridY !== undefined && (!Number.isInteger(assayGridY) || assayGridY < 4 || assayGridY > 64))) {
+    console.error('Archx assay: --stego-profile must be standard or robust; --stego-strength 1-16; grids 4-64');
+    process.exit(1);
+  }
+  const maxInputBytes = args['max-input-bytes'] ? Number(args['max-input-bytes']) : 50 * 1024 * 1024;
+  const fd = fs.openSync(input, 'r');
+  let bytes;
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > maxInputBytes) throw new Error(`input is not a regular file within the ${maxInputBytes}-byte limit`);
+    bytes = fs.readFileSync(fd);
+  } finally { fs.closeSync(fd); }
+  const sharpModule = await import('sharp');
+  const sharp = sharpModule.default || sharpModule;
+  let pipe = sharp(bytes, { failOn: 'error', limitInputPixels: 40_000_000 }).rotate();
+  if (args['max-width']) pipe = pipe.resize({ width: Number(args['max-width']), withoutEnlargement: true });
+  const { data, info } = await pipe.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const report = assayStegoEmbed(new Uint8Array(data), info.width, info.height, {
+    key: process.env.ARCHX_STEGO_KEY || args['stego-key'] || 'archx-assay-probe',
+    profile: assayProfile, strength: assayStrength,
+    gridX: assayGridX, gridY: assayGridY,
+    verify: !args['assay-no-verify'],
+  });
+  const result = { file: input, width: info.width, height: info.height, ...report };
+  if (args.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`Assay ${input} (${info.width}x${info.height}, profile ${report.profile}, strength ${report.strength})`);
+    console.log(`  measured PSNR ${report.psnr} dB, max channel delta ${report.maxChannelDelta}, content ${report.contentClass}`);
+    console.log(`  smooth cells ${(report.smoothFraction * 100).toFixed(0)}%, binary cells ${(report.binaryFraction * 100).toFixed(0)}%, grid ${report.grid.x}x${report.grid.y}`);
+    if (report.verifiedAtStrength !== null) console.log(`  detector self-verified at strength ${report.verifiedAtStrength} (recommended: ${report.recommendedStrength})`);
+    else if (!args['assay-no-verify']) console.log('  detector did NOT self-verify at any strength (exit 2)');
+    for (const w of report.warnings) console.log(`  ⚠ ${w}`);
+  }
+  process.exit(args['assay-no-verify'] || report.verifiedAtStrength !== null ? 0 : 2);
 }
 if (!input || !output || args.help) {
   console.log(`Usage: archx-protect <input image|folder> <output .archx|folder> [options]
@@ -75,7 +125,10 @@ if (!input || !output || args.help) {
   --stego-grid-y <n>  StegoMark grid rows 4–64 (profile default)
   --max-input-bytes <n> reject masters above this size (default 52428800)
   --max-input-pixels <n> reject masters above this pixel budget (default 40000000)
-  --timeout-sec <n> Sharp processing timeout per image (default 10)`);
+  --timeout-sec <n> Sharp processing timeout per image (default 10)
+  --assay              pre-flight: measure real embed PSNR/content class for one
+                       image and self-verify detector recovery (no output file;
+                       exit 2 when no strength self-verifies). --json for JSON.`);
   process.exit(input ? 0 : 1);
 }
 

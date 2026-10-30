@@ -48,7 +48,7 @@ npm pack --dry-run
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
 and then runs the real-Chromium browser suite. At v1.18.0 the expected
-results are 119/119 Node tests (112 unit + 7 seeded fuzz), a clean
+results are 128/128 Node tests (121 unit + 7 seeded fuzz), a clean
 `tsc --noEmit` type smoke test, 122/122 Chromium checks, and a passing
 packaged-artifact smoke test (`npm run test:pack`). With
 `ARCHX_TEST_REDIS_URL` pointed at a disposable Redis, `npm run
@@ -84,11 +84,12 @@ at the top of that file.
 
 | Path | Purpose | Review priority |
 | --- | --- | --- |
-| `server/middleware.js` | Token mint/batch/redemption boundary: authorization, hardened/catalog defaults and audit, canonical widths, derivative caches, buyer/order tracing, claims, proof of possession, quotas, replay state, proxy handling, security/delivery/provenance events | Critical |
+| `server/middleware.js` (+ `bounded.js`, `tokens.js`, `config.js`) | Token mint/batch/redemption boundary: authorization, hardened/catalog defaults and audit, canonical widths, derivative caches, buyer/order tracing, claims, proof of possession, step-up challenges, quotas, replay state, proxy handling, security/delivery/provenance events | Critical |
 | `server/redis-state-store.js` | Bundled atomic Redis/Valkey state-store adapter | Critical for multi-instance review |
-| `server/scramble-image.js` | Sharp derivative pipeline, format/dimension/pixel/time budgets, marks and StegoMark profiles, scrambling | Critical |
-| `src/scramble.js` | Shared container, scramble, AES-GCM, forensic, StegoMark, fingerprint, and BMP primitives | High |
-| `src/archx.js` | Browser loader/viewer: token fetch/proofs, decode/cache lifecycle, Canvas/WebGL renderers, guards, Lens, temporal effects | High |
+| `server/scramble-image.js` | Sharp derivative pipeline, format/dimension/pixel/time budgets, marks and StegoMark profiles, scrambling, detect worker pool | Critical |
+| `server/ownership.js` / `server/issuance-log.js` | Ed25519 ownership claims + layered rescan; HMAC-chained tamper-evident issuance records | High for attribution review |
+| `src/scramble.js` (barrel over `src/core/`) | Shared container, scramble, AES-GCM, forensic, StegoMark, fingerprint, and BMP primitives | High |
+| `src/archx.js` (assembly over `src/client/`) | Browser loader/viewer: token fetch/proofs, decode/cache lifecycle, Canvas/WebGL renderers, guards, Lens, temporal effects — module map in `docs/ARCHITECTURE.md` | High |
 | `server/build-assets.js` / `server/build-assets-cli.js` | Incremental responsive `.archx` builder and `archx-build` CLI for static/CDN catalogs | High for scale/static review |
 | `server/scramble-cli.js` | `archx-protect` command-line tool | Medium |
 | `server/detect-stego-cli.js` | `archx-detect` attribution tool | Medium |
@@ -156,7 +157,7 @@ information-leaking.
 
 ### 3. Browser client
 
-Follow a token image through `src/archx.js`:
+Follow a token image through `src/client/` (start at `loaders.js`, then `network.js` → `viewer.js` → `draw.js`):
 
 - token and asset-manifest schema/origin/redirect/size validation;
 - batch-mint grouping/fallback and manifest variant selection/cache bounds;

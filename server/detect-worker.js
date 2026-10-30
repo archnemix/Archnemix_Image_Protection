@@ -16,6 +16,7 @@
  * full search the caller asked for.
  */
 import { parentPort } from 'node:worker_threads';
+import './node-crypto.js'; // hardware SHA/HMAC for the shared stego core
 import { detectStegoFingerprint } from '../src/scramble.js';
 
 parentPort.on('message', (msg) => {

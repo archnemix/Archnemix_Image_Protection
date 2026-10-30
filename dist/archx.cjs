@@ -43,9 +43,10 @@ __export(index_exports, {
   PRESETS: () => PRESETS,
   ProtectedImage: () => ProtectedImage,
   TEMPORAL_INTERLACE_PROFILES: () => TEMPORAL_INTERLACE_PROFILES,
-  VERSION: () => VERSION,
+  VERSION: () => VERSION2,
   applyForensicBlocks: () => applyForensicBlocks,
   assayStegoCollusion: () => assayStegoCollusion,
+  assayStegoEmbed: () => assayStegoEmbed,
   auditIntegrity: () => auditIntegrity,
   auditIntegrityDetails: () => auditIntegrityDetails,
   base64ToBytes: () => base64ToBytes,
@@ -92,15 +93,60 @@ __export(index_exports, {
   tileRect: () => tileRect,
   useJsonParser: () => useJsonParser,
   usePlugin: () => usePlugin,
+  useSyncCrypto: () => useSyncCrypto,
   useWebCrypto: () => useWebCrypto,
   validateArchxHeader: () => validateArchxHeader,
   verifyEarlyIntegritySnapshot: () => verifyEarlyIntegritySnapshot
 });
 module.exports = __toCommonJS(index_exports);
 
-// src/scramble.js
-var ARCHX_MAGIC = "ARCHX1";
-var DEFAULT_GRID = 8;
+// src/core/bytes.js
+function asBytes(bytes) {
+  if (bytes instanceof Uint8Array) return bytes;
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
+  if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return new Uint8Array(bytes || []);
+}
+var utf8Encoder = new TextEncoder();
+var utf8Fatal = new TextDecoder("utf-8", { fatal: true });
+var utf8Lenient = new TextDecoder("utf-8", { fatal: false });
+var textDecodeCall = TextDecoder.prototype.decode;
+var textEncodeCall = TextEncoder.prototype.encode;
+function utf8Encode(str) {
+  return textEncodeCall.call(utf8Encoder, str);
+}
+function utf8DecodeFatal(bytes) {
+  return textDecodeCall.call(utf8Fatal, bytes);
+}
+function bytesToBase64(bytes) {
+  const u8 = asBytes(bytes);
+  if (typeof Buffer !== "undefined") return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString("base64");
+  let bin = "";
+  const CHUNK = 32768;
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+function base64ToBytes(b64) {
+  if (typeof b64 !== "string") throw new TypeError("Archx: base64 value must be a string");
+  let normalized = b64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
+  if (normalized.includes("=") && normalized.indexOf("=") !== normalized.length - padding) {
+    throw new Error("Archx: invalid base64 value");
+  }
+  if (normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    throw new Error("Archx: invalid base64 value");
+  }
+  if (normalized.length % 4) normalized += "=".repeat(4 - normalized.length % 4);
+  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(normalized, "base64"));
+  const bin = atob(normalized);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// src/core/crypto.js
 function hashSeed(str, seed = 0) {
   let h1 = 3735928559 ^ seed;
   let h2 = 1103547991 ^ seed;
@@ -166,60 +212,6 @@ function sha256SeededPrng(seedString) {
   );
   for (let i = 0; i < 12; i++) rand();
   return rand;
-}
-function buildScramblePlan(grid = DEFAULT_GRID, key = "", version = 2) {
-  if (version !== 1 && version !== 2) throw new TypeError("Archx: scramble plan version must be 1 or 2");
-  const g = Math.max(2, Math.min(32, grid | 0));
-  const count = g * g;
-  let rand;
-  if (version === 2) {
-    rand = sfc32(...cyrb128(String(key) + "::archx-grid2-" + g));
-    for (let i = 0; i < 8; i++) rand();
-  } else {
-    rand = mulberry32(hashSeed(String(key) + "::archx-grid-" + g));
-  }
-  const order = Array.from({ length: count }, (_, i) => i);
-  for (let i = count - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
-  }
-  const flips = Array.from({ length: count }, () => ({
-    fx: rand() < 0.5,
-    fy: rand() < 0.5
-  }));
-  const inverse = new Array(count);
-  order.forEach((orig, scrambledPos) => {
-    inverse[orig] = scrambledPos;
-  });
-  return { grid: g, count, version, order, inverse, flips };
-}
-function tileRect(index, grid, tw, th) {
-  return { x: index % grid * tw, y: Math.floor(index / grid) * th, w: tw, h: th };
-}
-function paddedSize(w, h, grid) {
-  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32) {
-    throw new RangeError("Archx: invalid image/grid dimensions");
-  }
-  const tw = Math.ceil(w / grid);
-  const th = Math.ceil(h / grid);
-  return { tw, th, pw: tw * grid, ph: th * grid };
-}
-function asBytes(bytes) {
-  if (bytes instanceof Uint8Array) return bytes;
-  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
-  if (ArrayBuffer.isView(bytes)) return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return new Uint8Array(bytes || []);
-}
-var utf8Encoder = new TextEncoder();
-var utf8Fatal = new TextDecoder("utf-8", { fatal: true });
-var utf8Lenient = new TextDecoder("utf-8", { fatal: false });
-var textDecodeCall = TextDecoder.prototype.decode;
-var textEncodeCall = TextEncoder.prototype.encode;
-function utf8Encode(str) {
-  return textEncodeCall.call(utf8Encoder, str);
-}
-function utf8DecodeFatal(bytes) {
-  return textDecodeCall.call(utf8Fatal, bytes);
 }
 var SHA256_K = new Uint32Array([
   1116352408,
@@ -287,7 +279,12 @@ var SHA256_K = new Uint32Array([
   3204031479,
   3329325298
 ]);
+var syncCryptoImpl = null;
+function useSyncCrypto(impl) {
+  syncCryptoImpl = impl && typeof impl.sha256 === "function" && typeof impl.hmacSha256 === "function" ? impl : null;
+}
 function sha256Bytes(message) {
+  if (syncCryptoImpl) return syncCryptoImpl.sha256(asBytes(message));
   const msg = asBytes(message);
   const bitLenHi = Math.floor(msg.length / 536870912);
   const bitLenLo = msg.length << 3;
@@ -341,6 +338,7 @@ function sha256Bytes(message) {
   return out;
 }
 function hmacSha256Bytes(key, message) {
+  if (syncCryptoImpl) return syncCryptoImpl.hmacSha256(asBytes(key), asBytes(message));
   let keyBytes = asBytes(key);
   if (keyBytes.length > 64) keyBytes = sha256Bytes(keyBytes);
   const inner = new Uint8Array(64 + asBytes(message).length);
@@ -354,6 +352,437 @@ function hmacSha256Bytes(key, message) {
   outer.set(sha256Bytes(inner), 64);
   return sha256Bytes(outer);
 }
+var coreWebCrypto = null;
+var keyCache = /* @__PURE__ */ new Map();
+var AES_KEY_CACHE_MAX = 16;
+function useWebCrypto(injected) {
+  if (!injected || typeof injected !== "object" || !injected.subtle) {
+    coreWebCrypto = null;
+  } else {
+    coreWebCrypto = {
+      subtle: injected.subtle,
+      importKey: typeof injected.importKey === "function" ? injected.importKey : null,
+      encrypt: typeof injected.encrypt === "function" ? injected.encrypt : null,
+      decrypt: typeof injected.decrypt === "function" ? injected.decrypt : null,
+      digest: typeof injected.digest === "function" ? injected.digest : null,
+      getRandomValues: typeof injected.getRandomValues === "function" ? injected.getRandomValues : null,
+      cryptoObj: injected.cryptoObj || null
+    };
+  }
+  keyCache.clear();
+}
+function subtleCall(name, args) {
+  if (coreWebCrypto) {
+    const fn = coreWebCrypto[name];
+    if (fn) return fn.call(coreWebCrypto.subtle, ...args);
+    return coreWebCrypto.subtle[name](...args);
+  }
+  return globalThis.crypto.subtle[name](...args);
+}
+function randomFill(bytes) {
+  if (coreWebCrypto?.getRandomValues) {
+    return coreWebCrypto.getRandomValues.call(coreWebCrypto.cryptoObj || globalThis.crypto, bytes);
+  }
+  return globalThis.crypto.getRandomValues(bytes);
+}
+async function importAesKey(keyBase64) {
+  if (typeof keyBase64 !== "string" || !keyBase64) throw new TypeError("Archx: AES key must be a base64 string");
+  const cached = keyCache.get(keyBase64);
+  if (cached) {
+    keyCache.delete(keyBase64);
+    keyCache.set(keyBase64, cached);
+    return cached;
+  }
+  const pending = (async () => {
+    const raw = base64ToBytes(keyBase64);
+    try {
+      if (![16, 24, 32].includes(raw.length)) {
+        throw new Error("Archx: AES key must be 16/24/32 bytes (base64)");
+      }
+      return await subtleCall("importKey", [
+        "raw",
+        raw,
+        { name: "AES-GCM", length: raw.length * 8 },
+        false,
+        ["encrypt", "decrypt"]
+      ]);
+    } finally {
+      raw.fill(0);
+    }
+  })();
+  keyCache.set(keyBase64, pending);
+  while (keyCache.size > AES_KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
+  try {
+    return await pending;
+  } catch (err) {
+    if (keyCache.get(keyBase64) === pending) keyCache.delete(keyBase64);
+    throw err;
+  }
+}
+function generateKeyBase64() {
+  const raw = new Uint8Array(32);
+  randomFill(raw);
+  const encoded = bytesToBase64(raw);
+  raw.fill(0);
+  return encoded;
+}
+async function encryptPayload(plainBytes, keyBase64) {
+  const key = await importAesKey(keyBase64);
+  const iv = new Uint8Array(12);
+  randomFill(iv);
+  const cipher = await subtleCall("encrypt", [
+    { name: "AES-GCM", iv },
+    key,
+    asBytes(plainBytes)
+  ]);
+  return { cipher: new Uint8Array(cipher), iv: bytesToBase64(iv) };
+}
+async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
+  const cipher = asBytes(cipherBytes);
+  const iv = base64ToBytes(ivBase64);
+  if (iv.length !== 12) throw new Error("Archx: AES-GCM IV must be 12 bytes");
+  if (cipher.length < 17) throw new Error("Archx: AES-GCM payload is too short");
+  const key = await importAesKey(keyBase64);
+  const plain = await subtleCall("decrypt", [
+    { name: "AES-GCM", iv },
+    key,
+    cipher
+  ]);
+  return new Uint8Array(plain);
+}
+
+// src/core/plan.js
+var DEFAULT_GRID = 8;
+function buildScramblePlan(grid = DEFAULT_GRID, key = "", version = 2) {
+  if (version !== 1 && version !== 2) throw new TypeError("Archx: scramble plan version must be 1 or 2");
+  const g = Math.max(2, Math.min(32, grid | 0));
+  const count = g * g;
+  let rand;
+  if (version === 2) {
+    rand = sfc32(...cyrb128(String(key) + "::archx-grid2-" + g));
+    for (let i = 0; i < 8; i++) rand();
+  } else {
+    rand = mulberry32(hashSeed(String(key) + "::archx-grid-" + g));
+  }
+  const order = Array.from({ length: count }, (_, i) => i);
+  for (let i = count - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const flips = Array.from({ length: count }, () => ({
+    fx: rand() < 0.5,
+    fy: rand() < 0.5
+  }));
+  const inverse = new Array(count);
+  order.forEach((orig, scrambledPos) => {
+    inverse[orig] = scrambledPos;
+  });
+  return { grid: g, count, version, order, inverse, flips };
+}
+function tileRect(index, grid, tw, th) {
+  return { x: index % grid * tw, y: Math.floor(index / grid) * th, w: tw, h: th };
+}
+function paddedSize(w, h, grid) {
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32) {
+    throw new RangeError("Archx: invalid image/grid dimensions");
+  }
+  const tw = Math.ceil(w / grid);
+  const th = Math.ceil(h / grid);
+  return { tw, th, pw: tw * grid, ph: th * grid };
+}
+function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
+  if (direction !== "scramble" && direction !== "unscramble") {
+    throw new TypeError("Archx: scramble direction is invalid");
+  }
+  const grid = plan?.grid;
+  const count = plan?.count;
+  if (!Number.isSafeInteger(pw) || !Number.isSafeInteger(ph) || pw < 1 || ph < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid || pw % grid !== 0 || ph % grid !== 0 || !Array.isArray(plan.order) || !Array.isArray(plan.inverse) || !Array.isArray(plan.flips) || plan.order.length !== count || plan.inverse.length !== count || plan.flips.length !== count) {
+    throw new RangeError("Archx: invalid scramble geometry");
+  }
+  const tw = pw / grid;
+  const th = ph / grid;
+  const src = asBytes(rgba);
+  const expected = pw * ph * 4;
+  if (!Number.isSafeInteger(expected) || src.length < expected) {
+    throw new RangeError("Archx: RGBA buffer is smaller than the padded image");
+  }
+  const out = new Uint8Array(expected);
+  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0;
+  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
+  const out32 = useWords ? new Uint32Array(out.buffer) : null;
+  for (let dest = 0; dest < count; dest++) {
+    const source = direction === "scramble" ? plan.order[dest] : plan.inverse[dest];
+    if (!Number.isInteger(source) || source < 0 || source >= count) {
+      throw new RangeError("Archx: invalid scramble plan");
+    }
+    const flipPos = direction === "scramble" ? dest : source;
+    const flip = plan.flips[flipPos];
+    if (!flip || typeof flip !== "object") throw new RangeError("Archx: invalid scramble plan");
+    const { fx, fy } = flip;
+    const sx = source % grid * tw;
+    const sy = Math.floor(source / grid) * th;
+    const dx = dest % grid * tw;
+    const dy = Math.floor(dest / grid) * th;
+    for (let y = 0; y < th; y++) {
+      const yy = fy ? th - 1 - y : y;
+      const srcRow = (sy + yy) * pw + sx;
+      const dstRow = (dy + y) * pw + dx;
+      if (useWords && !fx) {
+        out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
+      } else if (useWords) {
+        for (let x = 0; x < tw; x++) out32[dstRow + x] = src32[srcRow + (tw - 1 - x)];
+      } else {
+        for (let x = 0; x < tw; x++) {
+          const xx = fx ? tw - 1 - x : x;
+          const si = (srcRow + xx) * 4;
+          const di = (dstRow + x) * 4;
+          out[di] = src[si];
+          out[di + 1] = src[si + 1];
+          out[di + 2] = src[si + 2];
+          out[di + 3] = src[si + 3];
+        }
+      }
+    }
+  }
+  return out;
+}
+function scramblePixelsPadded(rgba, w, h, plan, out = null) {
+  const grid = plan?.grid;
+  const count = plan?.count;
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid || !Array.isArray(plan.order) || !Array.isArray(plan.flips) || plan.order.length !== count || plan.flips.length !== count) {
+    throw new RangeError("Archx: invalid scramble geometry");
+  }
+  const tw = Math.ceil(w / grid);
+  const th = Math.ceil(h / grid);
+  const pw = tw * grid;
+  const ph = th * grid;
+  const src = asBytes(rgba);
+  if (!Number.isSafeInteger(w * h * 4) || src.length < w * h * 4) {
+    throw new RangeError("Archx: RGBA buffer is smaller than the image");
+  }
+  const expected = pw * ph * 4;
+  const target = out ? asBytes(out) : new Uint8Array(expected);
+  if (!Number.isSafeInteger(expected) || target.length < expected) {
+    throw new RangeError("Archx: scramble output buffer is too small");
+  }
+  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 && target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
+  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
+  const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
+  let padSeedState = 2654435769;
+  for (let i = 0; i < count; i++) {
+    padSeedState = Math.imul(padSeedState ^ plan.order[i] * 2654435761, 2246822519);
+    padSeedState = Math.imul(padSeedState ^ (plan.flips[i].fx ? 2 : 0) + (plan.flips[i].fy ? 1 : 0) + 1, 3266489917);
+  }
+  const padRand = mulberry32(padSeedState >>> 0);
+  let padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
+  let padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
+  if (h > 8 && w > 4) {
+    let best = padShiftY, bestScore = Infinity;
+    for (let c = 0; c < 24; c++) {
+      const cand = 1 + Math.floor(padRand() * (h - 2));
+      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
+      for (let x = 0; x < w; x += 3) {
+        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
+        ma0 += src[a];
+        ma1 += src[a + 1];
+        ma2 += src[a + 2];
+        mb0 += src[b];
+        mb1 += src[b + 1];
+        mb2 += src[b + 2];
+        n++;
+      }
+      ma0 /= n;
+      ma1 /= n;
+      ma2 /= n;
+      mb0 /= n;
+      mb1 /= n;
+      mb2 /= n;
+      let s = 0;
+      for (let x = 0; x < w; x += 3) {
+        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
+        s += Math.abs(src[a] - ma0 - (src[b] - mb0)) + Math.abs(src[a + 1] - ma1 - (src[b + 1] - mb1)) + Math.abs(src[a + 2] - ma2 - (src[b + 2] - mb2));
+      }
+      const score = s / (3 * n);
+      if (score < bestScore) {
+        bestScore = score;
+        best = cand;
+      }
+    }
+    padShiftY = best;
+  }
+  if (w > 8 && h > 4) {
+    let best = padShiftX, bestScore = Infinity;
+    for (let c = 0; c < 24; c++) {
+      const cand = 1 + Math.floor(padRand() * (w - 2));
+      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
+      for (let y = 0; y < h; y += 3) {
+        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
+        ma0 += src[a];
+        ma1 += src[a + 1];
+        ma2 += src[a + 2];
+        mb0 += src[b];
+        mb1 += src[b + 1];
+        mb2 += src[b + 2];
+        n++;
+      }
+      ma0 /= n;
+      ma1 /= n;
+      ma2 /= n;
+      mb0 /= n;
+      mb1 /= n;
+      mb2 /= n;
+      let s = 0;
+      for (let y = 0; y < h; y += 3) {
+        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
+        s += Math.abs(src[a] - ma0 - (src[b] - mb0)) + Math.abs(src[a + 1] - ma1 - (src[b + 1] - mb1)) + Math.abs(src[a + 2] - ma2 - (src[b + 2] - mb2));
+      }
+      const score = s / (3 * n);
+      if (score < bestScore) {
+        bestScore = score;
+        best = cand;
+      }
+    }
+    padShiftX = best;
+  }
+  const padPhaseSeed = Math.floor(padRand() * 4294967295) | 0;
+  const wrapPos = (c, n) => (c % n + n) % n;
+  const PAD_NOISE_LUT = [-3, -2, -1, 1, 2, 3];
+  const padNoise = (gx, gy, channel) => {
+    let hash = padPhaseSeed ^ Math.imul((gx >> 3) + 1, 374761393) ^ Math.imul((gy >> 3) + 1, 668265263) ^ Math.imul(channel + 1, 2246822519) | 0;
+    hash = Math.imul(hash ^ hash >>> 13, 1274126177);
+    return PAD_NOISE_LUT[(hash >>> 16) % 6];
+  };
+  const ANCHOR_R = 16;
+  const rowPrefixCache = /* @__PURE__ */ new Map();
+  const colPrefixCache = /* @__PURE__ */ new Map();
+  const rowPrefix = (y) => {
+    let p = rowPrefixCache.get(y);
+    if (!p) {
+      p = new Float64Array(3 * (w + 1));
+      const base = y * w * 4;
+      for (let x = 0; x < w; x++) {
+        const si = base + x * 4;
+        p[x + 1] = p[x] + src[si];
+        p[w + 1 + x + 1] = p[w + 1 + x] + src[si + 1];
+        p[2 * (w + 1) + x + 1] = p[2 * (w + 1) + x] + src[si + 2];
+      }
+      rowPrefixCache.set(y, p);
+    }
+    return p;
+  };
+  const colPrefix = (x) => {
+    let p = colPrefixCache.get(x);
+    if (!p) {
+      p = new Float64Array(3 * (h + 1));
+      for (let y = 0; y < h; y++) {
+        const si = (y * w + x) * 4;
+        p[y + 1] = p[y] + src[si];
+        p[h + 1 + y + 1] = p[h + 1 + y] + src[si + 1];
+        p[2 * (h + 1) + y + 1] = p[2 * (h + 1) + y] + src[si + 2];
+      }
+      colPrefixCache.set(x, p);
+    }
+    return p;
+  };
+  const _boxA = [0, 0, 0];
+  const _boxB = [0, 0, 0];
+  const rowBox = (y, cx, out2) => {
+    const p = rowPrefix(y);
+    const x0 = Math.max(0, cx - ANCHOR_R), x1 = Math.min(w, cx + ANCHOR_R + 1);
+    const n = Math.max(1, x1 - x0);
+    out2[0] = (p[x1] - p[x0]) / n;
+    out2[1] = (p[w + 1 + x1] - p[w + 1 + x0]) / n;
+    out2[2] = (p[2 * (w + 1) + x1] - p[2 * (w + 1) + x0]) / n;
+  };
+  const colBox = (x, cy, out2) => {
+    const p = colPrefix(x);
+    const y0 = Math.max(0, cy - ANCHOR_R), y1 = Math.min(h, cy + ANCHOR_R + 1);
+    const n = Math.max(1, y1 - y0);
+    out2[0] = (p[y1] - p[y0]) / n;
+    out2[1] = (p[h + 1 + y1] - p[h + 1 + y0]) / n;
+    out2[2] = (p[2 * (h + 1) + y1] - p[2 * (h + 1) + y0]) / n;
+  };
+  const writePixel = (di, si) => {
+    target[di] = src[si];
+    target[di + 1] = src[si + 1];
+    target[di + 2] = src[si + 2];
+    target[di + 3] = src[si + 3];
+  };
+  const PAD_FEATHER = [0.45, 0.3, 0.15];
+  const writePadPixel = (di, srcX, srcY, rawX, rawY) => {
+    const si = (srcY * w + srcX) * 4;
+    let fade = 0, edgeSi = -1;
+    if (rawY >= h) {
+      rowBox(h - 1, srcX, _boxA);
+      rowBox(srcY, srcX, _boxB);
+      const d = rawY - h;
+      if (d < 3) {
+        fade = PAD_FEATHER[d];
+        edgeSi = ((h - 1) * w + srcX) * 4;
+      }
+    } else {
+      colBox(w - 1, rawY, _boxA);
+      colBox(srcX, rawY, _boxB);
+      const d = rawX - w;
+      if (d < 3) {
+        fade = PAD_FEATHER[d];
+        edgeSi = (rawY * w + w - 1) * 4;
+      }
+    }
+    for (let c = 0; c < 3; c++) {
+      let v = src[si + c] + Math.round(_boxA[c] - _boxB[c]);
+      if (fade) v = v * (1 - fade) + src[edgeSi + c] * fade;
+      target[di + c] = Math.max(0, Math.min(255, Math.round(v) + padNoise(rawX, rawY, c)));
+    }
+    target[di + 3] = src[si + 3];
+  };
+  for (let dest = 0; dest < count; dest++) {
+    const source = plan.order[dest];
+    if (!Number.isInteger(source) || source < 0 || source >= count) {
+      throw new RangeError("Archx: invalid scramble plan");
+    }
+    const flip = plan.flips[dest];
+    if (!flip || typeof flip !== "object") throw new RangeError("Archx: invalid scramble plan");
+    const { fx, fy } = flip;
+    const sx = source % grid * tw;
+    const sy = Math.floor(source / grid) * th;
+    const dx = dest % grid * tw;
+    const dy = Math.floor(dest / grid) * th;
+    for (let y = 0; y < th; y++) {
+      const rawY = sy + (fy ? th - 1 - y : y);
+      const rowIsPad = rawY >= h;
+      const srcY = rowIsPad ? wrapPos(padShiftY + (rawY - h), h) : rawY;
+      const dstRow = (dy + y) * pw + dx;
+      if (useWords && !fx && !rowIsPad) {
+        const avail = Math.max(0, Math.min(tw, w - sx));
+        if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
+        for (let x = avail; x < tw; x++) {
+          const rawX = sx + x;
+          const srcX = wrapPos(padShiftX + (rawX - w), w);
+          writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
+        }
+      } else if (useWords && !rowIsPad && !(sx + tw > w)) {
+        for (let x = 0; x < tw; x++) {
+          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
+        }
+      } else {
+        for (let x = 0; x < tw; x++) {
+          const rawX = sx + (fx ? tw - 1 - x : x);
+          const colIsPad = rawX >= w;
+          const srcX = colIsPad ? wrapPos(padShiftX + (rawX - w), w) : rawX;
+          if (rowIsPad || colIsPad) {
+            writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
+          } else {
+            writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4);
+          }
+        }
+      }
+    }
+  }
+  return target;
+}
+
+// src/core/sniff.js
 var IMAGE_FORMAT_MIME = Object.freeze({
   jpeg: "image/jpeg",
   png: "image/png",
@@ -544,33 +973,9 @@ function decodeBmpImage(bytes, { maxPixels = 1e8 } = {}) {
   }
   return Object.freeze({ data, width, height, channels: 4 });
 }
-function bytesToBase64(bytes) {
-  const u8 = asBytes(bytes);
-  if (typeof Buffer !== "undefined") return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString("base64");
-  let bin = "";
-  const CHUNK = 32768;
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
-  }
-  return btoa(bin);
-}
-function base64ToBytes(b64) {
-  if (typeof b64 !== "string") throw new TypeError("Archx: base64 value must be a string");
-  let normalized = b64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
-  const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
-  if (normalized.includes("=") && normalized.indexOf("=") !== normalized.length - padding) {
-    throw new Error("Archx: invalid base64 value");
-  }
-  if (normalized.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
-    throw new Error("Archx: invalid base64 value");
-  }
-  if (normalized.length % 4) normalized += "=".repeat(4 - normalized.length % 4);
-  if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(normalized, "base64"));
-  const bin = atob(normalized);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+
+// src/core/container.js
+var ARCHX_MAGIC = "ARCHX1";
 var MAX_ARCHX_HEADER_BYTES = 16384;
 var ARCHX_MAGIC_BYTES = Object.freeze([...ARCHX_MAGIC].map((c) => c.charCodeAt(0)));
 var ARCHX_HEADER_FIELDS = /* @__PURE__ */ new Set([
@@ -667,104 +1072,8 @@ function decodeContainer(bytes) {
   if (!payload.length) throw new Error("Archx: invalid .archx payload");
   return { header, payload };
 }
-var keyCache = /* @__PURE__ */ new Map();
-var AES_KEY_CACHE_MAX = 16;
-var coreWebCrypto = null;
-function useWebCrypto(injected) {
-  if (!injected || typeof injected !== "object" || !injected.subtle) {
-    coreWebCrypto = null;
-  } else {
-    coreWebCrypto = {
-      subtle: injected.subtle,
-      importKey: typeof injected.importKey === "function" ? injected.importKey : null,
-      encrypt: typeof injected.encrypt === "function" ? injected.encrypt : null,
-      decrypt: typeof injected.decrypt === "function" ? injected.decrypt : null,
-      digest: typeof injected.digest === "function" ? injected.digest : null,
-      getRandomValues: typeof injected.getRandomValues === "function" ? injected.getRandomValues : null,
-      cryptoObj: injected.cryptoObj || null
-    };
-  }
-  keyCache.clear();
-}
-function subtleCall(name, args) {
-  if (coreWebCrypto) {
-    const fn = coreWebCrypto[name];
-    if (fn) return fn.call(coreWebCrypto.subtle, ...args);
-    return coreWebCrypto.subtle[name](...args);
-  }
-  return globalThis.crypto.subtle[name](...args);
-}
-function randomFill(bytes) {
-  if (coreWebCrypto?.getRandomValues) {
-    return coreWebCrypto.getRandomValues.call(coreWebCrypto.cryptoObj || globalThis.crypto, bytes);
-  }
-  return globalThis.crypto.getRandomValues(bytes);
-}
-async function importAesKey(keyBase64) {
-  if (typeof keyBase64 !== "string" || !keyBase64) throw new TypeError("Archx: AES key must be a base64 string");
-  const cached = keyCache.get(keyBase64);
-  if (cached) {
-    keyCache.delete(keyBase64);
-    keyCache.set(keyBase64, cached);
-    return cached;
-  }
-  const pending = (async () => {
-    const raw = base64ToBytes(keyBase64);
-    try {
-      if (![16, 24, 32].includes(raw.length)) {
-        throw new Error("Archx: AES key must be 16/24/32 bytes (base64)");
-      }
-      return await subtleCall("importKey", [
-        "raw",
-        raw,
-        { name: "AES-GCM", length: raw.length * 8 },
-        false,
-        ["encrypt", "decrypt"]
-      ]);
-    } finally {
-      raw.fill(0);
-    }
-  })();
-  keyCache.set(keyBase64, pending);
-  while (keyCache.size > AES_KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value);
-  try {
-    return await pending;
-  } catch (err) {
-    if (keyCache.get(keyBase64) === pending) keyCache.delete(keyBase64);
-    throw err;
-  }
-}
-function generateKeyBase64() {
-  const raw = new Uint8Array(32);
-  randomFill(raw);
-  const encoded = bytesToBase64(raw);
-  raw.fill(0);
-  return encoded;
-}
-async function encryptPayload(plainBytes, keyBase64) {
-  const key = await importAesKey(keyBase64);
-  const iv = new Uint8Array(12);
-  randomFill(iv);
-  const cipher = await subtleCall("encrypt", [
-    { name: "AES-GCM", iv },
-    key,
-    asBytes(plainBytes)
-  ]);
-  return { cipher: new Uint8Array(cipher), iv: bytesToBase64(iv) };
-}
-async function decryptPayload(cipherBytes, keyBase64, ivBase64) {
-  const cipher = asBytes(cipherBytes);
-  const iv = base64ToBytes(ivBase64);
-  if (iv.length !== 12) throw new Error("Archx: AES-GCM IV must be 12 bytes");
-  if (cipher.length < 17) throw new Error("Archx: AES-GCM payload is too short");
-  const key = await importAesKey(keyBase64);
-  const plain = await subtleCall("decrypt", [
-    { name: "AES-GCM", iv },
-    key,
-    cipher
-  ]);
-  return new Uint8Array(plain);
-}
+
+// src/core/forensic.js
 function forensicBlockSigns(seed, count, version = 3) {
   const rand = version === 1 ? mulberry32(hashSeed(String(seed) + "::archx-forensic")) : version === 2 ? sfc32(...cyrb128(String(seed) + "::archx-forensic")) : sha256SeededPrng(String(seed) + "::archx-forensic-v3");
   return Array.from({ length: count }, () => rand() < 0.5 ? -1 : 1);
@@ -831,6 +1140,8 @@ function forensicScore(candidate, reference, w, h, seed, { blockSize = 32 } = {}
   }
   return best;
 }
+
+// src/core/stego-code.js
 function stegoFingerprint(value) {
   const s = String(value ?? "");
   if (/^[0-9a-fA-F]{12}$/.test(s)) return s.toLowerCase();
@@ -918,125 +1229,6 @@ function robustStegoFingerprintFromBits(bits) {
     fingerprint += byte.toString(16).padStart(2, "0");
   }
   return fingerprint;
-}
-function repairRobustViaFirstCrc(scores, hard, key, tag = "mac") {
-  const first = Uint8Array.from(hard.subarray(0, 64));
-  const syndromeOf = (bits) => {
-    const bytes = new Uint8Array(8);
-    for (let i = 0; i < 8; i++) {
-      let byte = 0;
-      for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
-      bytes[i] = byte;
-    }
-    return stegoCrc16(bytes.subarray(0, 6)) ^ (bytes[6] << 8 | bytes[7]);
-  };
-  const target = syndromeOf(first);
-  const buildCanonical = (correctedFirst) => {
-    let flips = 0;
-    let markerFlips = 0;
-    let softCost = 0;
-    for (let i = 0; i < 64; i++) {
-      if (correctedFirst[i] === hard[i]) continue;
-      flips++;
-      softCost += Math.abs(scores[i] || 0);
-    }
-    for (let j = 0; j < 16; j++) {
-      if (ROBUST_MARKER_BITS[j] === hard[80 + j]) continue;
-      markerFlips++;
-      flips++;
-      softCost += Math.abs(scores[80 + j] || 0);
-    }
-    if (markerFlips > 2 || flips > 8) return null;
-    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
-    const canonical = robustStegoCodeBits(fingerprint, key, tag);
-    let tagFlips = markerFlips;
-    for (let i = 64; i < 80; i++) {
-      if (canonical[i] === hard[i]) continue;
-      flips++;
-      tagFlips++;
-      softCost += Math.abs(scores[i] || 0);
-    }
-    return flips <= 8 && tagFlips <= 2 ? { bits: canonical, flips, softCost } : null;
-  };
-  if (target === 0) return buildCanonical(first);
-  const columns = new Uint16Array(64);
-  for (let i = 0; i < 64; i++) {
-    first[i] ^= 1;
-    columns[i] = syndromeOf(first) ^ target;
-    first[i] ^= 1;
-  }
-  const weakest = Array.from({ length: 64 }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 32);
-  const leftCandidates = weakest.filter((_, index) => index % 2 === 0);
-  const rightCandidates = weakest.filter((_, index) => index % 2 === 1);
-  const subsetMaps = (candidates) => {
-    const byWeight = Array.from({ length: 4 }, () => /* @__PURE__ */ new Map());
-    const visit = (start, chosen, syndrome, cost) => {
-      const map = byWeight[chosen.length];
-      const previous = map.get(syndrome);
-      if (!previous || cost < previous.cost) map.set(syndrome, { indices: [...chosen], cost });
-      if (chosen.length >= 3) return;
-      for (let i = start; i < candidates.length; i++) {
-        const bit = candidates[i];
-        chosen.push(bit);
-        visit(i + 1, chosen, syndrome ^ columns[bit], cost + Math.abs(scores[bit] || 0));
-        chosen.pop();
-      }
-    };
-    visit(0, [], 0, 0);
-    return byWeight;
-  };
-  const leftMaps = subsetMaps(leftCandidates);
-  const rightMaps = subsetMaps(rightCandidates);
-  let bestCanonical = null;
-  for (let total = 1; total <= 6; total++) {
-    for (let leftWeight = 0; leftWeight <= Math.min(3, total); leftWeight++) {
-      const rightWeight = total - leftWeight;
-      if (rightWeight < 0 || rightWeight > 3) continue;
-      for (const [syndrome, left] of leftMaps[leftWeight]) {
-        const right = rightMaps[rightWeight].get(target ^ syndrome);
-        if (!right) continue;
-        const corrected = Uint8Array.from(first);
-        for (const bit of [...left.indices, ...right.indices]) corrected[bit] ^= 1;
-        if (syndromeOf(corrected) !== 0) continue;
-        const candidate = buildCanonical(corrected);
-        if (!candidate) continue;
-        if (!bestCanonical || candidate.softCost < bestCanonical.softCost || candidate.softCost === bestCanonical.softCost && candidate.flips < bestCanonical.flips) {
-          bestCanonical = candidate;
-        }
-      }
-    }
-  }
-  return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
-}
-function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = "mac") {
-  const bits = Uint8Array.from(hard);
-  const bytes = new Uint8Array(12);
-  for (let i = 0; i < 12; i++) {
-    let byte = 0;
-    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
-    bytes[i] = byte;
-  }
-  if (robustStegoBytesValid(bytes, key, tag)) return { bits, flips: 0, tagScheme: tag };
-  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key, tag);
-  if (syndromeRepair) return { ...syndromeRepair, tagScheme: tag };
-  const candidates = Array.from({ length: bits.length }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 24);
-  const flip = (index) => {
-    bits[index] ^= 1;
-    bytes[index >> 3] ^= 1 << 7 - (index & 7);
-  };
-  const search = (start, depth, targetDepth) => {
-    if (depth === targetDepth) return robustStegoBytesValid(bytes, key, tag);
-    for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
-      flip(candidates[i]);
-      if (search(i + 1, depth + 1, targetDepth)) return true;
-      flip(candidates[i]);
-    }
-    return false;
-  };
-  for (let flips = 1; flips <= maxFlips; flips++) {
-    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips, tagScheme: tag };
-  }
-  return null;
 }
 function stegoCodeBits(fingerprint, key, tag = "mac") {
   const bytes = new Uint8Array(6);
@@ -1149,6 +1341,8 @@ function robustStegoLayout(cellCount, key, version = 2) {
   }
   return { order, polarity, segmentPolarity };
 }
+
+// src/core/stego-embed.js
 function embedStegoFingerprint(rgba, w, h, payload, {
   key = "",
   strength = 6,
@@ -1225,12 +1419,14 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   }
   return out;
 }
+
+// src/core/pixels.js
 function buildLumaIntegral(src, w, h) {
   const luma = new Uint8Array(w * h);
   for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
     luma[p] = src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
   }
-  const integral = new Float64Array((w + 1) * (h + 1));
+  const integral = w * h <= 16e6 ? new Uint32Array((w + 1) * (h + 1)) : new Float64Array((w + 1) * (h + 1));
   for (let y = 0; y < h; y++) {
     let rowSum = 0;
     const srcRow = y * w;
@@ -1351,6 +1547,127 @@ function rotateRgba(src, w, h, angleRad) {
     }
   }
   return out;
+}
+
+// src/core/stego-detect.js
+function repairRobustViaFirstCrc(scores, hard, key, tag = "mac") {
+  const first = Uint8Array.from(hard.subarray(0, 64));
+  const syndromeOf = (bits) => {
+    const bytes = new Uint8Array(8);
+    for (let i = 0; i < 8; i++) {
+      let byte = 0;
+      for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+      bytes[i] = byte;
+    }
+    return stegoCrc16(bytes.subarray(0, 6)) ^ (bytes[6] << 8 | bytes[7]);
+  };
+  const target = syndromeOf(first);
+  const buildCanonical = (correctedFirst) => {
+    let flips = 0;
+    let markerFlips = 0;
+    let softCost = 0;
+    for (let i = 0; i < 64; i++) {
+      if (correctedFirst[i] === hard[i]) continue;
+      flips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    for (let j = 0; j < 16; j++) {
+      if (ROBUST_MARKER_BITS[j] === hard[80 + j]) continue;
+      markerFlips++;
+      flips++;
+      softCost += Math.abs(scores[80 + j] || 0);
+    }
+    if (markerFlips > 2 || flips > 8) return null;
+    const fingerprint = robustStegoFingerprintFromBits(correctedFirst);
+    const canonical = robustStegoCodeBits(fingerprint, key, tag);
+    let tagFlips = markerFlips;
+    for (let i = 64; i < 80; i++) {
+      if (canonical[i] === hard[i]) continue;
+      flips++;
+      tagFlips++;
+      softCost += Math.abs(scores[i] || 0);
+    }
+    return flips <= 8 && tagFlips <= 2 ? { bits: canonical, flips, softCost } : null;
+  };
+  if (target === 0) return buildCanonical(first);
+  const columns = new Uint16Array(64);
+  for (let i = 0; i < 64; i++) {
+    first[i] ^= 1;
+    columns[i] = syndromeOf(first) ^ target;
+    first[i] ^= 1;
+  }
+  const weakest = Array.from({ length: 64 }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 32);
+  const leftCandidates = weakest.filter((_, index) => index % 2 === 0);
+  const rightCandidates = weakest.filter((_, index) => index % 2 === 1);
+  const subsetMaps = (candidates) => {
+    const byWeight = Array.from({ length: 4 }, () => /* @__PURE__ */ new Map());
+    const visit = (start, chosen, syndrome, cost) => {
+      const map = byWeight[chosen.length];
+      const previous = map.get(syndrome);
+      if (!previous || cost < previous.cost) map.set(syndrome, { indices: [...chosen], cost });
+      if (chosen.length >= 3) return;
+      for (let i = start; i < candidates.length; i++) {
+        const bit = candidates[i];
+        chosen.push(bit);
+        visit(i + 1, chosen, syndrome ^ columns[bit], cost + Math.abs(scores[bit] || 0));
+        chosen.pop();
+      }
+    };
+    visit(0, [], 0, 0);
+    return byWeight;
+  };
+  const leftMaps = subsetMaps(leftCandidates);
+  const rightMaps = subsetMaps(rightCandidates);
+  let bestCanonical = null;
+  for (let total = 1; total <= 6; total++) {
+    for (let leftWeight = 0; leftWeight <= Math.min(3, total); leftWeight++) {
+      const rightWeight = total - leftWeight;
+      if (rightWeight < 0 || rightWeight > 3) continue;
+      for (const [syndrome, left] of leftMaps[leftWeight]) {
+        const right = rightMaps[rightWeight].get(target ^ syndrome);
+        if (!right) continue;
+        const corrected = Uint8Array.from(first);
+        for (const bit of [...left.indices, ...right.indices]) corrected[bit] ^= 1;
+        if (syndromeOf(corrected) !== 0) continue;
+        const candidate = buildCanonical(corrected);
+        if (!candidate) continue;
+        if (!bestCanonical || candidate.softCost < bestCanonical.softCost || candidate.softCost === bestCanonical.softCost && candidate.flips < bestCanonical.flips) {
+          bestCanonical = candidate;
+        }
+      }
+    }
+  }
+  return bestCanonical ? { bits: bestCanonical.bits, flips: bestCanonical.flips } : null;
+}
+function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = "mac") {
+  const bits = Uint8Array.from(hard);
+  const bytes = new Uint8Array(12);
+  for (let i = 0; i < 12; i++) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) byte = byte << 1 | bits[i * 8 + b];
+    bytes[i] = byte;
+  }
+  if (robustStegoBytesValid(bytes, key, tag)) return { bits, flips: 0, tagScheme: tag };
+  const syndromeRepair = repairRobustViaFirstCrc(scores, bits, key, tag);
+  if (syndromeRepair) return { ...syndromeRepair, tagScheme: tag };
+  const candidates = Array.from({ length: bits.length }, (_, index) => index).sort((a, b) => Math.abs(scores[a]) - Math.abs(scores[b])).slice(0, 24);
+  const flip = (index) => {
+    bits[index] ^= 1;
+    bytes[index >> 3] ^= 1 << 7 - (index & 7);
+  };
+  const search = (start, depth, targetDepth) => {
+    if (depth === targetDepth) return robustStegoBytesValid(bytes, key, tag);
+    for (let i = start; i <= candidates.length - (targetDepth - depth); i++) {
+      flip(candidates[i]);
+      if (search(i + 1, depth + 1, targetDepth)) return true;
+      flip(candidates[i]);
+    }
+    return false;
+  };
+  for (let flips = 1; flips <= maxFlips; flips++) {
+    if (search(0, 0, flips)) return { bits: Uint8Array.from(bits), flips, tagScheme: tag };
+  }
+  return null;
 }
 var STEGO_TIMEOUT = Symbol("archx-stego-timeout");
 function detectStegoFingerprint(rgba, w, h, {
@@ -1651,6 +1968,9 @@ function detectStegoFingerprint(rgba, w, h, {
   const _reliability = new Float64Array(codeLength);
   const _voteScores = new Float64Array(codeLength);
   const _groups = Array.from({ length: codeLength }, () => []);
+  const _cellBitIdx = new Uint16Array(gx * gy);
+  const _cellScore = new Float32Array(gx * gy);
+  const _disagreeByBit = new Uint16Array(codeLength);
   const _segmentResponses = [];
   let _evalTick = 0;
   const evaluate = ({ fx = 0, fy = 0, scale = 1, scaleX = scale, scaleY = scale, originX = null, originY = null, erasure = false } = {}) => {
@@ -1661,7 +1981,7 @@ function detectStegoFingerprint(rgba, w, h, {
     const oy = originY ?? fy * ch;
     const bitScores = _bitScores.fill(0);
     const bitCounts = _bitCounts.fill(0);
-    const cellScores = [];
+    let cellLen = 0;
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
       const rawY1 = rawY0 + cellH0;
@@ -1727,7 +2047,9 @@ function detectStegoFingerprint(rgba, w, h, {
         const bitIndex = order[cy * gx + cx] % codeLength;
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
-        cellScores.push({ bitIndex, score });
+        _cellBitIdx[cellLen] = bitIndex;
+        _cellScore[cellLen] = score;
+        cellLen++;
       }
     }
     const votedBits = _votedBits.fill(0);
@@ -1736,7 +2058,7 @@ function detectStegoFingerprint(rgba, w, h, {
     if (robust) {
       const groups = _groups;
       for (const group of groups) group.length = 0;
-      for (const { bitIndex, score } of cellScores) groups[bitIndex].push(score);
+      for (let ci = 0; ci < cellLen; ci++) groups[_cellBitIdx[ci]].push(_cellScore[ci]);
       for (let i = 0; i < codeLength; i++) {
         const values = groups[i].sort((a, b) => a - b);
         if (!values.length) continue;
@@ -1753,25 +2075,28 @@ function detectStegoFingerprint(rgba, w, h, {
       }
     }
     const meanAbsPre = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
-    const preAgreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!votedBits[bitIndex]).length;
-    const preAgreement = cellScores.length ? preAgreeing / cellScores.length : 0;
+    let preAgreeing = 0;
+    for (let ci = 0; ci < cellLen; ci++) {
+      if (_cellScore[ci] >= 0 === !!votedBits[_cellBitIdx[ci]]) preAgreeing++;
+    }
+    const preAgreement = cellLen ? preAgreeing / cellLen : 0;
     const standardDepth = meanAbsPre >= 2 && preAgreement >= 0.82 ? 3 : 1;
     const minBitCountPre = Math.min(...bitCounts);
     const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const coverageOkPre = robust ? observedBitsPre >= 88 && cellScores.length >= 128 : minBitCountPre >= 2 && cellScores.length >= codeLength * 3;
+    const coverageOkPre = robust ? observedBitsPre >= 88 && cellLen >= 128 : minBitCountPre >= 2 && cellLen >= codeLength * 3;
     let agreementBound = preAgreement;
-    if (cellScores.length) {
-      const disagreeByBit = new Uint16Array(codeLength);
-      for (const { bitIndex, score } of cellScores) {
-        if (score >= 0 !== !!votedBits[bitIndex]) disagreeByBit[bitIndex]++;
+    if (cellLen) {
+      const disagreeByBit = _disagreeByBit.fill(0);
+      for (let ci = 0; ci < cellLen; ci++) {
+        if (_cellScore[ci] >= 0 !== !!votedBits[_cellBitIdx[ci]]) disagreeByBit[_cellBitIdx[ci]]++;
       }
       const gains = [...disagreeByBit].sort((a, b) => b - a);
       const maxFlips = robust ? 5 : standardDepth;
       let gainSum = 0;
       for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
-      agreementBound = (preAgreeing + gainSum) / cellScores.length;
+      agreementBound = (preAgreeing + gainSum) / cellLen;
     }
-    const repairable = meanAbsPre >= 1.2 && cellScores.length >= 96 && coverageOkPre && agreementBound >= 0.72;
+    const repairable = meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
     const erasureDecode = () => {
       const erasedPayload = [];
       let erasedTotal = 0;
@@ -1783,7 +2108,7 @@ function detectStegoFingerprint(rgba, w, h, {
       }
       if (!erasedTotal || erasedTotal > 32 || erasedPayload.length > 20) return null;
       const deep = erasedTotal > 24;
-      if (meanAbsPre < 2 || preAgreement < (deep ? 0.9 : 0.8) || cellScores.length < 96) return null;
+      if (meanAbsPre < 2 || preAgreement < (deep ? 0.9 : 0.8) || cellLen < 96) return null;
       const budget = deep && !(preAgreement >= 0.95 && meanAbsPre >= 4) ? 2 : 3;
       const weak = [];
       for (let i = 0; i < 48; i++) if (bitCounts[i] > 0) weak.push(i);
@@ -1857,7 +2182,7 @@ function detectStegoFingerprint(rgba, w, h, {
       for (let i = 0; i < codeLength; i++) if (bitCounts[i] < 2) sparse++;
       const erased = codeLength - observedBitsPre;
       if (sparse < 1 || sparse > 6 || observedBitsPre < 60) return null;
-      if (meanAbsPre < 2 || preAgreement < 0.85 || cellScores.length < codeLength * 3) return null;
+      if (meanAbsPre < 2 || preAgreement < 0.85 || cellLen < codeLength * 3) return null;
       const fixed = correctStegoBits(votedBits, reliability, key, 3);
       if (fixed.corrections < 0 || fixed.tagScheme !== "mac") return null;
       return { ...fixed, erasureDecoded: true, erasedBits: erased };
@@ -1871,23 +2196,26 @@ function detectStegoFingerprint(rgba, w, h, {
     const bits = corrected.bits;
     const fingerprint = robust ? robustStegoFingerprintFromBits(bits) : [...stegoBitsToBytes(bits).subarray(0, 6)].map((b) => b.toString(16).padStart(2, "0")).join("");
     const crcValid = corrected.corrections >= 0;
-    const agreeing = cellScores.filter(({ bitIndex, score }) => score >= 0 === !!bits[bitIndex]).length;
-    const agreement = cellScores.length ? agreeing / cellScores.length : 0;
+    let agreeing = 0;
+    for (let ci = 0; ci < cellLen; ci++) {
+      if (_cellScore[ci] >= 0 === !!bits[_cellBitIdx[ci]]) agreeing++;
+    }
+    const agreement = cellLen ? agreeing / cellLen : 0;
     const meanAbs = meanAbsPre;
     const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - Math.max(0, corrected.corrections) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
-    const bitCoverageOk = robust ? observedBits >= 88 && cellScores.length >= 128 || // Erasure decodes trade coverage for cryptographic certainty:
+    const bitCoverageOk = robust ? observedBits >= 88 && cellLen >= 128 || // Erasure decodes trade coverage for cryptographic certainty:
     // the payload + recomputed CRC/MAC/marker must agree with every
     // observed check bit (<=3 disagreements), which noise cannot
     // manufacture — but a floor of 76 observed bits stays.
-    corrected.erasureDecoded === true && observedBits >= 64 : minBitCount >= 2 && cellScores.length >= codeLength * 3 || corrected.erasureDecoded === true && observedBits >= 60 && cellScores.length >= codeLength * 3;
+    corrected.erasureDecoded === true && observedBits >= 64 : minBitCount >= 2 && cellLen >= codeLength * 3 || corrected.erasureDecoded === true && observedBits >= 60 && cellLen >= codeLength * 3;
     const correctionCount = Math.max(0, corrected.corrections);
     const legacyScheme = corrected.tagScheme === "crc";
     const robustCorrectionOk = !robust || correctionCount <= 3 || !legacyScheme && correctionCount <= 5 && meanAbs >= 3.5 && agreement >= 0.85;
     const standardCorrectionOk = robust || (legacyScheme ? correctionCount <= 1 && agreement >= 0.95 : correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85);
-    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellScores.length >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
+    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk;
     return {
       found,
       fingerprint,
@@ -1906,7 +2234,7 @@ function detectStegoFingerprint(rgba, w, h, {
       confidence: Math.round((found ? confidence : Math.min(0.49, confidence)) * 1e3) / 1e3,
       agreement: Math.round(agreement * 1e3) / 1e3,
       meanSignal: Math.round(meanAbs * 100) / 100,
-      cells: cellScores.length,
+      cells: cellLen,
       offset: {
         x: Math.round(ox / cellW0 * 1e3) / 1e3,
         y: Math.round(oy / cellH0 * 1e3) / 1e3
@@ -2532,297 +2860,113 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     profile: robust ? "robust" : "standard"
   };
 }
-function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
-  if (direction !== "scramble" && direction !== "unscramble") {
-    throw new TypeError("Archx: scramble direction is invalid");
-  }
-  const grid = plan?.grid;
-  const count = plan?.count;
-  if (!Number.isSafeInteger(pw) || !Number.isSafeInteger(ph) || pw < 1 || ph < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid || pw % grid !== 0 || ph % grid !== 0 || !Array.isArray(plan.order) || !Array.isArray(plan.inverse) || !Array.isArray(plan.flips) || plan.order.length !== count || plan.inverse.length !== count || plan.flips.length !== count) {
-    throw new RangeError("Archx: invalid scramble geometry");
-  }
-  const tw = pw / grid;
-  const th = ph / grid;
-  const src = asBytes(rgba);
-  const expected = pw * ph * 4;
-  if (!Number.isSafeInteger(expected) || src.length < expected) {
-    throw new RangeError("Archx: RGBA buffer is smaller than the padded image");
-  }
-  const out = new Uint8Array(expected);
-  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0;
-  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
-  const out32 = useWords ? new Uint32Array(out.buffer) : null;
-  for (let dest = 0; dest < count; dest++) {
-    const source = direction === "scramble" ? plan.order[dest] : plan.inverse[dest];
-    if (!Number.isInteger(source) || source < 0 || source >= count) {
-      throw new RangeError("Archx: invalid scramble plan");
-    }
-    const flipPos = direction === "scramble" ? dest : source;
-    const flip = plan.flips[flipPos];
-    if (!flip || typeof flip !== "object") throw new RangeError("Archx: invalid scramble plan");
-    const { fx, fy } = flip;
-    const sx = source % grid * tw;
-    const sy = Math.floor(source / grid) * th;
-    const dx = dest % grid * tw;
-    const dy = Math.floor(dest / grid) * th;
-    for (let y = 0; y < th; y++) {
-      const yy = fy ? th - 1 - y : y;
-      const srcRow = (sy + yy) * pw + sx;
-      const dstRow = (dy + y) * pw + dx;
-      if (useWords && !fx) {
-        out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
-      } else if (useWords) {
-        for (let x = 0; x < tw; x++) out32[dstRow + x] = src32[srcRow + (tw - 1 - x)];
-      } else {
-        for (let x = 0; x < tw; x++) {
-          const xx = fx ? tw - 1 - x : x;
-          const si = (srcRow + xx) * 4;
-          const di = (dstRow + x) * 4;
-          out[di] = src[si];
-          out[di + 1] = src[si + 1];
-          out[di + 2] = src[si + 2];
-          out[di + 3] = src[si + 3];
+
+// src/core/stego-assay.js
+function assayStegoEmbed(rgba, w, h, {
+  key = "",
+  profile = "robust",
+  strength = 6,
+  gridX,
+  gridY,
+  verify = false
+} = {}) {
+  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  const robust = profile === "robust";
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
+  const { luma, integral } = buildLumaIntegral(src, w, h);
+  const rectSum = (x0, y0, x1, y1) => integral[y1 * (w + 1) + x1] - integral[y0 * (w + 1) + x1] - integral[y1 * (w + 1) + x0] + integral[y0 * (w + 1) + x0];
+  let smoothCells = 0;
+  let binaryCells = 0;
+  let cells = 0;
+  for (let cy = 0; cy < gy; cy++) {
+    const y0 = Math.floor(cy * h / gy), y1 = Math.floor((cy + 1) * h / gy);
+    for (let cx = 0; cx < gx; cx++) {
+      const x0 = Math.floor(cx * w / gx), x1 = Math.floor((cx + 1) * w / gx);
+      const n = (x1 - x0) * (y1 - y0);
+      if (n < 16) continue;
+      cells++;
+      const mean = rectSum(x0, y0, x1, y1) / n;
+      let extreme = 0;
+      let sq = 0;
+      const step = Math.max(1, Math.floor(n / 256));
+      let sampled = 0;
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2 * step) {
+          const v = luma[y * w + x];
+          sq += (v - mean) * (v - mean);
+          if (v < 32 || v > 224) extreme++;
+          sampled++;
         }
       }
+      const std = sampled ? Math.sqrt(sq / sampled) : 0;
+      if (std < 8) smoothCells++;
+      if (sampled && extreme / sampled > 0.85 && std > 40) binaryCells++;
     }
   }
-  return out;
+  const smoothFraction = cells ? smoothCells / cells : 0;
+  const binaryFraction = cells ? binaryCells / cells : 0;
+  const measure = (atStrength) => {
+    const marked = embedStegoFingerprint(src, w, h, "archx-assay", {
+      key,
+      profile,
+      strength: atStrength,
+      gridX,
+      gridY
+    });
+    let mse = 0, maxDelta = 0;
+    for (let i = 0; i < src.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const d = marked[i + c] - src[i + c];
+        mse += d * d;
+        if (Math.abs(d) > maxDelta) maxDelta = Math.abs(d);
+      }
+    }
+    mse /= src.length / 4 * 3;
+    const psnr = mse === 0 ? Infinity : Math.round(10 * Math.log10(255 * 255 / mse) * 10) / 10;
+    return { marked, psnr, maxDelta };
+  };
+  const base = measure(strength);
+  const result = {
+    profile,
+    strength,
+    grid: { x: gx, y: gy },
+    psnr: base.psnr,
+    maxChannelDelta: base.maxDelta,
+    smoothFraction: Math.round(smoothFraction * 1e3) / 1e3,
+    binaryFraction: Math.round(binaryFraction * 1e3) / 1e3,
+    contentClass: binaryFraction > 0.35 ? "binary-graphic" : smoothFraction > 0.7 ? "flat-minimal" : "photo-textured",
+    verifiedAtStrength: null,
+    recommendedStrength: strength,
+    warnings: []
+  };
+  if (result.contentClass === "binary-graphic") {
+    result.warnings.push("near-binary high-contrast content (UI/text/periodic graphics) is StegoMark's documented weak class; expect poor recovery without much higher strength");
+  }
+  if (result.psnr < 32) {
+    result.warnings.push(`predicted PSNR ${result.psnr} dB at strength ${strength}: macro-cell shading may be visible on smooth gradients \u2014 judge on your own catalog, not on the word "invisible"`);
+  }
+  if (verify) {
+    for (const candidate of [strength, strength + 2, strength + 4, 16]) {
+      if (candidate > 16) break;
+      const trial = candidate === strength ? base : measure(candidate);
+      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY });
+      if (hit.found) {
+        result.verifiedAtStrength = candidate;
+        result.recommendedStrength = candidate;
+        if (candidate !== strength) result.psnr = trial.psnr;
+        break;
+      }
+    }
+    if (result.verifiedAtStrength === null) {
+      result.warnings.push("detector did NOT recover a fresh mark even at maximum strength: this content class is outside the embedder envelope \u2014 rely on visible marks/metadata, not StegoMark");
+    }
+  }
+  return Object.freeze(result);
 }
-function scramblePixelsPadded(rgba, w, h, plan, out = null) {
-  const grid = plan?.grid;
-  const count = plan?.count;
-  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || !Number.isInteger(grid) || grid < 2 || grid > 32 || count !== grid * grid || !Array.isArray(plan.order) || !Array.isArray(plan.flips) || plan.order.length !== count || plan.flips.length !== count) {
-    throw new RangeError("Archx: invalid scramble geometry");
-  }
-  const tw = Math.ceil(w / grid);
-  const th = Math.ceil(h / grid);
-  const pw = tw * grid;
-  const ph = th * grid;
-  const src = asBytes(rgba);
-  if (!Number.isSafeInteger(w * h * 4) || src.length < w * h * 4) {
-    throw new RangeError("Archx: RGBA buffer is smaller than the image");
-  }
-  const expected = pw * ph * 4;
-  const target = out ? asBytes(out) : new Uint8Array(expected);
-  if (!Number.isSafeInteger(expected) || target.length < expected) {
-    throw new RangeError("Archx: scramble output buffer is too small");
-  }
-  const useWords = src.byteOffset % 4 === 0 && src.byteLength % 4 === 0 && target.byteOffset % 4 === 0 && target.byteLength % 4 === 0;
-  const src32 = useWords ? new Uint32Array(src.buffer, src.byteOffset, src.byteLength / 4) : null;
-  const out32 = useWords ? new Uint32Array(target.buffer, target.byteOffset, target.byteLength / 4) : null;
-  let padSeedState = 2654435769;
-  for (let i = 0; i < count; i++) {
-    padSeedState = Math.imul(padSeedState ^ plan.order[i] * 2654435761, 2246822519);
-    padSeedState = Math.imul(padSeedState ^ (plan.flips[i].fx ? 2 : 0) + (plan.flips[i].fy ? 1 : 0) + 1, 3266489917);
-  }
-  const padRand = mulberry32(padSeedState >>> 0);
-  let padShiftY = h > 3 ? 1 + Math.floor(padRand() * (h - 2)) : 0;
-  let padShiftX = w > 3 ? 1 + Math.floor(padRand() * (w - 2)) : 0;
-  if (h > 8 && w > 4) {
-    let best = padShiftY, bestScore = Infinity;
-    for (let c = 0; c < 24; c++) {
-      const cand = 1 + Math.floor(padRand() * (h - 2));
-      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
-      for (let x = 0; x < w; x += 3) {
-        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
-        ma0 += src[a];
-        ma1 += src[a + 1];
-        ma2 += src[a + 2];
-        mb0 += src[b];
-        mb1 += src[b + 1];
-        mb2 += src[b + 2];
-        n++;
-      }
-      ma0 /= n;
-      ma1 /= n;
-      ma2 /= n;
-      mb0 /= n;
-      mb1 /= n;
-      mb2 /= n;
-      let s = 0;
-      for (let x = 0; x < w; x += 3) {
-        const a = ((h - 1) * w + x) * 4, b = (cand * w + x) * 4;
-        s += Math.abs(src[a] - ma0 - (src[b] - mb0)) + Math.abs(src[a + 1] - ma1 - (src[b + 1] - mb1)) + Math.abs(src[a + 2] - ma2 - (src[b + 2] - mb2));
-      }
-      const score = s / (3 * n);
-      if (score < bestScore) {
-        bestScore = score;
-        best = cand;
-      }
-    }
-    padShiftY = best;
-  }
-  if (w > 8 && h > 4) {
-    let best = padShiftX, bestScore = Infinity;
-    for (let c = 0; c < 24; c++) {
-      const cand = 1 + Math.floor(padRand() * (w - 2));
-      let ma0 = 0, ma1 = 0, ma2 = 0, mb0 = 0, mb1 = 0, mb2 = 0, n = 0;
-      for (let y = 0; y < h; y += 3) {
-        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
-        ma0 += src[a];
-        ma1 += src[a + 1];
-        ma2 += src[a + 2];
-        mb0 += src[b];
-        mb1 += src[b + 1];
-        mb2 += src[b + 2];
-        n++;
-      }
-      ma0 /= n;
-      ma1 /= n;
-      ma2 /= n;
-      mb0 /= n;
-      mb1 /= n;
-      mb2 /= n;
-      let s = 0;
-      for (let y = 0; y < h; y += 3) {
-        const a = (y * w + w - 1) * 4, b = (y * w + cand) * 4;
-        s += Math.abs(src[a] - ma0 - (src[b] - mb0)) + Math.abs(src[a + 1] - ma1 - (src[b + 1] - mb1)) + Math.abs(src[a + 2] - ma2 - (src[b + 2] - mb2));
-      }
-      const score = s / (3 * n);
-      if (score < bestScore) {
-        bestScore = score;
-        best = cand;
-      }
-    }
-    padShiftX = best;
-  }
-  const padPhaseSeed = Math.floor(padRand() * 4294967295) | 0;
-  const wrapPos = (c, n) => (c % n + n) % n;
-  const PAD_NOISE_LUT = [-3, -2, -1, 1, 2, 3];
-  const padNoise = (gx, gy, channel) => {
-    let hash = padPhaseSeed ^ Math.imul((gx >> 3) + 1, 374761393) ^ Math.imul((gy >> 3) + 1, 668265263) ^ Math.imul(channel + 1, 2246822519) | 0;
-    hash = Math.imul(hash ^ hash >>> 13, 1274126177);
-    return PAD_NOISE_LUT[(hash >>> 16) % 6];
-  };
-  const ANCHOR_R = 16;
-  const rowPrefixCache = /* @__PURE__ */ new Map();
-  const colPrefixCache = /* @__PURE__ */ new Map();
-  const rowPrefix = (y) => {
-    let p = rowPrefixCache.get(y);
-    if (!p) {
-      p = new Float64Array(3 * (w + 1));
-      const base = y * w * 4;
-      for (let x = 0; x < w; x++) {
-        const si = base + x * 4;
-        p[x + 1] = p[x] + src[si];
-        p[w + 1 + x + 1] = p[w + 1 + x] + src[si + 1];
-        p[2 * (w + 1) + x + 1] = p[2 * (w + 1) + x] + src[si + 2];
-      }
-      rowPrefixCache.set(y, p);
-    }
-    return p;
-  };
-  const colPrefix = (x) => {
-    let p = colPrefixCache.get(x);
-    if (!p) {
-      p = new Float64Array(3 * (h + 1));
-      for (let y = 0; y < h; y++) {
-        const si = (y * w + x) * 4;
-        p[y + 1] = p[y] + src[si];
-        p[h + 1 + y + 1] = p[h + 1 + y] + src[si + 1];
-        p[2 * (h + 1) + y + 1] = p[2 * (h + 1) + y] + src[si + 2];
-      }
-      colPrefixCache.set(x, p);
-    }
-    return p;
-  };
-  const _boxA = [0, 0, 0];
-  const _boxB = [0, 0, 0];
-  const rowBox = (y, cx, out2) => {
-    const p = rowPrefix(y);
-    const x0 = Math.max(0, cx - ANCHOR_R), x1 = Math.min(w, cx + ANCHOR_R + 1);
-    const n = Math.max(1, x1 - x0);
-    out2[0] = (p[x1] - p[x0]) / n;
-    out2[1] = (p[w + 1 + x1] - p[w + 1 + x0]) / n;
-    out2[2] = (p[2 * (w + 1) + x1] - p[2 * (w + 1) + x0]) / n;
-  };
-  const colBox = (x, cy, out2) => {
-    const p = colPrefix(x);
-    const y0 = Math.max(0, cy - ANCHOR_R), y1 = Math.min(h, cy + ANCHOR_R + 1);
-    const n = Math.max(1, y1 - y0);
-    out2[0] = (p[y1] - p[y0]) / n;
-    out2[1] = (p[h + 1 + y1] - p[h + 1 + y0]) / n;
-    out2[2] = (p[2 * (h + 1) + y1] - p[2 * (h + 1) + y0]) / n;
-  };
-  const writePixel = (di, si) => {
-    target[di] = src[si];
-    target[di + 1] = src[si + 1];
-    target[di + 2] = src[si + 2];
-    target[di + 3] = src[si + 3];
-  };
-  const PAD_FEATHER = [0.45, 0.3, 0.15];
-  const writePadPixel = (di, srcX, srcY, rawX, rawY) => {
-    const si = (srcY * w + srcX) * 4;
-    let fade = 0, edgeSi = -1;
-    if (rawY >= h) {
-      rowBox(h - 1, srcX, _boxA);
-      rowBox(srcY, srcX, _boxB);
-      const d = rawY - h;
-      if (d < 3) {
-        fade = PAD_FEATHER[d];
-        edgeSi = ((h - 1) * w + srcX) * 4;
-      }
-    } else {
-      colBox(w - 1, rawY, _boxA);
-      colBox(srcX, rawY, _boxB);
-      const d = rawX - w;
-      if (d < 3) {
-        fade = PAD_FEATHER[d];
-        edgeSi = (rawY * w + w - 1) * 4;
-      }
-    }
-    for (let c = 0; c < 3; c++) {
-      let v = src[si + c] + Math.round(_boxA[c] - _boxB[c]);
-      if (fade) v = v * (1 - fade) + src[edgeSi + c] * fade;
-      target[di + c] = Math.max(0, Math.min(255, Math.round(v) + padNoise(rawX, rawY, c)));
-    }
-    target[di + 3] = src[si + 3];
-  };
-  for (let dest = 0; dest < count; dest++) {
-    const source = plan.order[dest];
-    if (!Number.isInteger(source) || source < 0 || source >= count) {
-      throw new RangeError("Archx: invalid scramble plan");
-    }
-    const flip = plan.flips[dest];
-    if (!flip || typeof flip !== "object") throw new RangeError("Archx: invalid scramble plan");
-    const { fx, fy } = flip;
-    const sx = source % grid * tw;
-    const sy = Math.floor(source / grid) * th;
-    const dx = dest % grid * tw;
-    const dy = Math.floor(dest / grid) * th;
-    for (let y = 0; y < th; y++) {
-      const rawY = sy + (fy ? th - 1 - y : y);
-      const rowIsPad = rawY >= h;
-      const srcY = rowIsPad ? wrapPos(padShiftY + (rawY - h), h) : rawY;
-      const dstRow = (dy + y) * pw + dx;
-      if (useWords && !fx && !rowIsPad) {
-        const avail = Math.max(0, Math.min(tw, w - sx));
-        if (avail > 0) out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + avail), dstRow);
-        for (let x = avail; x < tw; x++) {
-          const rawX = sx + x;
-          const srcX = wrapPos(padShiftX + (rawX - w), w);
-          writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
-        }
-      } else if (useWords && !rowIsPad && !(sx + tw > w)) {
-        for (let x = 0; x < tw; x++) {
-          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
-        }
-      } else {
-        for (let x = 0; x < tw; x++) {
-          const rawX = sx + (fx ? tw - 1 - x : x);
-          const colIsPad = rawX >= w;
-          const srcX = colIsPad ? wrapPos(padShiftX + (rawX - w), w) : rawX;
-          if (rowIsPad || colIsPad) {
-            writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
-          } else {
-            writePixel((dstRow + x) * 4, (srcY * w + srcX) * 4);
-          }
-        }
-      }
-    }
-  }
-  return target;
-}
+
+// src/core/perceptual.js
 var DCT_COSINES_32x8 = (() => {
   const table = new Float64Array(32 * 8);
   for (let x = 0; x < 32; x++) {
@@ -2937,8 +3081,7 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
   });
 }
 
-// src/archx.js
-var VERSION = "1.18.0";
+// src/client/native.js
 var NATIVES = (() => {
   const g = globalThis;
   const grab = (obj, name) => {
@@ -3095,6 +3238,7 @@ var NATIVES = (() => {
     canvasToBlob: grab(canvasProto, "toBlob"),
     ctxDrawImage: grab(ctx2dProto, "drawImage"),
     ctxGetImageData: grab(ctx2dProto, "getImageData"),
+    ctxPutImageData: grab(ctx2dProto, "putImageData"),
     // 2D transform/state (red-team C2): save/restore/translate/scale
     // were called directly on the OFF-DOM unscramble buffer's context,
     // so a post-load restore() hook received `this.canvas` — the full
@@ -3167,274 +3311,6 @@ function isNativeFn(fn) {
     return false;
   }
 }
-var AUDIT_WEBGL_METHODS = [
-  "texImage2D",
-  "readPixels",
-  "drawArrays",
-  "drawElements",
-  "createTexture",
-  "bindTexture",
-  "bindFramebuffer",
-  "createFramebuffer",
-  "framebufferTexture2D",
-  "createShader",
-  "shaderSource",
-  "compileShader",
-  "createProgram",
-  "linkProgram",
-  "useProgram",
-  "getContextAttributes",
-  "uniform1f",
-  "uniform2f",
-  "uniform1i",
-  "viewport",
-  "activeTexture",
-  "texParameteri",
-  "pixelStorei",
-  "generateMipmap",
-  "getUniformLocation",
-  "attachShader",
-  "getShaderParameter",
-  "getProgramParameter",
-  "createBuffer",
-  "bindBuffer",
-  "bufferData",
-  "enableVertexAttribArray",
-  "vertexAttribPointer",
-  "getExtension"
-];
-var readerProtoCache;
-function currentReaderRead() {
-  try {
-    if (readerProtoCache === void 0) {
-      readerProtoCache = Object.getPrototypeOf(new ReadableStream().getReader());
-    }
-    return readerProtoCache?.read ?? null;
-  } catch {
-    return null;
-  }
-}
-function currentDescriptorAccessor(ctorName, prop, kind) {
-  try {
-    const ctor = ctorName === "HTMLCanvasElement" ? typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement : null : typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D : null;
-    if (!ctor) return null;
-    return Object.getOwnPropertyDescriptor(ctor.prototype, prop)?.[kind] || null;
-  } catch {
-    return null;
-  }
-}
-function auditIntegrity() {
-  const g = globalThis;
-  const current = [
-    ["fetch", g.fetch, NATIVES.fetch],
-    ["createImageBitmap", g.createImageBitmap, NATIVES.createImageBitmap],
-    ["URL.createObjectURL", typeof URL !== "undefined" ? URL.createObjectURL : null, NATIVES.createObjectURL],
-    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, NATIVES.canvasGetContext],
-    ["HTMLCanvasElement.prototype.toDataURL", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toDataURL : null, NATIVES.canvasToDataURL],
-    ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
-    ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
-    ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
-    ["CanvasRenderingContext2D.prototype.save", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null, NATIVES.ctxSave],
-    ["CanvasRenderingContext2D.prototype.restore", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null, NATIVES.ctxRestore],
-    ["CanvasRenderingContext2D.prototype.translate", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.translate : null, NATIVES.ctxTranslate],
-    ["CanvasRenderingContext2D.prototype.scale", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.scale : null, NATIVES.ctxScale],
-    ["CanvasRenderingContext2D.prototype.rotate", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.rotate : null, NATIVES.ctxRotate],
-    ["CanvasRenderingContext2D.prototype.setTransform", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.setTransform : null, NATIVES.ctxSetTransform],
-    ["Function.prototype.call", Function.prototype.call, NATIVES.fnCall],
-    ["Function.prototype.apply", Function.prototype.apply, NATIVES.fnApply],
-    ["Function.prototype.bind", Function.prototype.bind, NATIVES.fnBind],
-    ["Function.prototype.toString", Function.prototype.toString, NATIVES.fnToString],
-    ["Reflect.apply", typeof Reflect !== "undefined" ? Reflect.apply : null, NATIVES.reflectApply],
-    ["HTMLCanvasElement.prototype.width.get", currentDescriptorAccessor("HTMLCanvasElement", "width", "get"), NATIVES.canvasWidthGet],
-    ["HTMLCanvasElement.prototype.width.set", currentDescriptorAccessor("HTMLCanvasElement", "width", "set"), NATIVES.canvasWidthSet],
-    ["HTMLCanvasElement.prototype.height.get", currentDescriptorAccessor("HTMLCanvasElement", "height", "get"), NATIVES.canvasHeightGet],
-    ["HTMLCanvasElement.prototype.height.set", currentDescriptorAccessor("HTMLCanvasElement", "height", "set"), NATIVES.canvasHeightSet],
-    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.get", currentDescriptorAccessor("CanvasRenderingContext2D", "imageSmoothingQuality", "get"), NATIVES.smoothingQualityGet],
-    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.set", currentDescriptorAccessor("CanvasRenderingContext2D", "imageSmoothingQuality", "set"), NATIVES.smoothingQualitySet],
-    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
-    ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
-    ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
-    ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
-    ["ReadableStreamDefaultReader.prototype.read", currentReaderRead(), NATIVES.streamReaderRead],
-    ["Response.prototype.text", typeof Response !== "undefined" ? Response.prototype.text : null, NATIVES.responseText],
-    ["TextDecoder.prototype.decode", typeof TextDecoder !== "undefined" ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
-    ["TextEncoder.prototype.encode", typeof TextEncoder !== "undefined" ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
-    ["SubtleCrypto.prototype.importKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).importKey : null, NATIVES.subtleImportKey],
-    ["SubtleCrypto.prototype.decrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).decrypt : null, NATIVES.subtleDecrypt],
-    ["SubtleCrypto.prototype.encrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).encrypt : null, NATIVES.subtleEncrypt],
-    ["SubtleCrypto.prototype.digest", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).digest : null, NATIVES.subtleDigest],
-    ["SubtleCrypto.prototype.sign", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).sign : null, NATIVES.subtleSign],
-    ["SubtleCrypto.prototype.generateKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).generateKey : null, NATIVES.subtleGenerateKey],
-    ["SubtleCrypto.prototype.exportKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).exportKey : null, NATIVES.subtleExportKey],
-    ["Crypto.prototype.getRandomValues", (() => {
-      try {
-        return globalThis.crypto?.getRandomValues || null;
-      } catch {
-        return null;
-      }
-    })(), NATIVES.getRandomValues]
-  ];
-  for (const [label, ctor, capturedMap] of [
-    ["WebGLRenderingContext", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext : null, NATIVES.webgl1],
-    ["WebGL2RenderingContext", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext : null, NATIVES.webgl2]
-  ]) {
-    for (const method of AUDIT_WEBGL_METHODS) {
-      current.push([
-        `${label}.prototype.${method}`,
-        ctor ? ctor.prototype[method] : null,
-        capturedMap?.[method] ?? null
-      ]);
-    }
-  }
-  const issues = [];
-  for (const [name, now, captured] of current) {
-    if (!captured && !now) continue;
-    if (now !== captured || captured && !isNativeFn(captured)) issues.push(name);
-  }
-  return issues;
-}
-function auditIntegrityDetails() {
-  const issues = auditIntegrity();
-  const capturedByName = /* @__PURE__ */ new Map([
-    ["fetch", NATIVES.fetch],
-    ["createImageBitmap", NATIVES.createImageBitmap],
-    ["URL.createObjectURL", NATIVES.createObjectURL],
-    ["HTMLCanvasElement.prototype.getContext", NATIVES.canvasGetContext],
-    ["HTMLCanvasElement.prototype.toDataURL", NATIVES.canvasToDataURL],
-    ["HTMLCanvasElement.prototype.toBlob", NATIVES.canvasToBlob],
-    ["CanvasRenderingContext2D.prototype.drawImage", NATIVES.ctxDrawImage],
-    ["CanvasRenderingContext2D.prototype.getImageData", NATIVES.ctxGetImageData],
-    ["CanvasRenderingContext2D.prototype.save", NATIVES.ctxSave],
-    ["CanvasRenderingContext2D.prototype.restore", NATIVES.ctxRestore],
-    ["CanvasRenderingContext2D.prototype.translate", NATIVES.ctxTranslate],
-    ["CanvasRenderingContext2D.prototype.scale", NATIVES.ctxScale],
-    ["CanvasRenderingContext2D.prototype.rotate", NATIVES.ctxRotate],
-    ["CanvasRenderingContext2D.prototype.setTransform", NATIVES.ctxSetTransform],
-    ["Function.prototype.call", NATIVES.fnCall],
-    ["Function.prototype.apply", NATIVES.fnApply],
-    ["Function.prototype.bind", NATIVES.fnBind],
-    ["Function.prototype.toString", NATIVES.fnToString],
-    ["Reflect.apply", NATIVES.reflectApply],
-    ["HTMLCanvasElement.prototype.width.get", NATIVES.canvasWidthGet],
-    ["HTMLCanvasElement.prototype.width.set", NATIVES.canvasWidthSet],
-    ["HTMLCanvasElement.prototype.height.get", NATIVES.canvasHeightGet],
-    ["HTMLCanvasElement.prototype.height.set", NATIVES.canvasHeightSet],
-    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.get", NATIVES.smoothingQualityGet],
-    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.set", NATIVES.smoothingQualitySet],
-    ["Document.prototype.createElement", NATIVES.docCreateElement],
-    ["JSON.parse", NATIVES.jsonParse],
-    ["Element.prototype.attachShadow", NATIVES.attachShadow],
-    ["ReadableStream.prototype.getReader", NATIVES.streamGetReader],
-    ["ReadableStreamDefaultReader.prototype.read", NATIVES.streamReaderRead],
-    ["Response.prototype.text", NATIVES.responseText],
-    ["TextDecoder.prototype.decode", NATIVES.textDecode],
-    ["TextEncoder.prototype.encode", NATIVES.textEncode],
-    ["SubtleCrypto.prototype.importKey", NATIVES.subtleImportKey],
-    ["SubtleCrypto.prototype.decrypt", NATIVES.subtleDecrypt],
-    ["SubtleCrypto.prototype.encrypt", NATIVES.subtleEncrypt],
-    ["SubtleCrypto.prototype.digest", NATIVES.subtleDigest],
-    ["SubtleCrypto.prototype.sign", NATIVES.subtleSign],
-    ["SubtleCrypto.prototype.generateKey", NATIVES.subtleGenerateKey],
-    ["SubtleCrypto.prototype.exportKey", NATIVES.subtleExportKey],
-    ["Crypto.prototype.getRandomValues", NATIVES.getRandomValues]
-  ]);
-  for (const [label, capturedMap] of [
-    ["WebGLRenderingContext", NATIVES.webgl1],
-    ["WebGL2RenderingContext", NATIVES.webgl2]
-  ]) {
-    for (const [method, fn] of Object.entries(capturedMap || {})) {
-      capturedByName.set(`${label}.prototype.${method}`, fn);
-    }
-  }
-  const capturedNonNative = issues.filter((name) => {
-    const captured = capturedByName.get(name);
-    return !!captured && !isNativeFn(captured);
-  });
-  return Object.freeze({
-    ok: issues.length === 0,
-    issues: Object.freeze(issues),
-    capturedNonNative: Object.freeze(capturedNonNative),
-    changedSinceLoad: Object.freeze(issues.filter((name) => !capturedNonNative.includes(name))),
-    checked: Object.freeze([
-      "fetch",
-      "createImageBitmap",
-      "URL.createObjectURL",
-      "canvas context/readback",
-      "CanvasRenderingContext2D draw/readback",
-      "Document.createElement",
-      "WebGL/WebGL2 texture, framebuffer, shader/program, draw, and readback methods"
-    ]),
-    note: "Tripwire only: a clean result does not prove the absence of pre-load, native-looking, extension, CDP, or modified-browser hooks."
-  });
-}
-function captureEarlyIntegritySnapshot() {
-  const snapshot = Object.freeze({
-    fetch: globalThis.fetch || null,
-    createImageBitmap: globalThis.createImageBitmap || null,
-    canvasGetContext: typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null,
-    webglDrawArrays: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null,
-    webgl2DrawArrays: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null,
-    webglReadPixels: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null,
-    webgl2ReadPixels: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null,
-    fnCall: Function.prototype.call,
-    fnApply: Function.prototype.apply,
-    fnBind: Function.prototype.bind,
-    reflectApply: typeof Reflect !== "undefined" ? Reflect.apply : null,
-    ctxSave: typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null,
-    ctxRestore: typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null,
-    canvasWidthSet: (() => {
-      try {
-        return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "width")?.set || null;
-      } catch {
-        return null;
-      }
-    })(),
-    canvasHeightSet: (() => {
-      try {
-        return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "height")?.set || null;
-      } catch {
-        return null;
-      }
-    })(),
-    at: Date.now()
-  });
-  return snapshot;
-}
-function verifyEarlyIntegritySnapshot(snapshot) {
-  if (!snapshot || typeof snapshot !== "object") return Object.freeze({ ok: false, issues: Object.freeze(["missing-snapshot"]) });
-  const checks = [
-    ["fetch", globalThis.fetch || null, snapshot.fetch],
-    ["createImageBitmap", globalThis.createImageBitmap || null, snapshot.createImageBitmap],
-    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, snapshot.canvasGetContext],
-    ["WebGLRenderingContext.prototype.drawArrays", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null, snapshot.webglDrawArrays],
-    ["WebGL2RenderingContext.prototype.drawArrays", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null, snapshot.webgl2DrawArrays],
-    ["WebGLRenderingContext.prototype.readPixels", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null, snapshot.webglReadPixels],
-    ["WebGL2RenderingContext.prototype.readPixels", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null, snapshot.webgl2ReadPixels],
-    ["Function.prototype.call", Function.prototype.call, snapshot.fnCall],
-    ["Function.prototype.apply", Function.prototype.apply, snapshot.fnApply],
-    ["Function.prototype.bind", Function.prototype.bind, snapshot.fnBind],
-    ["Reflect.apply", typeof Reflect !== "undefined" ? Reflect.apply : null, snapshot.reflectApply],
-    ["CanvasRenderingContext2D.prototype.save", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null, snapshot.ctxSave],
-    ["CanvasRenderingContext2D.prototype.restore", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null, snapshot.ctxRestore],
-    ["HTMLCanvasElement.prototype.width.set", currentDescriptorAccessor("HTMLCanvasElement", "width", "set"), snapshot.canvasWidthSet],
-    ["HTMLCanvasElement.prototype.height.set", currentDescriptorAccessor("HTMLCanvasElement", "height", "set"), snapshot.canvasHeightSet]
-  ];
-  const issues = checks.filter(([, now, before]) => (before || now) && now !== before).map(([name]) => name);
-  return Object.freeze({ ok: issues.length === 0, issues: Object.freeze(issues), snapshotAt: snapshot.at || null });
-}
-function detectAutomation() {
-  const signals = [];
-  try {
-    if (typeof navigator !== "undefined") {
-      if (navigator.webdriver) signals.push("webdriver");
-      if (/HeadlessChrome|PhantomJS|Headless/i.test(navigator.userAgent || "")) signals.push("headless-ua");
-      if (navigator.languages && navigator.languages.length === 0) signals.push("no-languages");
-    }
-    if (typeof window !== "undefined" && window.outerWidth === 0 && window.outerHeight === 0) signals.push("zero-outer-size");
-  } catch {
-  }
-  return signals;
-}
 function nativeFetch(url, options) {
   return NATIVES.fetch ? nativeCall(NATIVES.fetch, globalThis, [url, options]) : fetch(url, options);
 }
@@ -3460,6 +3336,12 @@ function getNativeContext(canvas, type, attrs) {
 function nativeDrawImage(ctx, ...args) {
   return NATIVES.ctxDrawImage ? nativeCall(NATIVES.ctxDrawImage, ctx, args) : ctx.drawImage(...args);
 }
+function nativeGetImageData(ctx, x, y, w, h) {
+  return NATIVES.ctxGetImageData ? nativeCall(NATIVES.ctxGetImageData, ctx, [x, y, w, h]) : ctx.getImageData(x, y, w, h);
+}
+function nativePutImageData(ctx, data, x, y) {
+  return NATIVES.ctxPutImageData ? nativeCall(NATIVES.ctxPutImageData, ctx, [data, x, y]) : ctx.putImageData(data, x, y);
+}
 function nativeGlDrawArrays(gl, mode, first, count) {
   return NATIVES.glDrawArrays ? nativeCall(NATIVES.glDrawArrays, gl, [mode, first, count]) : gl.drawArrays(mode, first, count);
 }
@@ -3479,474 +3361,8 @@ function ctxNative(ctx, name, ...args) {
   const fn = NATIVES[CTX_NATIVE[name]];
   return fn ? nativeCall(fn, ctx, args) : ctx[name](...args);
 }
-var DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
-  160,
-  240,
-  320,
-  480,
-  640,
-  800,
-  960,
-  1200,
-  1440,
-  1600,
-  1920,
-  2240,
-  2560
-]);
-var DEFAULTS = {
-  mode: "shield",
-  // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
-  renderer: "auto",
-  // 'auto' | 'canvas' | 'webgl' — direct renderer flag (lets custom setups skip preset modes)
-  fit: "cover",
-  // 'cover' | 'contain' | 'fill'
-  lazy: true,
-  rootMargin: "500px",
-  unloadOnExit: false,
-  // gallery mode turns this on for huge grids
-  shadow: "closed",
-  // 'closed' | 'open' | 'none'
-  grid: DEFAULT_GRID,
-  scrambled: false,
-  // source pixels are tile-scrambled
-  planVersion: 1,
-  // scramble plan derivation for container-less scrambled sources (1 = legacy 32-bit seed, 2 = 128-bit seed); .archx headers carry their own `pv` and win
-  key: null,
-  // scramble seed and/or AES key (see docs)
-  aesKey: null,
-  // base64 AES key for encrypted .archx payloads
-  tokenEndpoint: null,
-  // e.g. '/archx/token/'  (+ image id)
-  tokenMethod: "POST",
-  // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
-  tokenTransport: "header",
-  // 'header' | 'query' | 'auto' — header keeps bearer tokens out of image URLs/logs
-  tokenBatch: false,
-  // coalesce simultaneous POST mints into {basePath}/tokens (catalog/gallery presets enable it)
-  tokenBatchEndpoint: null,
-  // explicit batch endpoint; otherwise derived by replacing a trailing /token segment
-  tokenBatchSize: 50,
-  // maximum mints per batch HTTP request
-  tokenBatchDelayMs: 8,
-  // quiet-period coalescing window for gallery/page bursts
-  tokenBatchMaxDelayMs: 50,
-  // hard cap so a continuous trickle cannot starve the first mint
-  assetManifest: null,
-  // archx-build manifest URL or object for { assetId } sources
-  assetManifestMaxBytes: 8 * 1024 * 1024,
-  assetHttpCache: "default",
-  // manifest/variant fetches may use browser/CDN HTTP caching
-  assetIntegrity: "auto",
-  // 'auto' | 'require' | 'off' — verify per-variant SHA-256 digests from the manifest
-  assetManifestIntegrity: null,
-  // optional 'sha256-<hex>' pin for a fetched manifest (archx-build prints it)
-  httpCache: "no-store",
-  // direct URL sources; token mint/payload requests always remain no-store
-  fetchPriority: null,
-  // null | 'high' | 'low' | 'auto' (hero images may use high; leave auto for galleries)
-  proofOfPossession: "auto",
-  // 'auto' | 'required' | 'off' — bind tokens to a non-extractable page key when WebCrypto allows
-  allowedTokenOrigins: null,
-  // exact extra origins allowed for token-returned payload URLs (endpoint origin is always allowed)
-  fetchTimeoutMs: 2e4,
-  // per-request network deadline (mint, payload, and direct sources)
-  maxResponseBytes: 64 * 1024 * 1024,
-  maxDecodedPixels: 4e7,
-  // pre-decode header budget + post-decode bitmap budget
-  maxDecodedDimension: 16384,
-  onExtract: "black",
-  // 'black' | 'lowres' | 'scrambled'
-  taintReadback: "auto",
-  // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
-  taintUrl: null,
-  // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
-  splitCanvases: false,
-  // shield+: one canvas per tile (hero images)
-  splitGrid: 3,
-  maxBackingWidth: 1920,
-  // never paint a wider backing store than this
-  dprCap: 3,
-  // match modern retina/mobile displays instead of upscaling a 2x canvas
-  sourceOversample: 2,
-  // fetch a 2x derivative then supersample down (server entitlement still caps the signed width)
-  maxSourceWidth: 2560,
-  // client-side ceiling before the server's own entitlement cap
-  sourceWidthBuckets: null,
-  // canonical requested widths (catalog/gallery presets supply a ladder)
-  qualityProfile: "high",
-  // 'original' | 'high' | 'balanced' | 'catalog' | 'fast' (sets requestQuality + sampling unless overridden)
-  requestQuality: null,
-  // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
-  networkAware: false,
-  // honour Save-Data / slow effectiveType with a smaller derivative (Network Information API)
-  cacheBitmap: true,
-  // reuse a decoded bitmap for the same source in this page session
-  bitmapCacheMaxEntries: 40,
-  bitmapCacheMaxBytes: 256 * 1024 * 1024,
-  // approximate decoded RGBA bytes in the shared LRU
-  cachePayload: true,
-  // retain the scrambled bytes privately so repaint/strict-memory recovery needs NO network reload
-  cacheScope: null,
-  // set per authenticated viewer/tenant so SPA account switches cannot reuse another viewer's bitmap
-  reloadOnResize: "upscale",
-  // 'never' | 'upscale' | 'always' — ordinary resizes repaint locally, never remint tokens
-  resizeUpscaleFactor: 1.75,
-  // only a much larger box may justify a fresh derivative under 'upscale'
-  renderLoop: "auto",
-  // 'auto' (static images draw on demand; temporal shield animates) | 'static' | 'continuous'
-  temporalShield: null,
-  // true | { strength, block, pattern, chroma, respectReducedMotion } — complementary frames a single screenshot cannot average
-  temporalInterlace: null,
-  // true | 'balanced60'|'pixels60'|'strips60'|'blocks60' | { profile, engine, layout, phases, cellSize, fill, refreshHz, ... }
-  cameraShield: null,
-  // experimental alias/profile for temporalShield aimed at rolling-shutter/Bayer cameras
-  watermark: null,
-  // string | { text, opacity, tile, corner }
-  forensic: true,
-  // invisible per-session block pattern (shield/vault/fortress)
-  sessionId: null,
-  // defaults to a random per-page-view id
-  brand: "\xA9 Protected \xB7 Archnemix",
-  retries: 2,
-  credentials: "same-origin",
-  integrity: "monitor",
-  // 'off' | 'monitor' | 'lock' — hooked-API policy
-  automation: "monitor",
-  // 'off' | 'monitor' | 'lock' — headless/bot policy
-  memory: "standard",
-  // 'standard' | 'strict' — strict wipes decoded bitmaps ASAP
-  localScramble: false,
-  // fortress: GPU texture holds scrambled pixels even for plain sources
-  lens: null,
-  // anti-screenshot pointer lens: true | { radius, idlePixelate }
-  captureShield: null,
-  // true | { dynamicTrace, temporalPattern, text, opacity } (fortress enables)
-  strikes: null,
-  // attempt lockout: { blurAt, lockAt, lockMs } (fortress enables)
-  debug: false,
-  // enables _debug() internals hook — NEVER in production
-  guards: {
-    contextMenu: true,
-    drag: true,
-    copy: true,
-    longPress: true,
-    print: true,
-    blurOnBlur: true,
-    // blur while window unfocused (snipping tools)
-    screenshotKeys: true,
-    // best-effort PrintScreen reaction
-    devtools: false
-    // opt-in: blur while DevTools appears open
-  },
-  onAttempt: null,
-  // (kind, instance) => void  — hook your logging
-  onLoad: null,
-  onError: null,
-  onClick: null,
-  onEvent: null,
-  // (sanitizedEvent, instance) => void — generic monitoring/plugin hook; never receives tokens/keys/pixels
-  alt: ""
-};
-var globalConfig = structuredCloneSafe(DEFAULTS);
-var instances = /* @__PURE__ */ new Set();
-var hostToInstance = /* @__PURE__ */ new WeakMap();
-var pageSessionId = null;
-var globalEventListeners = /* @__PURE__ */ new Set();
-var installedPlugins = /* @__PURE__ */ new Map();
-function sanitizeClientEvent(type, details = {}, instance = null) {
-  let mode = null;
-  try {
-    mode = instance?.options?.requestedMode || instance?.options?.mode || null;
-  } catch {
-  }
-  const cleanText = (value, max = 160) => {
-    if (value == null) return null;
-    const text = String(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
-    return text || null;
-  };
-  return Object.freeze({
-    schemaVersion: 1,
-    service: "archx-client",
-    type: cleanText(type, 80) || "archx.event",
-    at: (/* @__PURE__ */ new Date()).toISOString(),
-    mode: cleanText(mode, 32),
-    kind: cleanText(details.kind, 120),
-    reason: cleanText(details.reason, 160),
-    outcome: cleanText(details.outcome, 48),
-    issues: Array.isArray(details.issues) ? Object.freeze(details.issues.slice(0, 40).map((issue) => cleanText(issue, 120)).filter(Boolean)) : null
-  });
-}
-function emitClientEvent(type, details = {}, instance = null) {
-  const event = sanitizeClientEvent(type, details, instance);
-  const invoke = (listener) => {
-    try {
-      const result = listener(event, instance);
-      if (result && typeof result.catch === "function") result.catch(() => {
-      });
-    } catch {
-    }
-  };
-  for (const listener of [...globalEventListeners]) invoke(listener);
-  for (const plugin of installedPlugins.values()) {
-    if (typeof plugin.onEvent === "function") invoke(plugin.onEvent);
-  }
-  try {
-    const perInstance = instance?.options?.onEvent;
-    if (typeof perInstance === "function") invoke(perInstance);
-  } catch {
-  }
-  return event;
-}
-function onClientEvent(listener) {
-  if (typeof listener !== "function") throw new TypeError("Archx.on: listener must be a function");
-  globalEventListeners.add(listener);
-  return () => {
-    globalEventListeners.delete(listener);
-  };
-}
-function offClientEvent(listener) {
-  return globalEventListeners.delete(listener);
-}
-function usePlugin(plugin) {
-  if (!plugin || typeof plugin !== "object") throw new TypeError("Archx.use: plugin must be an object");
-  const name = typeof plugin.name === "string" && plugin.name.trim() ? plugin.name.trim().slice(0, 80) : `plugin-${installedPlugins.size + 1}`;
-  if (plugin.onEvent !== void 0 && typeof plugin.onEvent !== "function") {
-    throw new TypeError("Archx.use: plugin.onEvent must be a function when supplied");
-  }
-  if (plugin.setup !== void 0 && typeof plugin.setup !== "function") {
-    throw new TypeError("Archx.use: plugin.setup must be a function when supplied");
-  }
-  if (plugin.teardown !== void 0 && typeof plugin.teardown !== "function") {
-    throw new TypeError("Archx.use: plugin.teardown must be a function when supplied");
-  }
-  const previous = installedPlugins.get(name);
-  if (previous?.teardown) {
-    try {
-      previous.teardown();
-    } catch {
-    }
-  }
-  const record = Object.freeze({ name, onEvent: plugin.onEvent || null, teardown: plugin.teardown || null });
-  installedPlugins.set(name, record);
-  if (typeof plugin.setup === "function") {
-    try {
-      plugin.setup(Object.freeze({ on: onClientEvent, off: offClientEvent, version: VERSION }));
-    } catch {
-      installedPlugins.delete(name);
-      throw new Error(`Archx.use: plugin "${name}" setup failed`);
-    }
-  }
-  emitClientEvent("archx.plugin_installed", { kind: name, outcome: "installed" });
-  return Object.freeze({
-    name,
-    remove() {
-      const current = installedPlugins.get(name);
-      if (!current) return false;
-      installedPlugins.delete(name);
-      try {
-        current.teardown?.();
-      } catch {
-      }
-      return true;
-    }
-  });
-}
-function listPlugins() {
-  return Object.freeze([...installedPlugins.keys()]);
-}
-function structuredCloneSafe(obj) {
-  return JSON.parse(JSON.stringify(obj, (k, v) => typeof v === "function" ? void 0 : v));
-}
-function sessionId() {
-  if (globalConfig.sessionId) return globalConfig.sessionId;
-  if (!pageSessionId) {
-    const a = new Uint8Array(8);
-    crypto.getRandomValues(a);
-    pageSessionId = [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-  return pageSessionId;
-}
-function mergeOptions(opts = {}) {
-  const clean = {};
-  for (const [k, v] of Object.entries(opts)) if (v !== void 0) clean[k] = v;
-  const merged = { ...globalConfig, ...clean };
-  merged.guards = { ...globalConfig.guards };
-  if (opts.guards) {
-    for (const [k, v] of Object.entries(opts.guards)) if (v !== void 0) merged.guards[k] = v;
-  }
-  const qualityProfiles = {
-    original: { requestQuality: "lossless", sourceOversample: 2, dprCap: 3 },
-    high: { requestQuality: 95, sourceOversample: 2, dprCap: 3 },
-    balanced: { requestQuality: 90, sourceOversample: 1.5, dprCap: 2.5 },
-    catalog: { requestQuality: 88, sourceOversample: 1, dprCap: 2 },
-    fast: { requestQuality: 82, sourceOversample: 1.25, dprCap: 2 }
-  };
-  const qp = qualityProfiles[merged.qualityProfile];
-  if (qp) {
-    if (clean.requestQuality === void 0 && merged.requestQuality == null) merged.requestQuality = qp.requestQuality;
-    if (clean.sourceOversample === void 0 && clean.qualityProfile !== void 0) merged.sourceOversample = qp.sourceOversample;
-    if (clean.dprCap === void 0 && clean.qualityProfile !== void 0) merged.dprCap = qp.dprCap;
-  }
-  const rendererValue = String(merged.renderer || "auto").toLowerCase();
-  merged.renderer = rendererValue === "canvas2d" ? "canvas" : rendererValue === "canvas" || rendererValue === "webgl" ? rendererValue : "auto";
-  const customRequested = merged.mode === "custom" || clean.mode === void 0 && clean.renderer !== void 0;
-  if (customRequested) {
-    merged.requestedMode = "custom";
-    merged.mode = merged.renderer === "webgl" ? "vault" : "shield";
-  }
-  if (merged.mode === "lite" && clean.forensic === void 0) merged.forensic = false;
-  if (merged.mode === "fortress") {
-    merged.requestedMode = "fortress";
-    merged.mode = "vault";
-    if (clean.onExtract === void 0) merged.onExtract = "black";
-    if (clean.integrity === void 0) merged.integrity = "lock";
-    if (clean.memory === void 0) merged.memory = "strict";
-    if (clean.localScramble === void 0) merged.localScramble = true;
-    if (clean.forensic === void 0) merged.forensic = true;
-    if (clean.captureShield === void 0) merged.captureShield = true;
-    if (clean.temporalShield === void 0 && clean.cameraShield === void 0 && !normalizeTemporalInterlace(merged.temporalInterlace)) {
-      merged.temporalShield = { strength: 0.16, block: 2, pattern: "checker", chroma: true };
-    }
-    if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
-    if (!opts.guards || opts.guards.devtools === void 0) merged.guards.devtools = true;
-  }
-  return merged;
-}
-function sanitizeOptionsView(opts) {
-  if (!opts) return opts;
-  const sensitive = /* @__PURE__ */ new Set([
-    "key",
-    "aeskey",
-    "cachescope",
-    "sessionid",
-    "token",
-    "accesstoken",
-    "refreshtoken",
-    "secret",
-    "password",
-    "authorization",
-    "cookie",
-    "assetmanifest",
-    "tainturl"
-  ]);
-  const seen = /* @__PURE__ */ new WeakMap();
-  const clone = (value, keyName = "") => {
-    if (sensitive.has(String(keyName).toLowerCase())) return value ? "[redacted]" : value;
-    if (!value || typeof value !== "object") return value;
-    if (seen.has(value)) return "[circular]";
-    if (Array.isArray(value)) {
-      const out2 = [];
-      seen.set(value, out2);
-      for (const item of value) out2.push(clone(item));
-      return out2;
-    }
-    const proto = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) return value;
-    const out = {};
-    seen.set(value, out);
-    for (const [k, v] of Object.entries(value)) out[k] = clone(v, k);
-    return out;
-  };
-  return clone(opts);
-}
-var PRESETS = Object.freeze({
-  gallery: Object.freeze({
-    mode: "lite",
-    qualityProfile: "catalog",
-    sourceOversample: 1,
-    dprCap: 2,
-    lazy: true,
-    unloadOnExit: true,
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "static",
-    reloadOnResize: "never",
-    tokenBatch: true,
-    tokenBatchDelayMs: 20,
-    tokenBatchMaxDelayMs: 150,
-    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
-    httpCache: "default",
-    networkAware: true,
-    bitmapCacheMaxEntries: 24,
-    bitmapCacheMaxBytes: 128 * 1024 * 1024,
-    guards: Object.freeze({ blurOnBlur: false })
-  }),
-  catalog: Object.freeze({
-    mode: "lite",
-    qualityProfile: "catalog",
-    sourceOversample: 1,
-    dprCap: 2,
-    lazy: true,
-    unloadOnExit: true,
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "static",
-    reloadOnResize: "never",
-    tokenBatch: true,
-    tokenBatchDelayMs: 20,
-    tokenBatchMaxDelayMs: 150,
-    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
-    httpCache: "default",
-    networkAware: true,
-    assetHttpCache: "default",
-    bitmapCacheMaxEntries: 24,
-    bitmapCacheMaxBytes: 128 * 1024 * 1024,
-    guards: Object.freeze({ blurOnBlur: false })
-  }),
-  editorial: Object.freeze({
-    mode: "shield",
-    qualityProfile: "original",
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "static",
-    reloadOnResize: "upscale",
-    forensic: true
-  }),
-  commerce: Object.freeze({
-    mode: "vault",
-    qualityProfile: "original",
-    onExtract: "black",
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "static",
-    reloadOnResize: "upscale",
-    forensic: true,
-    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
-  }),
-  marketplace: Object.freeze({
-    mode: "vault",
-    qualityProfile: "high",
-    onExtract: "black",
-    tokenBatch: true,
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "static",
-    reloadOnResize: "upscale",
-    forensic: true,
-    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
-  }),
-  screenshotResistant: Object.freeze({
-    mode: "fortress",
-    qualityProfile: "original",
-    lens: true,
-    temporalShield: Object.freeze({ strength: 0.16, block: 2, pattern: "checker", chroma: true }),
-    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
-    cacheBitmap: true,
-    cachePayload: true,
-    renderLoop: "auto",
-    strikes: Object.freeze({ blurAt: 3, lockAt: 6, lockMs: 3e4 })
-  })
-});
-function preset(name = "editorial", overrides = {}) {
-  const base = PRESETS[name];
-  if (!base) throw new Error(`Archx: unknown preset "${name}" (known: ${Object.keys(PRESETS).join(", ")})`);
-  return {
-    ...base,
-    ...overrides,
-    guards: { ...base.guards || {}, ...overrides.guards || {} }
-  };
-}
+
+// src/client/temporal.js
 var TEMPORAL_INTERLACE_PROFILES = Object.freeze({
   balanced60: Object.freeze({
     engine: "auto",
@@ -4140,166 +3556,398 @@ var limiter = {
     });
   }
 };
-var bitmapCache = /* @__PURE__ */ new Map();
-var bitmapCacheBytes = 0;
-function bitmapEstimatedBytes(result) {
-  const bitmap = result?.bitmap;
-  const w = bitmap?.width || bitmap?.naturalWidth || result?.meta?.padW || 0;
-  const h = bitmap?.height || bitmap?.naturalHeight || result?.meta?.padH || 0;
-  const bytes = w * h * 4;
-  return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes) : 0;
+
+// src/client/options.js
+var DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
+  160,
+  240,
+  320,
+  480,
+  640,
+  800,
+  960,
+  1200,
+  1440,
+  1600,
+  1920,
+  2240,
+  2560
+]);
+var DEFAULTS = {
+  mode: "shield",
+  // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
+  renderer: "auto",
+  // 'auto' | 'canvas' | 'webgl' — direct renderer flag (lets custom setups skip preset modes)
+  fit: "cover",
+  // 'cover' | 'contain' | 'fill'
+  lazy: true,
+  rootMargin: "500px",
+  unloadOnExit: false,
+  // gallery mode turns this on for huge grids
+  shadow: "closed",
+  // 'closed' | 'open' | 'none'
+  grid: DEFAULT_GRID,
+  scrambled: false,
+  // source pixels are tile-scrambled
+  planVersion: 1,
+  // scramble plan derivation for container-less scrambled sources (1 = legacy 32-bit seed, 2 = 128-bit seed); .archx headers carry their own `pv` and win
+  key: null,
+  // scramble seed and/or AES key (see docs)
+  aesKey: null,
+  // base64 AES key for encrypted .archx payloads
+  tokenEndpoint: null,
+  // e.g. '/archx/token/'  (+ image id)
+  tokenMethod: "POST",
+  // token mint method; POST + X-Archx-Request avoids simple cross-site GET minting
+  tokenTransport: "header",
+  // 'header' | 'query' | 'auto' — header keeps bearer tokens out of image URLs/logs
+  tokenBatch: false,
+  // coalesce simultaneous POST mints into {basePath}/tokens (catalog/gallery presets enable it)
+  tokenBatchEndpoint: null,
+  // explicit batch endpoint; otherwise derived by replacing a trailing /token segment
+  tokenBatchSize: 50,
+  // maximum mints per batch HTTP request
+  tokenBatchDelayMs: 8,
+  // quiet-period coalescing window for gallery/page bursts
+  tokenBatchMaxDelayMs: 50,
+  // hard cap so a continuous trickle cannot starve the first mint
+  assetManifest: null,
+  // archx-build manifest URL or object for { assetId } sources
+  assetManifestMaxBytes: 8 * 1024 * 1024,
+  assetHttpCache: "default",
+  // manifest/variant fetches may use browser/CDN HTTP caching
+  assetIntegrity: "auto",
+  // 'auto' | 'require' | 'off' — verify per-variant SHA-256 digests from the manifest
+  assetManifestIntegrity: null,
+  // optional 'sha256-<hex>' pin for a fetched manifest (archx-build prints it)
+  httpCache: "no-store",
+  // direct URL sources; token mint/payload requests always remain no-store
+  fetchPriority: null,
+  // null | 'high' | 'low' | 'auto' (hero images may use high; leave auto for galleries)
+  proofOfPossession: "auto",
+  // 'auto' | 'required' | 'off' — bind tokens to a non-extractable page key when WebCrypto allows
+  allowedTokenOrigins: null,
+  // exact extra origins allowed for token-returned payload URLs (endpoint origin is always allowed)
+  fetchTimeoutMs: 2e4,
+  // per-request network deadline (mint, payload, and direct sources)
+  maxResponseBytes: 64 * 1024 * 1024,
+  maxDecodedPixels: 4e7,
+  // pre-decode header budget + post-decode bitmap budget
+  maxDecodedDimension: 16384,
+  onExtract: "black",
+  // 'black' | 'lowres' | 'scrambled'
+  taintReadback: "auto",
+  // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
+  taintUrl: null,
+  // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
+  splitCanvases: false,
+  // shield+: one canvas per tile (hero images)
+  splitGrid: 3,
+  maxBackingWidth: 1920,
+  // never paint a wider backing store than this
+  dprCap: 3,
+  // match modern retina/mobile displays instead of upscaling a 2x canvas
+  sourceOversample: 2,
+  // fetch a 2x derivative then supersample down (server entitlement still caps the signed width)
+  maxSourceWidth: 2560,
+  // client-side ceiling before the server's own entitlement cap
+  sourceWidthBuckets: null,
+  // canonical requested widths (catalog/gallery presets supply a ladder)
+  qualityProfile: "high",
+  // 'original' | 'high' | 'balanced' | 'catalog' | 'fast' (sets requestQuality + sampling unless overridden)
+  requestQuality: null,
+  // 1..100 | 'lossless' — honoured only when the server opts in with allowClientQuality
+  networkAware: false,
+  // honour Save-Data / slow effectiveType with a smaller derivative (Network Information API)
+  cacheBitmap: true,
+  // reuse a decoded bitmap for the same source in this page session
+  bitmapCacheMaxEntries: 40,
+  bitmapCacheMaxBytes: 256 * 1024 * 1024,
+  // approximate decoded RGBA bytes in the shared LRU
+  cachePayload: true,
+  // retain the scrambled bytes privately so repaint/strict-memory recovery needs NO network reload
+  cacheScope: null,
+  // set per authenticated viewer/tenant so SPA account switches cannot reuse another viewer's bitmap
+  reloadOnResize: "upscale",
+  // 'never' | 'upscale' | 'always' — ordinary resizes repaint locally, never remint tokens
+  resizeUpscaleFactor: 1.75,
+  // only a much larger box may justify a fresh derivative under 'upscale'
+  renderLoop: "auto",
+  // 'auto' (static images draw on demand; temporal shield animates) | 'static' | 'continuous'
+  temporalShield: null,
+  // true | { strength, block, pattern, chroma, respectReducedMotion } — complementary frames a single screenshot cannot average
+  temporalInterlace: null,
+  // true | 'balanced60'|'pixels60'|'strips60'|'blocks60' | { profile, engine, layout, phases, cellSize, fill, refreshHz, ... }
+  cameraShield: null,
+  // experimental alias/profile for temporalShield aimed at rolling-shutter/Bayer cameras
+  watermark: null,
+  // string | { text, opacity, tile, corner }
+  forensic: true,
+  // invisible per-session block pattern (shield/vault/fortress)
+  sessionId: null,
+  // defaults to a random per-page-view id
+  brand: "\xA9 Protected \xB7 Archnemix",
+  retries: 2,
+  credentials: "same-origin",
+  integrity: "monitor",
+  // 'off' | 'monitor' | 'lock' — hooked-API policy
+  automation: "monitor",
+  // 'off' | 'monitor' | 'lock' — headless/bot policy
+  memory: "standard",
+  // 'standard' | 'strict' — strict wipes decoded bitmaps ASAP
+  localScramble: false,
+  // fortress: GPU texture holds scrambled pixels even for plain sources
+  lens: null,
+  // anti-screenshot pointer lens: true | { radius, idlePixelate }
+  captureShield: null,
+  // true | { dynamicTrace, temporalPattern, text, opacity } (fortress enables)
+  strikes: null,
+  // attempt lockout: { blurAt, lockAt, lockMs } (fortress enables)
+  debug: false,
+  // enables _debug() internals hook — NEVER in production
+  guards: {
+    contextMenu: true,
+    drag: true,
+    copy: true,
+    longPress: true,
+    print: true,
+    blurOnBlur: true,
+    // blur while window unfocused (snipping tools)
+    screenshotKeys: true,
+    // best-effort PrintScreen reaction
+    devtools: false
+    // opt-in: blur while DevTools appears open
+  },
+  onAttempt: null,
+  // (kind, instance) => void  — hook your logging
+  onChallenge: null,
+  // async ({id, reason}) => proofToken — server step-up (Turnstile/WebAuthn) integration
+  onLoad: null,
+  onError: null,
+  onClick: null,
+  onEvent: null,
+  // (sanitizedEvent, instance) => void — generic monitoring/plugin hook; never receives tokens/keys/pixels
+  alt: ""
+};
+var globalConfig = structuredCloneSafe(DEFAULTS);
+function structuredCloneSafe(obj) {
+  return JSON.parse(JSON.stringify(obj, (k, v) => typeof v === "function" ? void 0 : v));
 }
-function closeBitmapQuietly(bitmap) {
-  try {
-    bitmap?.close?.();
-  } catch {
+function mergeOptions(opts = {}) {
+  const clean = {};
+  for (const [k, v] of Object.entries(opts)) if (v !== void 0) clean[k] = v;
+  const merged = { ...globalConfig, ...clean };
+  merged.guards = { ...globalConfig.guards };
+  if (opts.guards) {
+    for (const [k, v] of Object.entries(opts.guards)) if (v !== void 0) merged.guards[k] = v;
   }
-}
-function evictBitmapEntry(key, entry) {
-  if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
-  if (entry.settled && entry.bytes) {
-    bitmapCacheBytes = Math.max(0, bitmapCacheBytes - entry.bytes);
-    entry.bytes = 0;
-  }
-  if (entry.refs <= 0 && entry.result?.bitmap) closeBitmapQuietly(entry.result.bitmap);
-}
-function trimBitmapCache(maxEntries = DEFAULTS.bitmapCacheMaxEntries, maxBytes = DEFAULTS.bitmapCacheMaxBytes) {
-  const entryLimit = Math.max(0, Math.floor(Number(maxEntries) || 0));
-  const byteLimit = Math.max(0, Math.floor(Number(maxBytes) || 0));
-  while (bitmapCache.size > entryLimit || byteLimit > 0 && bitmapCacheBytes > byteLimit) {
-    const oldest = bitmapCache.keys().next().value;
-    if (oldest === void 0) break;
-    evictBitmapEntry(oldest, bitmapCache.get(oldest));
-  }
-}
-function cachePut(key, promise, opts = {}) {
-  const existing = bitmapCache.get(key);
-  if (existing?.promise === promise) return existing;
-  if (existing) evictBitmapEntry(key, existing);
-  const entry = { key, promise, result: null, refs: 1, bytes: 0, settled: false };
-  bitmapCache.set(key, entry);
-  promise.then((result) => {
-    entry.result = result;
-    entry.settled = true;
-    entry.bytes = bitmapEstimatedBytes(result);
-    if (bitmapCache.get(key) === entry) {
-      bitmapCacheBytes += entry.bytes;
-      trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
-    } else if (entry.refs <= 0) closeBitmapQuietly(result?.bitmap);
-  }, () => {
-    entry.settled = true;
-    entry.refs = 0;
-    if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
-  });
-  trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
-  return entry;
-}
-function cacheGetEntry(key, { acquire = false } = {}) {
-  const entry = bitmapCache.get(key);
-  if (!entry) return null;
-  bitmapCache.delete(key);
-  bitmapCache.set(key, entry);
-  if (acquire) entry.refs++;
-  return entry;
-}
-function cacheReleaseEntry(entry) {
-  if (!entry) return;
-  entry.refs = Math.max(0, entry.refs - 1);
-  if (entry.refs <= 0 && bitmapCache.get(entry.key) !== entry && entry.result?.bitmap) {
-    closeBitmapQuietly(entry.result.bitmap);
-  }
-}
-function clearBitmapCache() {
-  for (const [key, entry] of [...bitmapCache]) evictBitmapEntry(key, entry);
-  bitmapCache.clear();
-  bitmapCacheBytes = 0;
-}
-var visibilityObservers = /* @__PURE__ */ new Map();
-function getVisibilityObserver(rootMargin = "500px") {
-  const margin = typeof rootMargin === "string" && rootMargin.length <= 64 ? rootMargin : "500px";
-  let observer = visibilityObservers.get(margin);
-  if (!observer) {
-    const callback = (entries) => {
-      for (const e of entries) {
-        const inst = hostToInstance.get(e.target);
-        if (inst) inst._onVisibility(e.isIntersecting);
-      }
-    };
-    try {
-      observer = new IntersectionObserver(callback, { rootMargin: margin });
-    } catch {
-      observer = new IntersectionObserver(callback, { rootMargin: "500px" });
-    }
-    visibilityObservers.set(margin, observer);
-  }
-  return observer;
-}
-var sharedResizeObserver = null;
-function getResizeObserver() {
-  if (!sharedResizeObserver) {
-    sharedResizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const inst = hostToInstance.get(entry.target);
-        if (inst) inst._onResize(entry);
-      }
-    });
-  }
-  return sharedResizeObserver;
-}
-var globalGuardsInstalled = false;
-function installGlobalGuards() {
-  if (globalGuardsInstalled || typeof window === "undefined") return;
-  globalGuardsInstalled = true;
-  const blackoutAll = (ms, kind) => instances.forEach((i) => i._momentaryBlackout(ms, kind));
-  let lastCaptureKeyAt = 0;
-  const onCaptureKey = (e) => {
-    const key = String(e.key || "");
-    const shotKey = key === "PrintScreen" || e.code === "PrintScreen";
-    const macShot = e.metaKey && e.shiftKey && ["3", "4", "5"].includes(key);
-    const snipShortcut = (e.metaKey || e.ctrlKey) && e.shiftKey && key.toLowerCase() === "s";
-    if (!shotKey && !macShot && !snipShortcut) return;
-    if (shotKey && navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText("").catch(() => {
-      });
-    }
-    const now = Date.now();
-    if (now - lastCaptureKeyAt < 250) return;
-    lastCaptureKeyAt = now;
-    blackoutAll(1200, "screenshot-key");
+  const qualityProfiles = {
+    original: { requestQuality: "lossless", sourceOversample: 2, dprCap: 3 },
+    high: { requestQuality: 95, sourceOversample: 2, dprCap: 3 },
+    balanced: { requestQuality: 90, sourceOversample: 1.5, dprCap: 2.5 },
+    catalog: { requestQuality: 88, sourceOversample: 1, dprCap: 2 },
+    fast: { requestQuality: 82, sourceOversample: 1.25, dprCap: 2 }
   };
-  window.addEventListener("keydown", onCaptureKey, true);
-  window.addEventListener("keyup", onCaptureKey, true);
-  document.addEventListener("freeze", () => blackoutAll(1500, "screenshot-key"), true);
-  window.addEventListener("blur", () => instances.forEach((i) => i._setRisk("blur", true)), true);
-  window.addEventListener("focus", () => instances.forEach((i) => i._setRisk("blur", false)), true);
-  document.addEventListener("visibilitychange", () => {
-    instances.forEach((i) => i._setRisk("hidden", document.hidden));
-  });
-  if (window.matchMedia) {
-    const mq = window.matchMedia("print");
-    const onPrint = (m) => instances.forEach((i) => i._setRisk("print", m.matches));
-    if (mq.addEventListener) mq.addEventListener("change", onPrint);
+  const qp = qualityProfiles[merged.qualityProfile];
+  if (qp) {
+    if (clean.requestQuality === void 0 && merged.requestQuality == null) merged.requestQuality = qp.requestQuality;
+    if (clean.sourceOversample === void 0 && clean.qualityProfile !== void 0) merged.sourceOversample = qp.sourceOversample;
+    if (clean.dprCap === void 0 && clean.qualityProfile !== void 0) merged.dprCap = qp.dprCap;
   }
-  window.addEventListener("beforeprint", () => instances.forEach((i) => i._setRisk("print", true)));
-  window.addEventListener("afterprint", () => instances.forEach((i) => i._setRisk("print", false)));
-}
-var devtoolsTimer = null;
-function ensureDevtoolsWatcher() {
-  if (devtoolsTimer) return;
-  const check = () => {
-    if (typeof document !== "undefined" && document.hidden) return;
-    const open = window.outerWidth - window.innerWidth > 170 || window.outerHeight - window.innerHeight > 200;
-    instances.forEach((i) => {
-      if (i.options.guards.devtools) i._setRisk("devtools", open);
-    });
+  const rendererValue = String(merged.renderer || "auto").toLowerCase();
+  merged.renderer = rendererValue === "canvas2d" ? "canvas" : rendererValue === "canvas" || rendererValue === "webgl" ? rendererValue : "auto";
+  const AUTOMATION_ALIASES = {
+    allow: "off",
+    ignore: "off",
+    off: "off",
+    none: "off",
+    warn: "monitor",
+    report: "monitor",
+    degrade: "monitor",
+    monitor: "monitor",
+    block: "lock",
+    deny: "lock",
+    lock: "lock"
   };
-  check();
-  window.addEventListener("resize", check, true);
-  devtoolsTimer = setInterval(check, 400);
+  merged.automation = AUTOMATION_ALIASES[String(merged.automation ?? "monitor").toLowerCase()] ?? "monitor";
+  const customRequested = merged.mode === "custom" || clean.mode === void 0 && clean.renderer !== void 0;
+  if (customRequested) {
+    merged.requestedMode = "custom";
+    merged.mode = merged.renderer === "webgl" ? "vault" : "shield";
+  }
+  if (merged.mode === "lite" && clean.forensic === void 0) merged.forensic = false;
+  if (merged.mode === "fortress") {
+    merged.requestedMode = "fortress";
+    merged.mode = "vault";
+    if (clean.onExtract === void 0) merged.onExtract = "black";
+    if (clean.integrity === void 0) merged.integrity = "lock";
+    if (clean.memory === void 0) merged.memory = "strict";
+    if (clean.localScramble === void 0) merged.localScramble = true;
+    if (clean.forensic === void 0) merged.forensic = true;
+    if (clean.captureShield === void 0) merged.captureShield = true;
+    if (clean.temporalShield === void 0 && clean.cameraShield === void 0 && !normalizeTemporalInterlace(merged.temporalInterlace)) {
+      merged.temporalShield = { strength: 0.16, block: 2, pattern: "checker", chroma: true };
+    }
+    if (clean.strikes === void 0) merged.strikes = { blurAt: 3, lockAt: 6, lockMs: 3e4 };
+    if (!opts.guards || opts.guards.devtools === void 0) merged.guards.devtools = true;
+  }
+  return merged;
 }
-var glContextsInUse = 0;
-var GL_CONTEXT_BUDGET = 8;
-var $ = (t) => typeof t === "string" ? document.querySelector(t) : t;
+function sanitizeOptionsView(opts) {
+  if (!opts) return opts;
+  const sensitive = /* @__PURE__ */ new Set([
+    "key",
+    "aeskey",
+    "cachescope",
+    "sessionid",
+    "token",
+    "accesstoken",
+    "refreshtoken",
+    "secret",
+    "password",
+    "authorization",
+    "cookie",
+    "assetmanifest",
+    "tainturl"
+  ]);
+  const seen = /* @__PURE__ */ new WeakMap();
+  const clone = (value, keyName = "") => {
+    if (sensitive.has(String(keyName).toLowerCase())) return value ? "[redacted]" : value;
+    if (!value || typeof value !== "object") return value;
+    if (seen.has(value)) return "[circular]";
+    if (Array.isArray(value)) {
+      const out2 = [];
+      seen.set(value, out2);
+      for (const item of value) out2.push(clone(item));
+      return out2;
+    }
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out = {};
+    seen.set(value, out);
+    for (const [k, v] of Object.entries(value)) out[k] = clone(v, k);
+    return out;
+  };
+  return clone(opts);
+}
+var PRESETS = Object.freeze({
+  gallery: Object.freeze({
+    mode: "lite",
+    qualityProfile: "catalog",
+    sourceOversample: 1,
+    dprCap: 2,
+    lazy: true,
+    unloadOnExit: true,
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "never",
+    tokenBatch: true,
+    tokenBatchDelayMs: 20,
+    tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    httpCache: "default",
+    networkAware: true,
+    bitmapCacheMaxEntries: 24,
+    bitmapCacheMaxBytes: 128 * 1024 * 1024,
+    guards: Object.freeze({ blurOnBlur: false })
+  }),
+  catalog: Object.freeze({
+    mode: "lite",
+    qualityProfile: "catalog",
+    sourceOversample: 1,
+    dprCap: 2,
+    lazy: true,
+    unloadOnExit: true,
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "never",
+    tokenBatch: true,
+    tokenBatchDelayMs: 20,
+    tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    httpCache: "default",
+    networkAware: true,
+    assetHttpCache: "default",
+    bitmapCacheMaxEntries: 24,
+    bitmapCacheMaxBytes: 128 * 1024 * 1024,
+    guards: Object.freeze({ blurOnBlur: false })
+  }),
+  editorial: Object.freeze({
+    mode: "shield",
+    qualityProfile: "original",
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "upscale",
+    forensic: true
+  }),
+  commerce: Object.freeze({
+    mode: "vault",
+    qualityProfile: "original",
+    onExtract: "black",
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "upscale",
+    forensic: true,
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
+  }),
+  marketplace: Object.freeze({
+    mode: "vault",
+    qualityProfile: "high",
+    onExtract: "black",
+    tokenBatch: true,
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "upscale",
+    forensic: true,
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
+  }),
+  screenshotResistant: Object.freeze({
+    mode: "fortress",
+    qualityProfile: "original",
+    lens: true,
+    temporalShield: Object.freeze({ strength: 0.16, block: 2, pattern: "checker", chroma: true }),
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "auto",
+    strikes: Object.freeze({ blurAt: 3, lockAt: 6, lockMs: 3e4 })
+  })
+});
+function preset(name = "editorial", overrides = {}) {
+  const base = PRESETS[name];
+  if (!base) throw new Error(`Archx: unknown preset "${name}" (known: ${Object.keys(PRESETS).join(", ")})`);
+  return {
+    ...base,
+    ...overrides,
+    guards: { ...base.guards || {}, ...overrides.guards || {} }
+  };
+}
+var pageSessionId = null;
+function resetPageSession() {
+  pageSessionId = null;
+}
+function sessionId() {
+  if (globalConfig.sessionId) return globalConfig.sessionId;
+  if (!pageSessionId) {
+    const a = new Uint8Array(8);
+    crypto.getRandomValues(a);
+    pageSessionId = [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return pageSessionId;
+}
+function getGlobalConfig() {
+  return globalConfig;
+}
+function setGlobalConfig(next) {
+  globalConfig = next;
+}
+
+// src/client/sampling.js
 function fitRects(srcW, srcH, dstW, dstH, fit) {
   if (fit === "fill") return { sx: 0, sy: 0, sw: srcW, sh: srcH, dx: 0, dy: 0, dw: dstW, dh: dstH };
   const srcRatio = srcW / srcH;
@@ -4450,193 +4098,8 @@ function fetchPriorityInit(options = {}) {
   const priority = String(options.fetchPriority || "").toLowerCase();
   return ["high", "low", "auto"].includes(priority) ? { priority } : {};
 }
-var ASSET_MANIFEST_CACHE_MAX = 8;
-var assetManifestCache = /* @__PURE__ */ new Map();
-var assetManifestObjectCache = /* @__PURE__ */ new WeakMap();
-async function sha256Hex(bytes) {
-  try {
-    if (typeof crypto === "undefined" || !crypto.subtle?.digest) return null;
-    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    const digest = await subtleDo("digest", "SHA-256", view);
-    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  } catch {
-    return null;
-  }
-}
-function normalizeManifestIntegrityPin(value) {
-  if (value == null || value === "") return null;
-  if (typeof value !== "string") throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
-  const hex = value.startsWith("sha256-") ? value.slice("sha256-".length) : value;
-  if (!/^[0-9a-f]{64}$/.test(hex)) throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
-  return hex;
-}
-function normalizeAssetIntegrityMode(value) {
-  if (value === true) return "require";
-  if (value === false || value === "off") return "off";
-  if (value === "require") return "require";
-  return "auto";
-}
-async function verifyAssetVariantIntegrity(variant, bytes, options) {
-  const mode = normalizeAssetIntegrityMode(options.assetIntegrity);
-  if (mode === "off") return;
-  if (!variant.sha256) {
-    if (mode === "require") throw nonRetryableError("Archx: asset variant has no integrity digest");
-    return;
-  }
-  const digest = await sha256Hex(bytes);
-  if (!digest) {
-    if (mode === "require") {
-      throw nonRetryableError("Archx: asset integrity cannot be verified in this browser");
-    }
-    return;
-  }
-  if (digest !== variant.sha256) {
-    throw nonRetryableError("Archx: asset variant integrity check failed");
-  }
-}
-function normalizeAssetManifest(raw, baseUrl) {
-  if (!isPlainClientObject(raw) || raw.version !== 1 || !isPlainClientObject(raw.assets)) {
-    throw nonRetryableError("Archx: asset manifest is invalid");
-  }
-  const entries = Object.entries(raw.assets);
-  if (!entries.length || entries.length > 1e5) {
-    throw nonRetryableError("Archx: asset manifest has an invalid asset count");
-  }
-  const assets = /* @__PURE__ */ new Map();
-  for (const [id, assetRaw] of entries) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) || !isPlainClientObject(assetRaw)) {
-      throw nonRetryableError("Archx: asset manifest contains an invalid asset");
-    }
-    if (assetRaw.id !== void 0 && assetRaw.id !== id) {
-      throw nonRetryableError("Archx: asset manifest contains a mismatched asset id");
-    }
-    const width = assetRaw.width;
-    const height = assetRaw.height;
-    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 65536 || height > 65536) {
-      throw nonRetryableError("Archx: asset manifest contains invalid dimensions");
-    }
-    if (!validTokenString(assetRaw.key, { min: 1, max: 512 })) {
-      throw nonRetryableError("Archx: asset manifest contains an invalid key");
-    }
-    if (!Number.isInteger(assetRaw.grid) || assetRaw.grid < 2 || assetRaw.grid > 32) {
-      throw nonRetryableError("Archx: asset manifest contains an invalid grid");
-    }
-    if (assetRaw.planVersion !== void 0 && assetRaw.planVersion !== 1 && assetRaw.planVersion !== 2) {
-      throw nonRetryableError("Archx: asset manifest contains an invalid plan version");
-    }
-    if (assetRaw.aesKey !== void 0 && !validTokenString(assetRaw.aesKey, { min: 16, max: 256 })) {
-      throw nonRetryableError("Archx: asset manifest contains an invalid AES key");
-    }
-    if (!Array.isArray(assetRaw.variants) || !assetRaw.variants.length || assetRaw.variants.length > 32) {
-      throw nonRetryableError("Archx: asset manifest contains invalid variants");
-    }
-    const variants = assetRaw.variants.map((variantRaw) => {
-      if (!isPlainClientObject(variantRaw) || !Number.isSafeInteger(variantRaw.width) || !Number.isSafeInteger(variantRaw.height) || variantRaw.width < 1 || variantRaw.height < 1 || variantRaw.width > 65536 || variantRaw.height > 65536 || typeof variantRaw.url !== "string" || !variantRaw.url || variantRaw.url.length > 16384) {
-        throw nonRetryableError("Archx: asset manifest contains an invalid variant");
-      }
-      if (variantRaw.sha256 !== void 0 && variantRaw.sha256 !== null && (typeof variantRaw.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(variantRaw.sha256))) {
-        throw nonRetryableError("Archx: asset manifest contains an invalid variant digest");
-      }
-      const url = resolveHttpUrl(variantRaw.url, { base: baseUrl?.href, label: "asset variant URL" });
-      return Object.freeze({
-        width: variantRaw.width,
-        height: variantRaw.height,
-        url,
-        bytes: Number.isSafeInteger(variantRaw.bytes) && variantRaw.bytes > 0 ? variantRaw.bytes : null,
-        sha256: typeof variantRaw.sha256 === "string" ? variantRaw.sha256 : null
-      });
-    }).sort((a, b) => a.width - b.width || a.height - b.height);
-    assets.set(id, Object.freeze({
-      id,
-      width,
-      height,
-      key: assetRaw.key,
-      grid: assetRaw.grid,
-      ...assetRaw.planVersion !== void 0 ? { planVersion: assetRaw.planVersion } : {},
-      ...assetRaw.aesKey !== void 0 ? { aesKey: assetRaw.aesKey } : {},
-      variants: Object.freeze(variants)
-    }));
-  }
-  return Object.freeze({ version: 1, assets });
-}
-async function loadAssetManifest(manifestSource, options, controls) {
-  const pin = normalizeManifestIntegrityPin(options.assetManifestIntegrity);
-  if (isPlainClientObject(manifestSource)) {
-    if (pin) throw nonRetryableError("Archx: assetManifestIntegrity requires a fetched manifest URL");
-    let normalized = assetManifestObjectCache.get(manifestSource);
-    if (!normalized) {
-      const base = typeof document !== "undefined" ? new URL(document.baseURI) : new URL("http://archx.local/");
-      normalized = normalizeAssetManifest(manifestSource, base);
-      assetManifestObjectCache.set(manifestSource, normalized);
-    }
-    return normalized;
-  }
-  const manifestUrl = resolveHttpUrl(manifestSource, { label: "asset manifest URL" });
-  if (manifestUrl.hash) throw nonRetryableError("Archx: asset manifest URL must not contain a fragment");
-  const maxBytes = boundedInteger(
-    options.assetManifestMaxBytes,
-    DEFAULTS.assetManifestMaxBytes,
-    1024,
-    64 * 1024 * 1024
-  );
-  const cacheMode = normalizedHttpCache(options.assetHttpCache, "default");
-  const cacheKey = cacheDigest([
-    "asset-manifest",
-    1,
-    options.cacheScope || "",
-    manifestUrl.href,
-    controls.credentials,
-    cacheMode,
-    maxBytes,
-    controls.fetchTimeoutMs,
-    controls.retries,
-    pin || ""
-  ]);
-  let pending = assetManifestCache.get(cacheKey);
-  if (pending) {
-    assetManifestCache.delete(cacheKey);
-    assetManifestCache.set(cacheKey, pending);
-  }
-  if (!pending) {
-    pending = (async () => {
-      const response = await fetchBounded(manifestUrl.href, {
-        method: "GET",
-        credentials: controls.credentials,
-        cache: cacheMode,
-        redirect: "error",
-        ...fetchPriorityInit(options)
-      }, {
-        retries: controls.retries,
-        maxBytes,
-        timeoutMs: controls.fetchTimeoutMs,
-        validateResponse: (res) => assertResponseFinalOrigin(res, /* @__PURE__ */ new Set([manifestUrl.origin]))
-      });
-      if (pin) {
-        const digest = await sha256Hex(response.bytes);
-        if (!digest) {
-          throw nonRetryableError("Archx: asset manifest integrity cannot be verified in this browser");
-        }
-        if (digest !== pin) throw nonRetryableError("Archx: asset manifest integrity check failed");
-      }
-      return normalizeAssetManifest(parseBoundedJson(response.bytes), manifestUrl);
-    })();
-    assetManifestCache.set(cacheKey, pending);
-    while (assetManifestCache.size > ASSET_MANIFEST_CACHE_MAX) {
-      const oldest = assetManifestCache.keys().next().value;
-      if (oldest === cacheKey) break;
-      assetManifestCache.delete(oldest);
-    }
-    pending.catch(() => {
-      if (assetManifestCache.get(cacheKey) === pending) assetManifestCache.delete(cacheKey);
-    });
-  }
-  return pending;
-}
-function chooseAssetVariant(asset, neededWidth) {
-  const wanted = Math.max(1, Math.ceil(Number(neededWidth) || 1));
-  return asset.variants.find((variant) => variant.width >= wanted) || asset.variants[asset.variants.length - 1];
-}
-var tokenBatchQueues = /* @__PURE__ */ new Map();
+
+// src/client/network.js
 var tokenBatchSequence = 0;
 function deriveTokenBatchEndpoint(endpointUrl, options = {}) {
   if (options.tokenBatchEndpoint) {
@@ -4942,6 +4405,10 @@ async function fetchBounded(url, options = {}, controls = {}) {
         }
         const err = new Error("Archx fetch failed: HTTP " + response.status);
         err.status = response.status;
+        try {
+          err.challengeRequired = response.headers?.get?.("x-archx-challenge") === "required";
+        } catch {
+        }
         throw err;
       }
       const bytes = await readResponseBytes(response, maxBytes);
@@ -5158,6 +4625,273 @@ function parseTokenResponse(raw, options, endpointUrl) {
   if (raw.aesKey !== void 0) extra.aesKey = raw.aesKey;
   return Object.freeze({ extra: Object.freeze(extra), payloadUrl, headerToken, accessToken, allowedOrigins });
 }
+var tokenBatchQueues = /* @__PURE__ */ new Map();
+
+// src/client/assets.js
+var ASSET_MANIFEST_CACHE_MAX = 8;
+var assetManifestCache = /* @__PURE__ */ new Map();
+var assetManifestObjectCache = /* @__PURE__ */ new WeakMap();
+async function sha256Hex(bytes) {
+  try {
+    if (typeof crypto === "undefined" || !crypto.subtle?.digest) return null;
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const digest = await subtleDo("digest", "SHA-256", view);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+function normalizeManifestIntegrityPin(value) {
+  if (value == null || value === "") return null;
+  if (typeof value !== "string") throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
+  const hex = value.startsWith("sha256-") ? value.slice("sha256-".length) : value;
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw nonRetryableError("Archx: assetManifestIntegrity is invalid");
+  return hex;
+}
+function normalizeAssetIntegrityMode(value) {
+  if (value === true) return "require";
+  if (value === false || value === "off") return "off";
+  if (value === "require") return "require";
+  return "auto";
+}
+async function verifyAssetVariantIntegrity(variant, bytes, options) {
+  const mode = normalizeAssetIntegrityMode(options.assetIntegrity);
+  if (mode === "off") return;
+  if (!variant.sha256) {
+    if (mode === "require") throw nonRetryableError("Archx: asset variant has no integrity digest");
+    return;
+  }
+  const digest = await sha256Hex(bytes);
+  if (!digest) {
+    if (mode === "require") {
+      throw nonRetryableError("Archx: asset integrity cannot be verified in this browser");
+    }
+    return;
+  }
+  if (digest !== variant.sha256) {
+    throw nonRetryableError("Archx: asset variant integrity check failed");
+  }
+}
+function normalizeAssetManifest(raw, baseUrl) {
+  if (!isPlainClientObject(raw) || raw.version !== 1 || !isPlainClientObject(raw.assets)) {
+    throw nonRetryableError("Archx: asset manifest is invalid");
+  }
+  const entries = Object.entries(raw.assets);
+  if (!entries.length || entries.length > 1e5) {
+    throw nonRetryableError("Archx: asset manifest has an invalid asset count");
+  }
+  const assets = /* @__PURE__ */ new Map();
+  for (const [id, assetRaw] of entries) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id) || !isPlainClientObject(assetRaw)) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid asset");
+    }
+    if (assetRaw.id !== void 0 && assetRaw.id !== id) {
+      throw nonRetryableError("Archx: asset manifest contains a mismatched asset id");
+    }
+    const width = assetRaw.width;
+    const height = assetRaw.height;
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 65536 || height > 65536) {
+      throw nonRetryableError("Archx: asset manifest contains invalid dimensions");
+    }
+    if (!validTokenString(assetRaw.key, { min: 1, max: 512 })) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid key");
+    }
+    if (!Number.isInteger(assetRaw.grid) || assetRaw.grid < 2 || assetRaw.grid > 32) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid grid");
+    }
+    if (assetRaw.planVersion !== void 0 && assetRaw.planVersion !== 1 && assetRaw.planVersion !== 2) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid plan version");
+    }
+    if (assetRaw.aesKey !== void 0 && !validTokenString(assetRaw.aesKey, { min: 16, max: 256 })) {
+      throw nonRetryableError("Archx: asset manifest contains an invalid AES key");
+    }
+    if (!Array.isArray(assetRaw.variants) || !assetRaw.variants.length || assetRaw.variants.length > 32) {
+      throw nonRetryableError("Archx: asset manifest contains invalid variants");
+    }
+    const variants = assetRaw.variants.map((variantRaw) => {
+      if (!isPlainClientObject(variantRaw) || !Number.isSafeInteger(variantRaw.width) || !Number.isSafeInteger(variantRaw.height) || variantRaw.width < 1 || variantRaw.height < 1 || variantRaw.width > 65536 || variantRaw.height > 65536 || typeof variantRaw.url !== "string" || !variantRaw.url || variantRaw.url.length > 16384) {
+        throw nonRetryableError("Archx: asset manifest contains an invalid variant");
+      }
+      if (variantRaw.sha256 !== void 0 && variantRaw.sha256 !== null && (typeof variantRaw.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(variantRaw.sha256))) {
+        throw nonRetryableError("Archx: asset manifest contains an invalid variant digest");
+      }
+      const url = resolveHttpUrl(variantRaw.url, { base: baseUrl?.href, label: "asset variant URL" });
+      return Object.freeze({
+        width: variantRaw.width,
+        height: variantRaw.height,
+        url,
+        bytes: Number.isSafeInteger(variantRaw.bytes) && variantRaw.bytes > 0 ? variantRaw.bytes : null,
+        sha256: typeof variantRaw.sha256 === "string" ? variantRaw.sha256 : null
+      });
+    }).sort((a, b) => a.width - b.width || a.height - b.height);
+    assets.set(id, Object.freeze({
+      id,
+      width,
+      height,
+      key: assetRaw.key,
+      grid: assetRaw.grid,
+      ...assetRaw.planVersion !== void 0 ? { planVersion: assetRaw.planVersion } : {},
+      ...assetRaw.aesKey !== void 0 ? { aesKey: assetRaw.aesKey } : {},
+      variants: Object.freeze(variants)
+    }));
+  }
+  return Object.freeze({ version: 1, assets });
+}
+async function loadAssetManifest(manifestSource, options, controls) {
+  const pin = normalizeManifestIntegrityPin(options.assetManifestIntegrity);
+  if (isPlainClientObject(manifestSource)) {
+    if (pin) throw nonRetryableError("Archx: assetManifestIntegrity requires a fetched manifest URL");
+    let normalized = assetManifestObjectCache.get(manifestSource);
+    if (!normalized) {
+      const base = typeof document !== "undefined" ? new URL(document.baseURI) : new URL("http://archx.local/");
+      normalized = normalizeAssetManifest(manifestSource, base);
+      assetManifestObjectCache.set(manifestSource, normalized);
+    }
+    return normalized;
+  }
+  const manifestUrl = resolveHttpUrl(manifestSource, { label: "asset manifest URL" });
+  if (manifestUrl.hash) throw nonRetryableError("Archx: asset manifest URL must not contain a fragment");
+  const maxBytes = boundedInteger(
+    options.assetManifestMaxBytes,
+    DEFAULTS.assetManifestMaxBytes,
+    1024,
+    64 * 1024 * 1024
+  );
+  const cacheMode = normalizedHttpCache(options.assetHttpCache, "default");
+  const cacheKey = cacheDigest([
+    "asset-manifest",
+    1,
+    options.cacheScope || "",
+    manifestUrl.href,
+    controls.credentials,
+    cacheMode,
+    maxBytes,
+    controls.fetchTimeoutMs,
+    controls.retries,
+    pin || ""
+  ]);
+  let pending = assetManifestCache.get(cacheKey);
+  if (pending) {
+    assetManifestCache.delete(cacheKey);
+    assetManifestCache.set(cacheKey, pending);
+  }
+  if (!pending) {
+    pending = (async () => {
+      const response = await fetchBounded(manifestUrl.href, {
+        method: "GET",
+        credentials: controls.credentials,
+        cache: cacheMode,
+        redirect: "error",
+        ...fetchPriorityInit(options)
+      }, {
+        retries: controls.retries,
+        maxBytes,
+        timeoutMs: controls.fetchTimeoutMs,
+        validateResponse: (res) => assertResponseFinalOrigin(res, /* @__PURE__ */ new Set([manifestUrl.origin]))
+      });
+      if (pin) {
+        const digest = await sha256Hex(response.bytes);
+        if (!digest) {
+          throw nonRetryableError("Archx: asset manifest integrity cannot be verified in this browser");
+        }
+        if (digest !== pin) throw nonRetryableError("Archx: asset manifest integrity check failed");
+      }
+      return normalizeAssetManifest(parseBoundedJson(response.bytes), manifestUrl);
+    })();
+    assetManifestCache.set(cacheKey, pending);
+    while (assetManifestCache.size > ASSET_MANIFEST_CACHE_MAX) {
+      const oldest = assetManifestCache.keys().next().value;
+      if (oldest === cacheKey) break;
+      assetManifestCache.delete(oldest);
+    }
+    pending.catch(() => {
+      if (assetManifestCache.get(cacheKey) === pending) assetManifestCache.delete(cacheKey);
+    });
+  }
+  return pending;
+}
+function chooseAssetVariant(asset, neededWidth) {
+  const wanted = Math.max(1, Math.ceil(Number(neededWidth) || 1));
+  return asset.variants.find((variant) => variant.width >= wanted) || asset.variants[asset.variants.length - 1];
+}
+
+// src/client/bitmap-cache.js
+var bitmapCacheBytes = 0;
+function bitmapEstimatedBytes(result) {
+  const bitmap = result?.bitmap;
+  const w = bitmap?.width || bitmap?.naturalWidth || result?.meta?.padW || 0;
+  const h = bitmap?.height || bitmap?.naturalHeight || result?.meta?.padH || 0;
+  const bytes = w * h * 4;
+  return Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes) : 0;
+}
+function closeBitmapQuietly(bitmap) {
+  try {
+    bitmap?.close?.();
+  } catch {
+  }
+}
+function evictBitmapEntry(key, entry) {
+  if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
+  if (entry.settled && entry.bytes) {
+    bitmapCacheBytes = Math.max(0, bitmapCacheBytes - entry.bytes);
+    entry.bytes = 0;
+  }
+  if (entry.refs <= 0 && entry.result?.bitmap) closeBitmapQuietly(entry.result.bitmap);
+}
+function trimBitmapCache(maxEntries = DEFAULTS.bitmapCacheMaxEntries, maxBytes = DEFAULTS.bitmapCacheMaxBytes) {
+  const entryLimit = Math.max(0, Math.floor(Number(maxEntries) || 0));
+  const byteLimit = Math.max(0, Math.floor(Number(maxBytes) || 0));
+  while (bitmapCache.size > entryLimit || byteLimit > 0 && bitmapCacheBytes > byteLimit) {
+    const oldest = bitmapCache.keys().next().value;
+    if (oldest === void 0) break;
+    evictBitmapEntry(oldest, bitmapCache.get(oldest));
+  }
+}
+function cachePut(key, promise, opts = {}) {
+  const existing = bitmapCache.get(key);
+  if (existing?.promise === promise) return existing;
+  if (existing) evictBitmapEntry(key, existing);
+  const entry = { key, promise, result: null, refs: 1, bytes: 0, settled: false };
+  bitmapCache.set(key, entry);
+  promise.then((result) => {
+    entry.result = result;
+    entry.settled = true;
+    entry.bytes = bitmapEstimatedBytes(result);
+    if (bitmapCache.get(key) === entry) {
+      bitmapCacheBytes += entry.bytes;
+      trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
+    } else if (entry.refs <= 0) closeBitmapQuietly(result?.bitmap);
+  }, () => {
+    entry.settled = true;
+    entry.refs = 0;
+    if (bitmapCache.get(key) === entry) bitmapCache.delete(key);
+  });
+  trimBitmapCache(opts.bitmapCacheMaxEntries, opts.bitmapCacheMaxBytes);
+  return entry;
+}
+function cacheGetEntry(key, { acquire = false } = {}) {
+  const entry = bitmapCache.get(key);
+  if (!entry) return null;
+  bitmapCache.delete(key);
+  bitmapCache.set(key, entry);
+  if (acquire) entry.refs++;
+  return entry;
+}
+function cacheReleaseEntry(entry) {
+  if (!entry) return;
+  entry.refs = Math.max(0, entry.refs - 1);
+  if (entry.refs <= 0 && bitmapCache.get(entry.key) !== entry && entry.result?.bitmap) {
+    closeBitmapQuietly(entry.result.bitmap);
+  }
+}
+function clearBitmapCache() {
+  for (const [key, entry] of [...bitmapCache]) evictBitmapEntry(key, entry);
+  bitmapCache.clear();
+  bitmapCacheBytes = 0;
+}
+var bitmapCache = /* @__PURE__ */ new Map();
+
+// src/client/draw.js
 function asByteArray(value) {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -5341,6 +5075,486 @@ function scrambleCanvasLocally(source, grid, key) {
   setCanvasSize(cleanPadded, 0, 0);
   return { canvas: scrambled, meta: { plan, origW: w, origH: h, padW: pw, padH: ph } };
 }
+
+// src/client/events.js
+var globalEventListeners = /* @__PURE__ */ new Set();
+var installedPlugins = /* @__PURE__ */ new Map();
+function sanitizeClientEvent(type, details = {}, instance = null) {
+  let mode = null;
+  try {
+    mode = instance?.options?.requestedMode || instance?.options?.mode || null;
+  } catch {
+  }
+  const cleanText = (value, max = 160) => {
+    if (value == null) return null;
+    const text = String(value).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, max);
+    return text || null;
+  };
+  return Object.freeze({
+    schemaVersion: 1,
+    service: "archx-client",
+    type: cleanText(type, 80) || "archx.event",
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    mode: cleanText(mode, 32),
+    kind: cleanText(details.kind, 120),
+    reason: cleanText(details.reason, 160),
+    outcome: cleanText(details.outcome, 48),
+    issues: Array.isArray(details.issues) ? Object.freeze(details.issues.slice(0, 40).map((issue) => cleanText(issue, 120)).filter(Boolean)) : null
+  });
+}
+function emitClientEvent(type, details = {}, instance = null) {
+  const event = sanitizeClientEvent(type, details, instance);
+  const invoke = (listener) => {
+    try {
+      const result = listener(event, instance);
+      if (result && typeof result.catch === "function") result.catch(() => {
+      });
+    } catch {
+    }
+  };
+  for (const listener of [...globalEventListeners]) invoke(listener);
+  for (const plugin of installedPlugins.values()) {
+    if (typeof plugin.onEvent === "function") invoke(plugin.onEvent);
+  }
+  try {
+    const perInstance = instance?.options?.onEvent;
+    if (typeof perInstance === "function") invoke(perInstance);
+  } catch {
+  }
+  return event;
+}
+function onClientEvent(listener) {
+  if (typeof listener !== "function") throw new TypeError("Archx.on: listener must be a function");
+  globalEventListeners.add(listener);
+  return () => {
+    globalEventListeners.delete(listener);
+  };
+}
+function offClientEvent(listener) {
+  return globalEventListeners.delete(listener);
+}
+function usePlugin(plugin) {
+  if (!plugin || typeof plugin !== "object") throw new TypeError("Archx.use: plugin must be an object");
+  const name = typeof plugin.name === "string" && plugin.name.trim() ? plugin.name.trim().slice(0, 80) : `plugin-${installedPlugins.size + 1}`;
+  if (plugin.onEvent !== void 0 && typeof plugin.onEvent !== "function") {
+    throw new TypeError("Archx.use: plugin.onEvent must be a function when supplied");
+  }
+  if (plugin.setup !== void 0 && typeof plugin.setup !== "function") {
+    throw new TypeError("Archx.use: plugin.setup must be a function when supplied");
+  }
+  if (plugin.teardown !== void 0 && typeof plugin.teardown !== "function") {
+    throw new TypeError("Archx.use: plugin.teardown must be a function when supplied");
+  }
+  const previous = installedPlugins.get(name);
+  if (previous?.teardown) {
+    try {
+      previous.teardown();
+    } catch {
+    }
+  }
+  const record = Object.freeze({ name, onEvent: plugin.onEvent || null, teardown: plugin.teardown || null });
+  installedPlugins.set(name, record);
+  if (typeof plugin.setup === "function") {
+    try {
+      plugin.setup(Object.freeze({ on: onClientEvent, off: offClientEvent, version: VERSION }));
+    } catch {
+      installedPlugins.delete(name);
+      throw new Error(`Archx.use: plugin "${name}" setup failed`);
+    }
+  }
+  emitClientEvent("archx.plugin_installed", { kind: name, outcome: "installed" });
+  return Object.freeze({
+    name,
+    remove() {
+      const current = installedPlugins.get(name);
+      if (!current) return false;
+      installedPlugins.delete(name);
+      try {
+        current.teardown?.();
+      } catch {
+      }
+      return true;
+    }
+  });
+}
+function listPlugins() {
+  return Object.freeze([...installedPlugins.keys()]);
+}
+
+// src/client/integrity.js
+var AUDIT_WEBGL_METHODS = [
+  "texImage2D",
+  "readPixels",
+  "drawArrays",
+  "drawElements",
+  "createTexture",
+  "bindTexture",
+  "bindFramebuffer",
+  "createFramebuffer",
+  "framebufferTexture2D",
+  "createShader",
+  "shaderSource",
+  "compileShader",
+  "createProgram",
+  "linkProgram",
+  "useProgram",
+  "getContextAttributes",
+  "uniform1f",
+  "uniform2f",
+  "uniform1i",
+  "viewport",
+  "activeTexture",
+  "texParameteri",
+  "pixelStorei",
+  "generateMipmap",
+  "getUniformLocation",
+  "attachShader",
+  "getShaderParameter",
+  "getProgramParameter",
+  "createBuffer",
+  "bindBuffer",
+  "bufferData",
+  "enableVertexAttribArray",
+  "vertexAttribPointer",
+  "getExtension"
+];
+var readerProtoCache;
+function currentReaderRead() {
+  try {
+    if (readerProtoCache === void 0) {
+      readerProtoCache = Object.getPrototypeOf(new ReadableStream().getReader());
+    }
+    return readerProtoCache?.read ?? null;
+  } catch {
+    return null;
+  }
+}
+function currentDescriptorAccessor(ctorName, prop, kind) {
+  try {
+    const ctor = ctorName === "HTMLCanvasElement" ? typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement : null : typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D : null;
+    if (!ctor) return null;
+    return Object.getOwnPropertyDescriptor(ctor.prototype, prop)?.[kind] || null;
+  } catch {
+    return null;
+  }
+}
+function auditIntegrity() {
+  const g = globalThis;
+  const current = [
+    ["fetch", g.fetch, NATIVES.fetch],
+    ["createImageBitmap", g.createImageBitmap, NATIVES.createImageBitmap],
+    ["URL.createObjectURL", typeof URL !== "undefined" ? URL.createObjectURL : null, NATIVES.createObjectURL],
+    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, NATIVES.canvasGetContext],
+    ["HTMLCanvasElement.prototype.toDataURL", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toDataURL : null, NATIVES.canvasToDataURL],
+    ["HTMLCanvasElement.prototype.toBlob", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.toBlob : null, NATIVES.canvasToBlob],
+    ["CanvasRenderingContext2D.prototype.drawImage", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.drawImage : null, NATIVES.ctxDrawImage],
+    ["CanvasRenderingContext2D.prototype.getImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.getImageData : null, NATIVES.ctxGetImageData],
+    ["CanvasRenderingContext2D.prototype.putImageData", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.putImageData : null, NATIVES.ctxPutImageData],
+    ["CanvasRenderingContext2D.prototype.save", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null, NATIVES.ctxSave],
+    ["CanvasRenderingContext2D.prototype.restore", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null, NATIVES.ctxRestore],
+    ["CanvasRenderingContext2D.prototype.translate", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.translate : null, NATIVES.ctxTranslate],
+    ["CanvasRenderingContext2D.prototype.scale", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.scale : null, NATIVES.ctxScale],
+    ["CanvasRenderingContext2D.prototype.rotate", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.rotate : null, NATIVES.ctxRotate],
+    ["CanvasRenderingContext2D.prototype.setTransform", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.setTransform : null, NATIVES.ctxSetTransform],
+    ["Function.prototype.call", Function.prototype.call, NATIVES.fnCall],
+    ["Function.prototype.apply", Function.prototype.apply, NATIVES.fnApply],
+    ["Function.prototype.bind", Function.prototype.bind, NATIVES.fnBind],
+    ["Function.prototype.toString", Function.prototype.toString, NATIVES.fnToString],
+    ["Reflect.apply", typeof Reflect !== "undefined" ? Reflect.apply : null, NATIVES.reflectApply],
+    ["HTMLCanvasElement.prototype.width.get", currentDescriptorAccessor("HTMLCanvasElement", "width", "get"), NATIVES.canvasWidthGet],
+    ["HTMLCanvasElement.prototype.width.set", currentDescriptorAccessor("HTMLCanvasElement", "width", "set"), NATIVES.canvasWidthSet],
+    ["HTMLCanvasElement.prototype.height.get", currentDescriptorAccessor("HTMLCanvasElement", "height", "get"), NATIVES.canvasHeightGet],
+    ["HTMLCanvasElement.prototype.height.set", currentDescriptorAccessor("HTMLCanvasElement", "height", "set"), NATIVES.canvasHeightSet],
+    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.get", currentDescriptorAccessor("CanvasRenderingContext2D", "imageSmoothingQuality", "get"), NATIVES.smoothingQualityGet],
+    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.set", currentDescriptorAccessor("CanvasRenderingContext2D", "imageSmoothingQuality", "set"), NATIVES.smoothingQualitySet],
+    ["Document.prototype.createElement", typeof Document !== "undefined" ? Document.prototype.createElement : null, NATIVES.docCreateElement],
+    ["JSON.parse", typeof JSON !== "undefined" ? JSON.parse : null, NATIVES.jsonParse],
+    ["Element.prototype.attachShadow", typeof Element !== "undefined" ? Element.prototype.attachShadow : null, NATIVES.attachShadow],
+    ["ReadableStream.prototype.getReader", typeof ReadableStream !== "undefined" ? ReadableStream.prototype.getReader : null, NATIVES.streamGetReader],
+    ["ReadableStreamDefaultReader.prototype.read", currentReaderRead(), NATIVES.streamReaderRead],
+    ["Response.prototype.text", typeof Response !== "undefined" ? Response.prototype.text : null, NATIVES.responseText],
+    ["TextDecoder.prototype.decode", typeof TextDecoder !== "undefined" ? TextDecoder.prototype.decode : null, NATIVES.textDecode],
+    ["TextEncoder.prototype.encode", typeof TextEncoder !== "undefined" ? TextEncoder.prototype.encode : null, NATIVES.textEncode],
+    ["SubtleCrypto.prototype.importKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).importKey : null, NATIVES.subtleImportKey],
+    ["SubtleCrypto.prototype.decrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).decrypt : null, NATIVES.subtleDecrypt],
+    ["SubtleCrypto.prototype.encrypt", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).encrypt : null, NATIVES.subtleEncrypt],
+    ["SubtleCrypto.prototype.digest", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).digest : null, NATIVES.subtleDigest],
+    ["SubtleCrypto.prototype.sign", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).sign : null, NATIVES.subtleSign],
+    ["SubtleCrypto.prototype.generateKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).generateKey : null, NATIVES.subtleGenerateKey],
+    ["SubtleCrypto.prototype.exportKey", NATIVES.subtle ? Object.getPrototypeOf(NATIVES.subtle).exportKey : null, NATIVES.subtleExportKey],
+    ["Crypto.prototype.getRandomValues", (() => {
+      try {
+        return globalThis.crypto?.getRandomValues || null;
+      } catch {
+        return null;
+      }
+    })(), NATIVES.getRandomValues]
+  ];
+  for (const [label, ctor, capturedMap] of [
+    ["WebGLRenderingContext", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext : null, NATIVES.webgl1],
+    ["WebGL2RenderingContext", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext : null, NATIVES.webgl2]
+  ]) {
+    for (const method of AUDIT_WEBGL_METHODS) {
+      current.push([
+        `${label}.prototype.${method}`,
+        ctor ? ctor.prototype[method] : null,
+        capturedMap?.[method] ?? null
+      ]);
+    }
+  }
+  const issues = [];
+  for (const [name, now, captured] of current) {
+    if (!captured && !now) continue;
+    if (now !== captured || captured && !isNativeFn(captured)) issues.push(name);
+  }
+  return issues;
+}
+function auditIntegrityDetails() {
+  const issues = auditIntegrity();
+  const capturedByName = /* @__PURE__ */ new Map([
+    ["fetch", NATIVES.fetch],
+    ["createImageBitmap", NATIVES.createImageBitmap],
+    ["URL.createObjectURL", NATIVES.createObjectURL],
+    ["HTMLCanvasElement.prototype.getContext", NATIVES.canvasGetContext],
+    ["HTMLCanvasElement.prototype.toDataURL", NATIVES.canvasToDataURL],
+    ["HTMLCanvasElement.prototype.toBlob", NATIVES.canvasToBlob],
+    ["CanvasRenderingContext2D.prototype.drawImage", NATIVES.ctxDrawImage],
+    ["CanvasRenderingContext2D.prototype.getImageData", NATIVES.ctxGetImageData],
+    ["CanvasRenderingContext2D.prototype.putImageData", NATIVES.ctxPutImageData],
+    ["CanvasRenderingContext2D.prototype.save", NATIVES.ctxSave],
+    ["CanvasRenderingContext2D.prototype.restore", NATIVES.ctxRestore],
+    ["CanvasRenderingContext2D.prototype.translate", NATIVES.ctxTranslate],
+    ["CanvasRenderingContext2D.prototype.scale", NATIVES.ctxScale],
+    ["CanvasRenderingContext2D.prototype.rotate", NATIVES.ctxRotate],
+    ["CanvasRenderingContext2D.prototype.setTransform", NATIVES.ctxSetTransform],
+    ["Function.prototype.call", NATIVES.fnCall],
+    ["Function.prototype.apply", NATIVES.fnApply],
+    ["Function.prototype.bind", NATIVES.fnBind],
+    ["Function.prototype.toString", NATIVES.fnToString],
+    ["Reflect.apply", NATIVES.reflectApply],
+    ["HTMLCanvasElement.prototype.width.get", NATIVES.canvasWidthGet],
+    ["HTMLCanvasElement.prototype.width.set", NATIVES.canvasWidthSet],
+    ["HTMLCanvasElement.prototype.height.get", NATIVES.canvasHeightGet],
+    ["HTMLCanvasElement.prototype.height.set", NATIVES.canvasHeightSet],
+    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.get", NATIVES.smoothingQualityGet],
+    ["CanvasRenderingContext2D.prototype.imageSmoothingQuality.set", NATIVES.smoothingQualitySet],
+    ["Document.prototype.createElement", NATIVES.docCreateElement],
+    ["JSON.parse", NATIVES.jsonParse],
+    ["Element.prototype.attachShadow", NATIVES.attachShadow],
+    ["ReadableStream.prototype.getReader", NATIVES.streamGetReader],
+    ["ReadableStreamDefaultReader.prototype.read", NATIVES.streamReaderRead],
+    ["Response.prototype.text", NATIVES.responseText],
+    ["TextDecoder.prototype.decode", NATIVES.textDecode],
+    ["TextEncoder.prototype.encode", NATIVES.textEncode],
+    ["SubtleCrypto.prototype.importKey", NATIVES.subtleImportKey],
+    ["SubtleCrypto.prototype.decrypt", NATIVES.subtleDecrypt],
+    ["SubtleCrypto.prototype.encrypt", NATIVES.subtleEncrypt],
+    ["SubtleCrypto.prototype.digest", NATIVES.subtleDigest],
+    ["SubtleCrypto.prototype.sign", NATIVES.subtleSign],
+    ["SubtleCrypto.prototype.generateKey", NATIVES.subtleGenerateKey],
+    ["SubtleCrypto.prototype.exportKey", NATIVES.subtleExportKey],
+    ["Crypto.prototype.getRandomValues", NATIVES.getRandomValues]
+  ]);
+  for (const [label, capturedMap] of [
+    ["WebGLRenderingContext", NATIVES.webgl1],
+    ["WebGL2RenderingContext", NATIVES.webgl2]
+  ]) {
+    for (const [method, fn] of Object.entries(capturedMap || {})) {
+      capturedByName.set(`${label}.prototype.${method}`, fn);
+    }
+  }
+  const capturedNonNative = issues.filter((name) => {
+    const captured = capturedByName.get(name);
+    return !!captured && !isNativeFn(captured);
+  });
+  return Object.freeze({
+    ok: issues.length === 0,
+    issues: Object.freeze(issues),
+    capturedNonNative: Object.freeze(capturedNonNative),
+    changedSinceLoad: Object.freeze(issues.filter((name) => !capturedNonNative.includes(name))),
+    checked: Object.freeze([
+      "fetch",
+      "createImageBitmap",
+      "URL.createObjectURL",
+      "canvas context/readback",
+      "CanvasRenderingContext2D draw/readback",
+      "Document.createElement",
+      "WebGL/WebGL2 texture, framebuffer, shader/program, draw, and readback methods"
+    ]),
+    note: "Tripwire only: a clean result does not prove the absence of pre-load, native-looking, extension, CDP, or modified-browser hooks."
+  });
+}
+function captureEarlyIntegritySnapshot() {
+  const snapshot = Object.freeze({
+    fetch: globalThis.fetch || null,
+    createImageBitmap: globalThis.createImageBitmap || null,
+    canvasGetContext: typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null,
+    webglDrawArrays: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null,
+    webgl2DrawArrays: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null,
+    webglReadPixels: typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null,
+    webgl2ReadPixels: typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null,
+    fnCall: Function.prototype.call,
+    fnApply: Function.prototype.apply,
+    fnBind: Function.prototype.bind,
+    reflectApply: typeof Reflect !== "undefined" ? Reflect.apply : null,
+    ctxSave: typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null,
+    ctxRestore: typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null,
+    canvasWidthSet: (() => {
+      try {
+        return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "width")?.set || null;
+      } catch {
+        return null;
+      }
+    })(),
+    canvasHeightSet: (() => {
+      try {
+        return Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, "height")?.set || null;
+      } catch {
+        return null;
+      }
+    })(),
+    at: Date.now()
+  });
+  return snapshot;
+}
+function verifyEarlyIntegritySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return Object.freeze({ ok: false, issues: Object.freeze(["missing-snapshot"]) });
+  const checks = [
+    ["fetch", globalThis.fetch || null, snapshot.fetch],
+    ["createImageBitmap", globalThis.createImageBitmap || null, snapshot.createImageBitmap],
+    ["HTMLCanvasElement.prototype.getContext", typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement.prototype.getContext : null, snapshot.canvasGetContext],
+    ["WebGLRenderingContext.prototype.drawArrays", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.drawArrays : null, snapshot.webglDrawArrays],
+    ["WebGL2RenderingContext.prototype.drawArrays", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.drawArrays : null, snapshot.webgl2DrawArrays],
+    ["WebGLRenderingContext.prototype.readPixels", typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.readPixels : null, snapshot.webglReadPixels],
+    ["WebGL2RenderingContext.prototype.readPixels", typeof WebGL2RenderingContext !== "undefined" ? WebGL2RenderingContext.prototype.readPixels : null, snapshot.webgl2ReadPixels],
+    ["Function.prototype.call", Function.prototype.call, snapshot.fnCall],
+    ["Function.prototype.apply", Function.prototype.apply, snapshot.fnApply],
+    ["Function.prototype.bind", Function.prototype.bind, snapshot.fnBind],
+    ["Reflect.apply", typeof Reflect !== "undefined" ? Reflect.apply : null, snapshot.reflectApply],
+    ["CanvasRenderingContext2D.prototype.save", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.save : null, snapshot.ctxSave],
+    ["CanvasRenderingContext2D.prototype.restore", typeof CanvasRenderingContext2D !== "undefined" ? CanvasRenderingContext2D.prototype.restore : null, snapshot.ctxRestore],
+    ["HTMLCanvasElement.prototype.width.set", currentDescriptorAccessor("HTMLCanvasElement", "width", "set"), snapshot.canvasWidthSet],
+    ["HTMLCanvasElement.prototype.height.set", currentDescriptorAccessor("HTMLCanvasElement", "height", "set"), snapshot.canvasHeightSet]
+  ];
+  const issues = checks.filter(([, now, before]) => (before || now) && now !== before).map(([name]) => name);
+  return Object.freeze({ ok: issues.length === 0, issues: Object.freeze(issues), snapshotAt: snapshot.at || null });
+}
+function detectAutomation() {
+  const signals = [];
+  try {
+    if (typeof navigator !== "undefined") {
+      if (navigator.webdriver) signals.push("webdriver");
+      if (/HeadlessChrome|PhantomJS|Headless/i.test(navigator.userAgent || "")) signals.push("headless-ua");
+      if (navigator.languages && navigator.languages.length === 0) signals.push("no-languages");
+    }
+    if (typeof window !== "undefined" && window.outerWidth === 0 && window.outerHeight === 0) signals.push("zero-outer-size");
+  } catch {
+  }
+  return signals;
+}
+
+// src/client/registry.js
+var instances = /* @__PURE__ */ new Set();
+var hostToInstance = /* @__PURE__ */ new WeakMap();
+
+// src/client/observers.js
+function getVisibilityObserver(rootMargin = "500px") {
+  const margin = typeof rootMargin === "string" && rootMargin.length <= 64 ? rootMargin : "500px";
+  let observer = visibilityObservers.get(margin);
+  if (!observer) {
+    const callback = (entries) => {
+      for (const e of entries) {
+        const inst = hostToInstance.get(e.target);
+        if (inst) inst._onVisibility(e.isIntersecting);
+      }
+    };
+    try {
+      observer = new IntersectionObserver(callback, { rootMargin: margin });
+    } catch {
+      observer = new IntersectionObserver(callback, { rootMargin: "500px" });
+    }
+    visibilityObservers.set(margin, observer);
+  }
+  return observer;
+}
+var sharedResizeObserver = null;
+function getResizeObserver() {
+  if (!sharedResizeObserver) {
+    sharedResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const inst = hostToInstance.get(entry.target);
+        if (inst) inst._onResize(entry);
+      }
+    });
+  }
+  return sharedResizeObserver;
+}
+var globalGuardsInstalled = false;
+function installGlobalGuards() {
+  if (globalGuardsInstalled || typeof window === "undefined") return;
+  globalGuardsInstalled = true;
+  const blackoutAll = (ms, kind) => instances.forEach((i) => i._momentaryBlackout(ms, kind));
+  let lastCaptureKeyAt = 0;
+  const onCaptureKey = (e) => {
+    const key = String(e.key || "");
+    const shotKey = key === "PrintScreen" || e.code === "PrintScreen";
+    const macShot = e.metaKey && e.shiftKey && ["3", "4", "5"].includes(key);
+    const snipShortcut = (e.metaKey || e.ctrlKey) && e.shiftKey && key.toLowerCase() === "s";
+    if (!shotKey && !macShot && !snipShortcut) return;
+    if (shotKey && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText("").catch(() => {
+      });
+    }
+    const now = Date.now();
+    if (now - lastCaptureKeyAt < 250) return;
+    lastCaptureKeyAt = now;
+    blackoutAll(1200, "screenshot-key");
+  };
+  window.addEventListener("keydown", onCaptureKey, true);
+  window.addEventListener("keyup", onCaptureKey, true);
+  document.addEventListener("freeze", () => blackoutAll(1500, "screenshot-key"), true);
+  window.addEventListener("blur", () => instances.forEach((i) => i._setRisk("blur", true)), true);
+  window.addEventListener("focus", () => instances.forEach((i) => i._setRisk("blur", false)), true);
+  document.addEventListener("visibilitychange", () => {
+    instances.forEach((i) => i._setRisk("hidden", document.hidden));
+  });
+  if (window.matchMedia) {
+    const mq = window.matchMedia("print");
+    const onPrint = (m) => instances.forEach((i) => i._setRisk("print", m.matches));
+    if (mq.addEventListener) mq.addEventListener("change", onPrint);
+  }
+  window.addEventListener("beforeprint", () => instances.forEach((i) => i._setRisk("print", true)));
+  window.addEventListener("afterprint", () => instances.forEach((i) => i._setRisk("print", false)));
+}
+var devtoolsTimer = null;
+function ensureDevtoolsWatcher() {
+  if (devtoolsTimer) return;
+  const check = () => {
+    if (typeof document !== "undefined" && document.hidden) return;
+    const open = window.outerWidth - window.innerWidth > 170 || window.outerHeight - window.innerHeight > 200;
+    instances.forEach((i) => {
+      if (i.options.guards.devtools) i._setRisk("devtools", open);
+    });
+  };
+  check();
+  window.addEventListener("resize", check, true);
+  devtoolsTimer = setInterval(check, 400);
+}
+var glContextsInUse = 0;
+var GL_CONTEXT_BUDGET = 8;
+var $ = (t) => typeof t === "string" ? document.querySelector(t) : t;
+var visibilityObservers = /* @__PURE__ */ new Map();
+function glSlotsInUse() {
+  return glContextsInUse;
+}
+function acquireGlSlot() {
+  glContextsInUse++;
+}
+function releaseGlSlot() {
+  glContextsInUse = Math.max(0, glContextsInUse - 1);
+}
+
+// src/client/styles.js
 var SHADOW_CSS = `
   :host { display:block; }
   * { box-sizing: border-box; }
@@ -5396,6 +5610,8 @@ var SHADOW_CSS = `
     canvas.main, .tiles { opacity:0 !important; visibility:hidden !important; }
   }
 `;
+
+// src/client/viewer.js
 var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
@@ -5904,12 +6120,12 @@ var ProtectedImage = class {
             if (__privateGet(this, _abort).signal.aborted || !endpointUnsupported) throw err;
           }
         }
-        const mint = await fetchBounded(mintUrl.href, {
+        const doMintFetch = (headers) => fetchBounded(mintUrl.href, {
           method: tokenMethod,
           credentials: controls.credentials,
           cache: "no-store",
           redirect: "error",
-          headers: mintHeaders,
+          headers,
           signal: __privateGet(this, _abort).signal,
           ...fetchPriorityInit(o)
         }, {
@@ -5918,6 +6134,15 @@ var ProtectedImage = class {
           timeoutMs: controls.fetchTimeoutMs,
           validateResponse: (res) => assertResponseFinalOrigin(res, /* @__PURE__ */ new Set([endpointUrl.origin]))
         });
+        let mint;
+        try {
+          mint = await doMintFetch(mintHeaders);
+        } catch (err) {
+          if (!err?.challengeRequired || typeof o.onChallenge !== "function" || __privateGet(this, _destroyed)) throw err;
+          const proof = await o.onChallenge({ id: tokenId, reason: "suspicious-scraping" });
+          if (typeof proof !== "string" || !proof || proof.length > 8192) throw err;
+          mint = await doMintFetch({ ...mintHeaders, "X-Archx-Challenge": proof });
+        }
         return parseBoundedJson(mint.bytes);
       };
       const tokenPromise = (async () => {
@@ -6733,11 +6958,11 @@ var ProtectedImage = class {
   }
   _tryRenderWebGL() {
     if (__privateGet(this, _integrityHardLock)) return false;
-    if (glContextsInUse >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) {
+    if (glSlotsInUse() >= GL_CONTEXT_BUDGET && !__privateGet(this, _gl)) {
       if (!__privateGet(this, _glBudgetWarned)) {
         __privateSet(this, _glBudgetWarned, true);
         __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-webgl-budget", {
-          detail: { inUse: glContextsInUse, budget: GL_CONTEXT_BUDGET },
+          detail: { inUse: glSlotsInUse(), budget: GL_CONTEXT_BUDGET },
           bubbles: true
         }));
         emitClientEvent("archx.webgl_budget", { outcome: "canvas2d-fallback" }, this);
@@ -6773,12 +6998,12 @@ var ProtectedImage = class {
       } catch {
       }
       __privateSet(this, _gl, gl);
-      glContextsInUse++;
+      acquireGlSlot();
       this._poison(canvas, null);
       canvas.addEventListener("webglcontextlost", (e) => {
         e.preventDefault();
         __privateSet(this, _gl, null);
-        glContextsInUse = Math.max(0, glContextsInUse - 1);
+        releaseGlSlot();
         __privateSet(this, _glSource, null);
         __privateSet(this, _glMeta, null);
         __privateSet(this, _canaryDone, false);
@@ -6796,7 +7021,7 @@ var ProtectedImage = class {
       }, { signal: __privateGet(this, _abort).signal });
       if (!this._initGl(gl)) {
         __privateSet(this, _gl, null);
-        glContextsInUse--;
+        releaseGlSlot();
         __privateMethod(this, _ProtectedImage_instances, fresh2dCanvas_fn).call(this);
         return false;
       }
@@ -7441,7 +7666,7 @@ var ProtectedImage = class {
         glNative(__privateGet(this, _gl), "getExtension", "WEBGL_lose_context")?.loseContext();
       } catch {
       }
-      glContextsInUse = Math.max(0, glContextsInUse - 1);
+      releaseGlSlot();
       __privateSet(this, _gl, null);
     }
     clearTimeout(__privateGet(this, _resizeTimer));
@@ -7910,7 +8135,7 @@ setupTemporalFrames_fn = function(frame, cfg) {
   const fctx = getNativeContext(frame, "2d");
   let src;
   try {
-    src = fctx.getImageData(0, 0, w, h);
+    src = nativeGetImageData(fctx, 0, 0, w, h);
   } catch {
     return;
   }
@@ -7985,7 +8210,7 @@ setupTemporalFrames_fn = function(frame, cfg) {
       const lowCtx = getNativeContext(low, "2d");
       setSmoothing(lowCtx, true);
       nativeDrawImage(lowCtx, frame, 0, 0, lowW, lowH);
-      lowData = lowCtx.getImageData(0, 0, lowW, lowH).data;
+      lowData = nativeGetImageData(lowCtx, 0, 0, lowW, lowH).data;
       low.width = 0;
       low.height = 0;
     } catch {
@@ -8028,7 +8253,7 @@ setupTemporalFrames_fn = function(frame, cfg) {
           }
         }
       }
-      cctx.putImageData(out, 0, 0);
+      nativePutImageData(cctx, out, 0, 0);
       return c;
     }
     const gain = interlace.activeGain || 1;
@@ -8095,7 +8320,7 @@ setupTemporalFrames_fn = function(frame, cfg) {
         }
       }
     }
-    cctx.putImageData(out, 0, 0);
+    nativePutImageData(cctx, out, 0, 0);
     return c;
   };
   __privateSet(this, _temporalFrames, Array.from({ length: phases }, (_, phase) => mk(phase)));
@@ -8413,6 +8638,8 @@ glContinuous_fn = function() {
   if (loop === "static") return false;
   return !!__privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
 };
+
+// src/client/loaders.js
 function loadImage(target, source, options) {
   const inst = new ProtectedImage(target, source, options);
   return inst;
@@ -8670,8 +8897,11 @@ function defineElement() {
   }
   customElements.define("archx-image", ArchxImage);
 }
+
+// src/archx.js
+var VERSION2 = "1.19.0";
 var Archx = {
-  version: VERSION,
+  version: VERSION2,
   ProtectedImage,
   presets: PRESETS,
   preset,
@@ -8681,8 +8911,9 @@ var Archx = {
   config(partial = {}) {
     const clean = {};
     for (const [k, v] of Object.entries(partial)) if (v !== void 0) clean[k] = v;
-    globalConfig = { ...globalConfig, ...clean, guards: { ...globalConfig.guards, ...partial.guards || {} } };
-    return sanitizeOptionsView(globalConfig);
+    const current = getGlobalConfig();
+    setGlobalConfig({ ...current, ...clean, guards: { ...current.guards, ...partial.guards || {} } });
+    return sanitizeOptionsView(getGlobalConfig());
   },
   load: {
     image: loadImage,
@@ -8703,7 +8934,7 @@ var Archx = {
   clearCaches() {
     clearBitmapCache();
     assetManifestCache.clear();
-    pageSessionId = null;
+    resetPageSession();
   },
   /** Names of browser APIs that currently look monkey-patched. */
   auditIntegrity,

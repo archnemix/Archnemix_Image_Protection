@@ -156,13 +156,17 @@ try {
     if (args.json) console.log(JSON.stringify({ file: input, ownership: report }, null, 2));
     else {
       console.log(`Ownership verification for ${input}: ${report.verdict.toUpperCase()}`);
-      console.log(`  claim       : ${report.claimFound ? `found (${report.claimSource}), signature ${report.signatureValid ? 'VALID' : 'INVALID'}` : 'none'}`);
+      console.log(`  claim       : ${report.claimFound ? `found (${report.claimSource}, ${report.claimCandidates} candidate(s)), signature ${report.signatureChecked ? (report.signatureValid ? 'VALID' : 'INVALID') : 'UNCHECKED'}` : 'none'}`);
       if (report.owner) console.log(`  owner/image : ${report.owner} / ${report.imageId || '?'}`);
+      else if (report.unverifiedClaim) console.log(`  unverified  : suspect file CLAIMS owner "${report.unverifiedClaim.owner}" — signature not valid, do not cite`);
       console.log(`  perceptual  : ${report.perceptual.hash} (distance to claim: ${report.perceptual.distanceToClaim ?? 'n/a'})`);
       if (report.stego) console.log(`  stego       : ${report.stego.found ? `found ${report.stego.fingerprint} (claim match: ${report.stego.matchesClaim})` : 'not found'}`);
       console.log('  note        : evidence for investigation, not standalone legal proof of ownership.');
     }
-    process.exit(report.verdict === 'verified' || report.verdict === 'content-match' ? 0 : 1);
+    // Exit 0 requires a layer an attacker cannot fabricate (valid
+    // signature, keyed stego hit, or trusted-claim content match).
+    // A forged self-consistent claim yields no-evidence + exit 1.
+    process.exit(report.contentTrusted ? 0 : 1);
   }
   result = detectStegoFingerprint(data, info.width, info.height, {
     key,

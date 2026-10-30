@@ -12,7 +12,7 @@ import {
   encodeContainer, decodeContainer, isArchxContainer,
   encryptPayload, decryptPayload, generateKeyBase64,
   applyForensicBlocks, forensicScore, forensicBlockSigns,
-  embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint, assayStegoCollusion,
+  embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint, assayStegoCollusion, assayStegoEmbed,
   sha256Bytes, hmacSha256Bytes,
   sniffImageInfo, decodeBmpImage, base64ToBytes,
   perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
@@ -34,6 +34,7 @@ import {
   detectStegoFingerprintInWorker, closeStegoDetectWorker,
   batchDetectStegoInWorker, configureStegoDetectWorker,
   generateOwnershipKeyPair, verifyOwnershipClaim, extractOwnershipClaim, verifyOwnership,
+  embedOwnershipMetadata, createIssuanceLog, verifyIssuanceChain,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -3893,4 +3894,214 @@ test('v1.18 documented CLI flow: protect with separate keys, detect, verify owne
   ], { env, encoding: 'utf8' });
   assert.equal(verify.status, 0, verify.stderr || verify.stdout);
   assert.equal(JSON.parse(verify.stdout).ownership.verdict, 'verified');
+});
+
+/* ---------- v1.19: review-#8 regressions + new layers ---------- */
+
+test('v1.19 BoundedTtlSet mixed-TTL saturation: expired tail frees space before any live eviction or strict rejection', () => {
+  // The review-#8 disorder case: thousands of LIVE long-TTL heads with a
+  // few EXPIRED short-TTL entries at the back. The budget-bounded head
+  // scan (1024 + maxEntries/64) cannot reach the tail, so pass 2 (full
+  // expired sweep) must free the space. Old behavior: strict rejected a
+  // legitimate claim (false saturation) and evict dropped live claims.
+  const t0 = 1_000_000;
+  for (const saturation of ['strict', 'evict']) {
+    const set = new BoundedTtlSet({ maxEntries: 3002, cleanupIntervalMs: 0, saturation });
+    for (let i = 0; i < 3000; i++) assert.equal(set.claim('live-' + i, t0 + 1e9, t0), true);
+    assert.equal(set.claim('short-1', t0 + 10, t0), true);
+    assert.equal(set.claim('short-2', t0 + 10, t0), true);
+    assert.equal(set.size, 3002, 'set is full');
+    // t0+100: the two tail entries are expired; 3000 heads still live.
+    assert.equal(set.claim('new-claim', t0 + 1e9, t0 + 100), true, `${saturation}: expired tail must free space`);
+    assert.equal(set.liveEvictions, 0, `${saturation}: no live claim was evicted to make room`);
+    assert.equal(set.has('live-0', t0 + 100), true, `${saturation}: oldest live claim survives`);
+    assert.equal(set.has('short-1', t0 + 100), false, `${saturation}: expired claim is not live`);
+    assert.equal(set.has('new-claim', t0 + 100), true);
+    set.close();
+  }
+  // has() is a non-mutating peek: expired entries report false but the
+  // map is untouched (challenge clearances rely on this).
+  const peek = new BoundedTtlSet({ maxEntries: 4, cleanupIntervalMs: 0 });
+  assert.equal(peek.claim('a', 2000, 1000), true);
+  assert.equal(peek.has('a', 3000), false);
+  assert.equal(peek.size, 1, 'has() must not delete');
+  assert.equal(peek.has('missing', 1000), false);
+  peek.close();
+});
+
+test('v1.19 maxWidthFraction fails closed: invalid values rejected, fraction caps the delivered width', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v119-frac-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(640, 400));
+  for (const bad of [1.5, 0, -0.5, NaN, Infinity, '0.5']) {
+    const audit = auditArchxServerConfig({
+      secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true, maxWidthFraction: bad,
+    });
+    assert.equal(audit.ok, false, `maxWidthFraction ${String(bad)} must be rejected`);
+    assert.ok(audit.issues.some((issue) => /maxWidthFraction/.test(issue)));
+  }
+  const { base } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'frac-viewer' }),
+    maxWidthFraction: 0.5,
+  }, { cat: [640, 400] });
+  const mint = await postToken(base + '/archx/token/cat?w=640');
+  assert.equal(mint.status, 200, await mint.clone().text().catch(() => ''));
+  const tokenResponse = await mint.json();
+  const redeemed = await redeemToken(base, tokenResponse);
+  assert.equal(redeemed.status, 200);
+  const container = decodeContainer(new Uint8Array(await redeemed.arrayBuffer()));
+  assert.ok(container.header.w <= 320, `fraction 0.5 of a 640px master caps delivery at 320 (got ${container.header.w})`);
+});
+
+test('v1.19 step-up challenge gates single AND batch mints; a passed proof clears the subject', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'challenged-viewer' }),
+    abuseDetection: { distinctImages: 1, windowMs: 60_000, action: 'challenge' },
+    challenge: { verify: async (req, proof) => proof === 'good-proof' },
+  }, { cat: [320, 240], dog: [320, 240], bird: [320, 240] });
+
+  const first = await postToken(base + '/archx/token/cat?w=200');
+  assert.equal(first.status, 200, 'first distinct image is under the abuse threshold');
+
+  const gated = await postToken(base + '/archx/token/dog?w=200');
+  assert.equal(gated.status, 403, 'second distinct image steps up to a challenge');
+  assert.equal(gated.headers.get('x-archx-challenge'), 'required');
+
+  // Batch must not bypass the gate: the same subject, still uncleared.
+  const batch = await fetch(base + '/archx/tokens', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-archx-request': 'token' },
+    body: JSON.stringify({ items: [{ ref: 'doggy', id: 'dog', w: 200 }] }),
+  });
+  assert.equal(batch.status, 200);
+  const batchJson = await batch.json();
+  assert.equal(batchJson.tokens.doggy, undefined, 'batch mint is challenge-gated too');
+  assert.equal(batchJson.errors.doggy?.status, 403);
+
+  const wrong = await postToken(base + '/archx/token/dog?w=200', { headers: { 'x-archx-challenge': 'bogus' } });
+  assert.equal(wrong.status, 403, 'failing proof stays gated');
+
+  const passed = await postToken(base + '/archx/token/dog?w=200', { headers: { 'x-archx-challenge': 'good-proof' } });
+  assert.equal(passed.status, 200, 'passing proof mints');
+
+  const cleared = await postToken(base + '/archx/token/bird?w=200');
+  assert.equal(cleared.status, 200, 'clearance covers subsequent mints inside its TTL');
+});
+
+test('v1.19 challenge config fails closed: action challenge without a verifier is rejected', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v119-chal-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  assert.throws(
+    () => createArchxMiddleware({
+      secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+      abuseDetection: { distinctImages: 5, windowMs: 60000, action: 'challenge' },
+    }),
+    /challenge\.verify/,
+    'a challenge gate with no verifier must not silently become allow-all',
+  );
+});
+
+test('v1.19 issuance log: chain verifies; edits, reordering and deletion are detected', () => {
+  const secret = 'issuance-log-secret-0123456789';
+  assert.throws(() => createIssuanceLog({ secret: 'short' }), /at least 16 bytes/);
+  const log = createIssuanceLog({ secret });
+  log.append({ imageId: 'cat', viewerHash: 'v1', fingerprint: 'abc123' });
+  log.append({ imageId: 'dog', viewerHash: 'v2', fingerprint: 'def456' });
+  assert.equal(log.size, 2);
+  assert.equal(log.verify().ok, true);
+  assert.equal(verifyIssuanceChain(log.entries(), secret).ok, true);
+
+  const edited = log.entries().map((e) => ({ ...e, record: { ...e.record } }));
+  edited[0] = { ...edited[0], record: { ...edited[0].record, viewerHash: 'someone-else' } };
+  const editCheck = verifyIssuanceChain(edited, secret);
+  assert.equal(editCheck.ok, false, 'rewriting history breaks the chain');
+  assert.equal(editCheck.badIndex, 0);
+  assert.equal(editCheck.reason, 'mac-mismatch');
+
+  const entries = log.entries();
+  assert.equal(verifyIssuanceChain([entries[1], entries[0]], secret).ok, false, 'reordering breaks the chain');
+  assert.equal(verifyIssuanceChain([entries[1]], secret).ok, false, 'deleting the first entry breaks the chain');
+  assert.throws(() => createIssuanceLog({ secret, entries: edited }), /chain verification failed/);
+
+  const reloaded = createIssuanceLog({ secret, entries: log.entries() });
+  assert.equal(reloaded.head(), log.head());
+  reloaded.append({ imageId: 'bird', viewerHash: 'v3', fingerprint: 'ghi789' });
+  assert.equal(reloaded.verify().ok, true, 'a reloaded log keeps chaining');
+});
+
+test('v1.19 assayStegoEmbed measures the real embedder and self-verifies recovery', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const report = assayStegoEmbed(new Uint8Array(data), info.width, info.height, {
+    key: 'assay-test-key', profile: 'robust', strength: 6, verify: true,
+  });
+  assert.ok(report.psnr > 15 && report.psnr < 60, `measured PSNR is a sane number (${report.psnr})`);
+  assert.ok(report.maxChannelDelta >= 1 && report.maxChannelDelta <= 32, 'embed actually moved pixels, bounded');
+  assert.ok(['photo-textured', 'flat-minimal', 'binary-graphic'].includes(report.contentClass));
+  assert.notEqual(report.verifiedAtStrength, null, 'detector recovers a fresh mark at some strength');
+  assert.equal(report.recommendedStrength, report.verifiedAtStrength);
+  assert.ok(Array.isArray(report.warnings));
+
+  // Near-binary periodic graphics: the documented weak class must be
+  // classified (and warned about), not silently reported as fine.
+  const w = 640, h = 480;
+  const checker = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const v = ((x >> 3) + (y >> 3)) % 2 ? 255 : 0;
+      const i = (y * w + x) * 4;
+      checker[i] = v; checker[i + 1] = v; checker[i + 2] = v; checker[i + 3] = 255;
+    }
+  }
+  const binary = assayStegoEmbed(checker, w, h, { key: 'assay-test-key', profile: 'robust', strength: 6, verify: false });
+  assert.equal(binary.contentClass, 'binary-graphic');
+  assert.ok(binary.warnings.some((w) => /weak class/i.test(w)), 'binary content carries the weak-class warning');
+});
+
+test('v1.19 ownership XMP declares xmpRights:Marked and usage terms for external tools', async () => {
+  const jpeg = await sharp(await syntheticMaster(320, 240)).jpeg().toBuffer();
+  const stamped = await embedOwnershipMetadata(jpeg, {
+    artist: 'Studio Example', copyright: 'Copyright 2026 Studio Example. All rights reserved.',
+  });
+  const xmp = await sharp(stamped).metadata().then((m) => m.xmp?.toString('utf8') || '');
+  assert.match(xmp, /<xmpRights:Marked>True<\/xmpRights:Marked>/);
+  assert.match(xmp, /<xmpRights:UsageTerms>/);
+  assert.match(xmp, /Studio Example/);
+});
+
+test('v1.19 archx-protect --assay CLI reports measured PSNR and verifies recovery', async (t) => {
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v119-assaycli-'));
+  const photoPath = path.join(dir, 'photo.jpg');
+  fs.writeFileSync(photoPath, await sharp(await syntheticMaster(640, 420)).jpeg().toBuffer());
+  const env = { ...process.env, ARCHX_STEGO_KEY: 'assay-cli-key' };
+  const run = spawnSync('node', [
+    path.join(repoRoot, 'server/scramble-cli.js'), photoPath, '--assay', '--json',
+  ], { env, encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const report = JSON.parse(run.stdout);
+  assert.equal(report.profile, 'robust');
+  assert.ok(report.psnr > 15 && report.psnr < 60);
+  assert.notEqual(report.verifiedAtStrength, null);
+});
+
+test('v1.19 type declarations match the runtime export surface (no declaration drift)', async () => {
+  // Review #8 found ~10 declaration/runtime mismatches. Pin the contract:
+  // every callable/value declared in types/*.d.ts must exist at runtime
+  // with a compatible typeof. Parses only top-level `export function`,
+  // `export class`, and `export const` lines.
+  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const pairs = [
+    ['types/scramble.d.ts', await import('../src/scramble.js')],
+    ['types/server.d.ts', archxServerModule],
+    ['types/index.d.ts', await import('../src/archx.js')],
+  ];
+  for (const [file, mod] of pairs) {
+    const src = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+    for (const [, kind, name] of src.matchAll(/^export (function|class|const) ([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
+      assert.ok(name in mod, `${file} declares ${name} but the runtime module does not export it`);
+      if (kind === 'function' || kind === 'class') {
+        assert.equal(typeof mod[name], 'function', `${file}: ${name} should be callable at runtime`);
+      }
+    }
+  }
 });
