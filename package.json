@@ -1,0 +1,152 @@
+{
+  "name": "@archnemix/image-protection",
+  "version": "1.22.0",
+  "description": "Archnemix (Archx) \u2014 layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
+  "license": "0BSD",
+  "author": "Archnemix",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/archnemix/Archnemix_Image_Protection.git"
+  },
+  "homepage": "https://github.com/archnemix/Archnemix_Image_Protection#readme",
+  "bugs": {
+    "url": "https://github.com/archnemix/Archnemix_Image_Protection/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/archx.cjs",
+  "module": "./dist/archx.esm.js",
+  "unpkg": "./dist/archx.min.js",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./dist/archx.esm.js",
+      "require": "./dist/archx.cjs",
+      "default": "./dist/archx.esm.js"
+    },
+    "./server": {
+      "types": "./types/server.d.ts",
+      "default": "./server/middleware.js"
+    },
+    "./server/scramble-image": {
+      "types": "./types/server.d.ts",
+      "default": "./server/scramble-image.js"
+    },
+    "./build": {
+      "types": "./types/build.d.ts",
+      "default": "./server/build-assets.js"
+    },
+    "./redis": {
+      "types": "./types/redis.d.ts",
+      "default": "./server/redis-state-store.js"
+    },
+    "./scramble": {
+      "types": "./types/scramble.d.ts",
+      "default": "./src/scramble.js"
+    }
+  },
+  "files": [
+    "dist/archx.cjs",
+    "dist/archx.esm.js",
+    "dist/archx.min.js",
+    "dist/archx.min.js.sri",
+    "dist/*.map",
+    "src/archx.js",
+    "src/browser-global.js",
+    "src/index.js",
+    "src/core/bytes.js",
+    "src/core/crypto.js",
+    "src/core/plan.js",
+    "src/core/sniff.js",
+    "src/core/container.js",
+    "src/core/forensic.js",
+    "src/core/bch.js",
+    "src/core/stego-code.js",
+    "src/core/pixels.js",
+    "src/core/stego-embed.js",
+    "src/core/stego-detect.js",
+    "src/core/stego-assay.js",
+    "src/core/perceptual.js",
+    "src/scramble.js",
+    "server/middleware.js",
+    "server/node-crypto.js",
+    "server/issuance-log.js",
+    "server/ownership.js",
+    "server/build-assets.js",
+    "server/build-assets-cli.js",
+    "server/redis-state-store.js",
+    "server/scramble-image.js",
+    "server/detect-worker.js",
+    "server/scramble-cli.js",
+    "server/detect-stego-cli.js",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "types/*.d.ts",
+    "src/client/",
+    "server/bounded.js",
+    "server/tokens.js",
+    "server/config.js"
+  ],
+  "bin": {
+    "archx-protect": "./server/scramble-cli.js",
+    "archx-build": "./server/build-assets-cli.js",
+    "archx-detect": "./server/detect-stego-cli.js"
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "prepack": "npm run build",
+    "demo": "node server/demo-server.js",
+    "demo:images": "node tools/generate-test-images.mjs",
+    "test": "node --test tests/unit.test.mjs tests/fuzz.test.mjs",
+    "test:fuzz": "node --test tests/fuzz.test.mjs",
+    "test:browser": "node tests/browser-test.mjs",
+    "test:all": "npm run build && npm test && npm run test:browser",
+    "bench": "node tools/benchmark.mjs",
+    "bench:opt": "node --expose-gc tools/optimization-bench.mjs",
+    "load-test": "node tools/load-test.mjs",
+    "lint": "node tools/lint.mjs",
+    "verify": "npm run lint && npm run build && npm run test:types && npm test && npm run test:browser && npm audit --audit-level=high",
+    "test:types": "tsc --noEmit -p tsconfig.json",
+    "test:pack": "node tools/pack-smoke.mjs",
+    "test:redis": "node --test tests/redis-integration.test.mjs",
+    "bench:stego": "node tools/stego-bench.mjs",
+    "redteam": "node tools/red-team.mjs"
+  },
+  "keywords": [
+    "image-protection",
+    "anti-scraping",
+    "canvas",
+    "watermark",
+    "forensic-watermarking",
+    "copyright",
+    "webgl",
+    "steganography",
+    "signed-urls",
+    "temporal-interlace"
+  ],
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "devDependencies": {
+    "@sparticuz/chromium": "^138.0.0",
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.25.0",
+    "ioredis": "^5.11.1",
+    "puppeteer-core": "^25.16.0",
+    "sharp": "^0.35.5",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "sharp": "^0.35.5"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
+  },
+  "types": "./types/index.d.ts"
+}
