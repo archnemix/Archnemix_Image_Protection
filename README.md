@@ -763,8 +763,9 @@ npm run test:browser  # 122 checks in real headless Chromium (encapsulation, dec
                       # asset preload cache warming, catalog sizing, batch-minted 100-image gallery…)
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
-npm run redteam     # 36-attack red-team suite against a live hardened server (forgery, replay,
-                    # malleability, IDOR/batch abuse, traversal/symlink, pixel bombs, config escapes)
+npm run redteam     # 55-case red-team suite against a live hardened server (forgery, replay races,
+                    # malleability, claim fuzzing, keyring confusion, IDOR/batch abuse, slow-trickle
+                    # bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)
 npm run bench:stego # StegoMark survival benchmark (9 images x 11 transforms; --fp for the 369-case
                     # wrong-key false-positive sweep)
 npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload + Chromium timings/heap, JSON + --compare)

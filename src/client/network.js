@@ -376,6 +376,7 @@ export function validTokenString(value, { min = 1, max = 512, pattern = null } =
 
 export function bytesToBase64Url(bytes) {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  if (typeof view.toBase64 === 'function') return view.toBase64({ alphabet: 'base64url', omitPadding: true });
   let binary = '';
   const chunkSize = 32768;
   for (let i = 0; i < view.length; i += chunkSize) {

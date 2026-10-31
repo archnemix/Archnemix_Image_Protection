@@ -36,6 +36,7 @@ function utf8DecodeFatal(bytes) {
 function bytesToBase64(bytes) {
   const u8 = asBytes(bytes);
   if (typeof Buffer !== "undefined") return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString("base64");
+  if (typeof u8.toBase64 === "function") return u8.toBase64();
   let bin = "";
   const CHUNK = 32768;
   for (let i = 0; i < u8.length; i += CHUNK) {
@@ -55,6 +56,7 @@ function base64ToBytes(b64) {
   }
   if (normalized.length % 4) normalized += "=".repeat(4 - normalized.length % 4);
   if (typeof Buffer !== "undefined") return new Uint8Array(Buffer.from(normalized, "base64"));
+  if (typeof Uint8Array.fromBase64 === "function") return Uint8Array.fromBase64(normalized);
   const bin = atob(normalized);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -999,18 +1001,26 @@ function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 2, sign
   const by = Math.ceil(h / bs);
   const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : signsVersion === 2 ? 2 : 3);
   const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  const lutPos = new Uint8Array(256);
+  const lutNeg = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    lutPos[v] = Math.max(0, Math.min(255, v + delta));
+    lutNeg[v] = Math.max(0, Math.min(255, v - delta));
+  }
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
-      const d = signs[byi * bx + bxi] * delta;
+      const sign = signs[byi * bx + bxi];
+      const d = sign * delta;
       if (!d) continue;
+      const lut = sign > 0 ? lutPos : lutNeg;
       const x0 = bxi * bs, y0 = byi * bs;
       const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
       for (let y = y0; y < y1; y++) {
         let i = (y * w + x0) * 4;
         for (let x = x0; x < x1; x++, i += 4) {
-          out[i] = Math.max(0, Math.min(255, out[i] + d));
-          out[i + 1] = Math.max(0, Math.min(255, out[i + 1] + d));
-          out[i + 2] = Math.max(0, Math.min(255, out[i + 2] + d));
+          out[i] = lut[out[i]];
+          out[i + 1] = lut[out[i + 1]];
+          out[i + 2] = lut[out[i + 2]];
         }
       }
     }
@@ -1802,24 +1812,40 @@ function embedStegoFingerprint(rgba, w, h, payload, {
 // src/core/pixels.js
 function buildLumaIntegral(src, w, h) {
   const luma = new Uint8Array(w * h);
-  for (let p = 0, i = 0; p < luma.length; p++, i += 4) {
-    luma[p] = src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
-  }
   const integral = w * h <= 16e6 ? new Uint32Array((w + 1) * (h + 1)) : new Float64Array((w + 1) * (h + 1));
   for (let y = 0; y < h; y++) {
     let rowSum = 0;
-    const srcRow = y * w;
+    let i = y * w * 4;
+    const lumaRow = y * w;
     const outRow = (y + 1) * (w + 1);
     const prevRow = y * (w + 1);
-    for (let x = 0; x < w; x++) {
-      rowSum += luma[srcRow + x];
+    for (let x = 0; x < w; x++, i += 4) {
+      const v = src[i] * 77 + src[i + 1] * 150 + src[i + 2] * 29 >> 8;
+      luma[lumaRow + x] = v;
+      rowSum += v;
       integral[outRow + x + 1] = integral[prevRow + x + 1] + rowSum;
     }
   }
   return { luma, integral };
 }
+var wordView = (u8, words) => u8.byteOffset % 4 === 0 && u8.byteLength >= words * 4 ? new Uint32Array(u8.buffer, u8.byteOffset, words) : null;
 function flipPixels(src, w, h, flipX, flipY) {
   const flipped = new Uint8Array(w * h * 4);
+  const src32 = wordView(src, w * h);
+  if (src32) {
+    const out32 = new Uint32Array(flipped.buffer);
+    if (flipX && flipY) {
+      out32.set(src32);
+      out32.reverse();
+      return flipped;
+    }
+    for (let y = 0; y < h; y++) {
+      const sy = flipY ? h - 1 - y : y;
+      out32.set(src32.subarray(sy * w, sy * w + w), y * w);
+      if (flipX) out32.subarray(y * w, y * w + w).reverse();
+    }
+    return flipped;
+  }
   for (let y = 0; y < h; y++) {
     const sy = flipY ? h - 1 - y : y;
     const srow = sy * w * 4;
@@ -1845,6 +1871,26 @@ function mirroredVariant(entry, srcTop, w, h, axis, flipX, flipY) {
 function rotatePixels90(src, w, h, clockwise) {
   const out = new Uint8Array(w * h * 4);
   const nw = h;
+  const src32 = wordView(src, w * h);
+  if (src32) {
+    const out32 = new Uint32Array(out.buffer);
+    const T2 = 32;
+    for (let ty = 0; ty < h; ty += T2) {
+      const yEnd = Math.min(h, ty + T2);
+      for (let tx = 0; tx < w; tx += T2) {
+        const xEnd = Math.min(w, tx + T2);
+        for (let y = ty; y < yEnd; y++) {
+          const sRow = y * w;
+          const dx = clockwise ? h - 1 - y : y;
+          for (let x = tx; x < xEnd; x++) {
+            const dy = clockwise ? x : w - 1 - x;
+            out32[dy * nw + dx] = src32[sRow + x];
+          }
+        }
+      }
+    }
+    return out;
+  }
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const si = (y * w + x) * 4;
@@ -1866,6 +1912,25 @@ function rotatedVariant(entry, srcTop, w, h, clockwise) {
 }
 function transposePixels(src, w, h, anti) {
   const out = new Uint8Array(w * h * 4);
+  const src32 = wordView(src, w * h);
+  if (src32) {
+    const out32 = new Uint32Array(out.buffer);
+    const T2 = 32;
+    for (let ty = 0; ty < h; ty += T2) {
+      const yEnd = Math.min(h, ty + T2);
+      for (let tx = 0; tx < w; tx += T2) {
+        const xEnd = Math.min(w, tx + T2);
+        for (let y = ty; y < yEnd; y++) {
+          const sRow = y * w;
+          for (let x = tx; x < xEnd; x++) {
+            const di = anti ? (w - 1 - x) * h + (h - 1 - y) : x * h + y;
+            out32[di] = src32[sRow + x];
+          }
+        }
+      }
+    }
+    return out;
+  }
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const si = (y * w + x) * 4;
@@ -1886,17 +1951,28 @@ function transposedVariant(entry, srcTop, w, h, anti) {
 function resampleRgba(src, w, h, nw, nh) {
   const out = new Uint8Array(nw * nh * 4);
   const sx = w / nw, sy = h / nh;
+  const colX0 = new Int32Array(nw), colX1 = new Int32Array(nw);
+  const colWx = new Float64Array(nw), colInvWx = new Float64Array(nw);
+  for (let x = 0; x < nw; x++) {
+    const fx = Math.min(w - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+    const x0 = Math.floor(fx);
+    colX0[x] = x0;
+    colX1[x] = Math.min(w - 1, x0 + 1);
+    colWx[x] = fx - x0;
+    colInvWx[x] = 1 - colWx[x];
+  }
   for (let y = 0; y < nh; y++) {
     const fy = Math.min(h - 1, Math.max(0, (y + 0.5) * sy - 0.5));
     const y0 = Math.floor(fy), y1 = Math.min(h - 1, y0 + 1), wy = fy - y0;
-    for (let x = 0; x < nw; x++) {
-      const fx = Math.min(w - 1, Math.max(0, (x + 0.5) * sx - 0.5));
-      const x0 = Math.floor(fx), x1 = Math.min(w - 1, x0 + 1), wx = fx - x0;
-      const di = (y * nw + x) * 4;
-      const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
-      const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+    const invWy = 1 - wy;
+    const row0 = y0 * w, row1 = y1 * w;
+    let di = y * nw * 4;
+    for (let x = 0; x < nw; x++, di += 4) {
+      const wx = colWx[x], invWx = colInvWx[x];
+      const i00 = (row0 + colX0[x]) * 4, i10 = (row0 + colX1[x]) * 4;
+      const i01 = (row1 + colX0[x]) * 4, i11 = (row1 + colX1[x]) * 4;
       for (let c = 0; c < 4; c++) {
-        out[di + c] = (src[i00 + c] * (1 - wx) + src[i10 + c] * wx) * (1 - wy) + (src[i01 + c] * (1 - wx) + src[i11 + c] * wx) * wy;
+        out[di + c] = (src[i00 + c] * invWx + src[i10 + c] * wx) * invWy + (src[i01 + c] * invWx + src[i11 + c] * wx) * wy;
       }
     }
   }
@@ -1908,20 +1984,22 @@ function rotateRgba(src, w, h, angleRad) {
   const cos = Math.cos(angleRad), sin = Math.sin(angleRad);
   for (let y = 0; y < h; y++) {
     const dy = y - cy;
-    for (let x = 0; x < w; x++) {
+    const dySin = dy * sin, dyCos = dy * cos;
+    let di = y * w * 4;
+    for (let x = 0; x < w; x++, di += 4) {
       const dx = x - cx;
-      const fx = cx + dx * cos + dy * sin;
-      const fy = cy - dx * sin + dy * cos;
+      const fx = cx + dx * cos + dySin;
+      const fy = cy - dx * sin + dyCos;
       const sx = Math.min(w - 1, Math.max(0, fx));
       const sy = Math.min(h - 1, Math.max(0, fy));
       const x0 = Math.floor(sx), y0 = Math.floor(sy);
       const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
       const wx = sx - x0, wy = sy - y0;
-      const di = (y * w + x) * 4;
+      const invWx = 1 - wx, invWy = 1 - wy;
       const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
       const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
       for (let c = 0; c < 4; c++) {
-        out[di + c] = (src[i00 + c] * (1 - wx) + src[i10 + c] * wx) * (1 - wy) + (src[i01 + c] * (1 - wx) + src[i11 + c] * wx) * wy;
+        out[di + c] = (src[i00 + c] * invWx + src[i10 + c] * wx) * invWy + (src[i01 + c] * invWx + src[i11 + c] * wx) * wy;
       }
     }
   }
@@ -3607,6 +3685,36 @@ var DCT_COSINES_32x8 = (() => {
   }
   return table;
 })();
+var _weightsCache = /* @__PURE__ */ new Map();
+function cachedWeights(w, h, SIZE, colSpans, rowSpans) {
+  const key = w + "x" + h;
+  let table = _weightsCache.get(key);
+  if (table) return table;
+  const { starts: colStart, offsets: colOff, wts: colWts } = colSpans;
+  const { starts: rowStart, offsets: rowOff, wts: rowWts } = rowSpans;
+  table = new Float64Array(SIZE * SIZE);
+  for (let y = 0; y < h; y++) {
+    const oyBase = rowOff[y], oyCount = rowOff[y + 1] - oyBase;
+    const oRow = rowStart[y];
+    for (let x = 0; x < w; x++) {
+      const oxBase = colOff[x], oxCount = colOff[x + 1] - oxBase;
+      const oCol = colStart[x];
+      for (let oyi = 0; oyi < oyCount; oyi++) {
+        const wy = rowWts[oyBase + oyi];
+        if (wy <= 0) continue;
+        const rowBase = (oRow + oyi) * SIZE + oCol;
+        for (let oxi = 0; oxi < oxCount; oxi++) {
+          const wx = colWts[oxBase + oxi];
+          if (wx <= 0) continue;
+          table[rowBase + oxi] += wx * wy;
+        }
+      }
+    }
+  }
+  _weightsCache.set(key, table);
+  if (_weightsCache.size > 4) _weightsCache.delete(_weightsCache.keys().next().value);
+  return table;
+}
 function perceptualFingerprint(rgba, w, h) {
   if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) {
     throw new RangeError("Archx: invalid image dimensions for perceptual fingerprint");
@@ -3618,41 +3726,45 @@ function perceptualFingerprint(rgba, w, h) {
   }
   const SIZE = 32;
   const small = new Float64Array(SIZE * SIZE);
-  const weights = new Float64Array(SIZE * SIZE);
   const spansFor = (n) => {
-    const spans = new Array(n);
+    const starts = new Int32Array(n);
+    const offsets = new Int32Array(n + 1);
+    const flat = [];
     for (let s = 0; s < n; s++) {
       const s0 = s * SIZE / n;
       const s1 = (s + 1) * SIZE / n;
       const start = Math.floor(s0);
       const end = Math.min(SIZE - 1, Math.ceil(s1) - 1);
-      const wts = new Float64Array(end - start + 1);
-      for (let o = start; o <= end; o++) wts[o - start] = Math.min(s1, o + 1) - Math.max(s0, o);
-      spans[s] = { start, wts };
+      starts[s] = start;
+      offsets[s] = flat.length;
+      for (let o = start; o <= end; o++) flat.push(Math.min(s1, o + 1) - Math.max(s0, o));
     }
-    return spans;
+    offsets[n] = flat.length;
+    return { starts, offsets, wts: Float64Array.from(flat) };
   };
   const colSpans = spansFor(w);
   const rowSpans = spansFor(h);
+  const weights = cachedWeights(w, h, SIZE, colSpans, rowSpans);
+  const { starts: colStart, offsets: colOff, wts: colWts } = colSpans;
+  const { starts: rowStart, offsets: rowOff, wts: rowWts } = rowSpans;
   for (let y = 0; y < h; y++) {
-    const rowSpan = rowSpans[y];
     const rowOffset = y * w * 4;
+    const oyBase = rowOff[y], oyCount = rowOff[y + 1] - oyBase;
+    const oRow = rowStart[y];
     for (let x = 0; x < w; x++) {
       const i = rowOffset + x * 4;
-      const alpha = src[i + 3] / 255;
-      const gray = (src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256 * alpha;
-      const colSpan = colSpans[x];
-      for (let oyi = 0; oyi < rowSpan.wts.length; oyi++) {
-        const wy = rowSpan.wts[oyi];
+      const gray = src[i + 3] === 255 ? (src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256 : (src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256 * (src[i + 3] / 255);
+      const oxBase = colOff[x], oxCount = colOff[x + 1] - oxBase;
+      const oCol = colStart[x];
+      for (let oyi = 0; oyi < oyCount; oyi++) {
+        const wy = rowWts[oyBase + oyi];
         if (wy <= 0) continue;
-        const rowBase = (rowSpan.start + oyi) * SIZE + colSpan.start;
-        for (let oxi = 0; oxi < colSpan.wts.length; oxi++) {
-          const wx = colSpan.wts[oxi];
+        const rowBase = (oRow + oyi) * SIZE + oCol;
+        for (let oxi = 0; oxi < oxCount; oxi++) {
+          const wx = colWts[oxBase + oxi];
           if (wx <= 0) continue;
           const idx = rowBase + oxi;
-          const weight = wx * wy;
-          small[idx] += gray * weight;
-          weights[idx] += weight;
+          small[idx] += gray * (wx * wy);
         }
       }
     }
@@ -5136,6 +5248,7 @@ function validTokenString(value, { min = 1, max = 512, pattern = null } = {}) {
 }
 function bytesToBase64Url(bytes) {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  if (typeof view.toBase64 === "function") return view.toBase64({ alphabet: "base64url", omitPadding: true });
   let binary = "";
   const chunkSize = 32768;
   for (let i = 0; i < view.length; i += chunkSize) {
@@ -9532,7 +9645,7 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.21.0";
+var VERSION2 = "1.22.0";
 var Archx = {
   version: VERSION2,
   ProtectedImage,

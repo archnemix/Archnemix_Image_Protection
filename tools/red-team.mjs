@@ -5,9 +5,12 @@
  * Frames the security claims as attacks and tries to break them:
  * master/derivative extraction, token forgery & replay, authz
  * bypass, path/ID traversal, resource exhaustion, cache/privacy
- * leakage, and adversarial steganography (misattribution is the
+ * leakage, adversarial steganography (misattribution is the
  * failure that matters — a destroyed mark is a documented limit,
- * a WRONG attribution is a bug).
+ * a WRONG attribution is a bug), plus section H: redemption races,
+ * HTTP method/header/cache semantics, signed-claim fuzzing,
+ * keyring confusion, batch abuse, slow-trickle bodies, scrape
+ * quotas, and proof-of-possession theft/replay.
  *
  * Every entry states the defense it expects. A FAIL means an
  * attack succeeded; the process exits 1. INFO entries report
@@ -21,7 +24,7 @@ import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import sharp from 'sharp';
-import { createArchxMiddleware, auditArchxServerConfig } from '../server/middleware.js';
+import { createArchxMiddleware, auditArchxServerConfig, computeJwkThumbprint } from '../server/middleware.js';
 import { decodeContainer, embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint } from '../src/scramble.js';
 
 const SECRET = 'red-team-secret-with-well-over-32-bytes!!';
@@ -496,6 +499,340 @@ await attack('stego', 'transplant: marked region pasted onto a different photo (
       ? `transplant decoded as ${hit.fingerprint} — pixel marks are copyable with the pixels; issuance records + geometry must corroborate`
       : 'transplant did not decode (grid/geometry disagreement)',
   };
+});
+
+/* ==================== H. races, HTTP semantics, claim fuzz ==================== */
+console.log('\nH. Races, HTTP semantics, claim validation, sender constraints');
+
+await attack('race', '16-way concurrent redeem of a one-time token: exactly one wins', async () => {
+  const { body } = await mint();
+  const statuses = await Promise.all(Array.from({ length: 16 }, () =>
+    redeem(base, body, browserHeaders()).then((x) => x.status).catch(() => 0)));
+  const wins = statuses.filter((s) => s === 200).length;
+  return { pass: wins === 1, detail: `${wins}/16 succeeded (TOCTOU race must admit exactly one)` };
+});
+await attack('http', 'POST/HEAD/PUT on the redeem URL deliver nothing and do not spend the claim', async () => {
+  const { body } = await mint();
+  const attempts = [];
+  for (const method of ['POST', 'PUT', 'HEAD', 'DELETE']) {
+    const r = await fetch(base + body.cleanUrl, { method, headers: { 'x-archx-token': body.token, ...browserHeaders().headers } });
+    await r.text().catch(() => '');
+    attempts.push(`${method}:${r.status}`);
+    if (r.status === 200) return { pass: false, detail: `${method} returned 200 on a GET-only route` };
+  }
+  const genuine = await redeem(base, body, browserHeaders());
+  return { pass: genuine.status === 200, detail: `${attempts.join(' ')}; genuine GET after: ${genuine.status}` };
+});
+await attack('http', 'GET on the mint endpoint does not mint', async () => {
+  const r = await fetch(`${base}/archx/token/cat?w=200`, { headers: { 'x-archx-request': 'token', ...browserHeaders().headers } });
+  const text = await r.text();
+  return { pass: r.status >= 400 && !text.includes('"token"'), detail: `status ${r.status}` };
+});
+await attack('http', 'conditional/range headers open no side door (If-None-Match without token; Range with token)', async () => {
+  const noTok = await fetch(`${base}/archx/i/cat`, { headers: { 'if-none-match': '*', ...browserHeaders().headers } });
+  await noTok.text().catch(() => '');
+  const { body } = await mint();
+  const ranged = await fetch(base + body.cleanUrl, { headers: { range: 'bytes=0-99', 'x-archx-token': body.token, ...browserHeaders().headers } });
+  const len = (await ranged.arrayBuffer()).byteLength;
+  return {
+    pass: noTok.status >= 400 && ranged.status !== 206,
+    detail: `no-token+INM ${noTok.status}; ranged redeem ${ranged.status} (${len} bytes, must never be 206 partial)`,
+  };
+});
+await attack('token', 'duplicate token headers (garbage + genuine smuggled together) are refused, claim unburned', async () => {
+  const { body } = await mint();
+  const hdrs = new Headers(browserHeaders().headers);
+  hdrs.append('x-archx-token', 'garbage.token');
+  hdrs.append('x-archx-token', body.token);
+  const smuggled = await fetch(base + body.cleanUrl, { headers: hdrs });
+  await smuggled.text().catch(() => '');
+  const genuine = await redeem(base, body, browserHeaders());
+  return { pass: smuggled.status >= 400 && genuine.status === 200, detail: `dup-header ${smuggled.status}, genuine ${genuine.status}` };
+});
+await attack('token', 'structurally malformed tokens are all refused; genuine token still spends', async () => {
+  const { body } = await mint();
+  // Note: leading/trailing-space shapes are excluded deliberately —
+  // HTTP field parsing strips optional whitespace (RFC 9110) before
+  // the app sees the value, so a spaced header IS the genuine token
+  // (possession is the credential; whitespace adds no forgery power).
+  const shapes = ['', '.', 'a.', '.b', 'a.b.c', 'a..b', body.token + '.extra', body.token.toUpperCase(),
+    body.token + '=', body.token.replace('.', ' .'), 'eyJhbGciOiJub25lIn0.' + body.token, '🔑.🔑', body.token.replace('.', '..')];
+  for (const t of shapes) {
+    const r = await fetch(base + body.cleanUrl, { headers: { 'x-archx-token': t, ...browserHeaders().headers } }).catch(() => ({ status: 400 }));
+    if (r.status === 200) return { pass: false, detail: `shape ${JSON.stringify(t.slice(0, 24))} accepted` };
+  }
+  const genuine = await redeem(base, body, browserHeaders());
+  return { pass: genuine.status === 200, detail: `${shapes.length} malformed shapes refused; genuine ${genuine.status}` };
+});
+await attack('token', 'validly-signed but claim-fuzzed tokens gain nothing (insider-secret defense in depth)', async () => {
+  const { body } = await mint();
+  const claims = JSON.parse(Buffer.from(body.token.split('.')[0], 'base64url').toString());
+  const now = Date.now();
+  const nonce = () => crypto.randomBytes(12).toString('base64url');
+  const sign = (c) => {
+    const p = Buffer.from(JSON.stringify(c)).toString('base64url');
+    return `${p}.${crypto.createHmac('sha256', SECRET).update(p).digest().toString('base64url')}`;
+  };
+  const variants = [
+    ['w as string', { w: '240' }], ['w negative', { w: -5 }], ['w astronomical', { w: 1e9 }],
+    ['id swapped', { id: 'dog' }], ['aud wrong', { aud: 'archx:other' }], ['scope escalated', { scope: 'image:admin' }],
+    ['extra claim', { admin: true }], ['iat 1h in future', { iat: now + 3600000, exp: now + 3660000 }],
+    ['exp as string', { exp: String(now + 60000) }], ['v futuristic', { v: 99 }],
+  ];
+  for (const [label, patch] of variants) {
+    const r = await redeem(base, { ...body, token: sign({ ...claims, ...patch, n: nonce() }) }, browserHeaders());
+    if (r.status === 200) {
+      const { header } = decodeContainer(new Uint8Array(await r.arrayBuffer()));
+      return { pass: false, detail: `${label}: accepted (delivered ${header.w}px) — claim validation should refuse` };
+    }
+  }
+  const noNonce = { ...claims }; delete noNonce.n;
+  const r = await redeem(base, { ...body, token: sign(noNonce) }, browserHeaders());
+  return { pass: r.status >= 400, detail: `${variants.length} fuzzed claims + missing-nonce all refused (last ${r.status})` };
+});
+await attack('token', 'keyring kid confusion: MAC from key A presented under kid B is refused', async () => {
+  const SECRET_A = 'keyring-secret-AAAA-well-over-32-bytes!!';
+  const SECRET_B = 'keyring-secret-BBBB-well-over-32-bytes!!';
+  const h2 = createArchxMiddleware({ secrets: { keyA: SECRET_A, keyB: SECRET_B }, secretId: 'keyA', imagesDir: dir, allowAnonymous: true });
+  const s2 = await startServer(h2);
+  try {
+    const res = await postToken(`${s2.base}/archx/token/cat?w=200`, { headers: {} });
+    const minted = await res.json();
+    const claims = JSON.parse(Buffer.from(minted.token.split('.')[0], 'base64url').toString());
+    const signAs = (c, secret) => {
+      const p = Buffer.from(JSON.stringify(c)).toString('base64url');
+      return `${p}.${crypto.createHmac('sha256', secret).update(p).digest().toString('base64url')}`;
+    };
+    const sanity = await redeem(s2.base, minted, { headers: {} });
+    const confused = await redeem(s2.base, { ...minted, token: signAs({ ...claims, kid: 'keyB', n: crypto.randomBytes(12).toString('base64url') }, SECRET_A) }, { headers: {} });
+    const pathy = await redeem(s2.base, { ...minted, token: signAs({ ...claims, kid: '../keyA', n: crypto.randomBytes(12).toString('base64url') }, SECRET_A) }, { headers: {} });
+    return {
+      pass: sanity.status === 200 && confused.status >= 400 && pathy.status >= 400,
+      detail: `genuine ${sanity.status}, A-signed-as-B ${confused.status}, pathy-kid ${pathy.status}`,
+    };
+  } finally { s2.server.close(); h2.close?.(); }
+});
+await attack('batch', 'batch abuse shapes are bounded (2000 items, non-array items, __proto__ ref)', async () => {
+  const bigItems = Array.from({ length: 2000 }, (_, i) => ({ ref: `r${i}`, id: 'cat', w: 100 }));
+  const t0 = Date.now();
+  const huge = await postToken(`${base}/archx/tokens`, {
+    headers: { 'content-type': 'application/json', ...browserHeaders('viewer-batch').headers },
+    body: JSON.stringify({ items: bigItems }),
+  });
+  let mintedCount = 0;
+  if (huge.status === 200) mintedCount = Object.keys((await huge.json()).tokens || {}).length;
+  else await huge.text().catch(() => '');
+  const nonArray = await postToken(`${base}/archx/tokens`, {
+    headers: { 'content-type': 'application/json', ...browserHeaders('viewer-batch').headers },
+    body: JSON.stringify({ items: { a: 1 } }),
+  });
+  await nonArray.text().catch(() => '');
+  const protoRef = await postToken(`${base}/archx/tokens`, {
+    headers: { 'content-type': 'application/json', ...browserHeaders('viewer-batch').headers },
+    body: JSON.stringify({ items: [{ ref: '__proto__', id: 'cat', w: 100 }] }),
+  });
+  await protoRef.text().catch(() => '');
+  const clean = ({}).cat === undefined && ({}).archxPolluted === undefined;
+  return {
+    pass: (huge.status >= 400 || mintedCount <= 256) && nonArray.status >= 400 && clean && Date.now() - t0 < 30000,
+    detail: `2000-item batch: ${huge.status} (minted ${mintedCount}), non-array: ${nonArray.status}, proto-ref clean: ${clean}`,
+  };
+});
+await attack('dos', 'slow-trickle batch body is cut by the read deadline', async () => {
+  const h2 = createArchxMiddleware({ secret: SECRET, imagesDir: dir, allowAnonymous: true, callbackTimeoutMs: 1500 });
+  const s2 = await startServer(h2);
+  try {
+    const outcome = await new Promise((resolve) => {
+      const url = new URL(`${s2.base}/archx/tokens`);
+      const t0 = Date.now();
+      const req = http.request({
+        hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-archx-request': 'token', 'transfer-encoding': 'chunked' },
+      }, (res) => { res.resume(); res.on('end', () => resolve({ kind: 'response', status: res.statusCode, ms: Date.now() - t0 })); });
+      req.on('error', () => resolve({ kind: 'socket-cut', status: 0, ms: Date.now() - t0 }));
+      req.write('{"items":[{"ref":"a","id":"cat","w":100}');
+      const iv = setInterval(() => { try { req.write(' '); } catch { clearInterval(iv); } }, 500);
+      setTimeout(() => { clearInterval(iv); try { req.destroy(); } catch {} resolve({ kind: 'still-open', status: 0, ms: Date.now() - t0 }); }, 9000);
+    });
+    const alive = (await postToken(`${s2.base}/archx/token/cat?w=100`, { headers: {} })).status === 200;
+    return {
+      pass: outcome.kind !== 'still-open' && outcome.ms < 9000 && alive,
+      detail: `trickle ${outcome.kind} after ${outcome.ms}ms (deadline 1500ms), server alive: ${alive}`,
+    };
+  } finally { s2.server.close(); h2.close?.(); }
+});
+await attack('http', 'CRLF in the image id injects no response headers', async () => {
+  const r = await fetch(`${base}/archx/i/cat%0d%0aX-Injected:%20pwned`, browserHeaders()).catch(() => null);
+  const m = await postToken(`${base}/archx/token/cat%0d%0aX-Injected:%20pwned?w=100`, browserHeaders()).catch(() => null);
+  const injected = (x) => x && x.headers.get('x-injected') !== null;
+  return { pass: !injected(r) && !injected(m), detail: `redeem ${r?.status}, mint ${m?.status}, x-injected absent` };
+});
+await attack('http', 'cache-deception suffixes (.css / ;param) on the redeem path get no cacheable derivative', async () => {
+  for (const suffix of ['.css', ';v=2', '.js']) {
+    const { body } = await mint('cat', 200);
+    const mutated = body.cleanUrl.replace('/cat', `/cat${suffix}`);
+    const r = await fetch(base + mutated, { headers: { 'x-archx-token': body.token, ...browserHeaders().headers } });
+    await r.arrayBuffer().catch(() => {});
+    if (r.status === 200) {
+      const cc = (r.headers.get('cache-control') || '').toLowerCase();
+      return { pass: false, detail: `${suffix}: derivative served under a mutated id (cache-control: ${cc})` };
+    }
+  }
+  return { pass: true, detail: 'all suffix mutations refused' };
+});
+await attack('quota', 'distinct-image scrape quota denies the 4th distinct image (action: deny)', async () => {
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-redteam-quota-'));
+  for (const id of ['im1', 'im2', 'im3', 'im4', 'im5']) {
+    fs.writeFileSync(path.join(dir2, `${id}.jpg`), await syntheticMaster(200, 150, id.toUpperCase()));
+  }
+  const h2 = createArchxMiddleware({
+    secret: SECRET, imagesDir: dir2, allowAnonymous: true,
+    abuseDetection: { distinctImages: 3, action: 'deny' },
+  });
+  const s2 = await startServer(h2);
+  try {
+    const statuses = [];
+    for (const id of ['im1', 'im2', 'im3', 'im4']) {
+      const r = await postToken(`${s2.base}/archx/token/${id}?w=100`, { headers: {} });
+      await r.text().catch(() => '');
+      statuses.push(r.status);
+    }
+    return {
+      pass: statuses[0] === 200 && statuses[1] === 200 && statuses[2] === 200 && statuses[3] === 429,
+      detail: `mints: ${statuses.join(',')} (4th distinct must 429; deny stays sticky for the window by design)`,
+    };
+  } finally { s2.server.close(); h2.close?.(); fs.rmSync(dir2, { recursive: true, force: true }); }
+});
+await attack('pop', 'proof-of-possession: bearer copy, wrong key, wrong target, and proof replay all fail', async () => {
+  const makeKey = () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const ex = publicKey.export({ format: 'jwk' });
+    const jwk = { kty: 'EC', crv: 'P-256', x: ex.x, y: ex.y };
+    return { privateKey, jwk, header: Buffer.from(JSON.stringify(jwk)).toString('base64url') };
+  };
+  const makeProof = (key, token, target) => {
+    const proof = {
+      jwk: key.jwk, jti: crypto.randomBytes(18).toString('base64url'),
+      iat: Date.now(), exp: Date.now() + 60000, htm: 'GET', htu: target,
+      ath: crypto.createHash('sha256').update(token).digest().toString('base64url'),
+    };
+    const input = `v1.${Buffer.from(JSON.stringify(proof)).toString('base64url')}`;
+    const sig = crypto.sign('sha256', Buffer.from(input), { key: key.privateKey, dsaEncoding: 'ieee-p1363' });
+    return `${input}.${sig.toString('base64url')}`;
+  };
+  const h2 = createArchxMiddleware({
+    secret: SECRET, imagesDir: dir, allowAnonymous: true,
+    proofOfPossession: 'required', oneTimeTokens: false,
+  });
+  const s2 = await startServer(h2);
+  try {
+    const key = makeKey(), wrong = makeKey();
+    const noKey = await postToken(`${s2.base}/archx/token/cat?w=160`, { headers: {} });
+    await noKey.text().catch(() => '');
+    const mintRes = await postToken(`${s2.base}/archx/token/cat?w=160`, { headers: { 'x-archx-proof-key': key.header } });
+    const minted = await mintRes.json();
+    const spend = (proof) => fetch(s2.base + minted.cleanUrl, {
+      headers: { 'x-archx-token': minted.token, ...(proof ? { 'x-archx-proof': proof } : {}) },
+    }).then(async (r) => { await r.arrayBuffer().catch(() => {}); return r.status; });
+    const bearer = await spend(null);
+    const wrongKey = await spend(makeProof(wrong, minted.token, minted.cleanUrl));
+    const wrongTarget = await spend(makeProof(key, minted.token, '/archx/i/dog'));
+    const good = makeProof(key, minted.token, minted.cleanUrl);
+    const first = await spend(good);
+    const replayed = await spend(good);
+    const fresh = await spend(makeProof(key, minted.token, minted.cleanUrl));
+    return {
+      pass: noKey.status === 403 && bearer === 403 && wrongKey === 403 && wrongTarget === 403 && first === 200 && replayed === 403 && fresh === 200,
+      detail: `no-key mint ${noKey.status}; bearer ${bearer}; wrong-key ${wrongKey}; wrong-target ${wrongTarget}; good ${first}; proof-replay ${replayed}; fresh ${fresh}`,
+    };
+  } finally { s2.server.close(); h2.close?.(); }
+});
+await attack('extract', 'derivative cache never serves one width under another width\'s token', async () => {
+  const widths = [];
+  for (const w of [100, 240, 100]) {
+    const { body } = await mint('cat', w);
+    const r = await redeem(base, body, browserHeaders());
+    widths.push(decodeContainer(new Uint8Array(await r.arrayBuffer())).header.w);
+  }
+  return {
+    pass: widths[1] > widths[0] && widths[2] === widths[0] && widths[1] <= 240,
+    detail: `delivered widths ${widths.join(', ')} for requests 100/240/100`,
+  };
+});
+await attack('authz', 'authorize returning garbage shapes never widens access (true / string / null / NaN / negative)', async () => {
+  const shapes = [
+    ['true', async () => true], ['string', async () => 'yes'], ['null', async () => null],
+    ['string-maxWidth', async () => ({ viewerId: 's', maxWidth: '99999' })],
+    ['NaN-maxWidth', async () => ({ viewerId: 'n', maxWidth: NaN })],
+    ['negative-maxWidth', async () => ({ viewerId: 'neg', maxWidth: -50 })],
+  ];
+  for (const [label, authorize] of shapes) {
+    const h2 = createArchxMiddleware({ secret: SECRET, imagesDir: dir, maxWidthCap: 300, authorize });
+    const s2 = await startServer(h2);
+    try {
+      const res = await postToken(`${s2.base}/archx/token/cat?w=900`, { headers: {} });
+      if (res.status === 200) {
+        const body = await res.json();
+        const r = await redeem(s2.base, body, { headers: {} });
+        if (r.status === 200) {
+          const { header } = decodeContainer(new Uint8Array(await r.arrayBuffer()));
+          if (header.w > 300) return { pass: false, detail: `${label}: delivered ${header.w} > cap 300` };
+        }
+      } else {
+        const text = await res.text();
+        if (/^\s*at\s+\w+/m.test(text) || text.includes(SECRET)) return { pass: false, detail: `${label}: error body leaks internals` };
+      }
+    } finally { s2.server.close(); h2.close?.(); }
+  }
+  return { pass: true, detail: '6 garbage shapes: denied or clamped to cap, no leaks' };
+});
+await attack('stego', 'median + noise + 0.55x + q38 chain never MISattributes; wrong key finds nothing', async () => {
+  const marked = embedStegoFingerprint(photo.buf, photo.w, photo.h, 'BUYER-A', { key: STEGO_KEY, profile: 'robust', strength: 6 });
+  let s = 1234;
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const noisy = new Uint8Array(marked);
+  for (let i = 0; i < noisy.length; i += 4) {
+    const n = Math.round((rnd() - 0.5) * 28);
+    noisy[i] = Math.max(0, Math.min(255, noisy[i] + n));
+    noisy[i + 1] = Math.max(0, Math.min(255, noisy[i + 1] + n));
+    noisy[i + 2] = Math.max(0, Math.min(255, noisy[i + 2] + n));
+  }
+  const abused = await sharp(Buffer.from(noisy), { raw: { width: photo.w, height: photo.h, channels: 4 } })
+    .median(3).resize(Math.round(photo.w * 0.55)).jpeg({ quality: 38 }).toBuffer();
+  const back = await sharp(abused).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const px = new Uint8Array(back.data);
+  const hit = detectStegoFingerprint(px, back.info.width, back.info.height, { key: STEGO_KEY, profile: 'robust', searchGeometry: true, maxTimeMs: 30000 });
+  const wrongKey = detectStegoFingerprint(px, back.info.width, back.info.height, { key: 'someone-else', profile: 'robust', searchGeometry: true, maxTimeMs: 30000 });
+  return {
+    pass: (!hit.found || hit.fingerprint === stegoFingerprint('BUYER-A')) && !wrongKey.found,
+    detail: hit.found ? 'still BUYER-A after the chain; wrong key: nothing' : 'mark destroyed (limit), wrong key: nothing, no misattribution',
+  };
+});
+await attack('timing', 'MAC-validity timing oracle (informational measurement)', async () => {
+  // One retry: after ~53 attacks the sandbox socket pool can hiccup;
+  // an INFO measurement must never fail the suite on plumbing noise.
+  let mintOut;
+  try { mintOut = await mint(); } catch { await new Promise((r) => setTimeout(r, 300)); mintOut = await mint().catch(() => null); }
+  if (!mintOut?.body) return { pass: null, detail: 'measurement unavailable (transient fetch failure at mint)' };
+  const { body } = mintOut;
+  const claims = JSON.parse(Buffer.from(body.token.split('.')[0], 'base64url').toString());
+  const p = Buffer.from(JSON.stringify({ ...claims, exp: Date.now() - 1000 })).toString('base64url');
+  const expiredValidMac = `${p}.${crypto.createHmac('sha256', SECRET).update(p).digest().toString('base64url')}`;
+  const garbageMac = `${p}.${'A'.repeat(43)}`;
+  const time = async (token) => {
+    const samples = [];
+    for (let i = 0; i < 40; i++) {
+      const t0 = performance.now();
+      await fetch(base + body.cleanUrl, { headers: { 'x-archx-token': token, ...browserHeaders().headers } })
+        .then((r) => r.text()).catch(() => '');
+      samples.push(performance.now() - t0);
+    }
+    samples.sort((a, b) => a - b);
+    return samples[20].toFixed(2);
+  };
+  const g = await time(garbageMac);
+  const v = await time(expiredValidMac);
+  return { pass: null, detail: `median garbage-MAC ${g}ms vs valid-MAC-expired ${v}ms (HTTP noise dominates; HMAC compare is timingSafeEqual + canonical-gated)` };
 });
 
 /* ============================== report ============================== */

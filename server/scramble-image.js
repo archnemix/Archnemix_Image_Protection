@@ -804,7 +804,9 @@ export async function finishDerivative(base, opts = {}, owned = false) {
   };
   if (opts.aesKey) {
     const { cipher, iv } = await encryptPayload(payload, opts.aesKey);
-    payload = Buffer.from(cipher);
+    // cipher is a fresh, solely-owned buffer: a zero-copy Buffer view
+    // replaces a full-payload memcpy (bytes identical by construction).
+    payload = bufferView(cipher);
     header.encrypted = true;
     header.iv = iv;
   }

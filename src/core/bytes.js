@@ -34,6 +34,9 @@ export function utf8DecodeFatal(bytes) { return textDecodeCall.call(utf8Fatal, b
 export function bytesToBase64(bytes) {
   const u8 = asBytes(bytes);
   if (typeof Buffer !== 'undefined') return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength).toString('base64');
+  // Native codec where available (byte-identical output; avoids building
+  // a giant binary string for multi-MB payloads).
+  if (typeof u8.toBase64 === 'function') return u8.toBase64();
   let bin = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < u8.length; i += CHUNK) {
@@ -54,6 +57,7 @@ export function base64ToBytes(b64) {
   }
   if (normalized.length % 4) normalized += '='.repeat(4 - (normalized.length % 4));
   if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(normalized, 'base64'));
+  if (typeof Uint8Array.fromBase64 === 'function') return Uint8Array.fromBase64(normalized);
   const bin = atob(normalized);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);

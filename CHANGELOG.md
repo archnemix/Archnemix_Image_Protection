@@ -3,6 +3,49 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.22.0] — 2026-10-31
+
+Large-payload optimization pass + red-team expansion
+(`docs/RESEARCH.md` §2.30). No format, API, or output-byte
+changes anywhere: every optimization is probe-verified
+byte-identical (135 hash cases + golden freeze + payload sizes).
+
+### Performance (measured at 6000×4000 / 24 MP)
+
+- `flipPixels` word-level paths: 152 → 54 ms (mirror),
+  157 → 69 ms (180°).
+- `rotatePixels90` / `transposePixels` cache-tiled word scatter:
+  ~270 → ~140 ms.
+- `applyForensicBlocks` two-LUT clamped-add: 238 → 150 ms.
+- `perceptualFingerprint`: flattened span tables, opaque-pixel
+  fast path, (w,h)-keyed weight-sum cache: 301 → 259 ms.
+- `buildLumaIntegral` fused single pass; `resampleRgba`
+  precomputed column parameters; `rotateRgba` hoisted row terms.
+- Derivative encryption no longer copies the ciphertext
+  (zero-copy Buffer view); native `toBase64`/`fromBase64`
+  fast paths where the runtime provides them.
+- Unmarked-image detect screen at 2400px: 562 → 430 ms.
+- One measured non-win was reverted (rotateRgba interior-row
+  clamp skipping: branch cost exceeded clamp savings).
+
+### Added
+
+- **Red-team section H** (55 cases total, **53/53 scored
+  defenses held**, 2 informational): 16-way one-time-token
+  redemption race (exactly one winner), method confusion on
+  mint/redeem routes, If-None-Match/Range side doors, duplicate
+  token-header smuggling, structural token fuzz, validly-signed
+  claim fuzzing (insider-secret depth), keyring `kid` confusion,
+  batch abuse shapes (2000 items → 413), slow-trickle body
+  deadline, CRLF header injection, cache-deception suffixes,
+  distinct-image scrape quota (4th distinct image → 429),
+  proof-of-possession battery (bearer copy / wrong key / wrong
+  target / proof replay), authorize garbage shapes, derivative
+  cache width-confusion probe, harsher stego removal chain
+  (median+noise+0.55×+q38: still correct attribution, never a
+  wrong one), and a MAC timing-oracle measurement
+  (1.02 vs 1.01 ms medians — no signal at HTTP granularity).
+
 ## [1.21.0] — 2026-10-31
 
 Final completion round (`docs/RESEARCH.md` §2.29): permissive

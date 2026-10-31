@@ -3050,3 +3050,63 @@ security tool's site executes no third-party CDN JavaScript.
 Displayed pixels, stego formats 1–4 (golden-freeze green),
 token claim semantics, and every public API path. The honest
 limits of §2.28 stand unchanged.
+
+## 2.30 Large-payload optimization + red-team expansion (v1.22)
+
+A follow-up pass aimed where v1.21's micro-optimizations did
+not reach: the pure-JS pixel helpers whose cost scales with
+frame size (`src/core/pixels.js` — used by every dihedral probe
+in detection), plus a second, deeper attack wave.
+
+**Method**: profile at 6000×4000 first (24 MP: flips ~155 ms,
+rotate/transpose ~265 ms, pHash ~300 ms, forensic ~238 ms —
+scalar byte loops from the small-image era), capture 135
+output hashes across odd dimensions/unaligned buffers/float
+deltas as the identity oracle, then change only what the
+oracle cannot distinguish.
+
+**Shipped** (all hashes + golden freeze + payload sizes
+identical): word-level flips (−64%/−53%), cache-tiled (32×32)
+word-scatter rotate/transpose (−48%), two-LUT forensic blocks
+(−37%), pHash via flattened spans + opaque fast path +
+(w,h)-keyed weight cache (−14%; weight sums depend only on
+geometry and accumulate in a fixed order, so the cache is
+bit-exact), fused luma/integral build, hoisted resample/rotate
+terms, zero-copy ciphertext view in the derivative pipeline,
+native `toBase64`/`fromBase64` where available. Unmarked
+detect screen at 2400px: 562 → 430 ms. **One reversal kept
+honest**: skipping per-pixel clamps on provably-interior
+rotate rows measured *slower* (branch > clamp intrinsics) and
+was reverted; `buildLumaIntegral` fusion is bandwidth-bound
+and neutral at 24 MP (the 192 MB Float64 table dominates) —
+kept only because it strictly removes a pass at smaller sizes.
+End-to-end `bench:opt` cold transforms remain Sharp-bound;
+same-day samples swung ±40% with sandbox load while payload
+bytes stayed identical, so isolated medians are the cited
+evidence. Full-frame 24 MP derivatives remain encoder-bound
+(~13 s mozjpeg trellis on scrambled entropy) — a deployment
+sizing matter (`maxOutputPixels`, `processingTimeoutSec`),
+not a byte-changeable one.
+
+**Red-team section H** (55 cases; 53/53 scored held, 2 INFO):
+redemption race (16-way, exactly one winner), method
+confusion (405s, claim unspent), conditional/range headers,
+duplicate-header smuggling, structural token fuzz (13 shapes),
+signed-claim fuzzing (11 variants, all refused), keyring
+`kid` confusion, batch abuse (2000 items → 413), slow-trickle
+deadline (cut at 1504 ms against a 1500 ms budget), CRLF
+injection, cache-deception suffixes, distinct-image quota
+(429 on the 4th), a full proof-of-possession battery, garbage
+`authorize` shapes, width-cache confusion, a harsher stego
+chain (median+noise+0.55×+q38 — still BUYER-A, wrong key
+nothing), and a timing-oracle INFO (1.02 vs 1.01 ms medians).
+One attack-side false alarm, recorded for the same reason as
+§2.29's: a leading-space token "passed" because HTTP field
+parsing strips optional whitespace before the app runs — the
+server received the genuine token, and possession is the
+credential. The shape was replaced with real mutations.
+
+### What did not change
+
+Every output byte: stego formats 1–4, scramble plans, pHash
+bits, forensic marks, derivative bytes, token semantics.

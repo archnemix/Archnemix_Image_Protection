@@ -16,6 +16,42 @@ const DCT_COSINES_32x8 = (() => {
   return table;
 })();
 
+// The per-output-cell WEIGHT sums depend only on (w, h) — not on pixel
+// data — and are accumulated in a fixed order, so caching the finished
+// table per size is bit-identical to recomputing it. Bounded to the
+// last few sizes (8 KB each); same-size streams (derivative pipelines)
+// are the hit case that matters.
+const _weightsCache = new Map();
+function cachedWeights(w, h, SIZE, colSpans, rowSpans) {
+  const key = w + 'x' + h;
+  let table = _weightsCache.get(key);
+  if (table) return table;
+  const { starts: colStart, offsets: colOff, wts: colWts } = colSpans;
+  const { starts: rowStart, offsets: rowOff, wts: rowWts } = rowSpans;
+  table = new Float64Array(SIZE * SIZE);
+  for (let y = 0; y < h; y++) {
+    const oyBase = rowOff[y], oyCount = rowOff[y + 1] - oyBase;
+    const oRow = rowStart[y];
+    for (let x = 0; x < w; x++) {
+      const oxBase = colOff[x], oxCount = colOff[x + 1] - oxBase;
+      const oCol = colStart[x];
+      for (let oyi = 0; oyi < oyCount; oyi++) {
+        const wy = rowWts[oyBase + oyi];
+        if (wy <= 0) continue;
+        const rowBase = (oRow + oyi) * SIZE + oCol;
+        for (let oxi = 0; oxi < oxCount; oxi++) {
+          const wx = colWts[oxBase + oxi];
+          if (wx <= 0) continue;
+          table[rowBase + oxi] += wx * wy;
+        }
+      }
+    }
+  }
+  _weightsCache.set(key, table);
+  if (_weightsCache.size > 4) _weightsCache.delete(_weightsCache.keys().next().value);
+  return table;
+}
+
 export function perceptualFingerprint(rgba, w, h) {
   if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1) {
     throw new RangeError('Archx: invalid image dimensions for perceptual fingerprint');
@@ -27,7 +63,6 @@ export function perceptualFingerprint(rgba, w, h) {
   }
   const SIZE = 32;
   const small = new Float64Array(SIZE * SIZE);
-  const weights = new Float64Array(SIZE * SIZE);
 
   // Area-average to 32×32. Area weighting is slower than nearest-neighbour
   // sampling but makes the fingerprint materially steadier across the exact
@@ -35,40 +70,53 @@ export function perceptualFingerprint(rgba, w, h) {
   // The per-column/per-row overlap spans are precomputed once (they depend
   // only on x / y); the accumulation order — and therefore every float —
   // is unchanged, so fingerprints stay bit-identical to the direct form.
+  // Spans flattened into typed arrays (offset+count+weights): the
+  // accumulation below then touches no per-pixel objects, but visits
+  // exactly the same (pixel, output) pairs in exactly the same order
+  // with the same float arithmetic — fingerprints stay bit-identical.
   const spansFor = (n) => {
-    const spans = new Array(n);
+    const starts = new Int32Array(n);
+    const offsets = new Int32Array(n + 1);
+    const flat = [];
     for (let s = 0; s < n; s++) {
       const s0 = (s * SIZE) / n;
       const s1 = ((s + 1) * SIZE) / n;
       const start = Math.floor(s0);
       const end = Math.min(SIZE - 1, Math.ceil(s1) - 1);
-      const wts = new Float64Array(end - start + 1);
-      for (let o = start; o <= end; o++) wts[o - start] = Math.min(s1, o + 1) - Math.max(s0, o);
-      spans[s] = { start, wts };
+      starts[s] = start;
+      offsets[s] = flat.length;
+      for (let o = start; o <= end; o++) flat.push(Math.min(s1, o + 1) - Math.max(s0, o));
     }
-    return spans;
+    offsets[n] = flat.length;
+    return { starts, offsets, wts: Float64Array.from(flat) };
   };
   const colSpans = spansFor(w);
   const rowSpans = spansFor(h);
+  const weights = cachedWeights(w, h, SIZE, colSpans, rowSpans);
+  const { starts: colStart, offsets: colOff, wts: colWts } = colSpans;
+  const { starts: rowStart, offsets: rowOff, wts: rowWts } = rowSpans;
   for (let y = 0; y < h; y++) {
-    const rowSpan = rowSpans[y];
     const rowOffset = y * w * 4;
+    const oyBase = rowOff[y], oyCount = rowOff[y + 1] - oyBase;
+    const oRow = rowStart[y];
     for (let x = 0; x < w; x++) {
       const i = rowOffset + x * 4;
-      const alpha = src[i + 3] / 255;
-      const gray = ((src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256) * alpha;
-      const colSpan = colSpans[x];
-      for (let oyi = 0; oyi < rowSpan.wts.length; oyi++) {
-        const wy = rowSpan.wts[oyi];
+      // Opaque fast path: alpha = 255/255 = 1 exactly, so gray is the
+      // same float with the multiply skipped (x * 1 === x in IEEE 754).
+      const gray = src[i + 3] === 255
+        ? (src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256
+        : ((src[i] * 54 + src[i + 1] * 183 + src[i + 2] * 19) / 256) * (src[i + 3] / 255);
+      const oxBase = colOff[x], oxCount = colOff[x + 1] - oxBase;
+      const oCol = colStart[x];
+      for (let oyi = 0; oyi < oyCount; oyi++) {
+        const wy = rowWts[oyBase + oyi];
         if (wy <= 0) continue;
-        const rowBase = (rowSpan.start + oyi) * SIZE + colSpan.start;
-        for (let oxi = 0; oxi < colSpan.wts.length; oxi++) {
-          const wx = colSpan.wts[oxi];
+        const rowBase = (oRow + oyi) * SIZE + oCol;
+        for (let oxi = 0; oxi < oxCount; oxi++) {
+          const wx = colWts[oxBase + oxi];
           if (wx <= 0) continue;
           const idx = rowBase + oxi;
-          const weight = wx * wy;
-          small[idx] += gray * weight;
-          weights[idx] += weight;
+          small[idx] += gray * (wx * wy);
         }
       }
     }

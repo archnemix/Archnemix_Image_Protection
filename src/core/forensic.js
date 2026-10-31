@@ -37,18 +37,29 @@ export function applyForensicBlocks(rgba, w, h, seed, { blockSize = 32, delta = 
   const by = Math.ceil(h / bs);
   const signs = forensicBlockSigns(seed, bx * by, signsVersion === 1 ? 1 : signsVersion === 2 ? 2 : 3);
   const out = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  // Every block applies one of exactly two deltas (+/-delta): clamped-add
+  // tables built through the same Uint8 conversion as the direct form
+  // keep output bytes identical while dropping the per-channel clamps.
+  const lutPos = new Uint8Array(256);
+  const lutNeg = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    lutPos[v] = Math.max(0, Math.min(255, v + delta));
+    lutNeg[v] = Math.max(0, Math.min(255, v - delta));
+  }
   for (let byi = 0; byi < by; byi++) {
     for (let bxi = 0; bxi < bx; bxi++) {
-      const d = signs[byi * bx + bxi] * delta;
+      const sign = signs[byi * bx + bxi];
+      const d = sign * delta;
       if (!d) continue;
+      const lut = sign > 0 ? lutPos : lutNeg;
       const x0 = bxi * bs, y0 = byi * bs;
       const x1 = Math.min(w, x0 + bs), y1 = Math.min(h, y0 + bs);
       for (let y = y0; y < y1; y++) {
         let i = (y * w + x0) * 4;
         for (let x = x0; x < x1; x++, i += 4) {
-          out[i] = Math.max(0, Math.min(255, out[i] + d));
-          out[i + 1] = Math.max(0, Math.min(255, out[i + 1] + d));
-          out[i + 2] = Math.max(0, Math.min(255, out[i + 2] + d));
+          out[i] = lut[out[i]];
+          out[i + 1] = lut[out[i + 1]];
+          out[i + 2] = lut[out[i + 2]];
         }
       }
     }
