@@ -743,6 +743,31 @@ function inspectServerConfig(options = {}) {
       ...(Array.isArray(options.publicDirs) ? options.publicDirs : []),
     ]),
   });
+  // Directory-overlap guard, mirrored from the middleware
+  // constructor (which additionally resolves symlinks via
+  // realpath): a preflight audit must never report ok for a
+  // config the server would refuse to start — masters must not
+  // sit inside (or contain) a declared public root, and the
+  // derivative cache must not overlap either.
+  const masterDirsForOverlap = (options.imagesDirs || (options.imagesDir ? [options.imagesDir] : []))
+    .filter((d) => typeof d === 'string' && d)
+    .map((d) => path.resolve(d));
+  for (const masterDir of masterDirsForOverlap) {
+    for (const publicDir of config.publicDirs) {
+      if (pathsOverlap(masterDir, path.resolve(publicDir))) {
+        fail('masters directory overlaps a configured public directory');
+      }
+    }
+  }
+  if (config.outputCacheDir) {
+    const cacheDir = path.resolve(config.outputCacheDir);
+    for (const publicDir of config.publicDirs) {
+      if (pathsOverlap(cacheDir, path.resolve(publicDir))) fail('outputCacheDir overlaps a configured public directory');
+    }
+    for (const masterDir of masterDirsForOverlap) {
+      if (pathsOverlap(cacheDir, masterDir)) fail('outputCacheDir overlaps a master-image directory');
+    }
+  }
   if (!['deny', 'allow'].includes(config.stegoRegistryFailure)) fail("stegoRegistryFailure must be 'deny' or 'allow'");
   if (!['deny', 'allow'].includes(config.provenanceFailure)) fail("provenanceFailure must be 'deny' or 'allow'");
   if (!['optional', 'required', 'off'].includes(config.proofOfPossession)) {

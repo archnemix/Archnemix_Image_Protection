@@ -24,6 +24,7 @@ import {
   DEFAULT_WIDTH_BUCKETS,
   validateImageId,
 } from './middleware.js';
+import { isPathInside, pathsOverlap } from './config.js';
 import {
   configureSharpPerformance,
   inspectImageMetadata,
@@ -55,15 +56,6 @@ function stableValue(value) {
     return out;
   }
   return String(value);
-}
-
-function isPathInside(parent, child) {
-  const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
-}
-
-function pathsOverlap(a, b) {
-  return isPathInside(a, b) || isPathInside(b, a);
 }
 
 async function writeJsonAtomic(filePath, value, { mode = 0o600 } = {}) {

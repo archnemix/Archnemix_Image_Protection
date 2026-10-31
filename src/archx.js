@@ -55,7 +55,7 @@ import {
 import { onClientEvent, offClientEvent, usePlugin, listPlugins } from './client/events.js';
 import { loadImage, loadGallery, protectAll, preloadAssets, defineElement } from './client/loaders.js';
 
-export const VERSION = '1.20.0';
+export const VERSION = '1.21.0';
 
 const Archx = {
   version: VERSION,

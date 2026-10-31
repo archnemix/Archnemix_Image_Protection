@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archnemix Image Protection — publish the picture, keep the picture</title>
+<meta name="description" content="Open-source image protection for the web: private masters, scrambled one-time derivatives, a canvas viewer that refuses casual theft, and a blind ownership fingerprint that survives screenshots. 0BSD licensed.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="#top" aria-label="Archnemix home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <span>Archnemix</span>
+    </a>
+    <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
+    <nav class="masthead-nav" aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#layers">The layers</a>
+      <a href="#measured">Measured</a>
+      <a href="#use">Use it</a>
+      <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero">
+    <p class="kicker">For photographers, galleries &amp; shops who sell pictures</p>
+    <h1>Publish the picture.<br><em>Keep</em> the picture.</h1>
+    <p class="lede">
+      Archnemix serves your images in scrambled pieces, behind one-time tokens,
+      reassembled only inside a guarded viewer — while your master files never
+      touch the public web. Extraction tools get permuted tiles, decoys and
+      display-resolution fragments. Your visitors get the photograph.
+    </p>
+
+    <figure class="stage" id="stage">
+      <div class="stage-frame">
+        <canvas id="gl" aria-label="Interactive 3D demonstration: a photograph split into 64 tiles that scramble and reassemble"></canvas>
+        <div class="stage-fallback" id="stageFallback" hidden>
+          <p>The 3D demonstration needs WebGL. The idea, in one line: the picture
+          travels as 64 permuted, mirrored tiles and only becomes a picture
+          inside the viewer.</p>
+        </div>
+        <span class="stage-tag" id="stageTag">Your visitor&rsquo;s view</span>
+      </div>
+      <figcaption class="stage-controls">
+        <div class="stage-buttons" role="group" aria-label="Demonstration controls">
+          <button type="button" id="btnView" class="btn is-active">Visitor&rsquo;s view</button>
+          <button type="button" id="btnWire" class="btn">On the wire</button>
+        </div>
+        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Move your pointer across it; click to scatter.</p>
+      </figcaption>
+    </figure>
+
+    <div class="install-row">
+      <code class="install mono" id="installCmd">npm install @archnemix/image-protection</code>
+      <button type="button" class="btn btn-small" id="copyInstall">Copy</button>
+      <span class="install-note">Node ≥ 20.9 · pure-JS client · Sharp on the server · free for any use</span>
+    </div>
+  </section>
+
+  <!-- ============ 01 PROBLEM ============ -->
+  <section class="band" id="problem">
+    <header class="band-head"><span class="band-no">01</span><h2>The ordinary ways pictures walk away</h2></header>
+    <div class="cols-3">
+      <article>
+        <h3>Right place, wrong hands</h3>
+        <p>A normal <span class="mono">&lt;img&gt;</span> tag is a public URL. View-source,
+        DevTools, or one bulk scraper later, your full-resolution master is
+        on someone else&rsquo;s storefront — metadata, quality and all.</p>
+      </article>
+      <article>
+        <h3>Watermarks only go so far</h3>
+        <p>Visible marks spoil the viewing experience and crop out. Metadata
+        is stripped by the first re-upload. Neither survives a screenshot,
+        and neither stops a script that harvests a thousand images an hour.</p>
+      </article>
+      <article>
+        <h3>&ldquo;Disable right-click&rdquo; is theatre</h3>
+        <p>It annoys your customers and stops nobody. Real protection has to
+        change what the browser <em>receives</em>: no master file, no reusable
+        URL, nothing worth bulk-downloading.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ 02 HOW ============ -->
+  <section class="band" id="how">
+    <header class="band-head"><span class="band-no">02</span><h2>How Archx works</h2></header>
+    <ol class="steps">
+      <li>
+        <span class="step-no">i.</span>
+        <div>
+          <h3>Masters stay off the web</h3>
+          <p>Originals live outside your public folder. The only route that can
+          read them is the Archx middleware — and it refuses to start if your
+          masters sit inside a served directory.</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-no">ii.</span>
+        <div>
+          <h3>Every view is minted, scrambled &amp; spent once</h3>
+          <p>Your <span class="mono">authorize</span> callback decides who may see what, and how
+          large. The server downsizes to display resolution, permutes the
+          tiles under a 128-bit-seeded plan, optionally seals them with
+          AES-256-GCM, and issues a short-lived token that redeems exactly
+          once.</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-no">iii.</span>
+        <div>
+          <h3>The viewer reassembles — and poisons the exits</h3>
+          <p>Canvas/WebGL rendering with no image URL to copy. Read-back gets a
+          decoy, PrintScreen gets a black or degraded frame, and each
+          delivery can carry an invisible StegoMark fingerprint naming the
+          recipient — recoverable from a screenshot of the leak.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ============ 03 LAYERS ============ -->
+  <section class="band" id="layers">
+    <header class="band-head"><span class="band-no">03</span><h2>The layers, in plain terms</h2></header>
+    <div class="table-wrap">
+      <table class="layers">
+        <thead><tr><th scope="col">Layer</th><th scope="col">What it does</th><th scope="col">What it costs</th></tr></thead>
+        <tbody>
+          <tr><td>Private masters</td><td>Originals never sit in a web root; startup fails closed if they do.</td><td>Nothing at runtime</td></tr>
+          <tr><td>Display-resolution derivatives</td><td>Only a screen-sized derivative ever leaves the server — never the print file.</td><td>One Sharp transform, cached</td></tr>
+          <tr><td>Tile scramble + AES-256-GCM</td><td>Network payload is permuted tiles (optionally encrypted). Capture tools get confetti.</td><td>≈3&nbsp;ms per 1080p frame</td></tr>
+          <tr><td>One-time signed tokens</td><td>HMAC tokens, sender-constrained, spent on first use; hot-linking and replay die.</td><td>Microseconds</td></tr>
+          <tr><td>Guarded viewer</td><td>No <span class="mono">src</span> to steal; poisoned read-back; screenshot-degrading temporal interlace at 60&nbsp;Hz.</td><td>GPU-cheap canvas work</td></tr>
+          <tr><td>StegoMark fingerprint</td><td>Invisible per-recipient mark with BCH error correction; identified later by rescan, no original needed.</td><td>≈9&nbsp;ms at 960px, opt-in</td></tr>
+          <tr><td>Abuse budgets</td><td>Rate limits, distinct-image quotas, bounded memory everywhere — scrapers hit walls, not your origin.</td><td>Counters, not compute</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ 04 MEASURED ============ -->
+  <section class="band band-dark" id="measured">
+    <header class="band-head"><span class="band-no">04</span><h2>Measured, not promised</h2></header>
+    <p class="band-intro">Every number below comes from the benchmark and attack
+    suites shipped in the repository. Run them yourself:
+    <span class="mono">npm run bench:stego</span>, <span class="mono">npm run redteam</span>.</p>
+    <div class="stats">
+      <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after crops, resizes, recompression &amp; screenshots (robust fingerprint profile)</span></div>
+      <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">false accusations — unmarked images checked against wrong keys never produced a fingerprint</span></div>
+      <div class="stat"><span class="stat-n">36<span class="stat-of">/36</span></span><span class="stat-l">red-team attacks held: token forgery, replay, traversal, IDOR, pixel bombs, entitlement escapes</span></div>
+      <div class="stat"><span class="stat-n">138<span class="stat-of">+122</span></span><span class="stat-l">Node tests and real-Chromium browser checks, plus fuzzing and a packaged-artifact smoke test</span></div>
+    </div>
+    <aside class="honest">
+      <h3>The honest limits</h3>
+      <p>Nothing can make displayed pixels un-copyable: a determined person can
+      photograph a screen. Archx does not claim screenshot <em>prevention</em>,
+      DRM, or guarantees. What it does: removes the master from reach, makes
+      bulk theft slow and low-quality, degrades casual captures, and leaves
+      evidence in the copies that do escape. Layered friction plus
+      attribution — that is the whole pitch, and it is the same physics every
+      honest tool in this space lives with.</p>
+    </aside>
+  </section>
+
+  <!-- ============ 05 USE ============ -->
+  <section class="band" id="use">
+    <header class="band-head"><span class="band-no">05</span><h2>Use it in an afternoon</h2></header>
+    <div class="cols-2">
+      <div>
+        <h3>On the server</h3>
+<pre class="code mono">import { createArchxMiddleware }
+  from '@archnemix/image-protection/server';
+
+app.use(createArchxMiddleware({
+  imagesDir: '/private/masters',   // outside public/
+  secret: process.env.ARCHX_SECRET,
+  authorize: async (req, image) =&gt;
+    req.user ? { maxWidth: 1600 } : false,
+}));</pre>
+      </div>
+      <div>
+        <h3>In the page</h3>
+<pre class="code mono">import Archx from '@archnemix/image-protection';
+
+Archx.load.image('#hero-photo', 'aurora-valley', {
+  mode: 'vault',        // shield · vault · custom flags
+  temporalInterlace: { targetFps: 60 },
+});</pre>
+        <p class="fineprint">Prefer static hosting? The build CLI pre-scrambles assets for any CDN:
+        <span class="mono">npx archx-build</span>. Framework-free; Express, Fastify and plain
+        <span class="mono">node:http</span> all work.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 06 LICENSE ============ -->
+  <section class="band" id="license">
+    <header class="band-head"><span class="band-no">06</span><h2>Free as in &ldquo;it&rsquo;s yours&rdquo;</h2></header>
+    <div class="cols-2">
+      <p class="license-lede">Archnemix Image Protection is released under the
+      <strong>BSD Zero Clause License (0BSD)</strong>. Use it, copy it, modify it,
+      ship it in commercial products — for any purpose, with or without fee.
+      No attribution is required and no permission need be asked.</p>
+      <p>If it saves your work from being lifted, a credit line or a link back
+      is warmly appreciated — and entirely optional. That is the deal, in
+      full; the license text fits in a paragraph in the repository.</p>
+    </div>
+    <p class="cta-row">
+      <a class="btn btn-solid" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">Get it on GitHub ↗</a>
+      <a class="btn" href="https://www.npmjs.com/package/@archnemix/image-protection" rel="noopener">npm ↗</a>
+    </p>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="wordmark wordmark-small">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      Archnemix
+    </span>
+    <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · the 3D tiles above scramble exactly like the real payload does.</p>
+  </div>
+</footer>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+<script>
+// If the module/CDN never starts the stage, say so instead of showing a void.
+setTimeout(function () {
+  if (!window.__archxGlReady) {
+    var fb = document.getElementById('stageFallback');
+    var gl = document.getElementById('gl');
+    if (gl) gl.remove();
+    if (fb) fb.hidden = false;
+  }
+}, 7000);
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

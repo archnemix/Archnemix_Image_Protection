@@ -90,6 +90,28 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
         : Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
       const cellW = x1 - x0;
       const cellH = y1 - y0;
+      // The per-pixel delta takes exactly two values per cell
+      // (+/- cellAmp: polarity, band parity, segment sign and the bit
+      // are all ±1), and the band changes only at four fixed x
+      // offsets. Precompute clamped-add lookup tables for both
+      // deltas and the band ranges once per cell instead of a
+      // divide/floor, sign product and double clamp per pixel. The
+      // tables are built through the same Uint8 conversion the
+      // direct assignments used, so embedded bytes are identical.
+      // Clamping stays per channel: a saturated red channel must not
+      // suppress the mark in green/blue, or flat synthetic/saturated
+      // areas decode with a systematic one-direction bias.
+      const lutPos = new Uint8Array(256);
+      const lutNeg = new Uint8Array(256);
+      for (let v = 0; v < 256; v++) {
+        lutPos[v] = Math.max(0, Math.min(255, v + cellAmp));
+        lutNeg[v] = Math.max(0, Math.min(255, v - cellAmp));
+      }
+      // band b covers x-x0 in [ceil(b*cellW/4), ceil((b+1)*cellW/4)):
+      // the same partition the old per-pixel floor computed.
+      const bandStart = [0, 0, 0, 0];
+      for (let b = 1; b < columnBands; b++) bandStart[b] = Math.ceil((b * cellW) / columnBands);
+      const cellSign = (bit ? 1 : -1) * pol;
 
       for (let y = y0; y < y1; y++) {
         const segment = Math.min(
@@ -97,17 +119,17 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
           Math.floor(((y - y0) * rowSegments) / cellH),
         );
         const segmentSign = segmentPolarity[cell * rowSegments + segment];
+        const rowPositive = cellSign * segmentSign > 0; // even-band sign
         let i = (y * w + x0) * 4;
-        for (let x = x0; x < x1; x++, i += 4) {
-          const band = Math.min(columnBands - 1, Math.floor(((x - x0) * columnBands) / cellW));
-          const pattern = (band % 2 === 0 ? 1 : -1) * (bit ? 1 : -1) * pol * segmentSign;
-          const delta = cellAmp * pattern;
-          // Clamp per channel: a saturated red channel must not suppress the
-          // mark in green/blue, or flat synthetic/saturated areas decode with
-          // a systematic one-direction bias.
-          out[i] = Math.max(0, Math.min(255, src[i] + delta));
-          out[i + 1] = Math.max(0, Math.min(255, src[i + 1] + delta));
-          out[i + 2] = Math.max(0, Math.min(255, src[i + 2] + delta));
+        for (let b = 0; b < columnBands; b++) {
+          const xs = x0 + bandStart[b];
+          const xe = x0 + (b + 1 < columnBands ? bandStart[b + 1] : cellW);
+          const lut = (b % 2 === 0) === rowPositive ? lutPos : lutNeg;
+          for (let x = xs; x < xe; x++, i += 4) {
+            out[i] = lut[src[i]];
+            out[i + 1] = lut[src[i + 1]];
+            out[i + 2] = lut[src[i + 2]];
+          }
         }
       }
     }

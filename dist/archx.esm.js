@@ -445,7 +445,8 @@ function scramblePixels(rgba, pw, ph, plan, direction = "scramble") {
       if (useWords && !fx) {
         out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
       } else if (useWords) {
-        for (let x = 0; x < tw; x++) out32[dstRow + x] = src32[srcRow + (tw - 1 - x)];
+        out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
+        out32.subarray(dstRow, dstRow + tw).reverse();
       } else {
         for (let x = 0; x < tw; x++) {
           const xx = fx ? tw - 1 - x : x;
@@ -677,9 +678,8 @@ function scramblePixelsPadded(rgba, w, h, plan, out = null) {
           writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
         }
       } else if (useWords && !rowIsPad && !(sx + tw > w)) {
-        for (let x = 0; x < tw; x++) {
-          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
-        }
+        out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + tw), dstRow);
+        out32.subarray(dstRow, dstRow + tw).reverse();
       } else {
         for (let x = 0; x < tw; x++) {
           const rawX = sx + (fx ? tw - 1 - x : x);
@@ -1766,20 +1766,32 @@ function embedStegoFingerprint(rgba, w, h, payload, {
       const cellAmp = v4 ? Math.min(16, amp * Math.max(0.4, Math.min(1.2, 0.4 + std / 40))) : Math.min(16, amp * Math.max(0.4, Math.min(1.4, 0.4 + std / 36)));
       const cellW = x1 - x0;
       const cellH = y1 - y0;
+      const lutPos = new Uint8Array(256);
+      const lutNeg = new Uint8Array(256);
+      for (let v = 0; v < 256; v++) {
+        lutPos[v] = Math.max(0, Math.min(255, v + cellAmp));
+        lutNeg[v] = Math.max(0, Math.min(255, v - cellAmp));
+      }
+      const bandStart = [0, 0, 0, 0];
+      for (let b = 1; b < columnBands; b++) bandStart[b] = Math.ceil(b * cellW / columnBands);
+      const cellSign = (bit ? 1 : -1) * pol;
       for (let y = y0; y < y1; y++) {
         const segment = Math.min(
           rowSegments - 1,
           Math.floor((y - y0) * rowSegments / cellH)
         );
         const segmentSign = segmentPolarity[cell * rowSegments + segment];
+        const rowPositive = cellSign * segmentSign > 0;
         let i = (y * w + x0) * 4;
-        for (let x = x0; x < x1; x++, i += 4) {
-          const band = Math.min(columnBands - 1, Math.floor((x - x0) * columnBands / cellW));
-          const pattern = (band % 2 === 0 ? 1 : -1) * (bit ? 1 : -1) * pol * segmentSign;
-          const delta = cellAmp * pattern;
-          out[i] = Math.max(0, Math.min(255, src[i] + delta));
-          out[i + 1] = Math.max(0, Math.min(255, src[i + 1] + delta));
-          out[i + 2] = Math.max(0, Math.min(255, src[i + 2] + delta));
+        for (let b = 0; b < columnBands; b++) {
+          const xs = x0 + bandStart[b];
+          const xe = x0 + (b + 1 < columnBands ? bandStart[b + 1] : cellW);
+          const lut = b % 2 === 0 === rowPositive ? lutPos : lutNeg;
+          for (let x = xs; x < xe; x++, i += 4) {
+            out[i] = lut[src[i]];
+            out[i + 1] = lut[src[i + 1]];
+            out[i + 2] = lut[src[i + 2]];
+          }
         }
       }
     }
@@ -3324,6 +3336,118 @@ function detectStegoFingerprint(rgba, w, h, {
   }
   return best;
 }
+
+// src/core/stego-assay.js
+function assayStegoEmbed(rgba, w, h, {
+  key = "",
+  profile = "robust",
+  strength = 6,
+  gridX,
+  gridY,
+  verify = false,
+  layoutVersion = 3
+} = {}) {
+  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  const robust = profile === "robust";
+  const effectiveGridX = gridX ?? (robust ? 20 : 24);
+  const effectiveGridY = gridY ?? (robust ? 14 : 16);
+  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
+  const { luma, integral } = buildLumaIntegral(src, w, h);
+  const rectSum = (x0, y0, x1, y1) => integral[y1 * (w + 1) + x1] - integral[y0 * (w + 1) + x1] - integral[y1 * (w + 1) + x0] + integral[y0 * (w + 1) + x0];
+  let smoothCells = 0;
+  let binaryCells = 0;
+  let cells = 0;
+  for (let cy = 0; cy < gy; cy++) {
+    const y0 = Math.floor(cy * h / gy), y1 = Math.floor((cy + 1) * h / gy);
+    for (let cx = 0; cx < gx; cx++) {
+      const x0 = Math.floor(cx * w / gx), x1 = Math.floor((cx + 1) * w / gx);
+      const n = (x1 - x0) * (y1 - y0);
+      if (n < 16) continue;
+      cells++;
+      const mean = rectSum(x0, y0, x1, y1) / n;
+      let extreme = 0;
+      let sq = 0;
+      const step = Math.max(1, Math.floor(n / 256));
+      let sampled = 0;
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2 * step) {
+          const v = luma[y * w + x];
+          sq += (v - mean) * (v - mean);
+          if (v < 64 || v > 191) extreme++;
+          sampled++;
+        }
+      }
+      const std = sampled ? Math.sqrt(sq / sampled) : 0;
+      if (std < 8) smoothCells++;
+      if (sampled && extreme / sampled > 0.85 && std > 40) binaryCells++;
+    }
+  }
+  const smoothFraction = cells ? smoothCells / cells : 0;
+  const binaryFraction = cells ? binaryCells / cells : 0;
+  const measure = (atStrength) => {
+    const marked = embedStegoFingerprint(src, w, h, "archx-assay", {
+      key,
+      profile,
+      strength: atStrength,
+      gridX,
+      gridY,
+      layoutVersion
+    });
+    let mse = 0, maxDelta = 0;
+    for (let i = 0; i < src.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const d = marked[i + c] - src[i + c];
+        mse += d * d;
+        if (Math.abs(d) > maxDelta) maxDelta = Math.abs(d);
+      }
+    }
+    mse /= src.length / 4 * 3;
+    const psnr = mse === 0 ? Infinity : Math.round(10 * Math.log10(255 * 255 / mse) * 10) / 10;
+    return { marked, psnr, maxDelta };
+  };
+  const base = measure(strength);
+  const result = {
+    profile,
+    strength,
+    layoutVersion,
+    grid: { x: gx, y: gy },
+    psnr: base.psnr,
+    maxChannelDelta: base.maxDelta,
+    smoothFraction: Math.round(smoothFraction * 1e3) / 1e3,
+    binaryFraction: Math.round(binaryFraction * 1e3) / 1e3,
+    contentClass: binaryFraction > 0.35 ? "binary-graphic" : smoothFraction > 0.7 ? "flat-minimal" : "photo-textured",
+    verifiedAtStrength: null,
+    recommendedStrength: strength,
+    warnings: []
+  };
+  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
+  if (gx * gy < codeBits) {
+    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size \u2014 use a larger delivery size`);
+  }
+  if (result.contentClass === "binary-graphic") {
+    result.warnings.push("near-binary high-contrast content (UI/text/periodic graphics) is StegoMark's documented weak class; expect poor recovery without much higher strength");
+  }
+  if (result.psnr < 32) {
+    result.warnings.push(`predicted PSNR ${result.psnr} dB at strength ${strength}: macro-cell shading may be visible on smooth gradients \u2014 judge on your own catalog, not on the word "invisible"`);
+  }
+  if (verify) {
+    for (const candidate of [strength, strength + 2, strength + 4, 16]) {
+      if (candidate > 16) break;
+      const trial = candidate === strength ? base : measure(candidate);
+      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY, layoutVersion });
+      if (hit.found) {
+        result.verifiedAtStrength = candidate;
+        result.recommendedStrength = candidate;
+        if (candidate !== strength) result.psnr = trial.psnr;
+        break;
+      }
+    }
+    if (result.verifiedAtStrength === null) {
+      result.warnings.push("detector did NOT recover a fresh mark even at maximum strength: this content class is outside the embedder envelope \u2014 rely on visible marks/metadata, not StegoMark");
+    }
+  }
+  return Object.freeze(result);
+}
 function assayStegoCollusion(rgba, w, h, candidates, {
   key = "",
   profile = "robust",
@@ -3473,118 +3597,6 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     geometry: { scaleX, scaleY, originX, originY },
     profile: robust ? "robust" : "standard"
   };
-}
-
-// src/core/stego-assay.js
-function assayStegoEmbed(rgba, w, h, {
-  key = "",
-  profile = "robust",
-  strength = 6,
-  gridX,
-  gridY,
-  verify = false,
-  layoutVersion = 3
-} = {}) {
-  const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
-  const robust = profile === "robust";
-  const effectiveGridX = gridX ?? (robust ? 20 : 24);
-  const effectiveGridY = gridY ?? (robust ? 14 : 16);
-  const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
-  const { luma, integral } = buildLumaIntegral(src, w, h);
-  const rectSum = (x0, y0, x1, y1) => integral[y1 * (w + 1) + x1] - integral[y0 * (w + 1) + x1] - integral[y1 * (w + 1) + x0] + integral[y0 * (w + 1) + x0];
-  let smoothCells = 0;
-  let binaryCells = 0;
-  let cells = 0;
-  for (let cy = 0; cy < gy; cy++) {
-    const y0 = Math.floor(cy * h / gy), y1 = Math.floor((cy + 1) * h / gy);
-    for (let cx = 0; cx < gx; cx++) {
-      const x0 = Math.floor(cx * w / gx), x1 = Math.floor((cx + 1) * w / gx);
-      const n = (x1 - x0) * (y1 - y0);
-      if (n < 16) continue;
-      cells++;
-      const mean = rectSum(x0, y0, x1, y1) / n;
-      let extreme = 0;
-      let sq = 0;
-      const step = Math.max(1, Math.floor(n / 256));
-      let sampled = 0;
-      for (let y = y0; y < y1; y += 2) {
-        for (let x = x0; x < x1; x += 2 * step) {
-          const v = luma[y * w + x];
-          sq += (v - mean) * (v - mean);
-          if (v < 64 || v > 191) extreme++;
-          sampled++;
-        }
-      }
-      const std = sampled ? Math.sqrt(sq / sampled) : 0;
-      if (std < 8) smoothCells++;
-      if (sampled && extreme / sampled > 0.85 && std > 40) binaryCells++;
-    }
-  }
-  const smoothFraction = cells ? smoothCells / cells : 0;
-  const binaryFraction = cells ? binaryCells / cells : 0;
-  const measure = (atStrength) => {
-    const marked = embedStegoFingerprint(src, w, h, "archx-assay", {
-      key,
-      profile,
-      strength: atStrength,
-      gridX,
-      gridY,
-      layoutVersion
-    });
-    let mse = 0, maxDelta = 0;
-    for (let i = 0; i < src.length; i += 4) {
-      for (let c = 0; c < 3; c++) {
-        const d = marked[i + c] - src[i + c];
-        mse += d * d;
-        if (Math.abs(d) > maxDelta) maxDelta = Math.abs(d);
-      }
-    }
-    mse /= src.length / 4 * 3;
-    const psnr = mse === 0 ? Infinity : Math.round(10 * Math.log10(255 * 255 / mse) * 10) / 10;
-    return { marked, psnr, maxDelta };
-  };
-  const base = measure(strength);
-  const result = {
-    profile,
-    strength,
-    layoutVersion,
-    grid: { x: gx, y: gy },
-    psnr: base.psnr,
-    maxChannelDelta: base.maxDelta,
-    smoothFraction: Math.round(smoothFraction * 1e3) / 1e3,
-    binaryFraction: Math.round(binaryFraction * 1e3) / 1e3,
-    contentClass: binaryFraction > 0.35 ? "binary-graphic" : smoothFraction > 0.7 ? "flat-minimal" : "photo-textured",
-    verifiedAtStrength: null,
-    recommendedStrength: strength,
-    warnings: []
-  };
-  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
-  if (gx * gy < codeBits) {
-    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size \u2014 use a larger delivery size`);
-  }
-  if (result.contentClass === "binary-graphic") {
-    result.warnings.push("near-binary high-contrast content (UI/text/periodic graphics) is StegoMark's documented weak class; expect poor recovery without much higher strength");
-  }
-  if (result.psnr < 32) {
-    result.warnings.push(`predicted PSNR ${result.psnr} dB at strength ${strength}: macro-cell shading may be visible on smooth gradients \u2014 judge on your own catalog, not on the word "invisible"`);
-  }
-  if (verify) {
-    for (const candidate of [strength, strength + 2, strength + 4, 16]) {
-      if (candidate > 16) break;
-      const trial = candidate === strength ? base : measure(candidate);
-      const hit = detectStegoFingerprint(trial.marked, w, h, { key, profile, gridX, gridY, layoutVersion });
-      if (hit.found) {
-        result.verifiedAtStrength = candidate;
-        result.recommendedStrength = candidate;
-        if (candidate !== strength) result.psnr = trial.psnr;
-        break;
-      }
-    }
-    if (result.verifiedAtStrength === null) {
-      result.warnings.push("detector did NOT recover a fresh mark even at maximum strength: this content class is outside the embedder envelope \u2014 rely on visible marks/metadata, not StegoMark");
-    }
-  }
-  return Object.freeze(result);
 }
 
 // src/core/perceptual.js
@@ -9520,7 +9532,7 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.20.0";
+var VERSION2 = "1.21.0";
 var Archx = {
   version: VERSION2,
   ProtectedImage,

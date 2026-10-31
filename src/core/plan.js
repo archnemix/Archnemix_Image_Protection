@@ -112,7 +112,10 @@ export function scramblePixels(rgba, pw, ph, plan, direction = 'scramble') {
       if (useWords && !fx) {
         out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
       } else if (useWords) {
-        for (let x = 0; x < tw; x++) out32[dstRow + x] = src32[srcRow + (tw - 1 - x)];
+        // Mirror rows: copy then reverse natively (two engine-level
+        // passes beat one scalar JS pass; byte-identical result).
+        out32.set(src32.subarray(srcRow, srcRow + tw), dstRow);
+        out32.subarray(dstRow, dstRow + tw).reverse();
       } else {
         for (let x = 0; x < tw; x++) {
           const xx = fx ? tw - 1 - x : x;
@@ -362,9 +365,9 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
           writePadPixel((dstRow + x) * 4, srcX, srcY, rawX, rawY);
         }
       } else if (useWords && !rowIsPad && !((sx + tw) > w)) {
-        for (let x = 0; x < tw; x++) {
-          out32[dstRow + x] = src32[srcY * w + sx + (tw - 1 - x)];
-        }
+        // fx mirror of a full interior row: native copy + reverse.
+        out32.set(src32.subarray(srcY * w + sx, srcY * w + sx + tw), dstRow);
+        out32.subarray(dstRow, dstRow + tw).reverse();
       } else {
         for (let x = 0; x < tw; x++) {
           const rawX = sx + (fx ? tw - 1 - x : x);
@@ -381,22 +384,3 @@ export function scramblePixelsPadded(rgba, w, h, plan, out = null) {
   }
   return target;
 }
-
-/* ------------------------------------------------------------------ */
-/* Perceptual content fingerprint (soft binding)                       */
-/* ------------------------------------------------------------------ */
-
-/**
- * Compute a 64-bit DCT perceptual hash of an RGBA image.
- *
- * This is a C2PA-style *soft binding*: register it beside an image/order ID,
- * and a resized/re-encoded/mildly edited suspect copy can often still be
- * matched after metadata or even a pixel watermark has been stripped. It is
- * deliberately tiny and dependency-free. It is not cryptographic identity,
- * not proof of ownership by itself, and modern regeneration/cropping/
- * adversarial perturbation can move a copy beyond a safe threshold. Treat a
- * close distance as investigative evidence to corroborate, not a verdict.
- *
- * @param {Uint8Array|Buffer} rgba w*h*4 bytes
- * @returns {string} 16 lowercase hex characters
- */

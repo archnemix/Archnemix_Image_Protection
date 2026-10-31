@@ -2966,3 +2966,87 @@ limits, by measurement: 1-bit re-binarization, the adversarial
 periodic class, 0.7-scale photo crops of v4 marks inside tight
 auto-detection budgets (pin the layout or raise the budget),
 regeneration attacks, and the analog hole.
+
+## 2.29 Final completion round — red team, license, measured polish (v1.21)
+
+The closing round, at the security level the project considers
+complete: attack the system like an outsider, shave the hot paths
+without changing a single output byte, tighten module boundaries,
+and give the work away cleanly.
+
+**Red-team suite** (`tools/red-team.mjs`, `npm run redteam`): 36
+attacks against a live hardened server across seven classes —
+extraction (no-token fetch, URL guessing, width escalation),
+token attacks (payload tampering, signature corruption,
+wrong-secret and cross-image tokens, replay, User-Agent
+transplant, query-string smuggling, batch-IDOR over unauthorized
+ids), authorization/config (missing-authorize fail-closed, weak
+secret, prototype pollution), filesystem (dot-segment/traversal
+ids, symlinked masters escaping the root, `file://` and remote
+id shapes), resource exhaustion (garbage bodies, pixel bomb,
+40-way concurrency, 130-request mint flood), privacy/hygiene
+(cache headers, per-token payload divergence, error-body
+cleanliness, no secrets in mint responses), and adversarial
+StegoMark checks (wrong-key attribution, two-buyer averaging,
+heavy denoise+recompress, a marked-region transplant probe).
+First run: 33 held / 2 failed / 1 informational. Investigation
+of the failures is the useful part:
+
+1. *"Flipped signature byte accepted"* was an **attack bug**,
+   not a vulnerability: flipping the last base64url character
+   changed only slack bits — the decoded MAC was byte-identical,
+   and one-time claims are keyed canonically (verified by probe:
+   the variant spent the claim and the original then correctly
+   failed as replay). Still, token malleability is a standing
+   invitation to tomorrow's string-keyed cache or denylist, so
+   `verifyToken` now rejects non-canonical re-encodings, and the
+   suite's forgery attack corrupts a significant middle byte
+   with canonical re-encoding (also asserting a failed forgery
+   does not burn the genuine claim).
+2. **Config-audit parity gap (real, minor):** middleware startup
+   refused masters inside a declared public directory, but
+   `auditArchxServerConfig` reported `ok` for the same layout —
+   a preflight check must never bless what startup refuses. The
+   audit now mirrors the overlap rules (masters↔public,
+   cache↔public, cache↔masters).
+
+Final result: **36/36 defenses held**, 1 informational (a
+transplanted marked region on a foreign photo did not decode —
+the desired outcome, kept as informational rather than scored).
+
+**Optimizations** (probe-verified byte-identical across 48
+scramble and 48 embed cases; payloads unchanged in the repo
+bench): native copy+reverse for mirrored scramble rows
+(5.67 → 3.2 ms @1080p in `bench:opt`); StegoMark embed rebuilt
+around per-cell clamp tables and precomputed band ranges
+(10.4 → 9.2 ms @960×640); single-secret token verification now
+authenticates before parsing and decodes the MAC once. Cold
+derivative transforms remain Sharp-bound (unchanged within
+noise; a mid-round +13% reading reproduced at baseline on
+re-sample and is recorded here as noise, not hidden).
+
+**Modularity**: collusion assay moved to `stego-assay.js`
+(public paths preserved); `build-assets.js` path helpers
+deduplicated into their owner `config.js`; two orphaned JSDoc
+blocks from the §2.27 split deleted; unused imports trimmed;
+every source file now opens with a one-purpose header. The
+three large files that remain are each a single cohesive unit
+(one middleware factory, one viewer class, one detector) —
+further splitting would thread closure state through parameters
+for no behavioral gain, and is declined deliberately.
+
+**License**: MIT → **0BSD**. The project is a tool for keeping
+one's own work; giving it away with the fewest possible strings
+matches. Attribution appreciated, never required.
+
+**Website** (`website/`): warm-paper editorial design, a WebGL
+8×8 tile field that scrambles/reassembles exactly like the real
+payload (seeded permutation + mirrors), measured-numbers copy
+sourced from the shipped benches, vendored Three.js — a
+security tool's site executes no third-party CDN JavaScript.
+
+### What did not change
+
+Displayed pixels, stego formats 1–4 (golden-freeze green),
+token claim semantics, and every public API path. The honest
+limits of §2.28 stand unchanged.

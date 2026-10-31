@@ -24,15 +24,42 @@ export function verifyToken(token, secretOrKeyring) {
   if (parts.length !== 2) return null;
   const [body, mac] = parts;
   if (!/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]+$/.test(mac)) return null;
-  let payload;
-  try {
-    payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-  } catch { return null; }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  // Canonical encodings only: base64url's final character carries
+  // slack bits, so up to four distinct strings decode to the same
+  // MAC bytes. Claims are keyed canonically today, but token
+  // malleability is a standing invitation for tomorrow's
+  // string-keyed cache, log, or denylist — reject re-encodings
+  // that differ from what signToken would have emitted.
+  const bodyBytes = Buffer.from(body, 'base64url');
+  const given = Buffer.from(mac, 'base64url');
+  if (bodyBytes.toString('base64url') !== body) return null;
+  if (given.toString('base64url') !== mac) return null;
 
   const isKeyring = secretOrKeyring instanceof Map ||
     (secretOrKeyring && typeof secretOrKeyring === 'object' && !Buffer.isBuffer(secretOrKeyring) &&
       !(secretOrKeyring instanceof Uint8Array));
+  // Single-secret deployments (the common case) authenticate before
+  // parsing: a forged or malformed payload is never JSON.parse'd, and
+  // rejection costs one HMAC instead of a parse plus claim walk. The
+  // accept set is unchanged. Keyrings still parse first because key
+  // selection needs the payload's `kid`.
+  if (!isKeyring) {
+    if (typeof secretOrKeyring !== 'string' && !(secretOrKeyring instanceof Uint8Array)) return null;
+    const expected = crypto.createHmac('sha256', secretOrKeyring).update(body).digest();
+    if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+    let payload;
+    try { payload = JSON.parse(bodyBytes.toString('utf8')); } catch { return null; }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    if (!Number.isFinite(payload.exp) || Date.now() > payload.exp) return null;
+    payload.kid = typeof payload.kid === 'string' ? payload.kid : 'primary';
+    return payload;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(bodyBytes.toString('utf8'));
+  } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+
   const candidates = [];
   if (isKeyring) {
     const entries = secretOrKeyring instanceof Map
@@ -46,12 +73,9 @@ export function verifyToken(token, secretOrKeyring) {
       // before `kid` was introduced. They still expire within the normal TTL.
       candidates.push(...entries.slice(0, 16));
     }
-  } else if (typeof secretOrKeyring === 'string' || secretOrKeyring instanceof Uint8Array) {
-    candidates.push([typeof payload.kid === 'string' ? payload.kid : 'primary', secretOrKeyring]);
   }
   if (!candidates.length) return null;
 
-  const given = Buffer.from(mac, 'base64url');
   for (const [keyId, candidateSecret] of candidates) {
     if (typeof candidateSecret !== 'string' && !(candidateSecret instanceof Uint8Array)) continue;
     const expected = crypto.createHmac('sha256', candidateSecret).update(body).digest();

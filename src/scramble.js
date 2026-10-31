@@ -45,7 +45,8 @@ export {
 export { forensicBlockSigns, applyForensicBlocks, forensicScore } from './core/forensic.js';
 export { stegoFingerprint, legacyStegoFingerprint } from './core/stego-code.js';
 export { embedStegoFingerprint } from './core/stego-embed.js';
-export { detectStegoFingerprint, assayStegoCollusion } from './core/stego-detect.js';
+export { detectStegoFingerprint } from './core/stego-detect.js';
+export { assayStegoCollusion } from './core/stego-assay.js';
 export { assayStegoEmbed } from './core/stego-assay.js';
 export {
   perceptualFingerprint, normalizePerceptualFingerprint,

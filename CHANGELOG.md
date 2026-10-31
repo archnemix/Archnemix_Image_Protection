@@ -3,6 +3,65 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.21.0] — 2026-10-31
+
+Final completion round (`docs/RESEARCH.md` §2.29): permissive
+relicensing, a red-team attack suite, measured everywhere.
+
+### Changed
+
+- **License: MIT → 0BSD** (BSD Zero Clause). Use, copy, modify and
+  distribute for any purpose, with or without fee; attribution is
+  appreciated but explicitly not required.
+- **Token verification hardening**: non-canonical base64url
+  re-encodings of a valid token are now rejected (base64url slack
+  bits previously let up to four distinct strings carry the same
+  MAC), and single-secret verification authenticates before
+  parsing claims. One-time-claim semantics unchanged.
+- **Config-audit parity**: `auditArchxServerConfig` now flags
+  masters/output-cache directories that overlap a configured
+  public directory — previously only middleware startup caught
+  this, so a preflight audit could report `ok` for a config the
+  server would refuse to start.
+- **Modularity**: the collusion assay moved from
+  `src/core/stego-detect.js` to `src/core/stego-assay.js` (public
+  export paths unchanged); duplicate path helpers in
+  `server/build-assets.js` deduplicated into `server/config.js`;
+  orphaned documentation blocks and unused imports removed.
+
+### Security
+
+- Dev-dependency advisory closed during the ship run:
+  `follow-redirects` (via `@sparticuz/chromium`, test-only)
+  1.16.1 → 1.16.2 for GHSA-mrwp-f3q8-3g9p; `npm audit` is clean.
+  The published package has zero runtime dependencies and was
+  never exposed.
+
+### Performance (byte-identical outputs, probe-verified)
+
+- Scramble mirror rows now copy+reverse natively:
+  `scramblePixels` 1080p 5.67 → 3.2 ms in the repo bench.
+- StegoMark embed inner loop restructured around per-cell clamp
+  tables and precomputed band ranges: 960×640 10.4 → 9.2 ms.
+- End-to-end cold transforms are Sharp-bound and unchanged within
+  noise; payload bytes identical before/after.
+
+### Added
+
+- **`npm run redteam`** — `tools/red-team.mjs`, a 36-attack
+  adversarial suite against a live hardened server (token forgery/
+  tampering/replay/malleability, sender binding, entitlement and
+  width-cap escapes, batch-IDOR, fail-open config probes,
+  prototype pollution, traversal/symlink escapes, malformed-image
+  and pixel-bomb handling, concurrency/mint floods, cache-header
+  and error-body hygiene, wrong-key/collusion/denoise stego
+  attacks). Result at ship time: **36/36 defenses held**, 1
+  informational. The suite found and fixed the two issues above.
+- **`website/`** — the static Archnemix product site: editorial
+  paper design, a WebGL tile-scramble hero that scrambles the way
+  the real payload does, measured-numbers page copy, no build step
+  and no third-party JavaScript (Three.js vendored).
+
 ## [1.20.0] — 2026-10-31
 
 Critique response (`docs/RESEARCH.md` §2.28): a measured answer to

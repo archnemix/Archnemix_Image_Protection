@@ -14,11 +14,12 @@ const files = [];
 function walk(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
+    if (entry.isDirectory() && entry.name === 'vendor') continue; // third-party, as-shipped
     if (entry.isDirectory()) walk(full);
     else if (entry.isFile() && /\.(?:js|mjs|cjs)$/.test(entry.name)) files.push(full);
   }
 }
-for (const dir of ['src', 'server', 'tools', 'tests']) {
+for (const dir of ['src', 'server', 'tools', 'tests', 'website']) {
   const abs = path.join(root, dir);
   if (fs.existsSync(abs)) walk(abs);
 }

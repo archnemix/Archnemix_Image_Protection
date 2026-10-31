@@ -731,7 +731,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 72 tests: 65 unit/integration (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 138 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,
@@ -752,7 +752,7 @@ npm test            # 72 tests: 65 unit/integration (scramble/crypto incl. plan 
                     # + 7 seeded fuzz cases (container/header/sniffer/scramble/stego parsers + live token
                     # mutation; ARCHX_FUZZ_MULTIPLIER scales campaigns)
 npm run test:types  # tsc --noEmit smoke test over the shipped TypeScript declarations
-npm run test:browser  # 108 checks in real headless Chromium (encapsulation, decoys,
+npm run test:browser  # 122 checks in real headless Chromium (encapsulation, decoys,
                       # pixel-exact 1:1 display (MAD 0), origin-tainted SecurityError readback,
                       # native detail retention, WebGL black read-back, post-load and pre-load draw-hook
                       # Fortress/Vault policy regressions, sanitized plugin telemetry,
@@ -763,6 +763,10 @@ npm run test:browser  # 108 checks in real headless Chromium (encapsulation, dec
                       # asset preload cache warming, catalog sizing, batch-minted 100-image gallery…)
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
+npm run redteam     # 36-attack red-team suite against a live hardened server (forgery, replay,
+                    # malleability, IDOR/batch abuse, traversal/symlink, pixel bombs, config escapes)
+npm run bench:stego # StegoMark survival benchmark (9 images x 11 transforms; --fp for the 369-case
+                    # wrong-key false-positive sweep)
 npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload + Chromium timings/heap, JSON + --compare)
                     # bounded local mint+redeem regression load; see docs/OPERATIONS.md
                     # before treating any staging number as a capacity result
@@ -782,9 +786,13 @@ docs/        industry-standards checklist (docs/STANDARDS.md), reviewer guide, r
              operations, compliance readiness, compatibility matrix, and plain-language IP-holder guide
 examples/    copy-and-run protection ladder and custom-flags showcase
 tests/       unit + seeded fuzz + real-browser suites + TypeScript smoke test
-tools/       build, demo-image generator, benchmarks, bounded load test
+tools/       build, demo-image generator, benchmarks, bounded load test, red-team attack suite
+website/     static product site (no build step; vendored Three.js; see website/README.md)
 ```
 
 ## License
 
-MIT © Archnemix contributors
+[0BSD](LICENSE) © Archnemix contributors — use, copy, modify, and
+distribute for any purpose, commercial or not, with or without fee.
+**Attribution is not required.** If Archx helps you protect your
+work, a link back is appreciated but entirely optional.

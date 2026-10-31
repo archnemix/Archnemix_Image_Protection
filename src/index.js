@@ -1,3 +1,5 @@
+/** ESM entry point: re-exports the public Archx API (default export
+ * plus named exports) from archx.js for bundlers and `import` users. */
 import Archx, {
   ProtectedImage,
   VERSION,
