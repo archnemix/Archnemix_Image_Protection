@@ -5,6 +5,16 @@ here. The project follows semantic versioning once a version is released.
 
 ## Unreleased
 
+- **Test-suite Windows portability** (no shipped-code change; tests are not
+  in the npm artifact): three tests derived the repo root from
+  `new URL(import.meta.url).pathname`, which on Windows yields `/F:/...`
+  and resolved to doubled-drive paths (`F:\F:\...`) — now via
+  `fileURLToPath`, matching the rest of the suite; CLI subprocess tests
+  spawn `process.execPath` instead of relying on `node` PATH lookup; the
+  symlink-escape fixture skips its sub-check when Windows refuses file
+  symlink creation without Developer Mode/elevation (EPERM) instead of
+  failing the test. Result: 138/138 on Windows (was 134/138) and Linux.
+
 - **Website, now multi-page** (not part of the npm artifact; no library
   version change): the overview hero gained drag-orbit, per-tile raycast
   tracing, and 4×4/8×8/16×16 grids; a new **technical decision atlas**
