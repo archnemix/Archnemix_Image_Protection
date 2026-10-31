@@ -171,7 +171,6 @@ function paintValley(w, h) {
 }
 
 /* ---------- 3D tile field ---------- */
-const GRID = 8;
 const PLANE_W = 8.8, PLANE_H = 5.5;
 
 async function startStage() {
@@ -205,39 +204,54 @@ async function startStage() {
 
   const group = new THREE.Group();
   scene.add(group);
-
-  const tw = PLANE_W / GRID, th = PLANE_H / GRID;
-  const geo = new THREE.BoxGeometry(tw * 0.982, th * 0.982, 0.07);
   const side = new THREE.MeshStandardMaterial({ color: 0x2b2620, roughness: 0.9 });
-  const tiles = [];
-  const slotPos = (i) => ({
-    x: (i % GRID) * tw - PLANE_W / 2 + tw / 2,
-    y: PLANE_H / 2 - th / 2 - Math.floor(i / GRID) * th,
-  });
 
-  for (let row = 0; row < GRID; row++) {
-    for (let col = 0; col < GRID; col++) {
-      const idx = row * GRID + col;
-      const t = texture.clone();
-      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
-      t.repeat.set(1 / GRID, 1 / GRID);
-      t.offset.set(col / GRID, 1 - (row + 1) / GRID);
-      t.needsUpdate = true;
-      const face = new THREE.MeshStandardMaterial({ map: t, roughness: 0.62, metalness: 0.02 });
-      // Face material on both z faces: a pi-rotated tile reads as the
-      // mirrored picture, exactly like a real fx-flipped payload tile.
-      const mesh = new THREE.Mesh(geo, [side, side, side, side, face, face]);
-      const home = slotPos(idx);
-      mesh.position.set(home.x, home.y, 0);
-      group.add(mesh);
-      tiles.push({
-        mesh, idx,
-        tx: home.x, ty: home.y, tz: 0,        // targets
-        flip: 0,                               // target rotY (0 or PI)
-        lift: 0,                               // pointer lift (smoothed)
-        speed: 2.6 + ((idx * 37) % 10) / 6,    // deterministic stagger
-      });
+  let GRID = 8;
+  let tiles = [];
+  let tileGeo = null;
+  const slotPos = (i) => {
+    const tw = PLANE_W / GRID, th = PLANE_H / GRID;
+    return { x: (i % GRID) * tw - PLANE_W / 2 + tw / 2, y: PLANE_H / 2 - th / 2 - Math.floor(i / GRID) * th };
+  };
+
+  function buildTiles(gridN) {
+    for (const t of tiles) {
+      group.remove(t.mesh);
+      const mats = Array.isArray(t.mesh.material) ? t.mesh.material : [t.mesh.material];
+      for (const m of mats) { if (m !== side) { m.map?.dispose(); m.dispose(); } }
     }
+    tileGeo?.dispose();
+    GRID = gridN;
+    tiles = [];
+    const tw = PLANE_W / GRID, th = PLANE_H / GRID;
+    tileGeo = new THREE.BoxGeometry(tw * 0.982, th * 0.982, 0.07);
+    for (let row = 0; row < GRID; row++) {
+      for (let col = 0; col < GRID; col++) {
+        const idx = row * GRID + col;
+        const t = texture.clone();
+        t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+        t.repeat.set(1 / GRID, 1 / GRID);
+        t.offset.set(col / GRID, 1 - (row + 1) / GRID);
+        t.needsUpdate = true;
+        const face = new THREE.MeshStandardMaterial({ map: t, roughness: 0.62, metalness: 0.02 });
+        // Face on both z sides: a pi-rotated tile reads as the mirrored
+        // picture — exactly like a real fx-flipped payload tile.
+        const mesh = new THREE.Mesh(tileGeo, [side, side, side, side, face, face]);
+        const home = slotPos(idx);
+        mesh.position.set(home.x, home.y, 0);
+        mesh.userData.tileIdx = idx;
+        group.add(mesh);
+        tiles.push({
+          mesh, idx, face,
+          tx: home.x, ty: home.y, tz: 0,
+          flip: 0, lift: 0,
+          slot: idx, mirrored: false,
+          speed: 2.6 + ((idx * 37) % 10) / 6,
+        });
+      }
+    }
+    const stats = document.getElementById('stageStats');
+    if (stats) stats.textContent = `${GRID * GRID} tiles · seeded permutation · drag to orbit · hover a tile · space to scatter`;
   }
 
   /* ----- state: assembled vs scrambled ----- */
@@ -245,6 +259,7 @@ async function startStage() {
   let round = 0;
   const tag = document.getElementById('stageTag');
   const caption = document.getElementById('stageCaption');
+  const readout = document.getElementById('stageReadout');
   const btnView = document.getElementById('btnView');
   const btnWire = document.getElementById('btnWire');
 
@@ -265,20 +280,42 @@ async function startStage() {
       tile.tx = p.x; tile.ty = p.y;
       tile.tz = on ? (rand() - 0.3) * 0.55 : 0;
       tile.flip = on && rand() < 0.42 ? Math.PI : 0;
+      tile.slot = dest;
+      tile.mirrored = tile.flip !== 0;
     }
     tag.textContent = on ? 'On the wire — the payload' : 'Your visitor’s view';
     caption.innerHTML = on
       ? 'Tiles permuted and mirrored under a 128-bit-seeded plan (optionally AES-256-GCM sealed). This — at display resolution only — is all a scraper, proxy or DevTools session ever downloads.'
-      : 'Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Move your pointer across it; click to scatter.';
+      : 'Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.';
     btnView.classList.toggle('is-active', !on);
     btnWire.classList.toggle('is-active', on);
   }
   btnView.addEventListener('click', () => { poke(); setScrambled(false); });
   btnWire.addEventListener('click', () => { poke(); setScrambled(true); });
-  canvas.addEventListener('click', () => { poke(); setScrambled(!scrambled); });
 
-  /* ----- pointer presence ----- */
+  /* ----- pointer: lift field, raycast readout, drag-orbit ----- */
   const pointer = { x: 999, y: 999, active: false, parX: 0, parY: 0 };
+  const orbit = { x: 0, y: 0, tx: 0, ty: 0, dragging: false, moved: 0, lastX: 0, lastY: 0, downX: 0, downY: 0 };
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  let hovered = null;
+
+  function setHovered(tile) {
+    if (hovered === tile) return;
+    if (hovered) hovered.face.emissive.setHex(0x000000);
+    hovered = tile;
+    if (hovered) {
+      hovered.face.emissive.setHex(0x53200f);
+      if (readout) {
+        readout.textContent = scrambled
+          ? `tile ${hovered.idx} → wire slot ${hovered.slot}${hovered.mirrored ? ' · mirrored' : ''}`
+          : `tile ${hovered.idx} · home slot ${hovered.slot} — press space or “On the wire” to scatter it`;
+      }
+    } else if (readout) {
+      readout.textContent = 'Hover a tile to trace where it travels.';
+    }
+  }
+
   canvas.addEventListener('pointermove', (e) => {
     const r = canvas.getBoundingClientRect();
     pointer.x = ((e.clientX - r.left) / r.width - 0.5) * PLANE_W;
@@ -286,8 +323,39 @@ async function startStage() {
     pointer.parX = (e.clientX - r.left) / r.width - 0.5;
     pointer.parY = (e.clientY - r.top) / r.height - 0.5;
     pointer.active = true;
+    if (orbit.dragging) {
+      const dx = e.clientX - orbit.lastX, dy = e.clientY - orbit.lastY;
+      orbit.lastX = e.clientX; orbit.lastY = e.clientY;
+      orbit.moved += Math.abs(dx) + Math.abs(dy);
+      orbit.ty = Math.max(-0.45, Math.min(0.45, orbit.ty + dx * 0.004));
+      orbit.tx = Math.max(-0.35, Math.min(0.35, orbit.tx + dy * 0.004));
+      return;
+    }
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects(group.children, false)[0];
+    setHovered(hit ? tiles[hit.object.userData.tileIdx] : null);
   });
-  canvas.addEventListener('pointerleave', () => { pointer.active = false; });
+  canvas.addEventListener('pointerdown', (e) => {
+    orbit.dragging = true; orbit.moved = 0;
+    orbit.lastX = orbit.downX = e.clientX; orbit.lastY = orbit.downY = e.clientY;
+    canvas.setPointerCapture?.(e.pointerId);
+  });
+  canvas.addEventListener('pointerup', () => {
+    const wasDrag = orbit.moved > 7;
+    orbit.dragging = false;
+    if (!wasDrag) { poke(); setScrambled(!scrambled); }
+  });
+  canvas.addEventListener('pointerleave', () => { pointer.active = false; orbit.dragging = false; setHovered(null); });
+  canvas.addEventListener('keydown', (e) => {
+    if (e.key === ' ') { e.preventDefault(); poke(); setScrambled(!scrambled); }
+  });
+  document.querySelectorAll('#gridSeg button').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('#gridSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    poke();
+    buildTiles(Number(b.dataset.g));
+    setScrambled(scrambled);
+  }));
 
   /* ----- auto-cycle (calm; off for reduced motion) ----- */
   let lastPoke = performance.now();
@@ -312,21 +380,21 @@ async function startStage() {
   new IntersectionObserver(([en]) => { visible = en.isIntersecting; }, { threshold: 0.05 }).observe(frame);
 
   /* ----- render loop ----- */
+  buildTiles(8);
   const clock = new THREE.Clock();
-  const ease = REDUCED ? 1 : 0; // reduced motion: snap, no sweeps
+  const ease = REDUCED ? 1 : 0;
   function tick() {
     requestAnimationFrame(tick);
     if (!visible) return;
     const dt = Math.min(clock.getDelta(), 0.05);
-    const R = 1.9; // pointer influence radius (world units)
+    const R = 1.9;
     for (const tile of tiles) {
       const m = tile.mesh;
       const k = ease === 1 ? 1 : 1 - Math.exp(-tile.speed * dt * 2.2);
       m.position.x += (tile.tx - m.position.x) * k;
       m.position.y += (tile.ty - m.position.y) * k;
-      // pointer lift
       let targetLift = 0, tiltX = 0, tiltY = 0;
-      if (pointer.active && !REDUCED) {
+      if (pointer.active && !REDUCED && !orbit.dragging) {
         const dx = m.position.x - pointer.x, dy = m.position.y - pointer.y;
         const d = Math.hypot(dx, dy);
         if (d < R) {
@@ -338,14 +406,17 @@ async function startStage() {
       }
       tile.lift += (targetLift - tile.lift) * (1 - Math.exp(-dt * 9));
       m.position.z = tile.tz + tile.lift + (m.position.z - tile.tz - tile.lift) * Math.exp(-dt * 6);
-      // flip rotation (shortest path kept simple: exponential approach)
       m.rotation.y += (tile.flip + tiltY - m.rotation.y) * (1 - Math.exp(-tile.speed * dt * 1.9));
       m.rotation.x += (tiltX - m.rotation.x) * (1 - Math.exp(-dt * 9));
     }
+    orbit.x += (orbit.tx - orbit.x) * (1 - Math.exp(-dt * 7));
+    orbit.y += (orbit.ty - orbit.y) * (1 - Math.exp(-dt * 7));
     if (!REDUCED) {
       const gx = pointer.parY * -0.05, gy = pointer.parX * 0.07;
-      group.rotation.x += (gx - group.rotation.x) * (1 - Math.exp(-dt * 3));
-      group.rotation.y += (gy - group.rotation.y) * (1 - Math.exp(-dt * 3));
+      group.rotation.x += ((gx + orbit.x) - group.rotation.x) * (1 - Math.exp(-dt * 3));
+      group.rotation.y += ((gy + orbit.y) - group.rotation.y) * (1 - Math.exp(-dt * 3));
+    } else {
+      group.rotation.x = orbit.x; group.rotation.y = orbit.y;
     }
     renderer.render(scene, camera);
   }

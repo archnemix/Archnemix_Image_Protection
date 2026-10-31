@@ -3,6 +3,21 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## Unreleased
+
+- **Website, now multi-page** (not part of the npm artifact; no library
+  version change): the overview hero gained drag-orbit, per-tile raycast
+  tracing, and 4×4/8×8/16×16 grids; a new **technical decision atlas**
+  documents all 21 engineering decisions (problem / chosen / alternatives
+  rejected / pros / cons / measured evidence) with five live widgets —
+  a bit-exact port of the scramble-plan builder (60/60 parity against
+  `src/core/plan.js`), a WebCrypto token explorer including the canonical
+  base64url malleability gate, a replay-saturation sizing calculator, a
+  BCH errors/erasures recovery map, and the measured StegoMark survival
+  chart; a new **threat-model page** with an eight-attacker interactive
+  matrix and explicit "choose something else" guidance. All interactions
+  browser-verified (zero console errors), lint now covers 63 files.
+
 ## [1.22.0] — 2026-10-31
 
 Large-payload optimization pass + red-team expansion

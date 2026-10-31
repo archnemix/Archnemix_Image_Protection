@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threat model &amp; honest limits — Archnemix Image Protection</title>
+<meta name="description" content="Who Archx stops, who it slows, and who it cannot stop. An interactive attacker matrix, the physics of the analog hole, and when to choose DRM, C2PA, or neural watermarking instead.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html" aria-label="Archnemix home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <span>Archnemix</span>
+    </a>
+    <p class="masthead-meta">Threat model &amp; limits</p>
+    <nav class="masthead-nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="technical.html">Technical</a>
+      <a href="limits.html" aria-current="page">Threat model</a>
+      <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="page-intro">
+    <p class="kicker">Read this before you rely on it</p>
+    <h1>Who it stops. Who it slows.<br>Who it cannot stop.</h1>
+    <p class="lede2">Displayed pixels cannot be made un-copyable — a camera pointed at a screen
+    defeats every purely digital scheme ever shipped, including this one. So the honest
+    question is never “is it unbreakable?” but “what does each attacker actually walk away
+    with, and what evidence do I hold afterwards?” Pick an attacker:</p>
+  </section>
+
+  <section class="simple-band" style="border-top:0;padding-top:26px">
+    <div class="attacker-grid" id="attackerGrid" role="group" aria-label="Choose an attacker"></div>
+    <div class="attacker-detail" id="attackerDetail" aria-live="polite"></div>
+    <noscript><p>The interactive matrix needs JavaScript. In short: casual copying and bulk scraping are stopped or made worthless; determined single-image theft is slowed, degraded, and made attributable; photographing a screen cannot be prevented by any web technology.</p></noscript>
+  </section>
+
+  <section class="band">
+    <header class="band-head"><span class="band-no">§</span><h2>The limits, printed in full</h2></header>
+    <div class="cols-2">
+      <div>
+        <h3>What Archx does not do</h3>
+        <ul>
+          <li><strong>Prevent screenshots.</strong> OS-level and extension captures happen above page JavaScript. Archx degrades them (interlace, readback poisoning) and attributes them (StegoMark survives screenshot chains in the bench) — it does not veto them.</li>
+          <li><strong>Stop a camera.</strong> Temporal interlace and moiré-unfriendly patterns reduce quality; physics wins eventually. Attribution is the control here.</li>
+          <li><strong>Survive AI regeneration.</strong> Diffusion re-synthesis drops every tested invisible watermark (ours and the neural ones) to near-zero decode in the literature. If your threat is “regenerate my catalog”, you need provenance + legal process, not only marks.</li>
+          <li><strong>Prove collusion alone.</strong> The assay ranks suspects for investigation; Tardos’ bound puts blind collusion-proof decoding outside a 96-bit channel. Anyone claiming otherwise at this payload size is selling something.</li>
+          <li><strong>Replace access control.</strong> If everyone may view, everyone may copy at display quality. Archx assumes an <span class="mono">authorize</span> decision exists.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Known measured edges</h3>
+        <ul>
+          <li>Adversarial periodic/synthetic content: <strong>0/11</strong> robust recovery in the bench (kept in the corpus deliberately).</li>
+          <li>1-bit re-binarization destroys the mark (a measured dead end for survival at acceptable quality).</li>
+          <li>Layout-4 marks under 0.7-scale photo crops can exhaust a 20 s auto-detection budget (pin the layout or raise the budget — pinned searches recover them).</li>
+          <li>Robust-profile distortion is ≈28.6 dB PSNR class: visible to pixel-peepers, chosen knowingly (D-12).</li>
+          <li>Transplanted marked regions carry their pixels’ mark with them — attribution must be corroborated with issuance records, as the guide describes.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <header class="band-head"><span class="band-no">§</span><h2>When to choose something else instead</h2></header>
+    <div class="table-wrap">
+      <table class="layers">
+        <thead><tr><th scope="col">If you need…</th><th scope="col">Choose</th><th scope="col">Honest trade-off</th></tr></thead>
+        <tbody>
+          <tr><td>Output-path control (HDCP-class)</td><td>EME DRM (Widevine/FairPlay) via a video pipeline</td><td>Real output protection for video; licensing/CDM deals, no still-image workflow, heavy integration. Archx can still attribute leaks on top.</td></tr>
+          <tr><td>Provenance &amp; authenticity signalling</td><td>C2PA manifest signing</td><td>Proves origin/history where verifiers exist; prevents nothing. Complementary to Archx, not a substitute.</td></tr>
+          <tr><td>Highest-fidelity invisible marks at platform scale</td><td>Neural watermarking (SynthID-class services)</td><td>~40 dB-class quality; needs ML infrastructure/accounts; equally dead under regeneration.</td></tr>
+          <tr><td>Deep-zoom into gigapixel works</td><td>IIIF tiered tile server with resolution-capped access</td><td>The established museum pattern; more moving parts than a derivative pipeline.</td></tr>
+          <tr><td>“Nobody may ever see pixels leave”</td><td>Don’t publish the image</td><td>The only absolute control. Everything else — including this tool — is friction, quality caps, and evidence.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:22px">The engineering rationale behind every one of these boundaries is in the
+    <a href="technical.html">decision atlas</a> — including where our own numbers are unflattering.</p>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="wordmark wordmark-small">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      Archnemix
+    </span>
+    <p><a href="index.html">Overview</a> · <a href="technical.html">Technical decisions</a> · © 2026 Archnemix contributors · 0BSD</p>
+  </div>
+</footer>
+
+<script type="module" src="limits.js"></script>
+</body>
+</html>

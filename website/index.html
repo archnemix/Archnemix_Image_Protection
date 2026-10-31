@@ -20,11 +20,10 @@
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
-    <nav class="masthead-nav" aria-label="Sections">
-      <a href="#how">How it works</a>
-      <a href="#layers">The layers</a>
-      <a href="#measured">Measured</a>
-      <a href="#use">Use it</a>
+    <nav class="masthead-nav" aria-label="Pages">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="technical.html">Technical</a>
+      <a href="limits.html">Threat model</a>
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
@@ -45,7 +44,7 @@
 
     <figure class="stage" id="stage">
       <div class="stage-frame">
-        <canvas id="gl" aria-label="Interactive 3D demonstration: a photograph split into 64 tiles that scramble and reassemble"></canvas>
+        <canvas id="gl" tabindex="0" aria-label="Interactive 3D demonstration: a photograph split into tiles that scramble and reassemble. Drag to orbit, hover a tile to trace it, press space to scatter."></canvas>
         <div class="stage-fallback" id="stageFallback" hidden>
           <p>The 3D demonstration needs WebGL. The idea, in one line: the picture
           travels as 64 permuted, mirrored tiles and only becomes a picture
@@ -58,8 +57,18 @@
           <button type="button" id="btnView" class="btn is-active">Visitor&rsquo;s view</button>
           <button type="button" id="btnWire" class="btn">On the wire</button>
         </div>
-        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Move your pointer across it; click to scatter.</p>
+        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.</p>
       </figcaption>
+      <div class="stage-tools">
+        <span class="tools-label">Grid</span>
+        <span class="seg" id="gridSeg" role="group" aria-label="Tile grid size">
+          <button type="button" data-g="4">4×4</button>
+          <button type="button" data-g="8" class="is-active">8×8</button>
+          <button type="button" data-g="16">16×16</button>
+        </span>
+        <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
+        <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>
+      </div>
     </figure>
 
     <div class="install-row">
@@ -231,7 +240,7 @@ Archx.load.image('#hero-photo', 'aurora-valley', {
       <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
-    <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · the 3D tiles above scramble exactly like the real payload does.</p>
+    <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · <a href="technical.html">why every piece is built this way</a> · the 3D tiles above scramble exactly like the real payload does.</p>
   </div>
 </footer>
 
