@@ -134,7 +134,7 @@
   "devDependencies": {
     "@sparticuz/chromium": "^138.0.0",
     "@types/node": "^22.20.5",
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.28.2",
     "ioredis": "^5.11.1",
     "puppeteer-core": "^25.16.0",
     "sharp": "^0.35.5",
