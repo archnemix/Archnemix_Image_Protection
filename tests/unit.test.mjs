@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import {
   buildScramblePlan, scramblePixels, scramblePixelsPadded, paddedSize,
@@ -608,11 +609,23 @@ test('strict server configuration fails closed and rejects unsafe deployments', 
   const outsideFile = path.join(outside, 'outside.jpg');
   fs.writeFileSync(outsideFile, await syntheticMaster());
   const symlinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-links-'));
-  fs.symlinkSync(outsideFile, path.join(symlinkDir, 'escape.jpg'));
-  assert.throws(
-    () => createArchxMiddleware({ secret: TEST_SECRET, imagesDir: symlinkDir, allowAnonymous: true }),
-    /no supported master images/i,
-  );
+  let symlinkCreated = true;
+  try {
+    fs.symlinkSync(outsideFile, path.join(symlinkDir, 'escape.jpg'));
+  } catch (err) {
+    // Windows refuses file symlinks without Developer Mode or elevation
+    // (EPERM). The escape check itself is platform-independent and stays
+    // covered on POSIX; skip only this sub-check where the OS forbids
+    // creating the fixture.
+    if (err.code !== 'EPERM' && err.code !== 'EACCES') throw err;
+    symlinkCreated = false;
+  }
+  if (symlinkCreated) {
+    assert.throws(
+      () => createArchxMiddleware({ secret: TEST_SECRET, imagesDir: symlinkDir, allowAnonymous: true }),
+      /no supported master images/i,
+    );
+  }
 
   assert.equal(validateImageId('cat-01_final'), true);
   for (const bad of ['', '.', '..', '../cat', 'cat/dog', 'cat\\dog', 'cat.jpg', '-cat', 'a'.repeat(129), null, 42]) {
@@ -3275,7 +3288,7 @@ test('CLI parsers never eat positional paths and honour --flag=value', async (t)
   const input = path.join(root, 'in.png');
   const output = path.join(root, 'out.archx');
   fs.writeFileSync(input, await syntheticMaster(64, 48));
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   execFileSync(process.execPath, [
     path.join(repoRoot, 'server/scramble-cli.js'), input, output,
     '--key', 'cli-key', '--grid=4', '--encrypt=false',
@@ -3865,7 +3878,7 @@ test('v1.18 documented CLI flow: protect with separate keys, detect, verify owne
     ARCHX_OWNERSHIP_PRIVATE_KEY: keyPair.privateKey,
   };
   const repoRoot = path.resolve('.');
-  const protect = spawnSync('node', [
+  const protect = spawnSync(process.execPath, [
     path.join(repoRoot, 'server/scramble-cli.js'), masterPath, path.join(dir, 'photo.archx'),
     '--stego', 'ORDER-README-1', '--stego-profile', 'robust',
     '--ownership-owner', 'Studio Example',
@@ -3881,14 +3894,14 @@ test('v1.18 documented CLI flow: protect with separate keys, detect, verify owne
   const suspectPath = path.join(dir, 'suspect.png');
   fs.writeFileSync(suspectPath, restored);
 
-  const detect = spawnSync('node', [
+  const detect = spawnSync(process.execPath, [
     path.join(repoRoot, 'server/detect-stego-cli.js'), suspectPath,
     '--expect', 'ORDER-README-1', '--profile', 'robust', '--json',
   ], { env, encoding: 'utf8' });
   assert.equal(detect.status, 0, detect.stderr || detect.stdout);
   assert.equal(JSON.parse(detect.stdout).found, true);
 
-  const verify = spawnSync('node', [
+  const verify = spawnSync(process.execPath, [
     path.join(repoRoot, 'server/detect-stego-cli.js'), suspectPath,
     '--verify-ownership', '--ownership-pubkey', pubPath,
     '--claim', extractOwnershipClaim(new Uint8Array(container.payload)),
@@ -4071,12 +4084,12 @@ test('v1.19 ownership XMP declares xmpRights:Marked and usage terms for external
 });
 
 test('v1.19 archx-protect --assay CLI reports measured PSNR and verifies recovery', async (t) => {
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v119-assaycli-'));
   const photoPath = path.join(dir, 'photo.jpg');
   fs.writeFileSync(photoPath, await sharp(await syntheticMaster(640, 420)).jpeg().toBuffer());
   const env = { ...process.env, ARCHX_STEGO_KEY: 'assay-cli-key' };
-  const run = spawnSync('node', [
+  const run = spawnSync(process.execPath, [
     path.join(repoRoot, 'server/scramble-cli.js'), photoPath, '--assay', '--json',
   ], { env, encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr || run.stdout);
@@ -4091,7 +4104,7 @@ test('v1.19 type declarations match the runtime export surface (no declaration d
   // every callable/value declared in types/*.d.ts must exist at runtime
   // with a compatible typeof. Parses only top-level `export function`,
   // `export class`, and `export const` lines.
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const pairs = [
     ['types/scramble.d.ts', await import('../src/scramble.js')],
     ['types/server.d.ts', archxServerModule],
