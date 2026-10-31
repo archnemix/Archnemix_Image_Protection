@@ -36,7 +36,7 @@ jobs:
       - run: npm run verify
       - name: Generate CycloneDX SBOM
         run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: archx-sbom-publish
           path: sbom.cdx.json
