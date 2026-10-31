@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Technical decisions — Archnemix Image Protection</title>
+<meta name="description" content="Every major engineering decision in Archnemix Image Protection: what was chosen, what was rejected, the pros and cons, and the measured evidence. With live interactive widgets.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html" aria-label="Archnemix home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <span>Archnemix</span>
+    </a>
+    <p class="masthead-meta">Technical decisions</p>
+    <nav class="masthead-nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="technical.html" aria-current="page">Technical</a>
+      <a href="limits.html">Threat model</a>
+      <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="page-intro">
+    <p class="kicker">The decision atlas</p>
+    <h1>Every choice, on the record.</h1>
+    <p class="lede2">Twenty-one decisions shaped Archx. Each one below states the problem,
+    what we chose, what we rejected and why, the honest pros and cons, and the measured
+    evidence — with live widgets where a mechanism is easier to feel than to read about.
+    Nothing here is marketing: where a choice costs something, the cost is printed.</p>
+  </section>
+
+  <div class="tech-layout">
+    <aside class="tech-index">
+      <h2>Index</h2>
+      <nav id="techIndex" aria-label="Decisions index"><noscript><p>Enable JavaScript for the clickable index — all decisions follow in order below.</p></noscript></nav>
+      <h2>How to read</h2>
+      <p style="font-size:13.5px;color:var(--ink-soft);margin:0">“Evidence” cites the shipped
+      benchmark/attack suites and <span class="mono">docs/RESEARCH.md</span> sections, so every claim
+      can be re-run. Widgets run the real algorithms where noted.</p>
+    </aside>
+
+    <div>
+      <div class="tech-toolbar" role="search">
+        <input class="tech-search" id="techSearch" type="search" placeholder="Filter decisions… (try “token”, “BCH”, “Sharp”)" aria-label="Filter decisions">
+        <button class="chip" data-tag="security">Security</button>
+        <button class="chip" data-tag="performance">Performance</button>
+        <button class="chip" data-tag="quality">Image quality</button>
+        <button class="chip" data-tag="compat">Compatibility</button>
+        <button class="chip" data-tag="honesty">Honesty</button>
+        <span class="tech-count" id="techCount"></span>
+      </div>
+
+      <!-- ================= A. DELIVERY ================= -->
+      <div class="group-head"><span class="band-no">A</span><h2>Delivery — what leaves the server</h2></div>
+
+      <article class="decision" id="d-masters" data-tags="security">
+        <div class="decision-head"><span class="decision-no">D-01</span>
+          <div><h3 class="decision-title">Masters live outside the public root — and startup refuses otherwise</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Fail-closed</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">The original file is never web-addressable; the middleware is the only reader, and it will not boot over a public masters folder.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Most “protected” galleries still host the original at a guessable URL. One directory listing, backup file, or misconfigured static route hands over the master — every other layer is then decoration.</p></div>
+            <div><h4>We chose</h4><p>Originals sit in a directory the web server never serves. The middleware resolves real paths, rejects symlinks that escape, and <em>throws at startup</em> if a masters directory overlaps any declared public directory. The preflight audit mirrors the same rule (a v1.21 red-team find: the audit once said “ok” where startup refused).</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Signed URLs to public files</strong> — the file is still fetchable by anyone who obtains or guesses the URL class; revocation is per-URL theatre.</li><li><strong>Obscure filenames</strong> — secrecy by entropy of a path leaks via logs, referrers, and screenshots.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Whole classes of static-file bugs become irrelevant.</li><li>One auditable read path for every byte that leaves.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Requires a server component (or the offline asset builder) — pure static hosting of originals is out.</li><li>Deployments must think about filesystem layout once.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team traversal/symlink/config attacks (suite sections C–D) all held; the demo deliberately 404s <span class="mono">/demo-masters/…</span> so anyone can test it. RESEARCH §2.29.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-derivatives" data-tags="security quality">
+        <div class="decision-head"><span class="decision-no">D-02</span>
+          <div><h3 class="decision-title">Only display-resolution derivatives ever leave</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Quality</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">The server downsizes to the entitled display width before anything is scrambled or sent. The print-resolution file cannot be reconstructed from what was never transmitted.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>If full-resolution pixels reach the browser “for fast zoom”, extraction gets full resolution too. Client-side downscaling is a polite request, not a boundary.</p></div>
+            <div><h4>We chose</h4><p>Your <span class="mono">authorize</span> callback grants a maximum width per viewer; the server renders exactly that (optionally snapped to canonical width buckets for cache efficiency) and the token binds the width. Smuggling a bigger <span class="mono">w</span> at redeem time changes nothing.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Full-res + CSS scaling</strong> — the extracted copy is print-ready.</li><li><strong>Deep-zoom tile streaming (IIIF-style)</strong> — excellent pattern, documented as the escalation path, but a much larger surface; deferred deliberately.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Even a perfect payload reconstruction caps at screen quality.</li><li>Smaller payloads; two-stage derivative caching keeps it cheap.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>No infinite pinch-zoom into print detail (the viewer offers a lens within the derivative).</li><li>Width policy is a real product decision the host must make.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Entitlement-escalation attacks (mint/redeem width smuggling, absurd widths) held in the red-team suite; derivative width is asserted from the container header in tests.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-scramble-aes" data-tags="security honesty">
+        <div class="decision-head"><span class="decision-no">D-03</span>
+          <div><h3 class="decision-title">Scramble is obfuscation; AES-256-GCM is the secrecy — labelled as such</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Honesty</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Tile permutation makes payloads useless to capture tools; it is never sold as encryption. When secrecy matters, the payload is additionally sealed with AES-256-GCM.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Vendors routinely call pixel shuffling “encryption”. A permutation can be attacked with jigsaw solvers and known-plaintext edges; overselling it leaves buyers with a false threat model.</p></div>
+            <div><h4>We chose</h4><p>Two separately-named layers: a key-seeded tile permutation + mirrors (obfuscation, defeats casual tooling and network capture), and optional AES-256-GCM over the encoded derivative (actual confidentiality, WebCrypto/Node crypto). Docs state plainly which is which.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Scramble-only marketed as encryption</strong> — dishonest and weaker against solvers.</li><li><strong>Encryption-only</strong> — loses the “confetti” property for decrypted-in-page captures and screenshot tooling that hooks image decoders.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Each layer is evaluated against the right attacker.</li><li>Operators can trade CPU for secrecy explicitly.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Two mechanisms to configure and explain.</li><li>AES path needs key handling in the client loader.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Plan derivation and padding went through five measured generations against seam-oracle attacks (D-05). Crypto core is pinned to <span class="mono">node:crypto</span> test vectors in the unit suite.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-plan-v2" data-tags="security compat">
+        <div class="decision-head"><span class="decision-no">D-04</span>
+          <div><h3 class="decision-title">128-bit-seeded scramble plans (v2); the 32-bit v1 kept frozen, not deleted</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Compatibility</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Version-1 plans derived from a 32-bit seed — brute-forceable offline. v2 seeds sfc32 from a 128-bit cyrb128 hash. Old payloads still decode because v1 was frozen instead of “fixed”.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>With a 32-bit seed, an attacker who captures one scrambled payload can enumerate every seed, unscramble, and score the results — recovering the permutation without the key. Measured: feasible on a laptop.</p></div>
+            <div><h4>We chose</h4><p>New payloads default to plan v2 (128-bit state, warm-up rounds). v1 remains byte-for-byte for decoding legacy assets; no public entry point emits it unless explicitly requested. Try the real algorithm:</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Silently change v1 derivation</strong> — orphans every previously built asset.</li><li><strong>Bigger grid instead of bigger seed</strong> — permutation size was never the weak point; seed entropy was.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Seed brute-force moves from hours to infeasible.</li><li>Zero migration for existing assets.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Two derivations to maintain and test forever (accepted: formats are forever).</li></ul></div>
+          </div>
+          <div class="widget" id="w-plan">
+            <h4>Widget — the real scramble plan, in your browser</h4>
+            <div class="w-row">
+              <label>Key <input type="text" id="planKey" value="correct horse battery staple" size="28"></label>
+              <label>Grid
+                <span class="seg" id="planGridSeg"><button data-g="4">4×4</button><button data-g="8" class="is-active">8×8</button><button data-g="16">16×16</button></span></label>
+              <label>Plan version
+                <span class="seg" id="planVerSeg"><button data-v="1">v1 · 32-bit</button><button data-v="2" class="is-active">v2 · 128-bit</button></span></label>
+              <button class="w-btn ghost" id="planRandom" type="button">Random key</button>
+            </div>
+            <canvas id="planCanvas" width="860" height="340" aria-label="Scramble plan visualization: original tile grid mapped to scrambled positions"></canvas>
+            <p class="w-out" id="planOut">Hover a tile…</p>
+            <p class="w-note">This runs the shipped <span class="mono">buildScramblePlan</span> code (cyrb128+sfc32 / mulberry32, ported verbatim and parity-tested against the library). Left = original tiles, right = where each lands on the wire; ⇄/⇅ marks are mirrors.</p>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.2x plan-v2 work; golden tests pin both derivations. The widget’s port is diff-tested against <span class="mono">src/core/plan.js</span> outputs.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-padding" data-tags="security quality">
+        <div class="decision-head"><span class="decision-no">D-05</span>
+          <div><h3 class="decision-title">Padding that does not betray the edges (five generations)</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Quality</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Images rarely divide by the grid; the padded strip sounded innocent until it kept naming the boundary tiles to solvers. Final design: a keyed, DC-anchored coherent wrap.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Black padding (v0) identified every edge tile and its flip. Edge replication duplicated rows exactly. Reflection left a palindromic seam (row-diff MAD ≈0.6 vs ≈17 natural). A shifted wrap broke the palindrome but re-phased rows and left a luminance cliff — each generation was measured, then broken by a better statistic.</p></div>
+            <div><h4>We chose</h4><p>One keyed toroidal offset for the whole strip (texture stays coherent), chosen by keyed best-match search; each pad pixel DC-shifted by the ±16px local box-mean delta (no seam cliff), feathered toward the true edge, plus block-constant non-zero keyed noise so pads never equal the edge on flats.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li>Black / replicate / reflect / naive wrap — each broken by a named measurement, above.</li><li><strong>Crop-to-grid</strong> — throws away delivered pixels; display must stay whole.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Strip statistics now resemble ordinary texture continuation.</li><li>Unpredictable without the key; irrelevant with it.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>The most intricate 200 lines in the scramble path; display never shows them (cropped before presentation), but they must stay bit-frozen.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Seam statistics published per generation in RESEARCH (§2.2x padding work); fused pad+scramble output is equality-tested against the two-step form.</p></div>
+        </div>
+      </article>
+
+      <!-- ================= B. TOKENS ================= -->
+      <div class="group-head"><span class="band-no">B</span><h2>Tokens &amp; access control</h2></div>
+
+      <article class="decision" id="d-tokens" data-tags="security">
+        <div class="decision-head"><span class="decision-no">D-06</span>
+          <div><h3 class="decision-title">One-time HMAC tokens with an allowlisted claim set — not a JWT library</h3>
+          <div class="decision-tags"><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">A token is <span class="mono">base64url(claims).base64url(HMAC-SHA256)</span>: eight-ish claims, every one validated (audience, scope, image, width, iat/exp window, nonce), spent exactly once, canonical encodings only.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>General JWT stacks bring algorithm negotiation, remote key fetching, and claim liberalism — the exact surface behind “alg:none”, kid-confusion, and claim-smuggling bugs. This system needs one narrow thing: “viewer V may fetch image I at width W, once, soon.”</p></div>
+            <div><h4>We chose</h4><p>A fixed HMAC construction, a frozen claim allowlist (unknown keys refuse), strict types, TTL and clock-skew windows, and a one-time claim store keyed canonically. v1.21 added canonical-encoding rejection after the red team showed base64url slack bits let four strings carry one MAC. Single-secret verification authenticates before parsing.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Off-the-shelf JWT</strong> — larger parser/alg surface for zero needed features.</li><li><strong>Opaque session ids only</strong> — loses stateless width/image binding and forces a lookup per request.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Tiny, auditable verifier; timing-safe compare; replay dies at the claim store.</li><li>Key rotation via keyring <span class="mono">kid</span> without alg games.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Not interoperable with JWT tooling (by design).</li><li>We own the verifier’s correctness — hence the fuzz battery.</li></ul></div>
+          </div>
+          <div class="widget" id="w-token">
+            <h4>Widget — mint, inspect, and tamper with a real token</h4>
+            <div class="w-row">
+              <label>Demo secret <input type="text" id="tokSecret" value="site-demo-secret-not-for-production" size="34"></label>
+              <button class="w-btn" id="tokMint" type="button">Mint token</button>
+              <button class="w-btn ghost" id="tokTamper" type="button">Tamper: width 240 → 4000</button>
+              <button class="w-btn ghost" id="tokVariant" type="button">Padding-variant re-encode</button>
+            </div>
+            <label style="display:grid;gap:5px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--ink-soft)">Claims (JSON — edit me, then re-mint)
+              <textarea id="tokClaims" spellcheck="false"></textarea></label>
+            <p class="w-out" id="tokOut">Press “Mint token”. Runs 100% locally with WebCrypto; the demo secret never leaves this page.</p>
+            <p class="w-note">Verification mirrors the server’s single-secret path: canonical-encoding check → HMAC compare → claim validation. The padding variant has a <em>valid</em> MAC but a non-canonical string — watch it fail anyway.</p>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team sections B + H: corrupted/tampered/wrong-secret/cross-image/replayed/expired/fuzzed-claim/kid-confused tokens all refused; a failed forgery does not burn the genuine claim; 16-way race admits exactly one redemption.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-saturation" data-tags="security performance">
+        <div class="decision-head"><span class="decision-no">D-07</span>
+          <div><h3 class="decision-title">Replay-store saturation is an operator policy, not a surprise</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Performance</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">A one-time-claim store is finite. When it fills, something must give: evict the oldest claims (a replay window re-opens) or refuse new views (strict). We ship both, default by deployment profile, plus the sizing math.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>An attacker who can force churn (many cheap mints) can push legitimate claims out of a bounded store — converting a memory bound into a replay vulnerability, silently.</p></div>
+            <div><h4>We chose</h4><p>Explicit <span class="mono">saturation: 'evict' | 'strict'</span>. Library default is evict (availability), the hardened production preset is strict (refuse new redemptions rather than forget a spend). Sizing rule: <span class="mono">maxEntries ≥ peak redemptions/sec × TTL × margin</span>.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Unbounded store</strong> — trades a replay bug for an OOM kill switch anyone can press.</li><li><strong>Silent eviction (the industry default)</strong> — the failure mode exists but is undocumented and unmeasured.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>The trade-off is named, configurable, and auditable in config review.</li><li>Strict mode makes saturation a loud 429/503, not a quiet replay.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Operators must actually size the store (the widget below helps).</li><li>Strict mode can refuse real users under attack — that is the point, but it is a real cost.</li></ul></div>
+          </div>
+          <div class="widget" id="w-saturation">
+            <h4>Widget — size your claim store</h4>
+            <div class="w-row">
+              <label>Peak redemptions/sec <input type="range" id="satRps" min="1" max="1000" value="50"><span class="mono" id="satRpsV">50</span></label>
+              <label>Token TTL (sec) <input type="range" id="satTtl" min="30" max="1800" step="30" value="300"><span class="mono" id="satTtlV">300</span></label>
+              <label>Safety margin <input type="range" id="satMargin" min="1" max="5" step="0.5" value="2"><span class="mono" id="satMarginV">2×</span></label>
+              <label>Policy
+                <span class="seg" id="satSeg"><button data-p="evict" class="is-active">evict</button><button data-p="strict">strict</button></span></label>
+            </div>
+            <p class="w-out" id="satOut"></p>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.28 (critique response) + OPERATIONS sizing table; saturation behavior is unit-tested in both modes.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-pop" data-tags="security compat">
+        <div class="decision-head"><span class="decision-no">D-08</span>
+          <div><h3 class="decision-title">Sender-constraining: bind tokens to the browser that asked</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Compatibility</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">A copied token should be worthless elsewhere: optional User-Agent binding for cheap friction, and DPoP-style proof-of-possession (RFC 9449 shape) with an ephemeral in-page key for real binding.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Bearer tokens leak via logs, screenshots of DevTools, and shared links. One-time use narrows the window but a fast thief can spend first.</p></div>
+            <div><h4>We chose</h4><p>Two strengths: UA binding (friction, trivially spoofable by the thief who copies headers too — labelled as such) and proof-of-possession: the page holds a non-extractable P-256 key; the token carries its JWK thumbprint (<span class="mono">jkt</span>); redemption needs a fresh signed proof bound to method, URL, token hash, and a one-time <span class="mono">jti</span>.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>IP binding</strong> — breaks mobile/NAT users, trivially shared by co-located thieves.</li><li><strong>Cookies-only</strong> — the loader is cross-origin friendly; cookies reintroduce CSRF considerations.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Stolen token + no private key = 403, even inside the TTL.</li><li>Proof replay itself is one-time-use.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Needs WebCrypto in the page; more moving parts; <span class="mono">required</span> mode refuses keyless clients outright.</li><li>Script already running in the victim page can still ask the page to sign — stated in the docs, not hidden.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team PoP battery: bearer copy 403, wrong key 403, wrong target 403, proof replay 403, fresh proof 200. RESEARCH §2.26.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-deny-default" data-tags="security">
+        <div class="decision-head"><span class="decision-no">D-09</span>
+          <div><h3 class="decision-title">Deny-by-default authorization; the audit must never bless what startup refuses</h3>
+          <div class="decision-tags"><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">No <span class="mono">authorize</span> callback and no explicit anonymous mode ⇒ the constructor throws. Throwing authorizers deny. Misspelled options throw. Weak secrets throw.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>The most dangerous default in access-control code is the permissive one reached by omission: a forgotten callback, a typo’d option, an exception path that falls through to “serve”.</p></div>
+            <div><h4>We chose</h4><p>Fail-closed everywhere: missing authorization config is a startup error; authorize results are normalized strictly (garbage shapes ⇒ deny or clamp, never widen); unknown option keys are rejected so <span class="mono">allowdOrigins</span> can’t silently no-op; the config audit mirrors every startup refusal we know how to check statically.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Permissive demo default</strong> — demos become production; the incident writes itself.</li><li><strong>Warnings instead of throws</strong> — nobody reads warnings at 2 a.m. during a deploy.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Misconfiguration fails loudly at boot, in CI, before traffic.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>First-run friction: you must write one authorize function (examples provided).</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team section C + H (garbage authorize shapes: true/string/null/NaN/negative — denied or clamped, never widened). RESEARCH §2.25–2.29.</p></div>
+        </div>
+      </article>
+
+      <!-- ================= C. VIEWER ================= -->
+      <div class="group-head"><span class="band-no">C</span><h2>The viewer — where pixels become visible</h2></div>
+
+      <article class="decision" id="d-viewer" data-tags="security honesty">
+        <div class="decision-head"><span class="decision-no">D-10</span>
+          <div><h3 class="decision-title">Canvas viewer with poisoned readback — no <span class="mono">&lt;img&gt;</span>, no right-click theatre</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Honesty</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">The picture exists as canvas paint operations, not as an addressable image element. Readback APIs get decoys or black; “disable right-click” is available as a flag but never presented as a control.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>An <span class="mono">&lt;img src&gt;</span> is a public handle: save-as, drag-out, DevTools “open in new tab”, extension harvesters. Blocking context menus stops none of those and annoys paying users.</p></div>
+            <div><h4>We chose</h4><p>Canvas2D/WebGL presentation of reassembled tiles; origin-tainted or black readback for <span class="mono">toDataURL</span>/<span class="mono">captureStream</span> paths where the platform allows; decoy responses for known extraction probes; print paths degraded. Every guard is an individual flag so sites choose their own friction.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Right-click blockers as the headline</strong> — theatre (see Overview §01).</li><li><strong>EME/DRM</strong> — real output protection exists there, but licensing, per-browser CDM deals, and no support for still-image workflows put it outside an open-source JS library. Named honestly as the “choose something else” path.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Casual and bulk tooling gets nothing addressable; extraction cost rises sharply.</li><li>Pixel-exact 1:1 display is preserved (MAD 0 in browser tests).</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Screenshots by privileged tooling still work — degraded and attributable, never “prevented”.</li><li>Canvas breaks some a11y/save workflows; hosts keep alt-text duties (documented).</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>122-check real-Chromium suite: encapsulation, decoy readback, black WebGL readback, replay, guards. RESEARCH §2.x viewer work.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-temporal" data-tags="security quality">
+        <div class="decision-head"><span class="decision-no">D-11</span>
+          <div><h3 class="decision-title">Temporal interlace at 60 Hz: never show the whole picture in one instant</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Quality</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Alternating complementary subsets (strips/blocks/checkerboards) at display rate: the eye integrates a complete image; a single-frame capture inherits holes.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Any static framebuffer can be captured in one shot. If the complete image never exists in a single presented frame, single captures degrade — and cross-frame averaging fights deliberate pattern choices.</p></div>
+            <div><h4>We chose</h4><p>GPU-shader or pre-rendered alternating frames, configurable pattern (strip/pixel/block), subset size, and target rate (60 Hz default). Fully disable-able; quality impact is measured, not asserted.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Animated watermark overlays only</strong> — composited over a complete static frame; capture then inpaint.</li><li><strong>Always-on interlace</strong> — photosensitive users and some displays suffer; hence flags + reduced-motion respect.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Single-shot screenshots arrive degraded by construction.</li><li>Cheap: shader mask or two pre-renders, no per-frame CPU.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Determined multi-frame capture + averaging partially recovers; camera photos of the screen integrate like the eye does. Both stated plainly.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Browser suite covers shader/frames patterns + capture traces; demo exposes every interlace flag live.</p></div>
+        </div>
+      </article>
+
+      <!-- ================= D. WATERMARKING ================= -->
+      <div class="group-head"><span class="band-no">D</span><h2>Watermarking &amp; detection — attribution after the leak</h2></div>
+
+      <article class="decision" id="d-classical" data-tags="quality security">
+        <div class="decision-head"><span class="decision-no">D-12</span>
+          <div><h3 class="decision-title">Classical spread-spectrum watermarking in pure JS (not neural, not LSB)</h3>
+          <div class="decision-tags"><span class="chip static">Quality</span><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">StegoMark signs each grid cell with a keyed ± pattern, amplitude masked by local texture. Robust profile PSNR ≈28–30 dB buys crop/scale/geometry survival that prettier marks don’t have.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>A leak arrives cropped, resized, re-compressed, screenshotted, sometimes mirrored. The watermark must be findable blind (no original), keyed (only the owner can read/forge), and cheap enough to embed per-viewer at request time in JavaScript.</p></div>
+            <div><h4>We chose</h4><p>Cell-based spread spectrum with keyed polarity/segment signs, texture-adaptive amplitude (flat cells gentle, textured cells stronger), repetition coding (v1–v3) or BCH (v4, D-13). Detection integrates cell evidence over a luma integral image and searches geometry.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Neural marks (SynthID/StegaStamp class)</strong> — better PSNR (~40 dB class), but need trained encoder/decoder networks; not feasible in a dependency-free JS library, and regeneration attacks kill them too (measured in the literature at ~0–13% decode).</li><li><strong>LSB steganography</strong> — dies at the first JPEG re-save.</li><li><strong>DCT-QIM with JND masking</strong> — a real path to ~38–41 dB, but it is new embedding physics (a future layout version), not a patch to shipped marks.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Runs anywhere JS runs; per-token embedding ≈9 ms at 960px.</li><li>Survives the transform chain leaks actually go through (chart below).</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>28.6 dB-class distortion on the robust profile is visible under pixel-peeping — the price of the envelope, printed here rather than hidden.</li><li>Diffusion regeneration and 1-bit binarization remain outside the envelope.</li></ul></div>
+          </div>
+          <div class="widget" id="w-survival">
+            <h4>Widget — measured survival (shipped benchmark, strength 6)</h4>
+            <div class="w-row">
+              <span class="seg" id="survSeg"><button data-m="class" class="is-active">Layout 4 · robust · by content class</button><button data-m="totals">Layout 3 vs 4 · totals</button></span>
+            </div>
+            <canvas id="survCanvas" width="860" height="300" aria-label="Bar chart of watermark survival rates"></canvas>
+            <p class="w-note" id="survNote">9 images × 11 transforms (crops, scales, JPEG/WebP rounds, screenshot chains, mirrors). False positives: <strong>0/369</strong> wrong-key checks. Re-run: <span class="mono">npm run bench:stego</span>.</p>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.24, §2.28 (full bench tables + PSNR by class). “Periodic” synthetic content is a measured 0/11 — adversarial test content, kept in the corpus on purpose.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-bch" data-tags="security quality compat">
+        <div class="decision-head"><span class="decision-no">D-13</span>
+          <div><h3 class="decision-title">Layout 4 = BCH(188,64) — shipped opt-in, deliberately not the default</h3>
+          <div class="decision-tags"><span class="chip static">Quality</span><span class="chip static">Compatibility</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Algebraic error correction beats repetition — in quality (+1.4 dB photos) and theory. It lost the pre-registered flip test by one case (84 vs 85 robust), so layout 3 stays default. The bar was set before the experiment; the result stands.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Repetition coding wastes capacity: to fix k erasures you repeat everything. Literature (Frontiers in Physics 2026 ECC comparison) puts BCH + repetition concatenation at the top for watermark extraction robustness, with deterministic correction at low bit reliability.</p></div>
+            <div><h4>We chose</h4><p>Shortened BCH(188,64) over the unchanged v3 cell layout (48-bit fingerprint + keyed MAC-16 inside the codeword), gentler amplitude curve paid for by the coding gain. Layouts 1–3 byte-frozen; v4 is <span class="mono">steganography.layoutVersion: 4</span>.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Make v4 the default anyway</strong> — the flip bar (“≥ v3 in every class, better PSNR, FP 0”) was written before measuring; v4 trails by one robust-mode case (0.7-scale photo crops inside a 20 s auto-layout budget). Moving goalposts after results is how benchmarks become marketing.</li><li><strong>LDPC</strong> — wants soft LLRs and longer blocks; a 188-bit channel with hard cell votes favours BCH.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Guaranteed radius 2e+s ≤ 36; erasure recovery measured at 70/188 bits erased.</li><li>Better PSNR in every class; standard-mode recovery identical (63/99).</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Needs a v1.20+ detector; slightly behind on small-crop photos under tight time budgets.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Bench table in the widget above (D-12) and RESEARCH §2.28; golden-hash test proves layouts 1–3 byte-identical across the change.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-mac" data-tags="security honesty">
+        <div class="decision-head"><span class="decision-no">D-14</span>
+          <div><h3 class="decision-title">A keyed MAC decides attribution — never a CRC, never a “confidence %”</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Honesty</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">False attribution is the catastrophic failure (accusing an innocent buyer). Every candidate decode must pass a keyed 16-bit MAC and strict mismatch caps; the reported <span class="mono">confidence: 0.99</span> is a label, not a measured probability — and the docs say so.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Powerful solvers try thousands of candidate codewords. Against a CRC — or a loose error cap — some noise candidate eventually “validates”, manufacturing a fingerprint from an unmarked image. We measured this happening (a wrong MAC-valid fingerprint at a loose cap) during development.</p></div>
+            <div><h4>We chose</h4><p>MAC-16 inside every codeword version, mismatch caps at 0.30×(observed−64) (≈7σ from noise solves), hard clamp 0.34, agreement/evidence tiers. Legacy CRC codewords remain readable only behind an explicit compatibility flag.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>CRC tags</strong> — unkeyed: anyone can forge, noise can pass.</li><li><strong>Wider caps for more recoveries</strong> — buys true positives with false accusations; the exchange rate is unacceptable.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>0/369 wrong-key false positives on the final decoder (including every solver rung).</li><li>Forgery requires the stego key, not just the algorithm.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Some genuinely-marked but heavily damaged copies correctly return “not found” instead of a guess. That is the intended asymmetry.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>FP sweep <span class="mono">bench:stego --fp</span> (369 checks); MAC-lottery incident and cap derivation in RESEARCH §2.28.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-ladder" data-tags="quality performance">
+        <div class="decision-head"><span class="decision-no">D-15</span>
+          <div><h3 class="decision-title">A decode ladder, not a decoder: BM → ML → OSD → ISD → forensic stash</h3>
+          <div class="decision-tags"><span class="chip static">Quality</span><span class="chip static">Performance</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Bounded-distance decoding dies at 37 erasures. Real crops erase 69+ bits and flip a few of the survivors. Each rung exists because a measured case killed the previous one.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Ground-truth capture on a failing crop: 69 erasures + 13 errors, ~4 of them inside whatever basis you solve from. No single classical algorithm covers that inside a 20-second multi-layout budget.</p></div>
+            <div><h4>We chose</h4><p>Berlekamp-Massey first (fast, guaranteed radius), ML erasure solve (any 64 independent clean bits), OSD-1/2 reprocessing, inline information-set decoding on coherent candidates, then deep ISD over the three best <em>distinct-geometry</em> failures stashed during the search — including one bounded pass when the clock runs out. All randomness input-seeded and deterministic.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Unbounded inline search</strong> — every unmarked suspect would pay seconds of ISD; screening latency explodes (measured).</li><li><strong>Single best-candidate retry</strong> — the max-evidence candidate turned out to be the worst ISD case (an error sat inside its top-24 reliability ranks); hence top-3 distinct geometries.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Crop recovery that bounded-distance decoding cannot express, inside fixed budgets.</li><li>Unmarked images exit via cheap screens (430 ms at 2400px).</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>The most intricate code in the repo; gate calibration is content-scale dependent and pinned by the bench corpus.</li></ul></div>
+          </div>
+          <div class="widget" id="w-bch">
+            <h4>Widget — where each rung can still save the mark (schematic)</h4>
+            <div class="w-row">
+              <label>Erasures (bits cropped away) <input type="range" id="bchS" min="0" max="130" value="69"><span class="mono" id="bchSV">69</span></label>
+              <label>Errors (surviving bits flipped) <input type="range" id="bchE" min="0" max="40" value="13"><span class="mono" id="bchEV">13</span></label>
+            </div>
+            <canvas id="bchCanvas" width="860" height="340" aria-label="Schematic recovery regions by erasures and errors"></canvas>
+            <p class="w-out" id="bchOut"></p>
+            <p class="w-note">Schematic — real recovery depends on error positions, reliability ordering, mismatch caps and the time budget; every candidate must still pass the keyed MAC. The default point (69, 13) is the measured ground truth of a real failing case.</p>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.28 root-cause table (six measured causes, six fixes); codec-level OSD/ISD unit tests; two-phase detection timing (dihedral screens 13.9 s → 0.6 s class).</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-corroboration" data-tags="security honesty">
+        <div class="decision-head"><span class="decision-no">D-16</span>
+          <div><h3 class="decision-title">Corroboration stack: pHash + forensic blocks + collusion assay — evidence, not verdicts</h3>
+          <div class="decision-tags"><span class="chip static">Honesty</span><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">A 64-bit DCT pHash (soft binding), seeded forensic block signs, and a collusion-ranking assay support the primary mark. Each is labelled with what it can and cannot prove.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Attribution in the real world is an investigation: marks get cropped, buyers collude by averaging copies, suspects arrive recompressed by platforms. One signal, however strong, will sometimes be absent — and overstating weak signals is how innocent people get accused.</p></div>
+            <div><h4>We chose</h4><p>Layered, independently-failing evidence: pHash near-duplicate matching, block-sign correlation against a reference, and a collusion assay that <em>ranks</em> candidate recipients by z-score for human review, backed by an issuance log and signed ownership tokens.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Claiming collusion-proof decoding</strong> — Tardos’ bound needs ≈2,180 symbols for c=4 at ε=1e-6; the channel carries 96 bits. Blind collusion-proofing is mathematically out of reach here, so we rank instead of accuse.</li><li><strong>Single-signal verdicts</strong> — pHash alone is spoofable; forensic blocks alone are weak.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Graceful degradation: absent mark ≠ absent evidence.</li><li>Each layer’s strength is documented in its own terms.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Operators must run an actual investigation workflow (we ship the guide, not a magic button).</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Collusion assay ranks averaging participants above innocents in tests; two-buyer averaging yields <em>no</em> phantom fingerprint in the red-team suite. RESEARCH §2.26.</p></div>
+        </div>
+      </article>
+
+      <!-- ================= E. PLATFORM ================= -->
+      <div class="group-head"><span class="band-no">E</span><h2>Platform — running it safely at scale</h2></div>
+
+      <article class="decision" id="d-sharp" data-tags="performance security">
+        <div class="decision-head"><span class="decision-no">D-17</span>
+          <div><h3 class="decision-title">Sharp/libvips under hard budgets, one chained pipeline</h3>
+          <div class="decision-tags"><span class="chip static">Performance</span><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Every transform runs as a single libvips pipeline with pixel/channel caps, <span class="mono">failOn</span>, sequential reads, and a wall-clock timeout — because the image decoder is the most dangerous code you expose to the internet.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Image parsers are a historic CVE farm, and naive multi-pass processing (decode → encode → decode) multiplies both risk and seconds. A 60,000×60,000 IHDR claim should cost a header check, not 14 GB.</p></div>
+            <div><h4>We chose</h4><p>Sharp (peer dependency, operator-patched), chained operations, two-stage derivative construction (cacheable clean base → per-viewer finish), orientation baked only when present, output-pixel budgets that include scramble padding, and controlled error mapping for malformed input.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Pure-JS codecs (Jimp class)</strong> — ~14–40× slower, full-frame heap pressure.</li><li><strong>ImageMagick shell-outs</strong> — process-spawn attack surface + full in-memory frames.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Streaming keeps RAM flat; budgets make DoS arithmetic boring.</li><li>Cold 960px catalog derivative ≈63 ms; warm path is cache + tokens.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Native dependency to keep patched (documented; audit in CI).</li><li>Full-res 24 MP scrambled encodes are encoder-bound (~13 s mozjpeg) — sizing guidance, not magic.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Optimization bench (<span class="mono">npm run bench:opt</span>); pixel-bomb and garbage-master attacks held fast; fuzz suite over parsers. RESEARCH §2.27, §2.30.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-bounded" data-tags="security performance">
+        <div class="decision-head"><span class="decision-no">D-18</span>
+          <div><h3 class="decision-title">Bounded everything: no attacker-sized data structures</h3>
+          <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Performance</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Rate limiters, replay sets, distinct-image trackers, body readers, batch minters, detect queues — every structure an attacker can grow has a hard capacity and a deadline.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>“Just use a Map” is how a token endpoint becomes a memory-exhaustion service. Slow-trickle bodies pin handlers; 2,000-item batches pin CPUs; distinct-ID floods pin trackers.</p></div>
+            <div><h4>We chose</h4><p>Capacity-capped structures with interval cleanup (no per-request scans), /64+/48 IPv6 limiter tiers (rotation-resistant), deadline-bounded body reads, batch item caps, slow-callback timeouts, and a distinct-image scrape quota with deny/challenge actions.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Rely on the host framework’s limits</strong> — varies by deployment; the library must be safe behind a bare <span class="mono">node:http</span> server (our demo is one).</li><li><strong>Per-IP only rate keys</strong> — IPv6 rotation walks straight through (measured; hence tiers).</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Worst-case memory/connections are arithmetic, not vibes.</li><li>Scrapers hit quotas, not your origin budget.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>More knobs; multi-instance deployments should use the Redis store for shared truth (shipped, contract-tested against real Redis in CI).</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team E + H: mint flood 429s, slow-trickle cut at deadline, 4th distinct image 429, 40-way concurrency bounded. Load test ships in-repo.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-nodefloor" data-tags="compat security">
+        <div class="decision-head"><span class="decision-no">D-19</span>
+          <div><h3 class="decision-title">Zero runtime dependencies; an honest Node floor split</h3>
+          <div class="decision-tags"><span class="chip static">Compatibility</span><span class="chip static">Security</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">The library installs with no runtime dependency tree (Sharp is a peer). <span class="mono">engines ≥20.9</span> covers the library; the dev browser suite needs Node 22 — because the Node-20-compatible Puppeteer line failed our audit gate.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Supply-chain risk scales with dependency count, and “supports Node 20” claims often quietly exclude the test tooling. Puppeteer 25 needs Node ≥22.12; Puppeteer 24 would have kept 20 but dragged advisories our CI rejects.</p></div>
+            <div><h4>We chose</h4><p>Measure it, then write it down: pin Puppeteer 24 was evaluated and rejected on its audit chain (basic-ftp/extract-zip). CI encodes the split honestly — library suites on Node 20 and 22, browser suite on 22; <span class="mono">.nvmrc</span> says 22 for contributors.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Lower the audit gate</strong> — the gate caught a real same-day advisory during the v1.21 ship run.</li><li><strong>Bundle a crypto/base64 library</strong> — platform primitives suffice; every dep is a future advisory.</li></ul></div>
+            <div><h4>Pros</h4><ul><li><span class="mono">npm audit</span> on the shipped artifact is an empty tree by construction.</li><li>Version claims match what CI actually runs.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Contributors on Node 20 can’t run the browser suite locally (CI still covers them).</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.28 (Puppeteer measurement), §2.29 (follow-redirects advisory caught at ship time, dev-only chain).</p></div>
+        </div>
+      </article>
+
+      <!-- ================= F. PROCESS ================= -->
+      <div class="group-head"><span class="band-no">F</span><h2>Process — how the work itself is governed</h2></div>
+
+      <article class="decision" id="d-byteidentical" data-tags="performance compat">
+        <div class="decision-head"><span class="decision-no">D-20</span>
+          <div><h3 class="decision-title">Optimizations must be byte-identical — or be reverted</h3>
+          <div class="decision-tags"><span class="chip static">Performance</span><span class="chip static">Compatibility</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">Speed work is gated by output-hash oracles (135 cases at 24 MP last round) and a golden freeze of shipped formats. One “optimization” measured slower and was reverted in the same round; its numbers are published too.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Floating-point reassociation, encoder-flag drift, and cache-sharing “improvements” silently change pixels or payloads — invalidating issued marks, cached derivatives, and every prior benchmark.</p></div>
+            <div><h4>We chose</h4><p>Every performance change ships with before/after hash probes over odd sizes and unaligned buffers, exact-arithmetic justifications (integer-exact, order-preserved, or permutation-only), and isolated median timings. New physics ships as a new format version (D-13), never as a silent change.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>“Visually identical” as the bar</strong> — watermark decoders read bits, not vibes.</li><li><strong>Benchmark-only validation</strong> — end-to-end benches swing ±40% with machine load; hashes don’t.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Upgrades are safe for issued assets; regressions are caught by diff, not by users.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>Some textbook optimizations (separable filters, encoder tweaks) are off-limits; wins must be structural, which is slower to find.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.29–2.30: flips −64%, rotate/transpose −48%, forensic −37% at 24 MP, all hash-identical; rotate-interior-clamp reversal documented with numbers.</p></div>
+        </div>
+      </article>
+
+      <article class="decision" id="d-honesty" data-tags="honesty">
+        <div class="decision-head"><span class="decision-no">D-21</span>
+          <div><h3 class="decision-title">Honest labelling as an engineering constraint — and 0BSD</h3>
+          <div class="decision-tags"><span class="chip static">Honesty</span></div></div>
+          <button class="decision-toggle" aria-expanded="false">Open</button></div>
+        <p class="decision-lede">No “screenshot prevention”, no DRM claims, no C2PA conformance, no independent-audit theatre. The license matches the philosophy: BSD Zero Clause — use it any way you like; attribution appreciated, never required.</p>
+        <div class="decision-body" hidden>
+          <div class="decision-grid">
+            <div><h4>The problem</h4><p>Displayed pixels cannot be made un-copyable (the analog hole is physics). Tools that promise otherwise train buyers to under-invest in the layers that work — access control, resolution policy, attribution, and response.</p></div>
+            <div><h4>We chose</h4><p>Every claim in the README/site maps to a shipped, runnable measurement; limits get their own page (<a href="limits.html">Threat model</a>) including when to choose EME DRM, C2PA provenance, or neural watermarking services instead. The 0BSD license removes permission friction for a tool whose job is protecting other people’s work.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Marketing-first claims</strong> — they benchmark well in sales decks and fail in incident reports.</li><li><strong>Copyleft (GPL)</strong> — would keep the code out of the commercial galleries that need it most.</li><li><strong>Claiming C2PA</strong> — provenance is not protection; the 2.4 spec’s conformance program is young and we do not sign manifests. Named, not implied.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Operators size their expectations and their other defenses correctly.</li><li>Zero license friction for adoption, forks, and audits.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>“We can’t stop screenshots” loses some sales to vendors who lie about it. Accepted.</li></ul></div>
+          </div>
+          <div class="evidence"><h4>Evidence</h4><p>This page. Every number on it is reproducible from the repository: <span class="mono">npm run verify · npm run redteam · npm run bench:stego · npm run bench:opt</span>.</p></div>
+        </div>
+      </article>
+
+    </div>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="wordmark wordmark-small">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      Archnemix
+    </span>
+    <p><a href="index.html">Overview</a> · <a href="limits.html">Threat model &amp; limits</a> · © 2026 Archnemix contributors · 0BSD</p>
+  </div>
+</footer>
+
+<script type="module" src="technical.js"></script>
+</body>
+</html>

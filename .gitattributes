@@ -1,0 +1,15 @@
+# Normalize text files to LF in the repository and working tree.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending converted.
+*.gif binary
+*.jpeg binary
+*.jpg binary
+*.png binary
+*.webp binary
+*.zip binary
+
+# Generated outputs are committed for direct-download use, but should not
+# dominate GitHub language statistics.
+dist/** linguist-generated=true
+package-lock.json linguist-generated=true

@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Local environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and test output
+*.log
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Local package/release archives
+*.tgz
+*.zip
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Regenerable demo assets (npm run demo:images) — keep the repository light
+demo-masters/gallery/
+demo/public-unprotected/
+
+# Local scratch and generated protected samples
+*.archx
+tmp/
+temp/
