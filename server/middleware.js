@@ -1755,12 +1755,15 @@ export function createArchxMiddleware(options = {}) {
       }
 
       if (isBatchTokens) {
-        // A CORS preflight is unauthenticated by specification; this
-      // branch still checks the origin allowlist and returns only CORS
-      // headers (204, no body, no token, no payload). Access control
-      // for every real request below is unchanged.
-      // codeql[js/user-controlled-bypass]
-      if (isPreflight(req)) {
+        if (req.method === 'OPTIONS') {
+          // Only a true CORS preflight (Origin + Access-Control-Request-
+          // Method, from an allowlisted origin) earns the 204 below; a
+          // bare OPTIONS from a non-browser caller is a method probe.
+          if (!isPreflight(req)) {
+            return deny(req, res, 405, 'method not allowed', {
+              phase, reason: 'batch-token-method', headers: { Allow: 'POST' },
+            });
+          }
           if (!allowedOrigins?.length || !originAllowed(req)) {
             return deny(req, res, 403, 'forbidden', { phase, reason: 'cors-origin' });
           }
@@ -1930,12 +1933,16 @@ export function createArchxMiddleware(options = {}) {
         return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
       }
 
-      // A CORS preflight is unauthenticated by specification; this
-      // branch still checks the origin allowlist and returns only CORS
-      // headers (204, no body, no token, no payload). Access control
-      // for every real request below is unchanged.
-      // codeql[js/user-controlled-bypass]
-      if (isPreflight(req)) {
+      if (req.method === 'OPTIONS') {
+        // Only a true CORS preflight (Origin + Access-Control-Request-
+        // Method, from an allowlisted origin) earns the 204 below; a
+        // bare OPTIONS from a non-browser caller is a method probe.
+        if (!isPreflight(req)) {
+          return deny(req, res, 405, 'method not allowed', {
+            id, phase, reason: kind === 'token' ? 'token-method' : 'image-method',
+            headers: { Allow: kind === 'token' ? cfg.tokenMethods.join(', ') : 'GET' },
+          });
+        }
         if (!allowedOrigins?.length || !originAllowed(req)) {
           return deny(req, res, 403, 'forbidden', { id, phase, reason: 'cors-origin' });
         }
