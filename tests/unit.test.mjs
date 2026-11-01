@@ -4422,3 +4422,43 @@ test('v1.20 ISD: 69 erasures + 13 tail-biased errors recover via information set
   const noise = Uint8Array.from({ length: BCH_CODE_BITS }, (_, i) => ((i * 2654435761) >>> 13) & 1);
   assert.equal(bchIsdSolve(noise, order, { maxMismatches: 20, verify: () => false, trials: 600, seedSalt: 3 }), null);
 });
+
+test('v1.24: preflight-only OPTIONS and HMAC key-cache byte identity', async (t) => {
+  const { signToken } = await import('../server/tokens.js');
+  const payload = { v: 2, id: 'cat', n: 'abc123' };
+  const secret = 'unit-secret-for-hmac-identity-32chars!';
+  // The cached-Buffer HMAC key path must produce byte-identical MACs to a
+  // Buffer key (and to itself on the cache-hit path): createHmac encodes
+  // string keys as UTF-8, which is exactly Buffer.from(secret).
+  assert.equal(signToken(payload, secret), signToken(payload, Buffer.from(secret)));
+  assert.equal(signToken(payload, secret), signToken(payload, secret));
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-v124-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const handler = createArchxMiddleware({
+    secret: 'v124-secret-for-unit-tests-32chars-min',
+    imagesDir: dir,
+    allowedOrigins: ['https://example.test'],
+    authorize: async () => ({}),
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  // A bare OPTIONS (curl/scanner shape) is not a CORS preflight: it must hit
+  // the normal method check (405), not the permissive 204 preflight branch.
+  assert.equal((await fetch(base + '/archx/i/cat', { method: 'OPTIONS' })).status, 405);
+  // A real preflight (Origin + Access-Control-Request-Method) from the
+  // allowed origin still gets its 204…
+  const okPreflight = await fetch(base + '/archx/i/cat', {
+    method: 'OPTIONS',
+    headers: { origin: 'https://example.test', 'access-control-request-method': 'GET' },
+  });
+  assert.equal(okPreflight.status, 204);
+  // …and a preflight-shaped request from any other origin is refused.
+  const evilPreflight = await fetch(base + '/archx/i/cat', {
+    method: 'OPTIONS',
+    headers: { origin: 'https://evil.example', 'access-control-request-method': 'GET' },
+  });
+  assert.equal(evilPreflight.status, 403);
+});
