@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import sharp from 'sharp';
 import {
   detectStegoFingerprint, legacyStegoFingerprint, stegoFingerprint, sniffImageInfo, decodeBmpImage,
-  perceptualFingerprint, normalizePerceptualFingerprint, comparePerceptualFingerprints,
+  perceptualFingerprint, normalizePerceptualFingerprint, matchPerceptualFingerprint,
 } from '../src/scramble.js';
 import { deriveStegoKey } from './middleware.js';
 import { verifyOwnership } from './ownership.js';
@@ -47,7 +47,7 @@ function parseArgs(argv, booleanFlags = new Set()) {
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'verify-ownership', 'help']));
+const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'verify-ownership', 'help', 'no-orientations']));
 const input = args._[0];
 if (!input || args.help) {
   console.log(`Usage: archx-detect <suspect image> [options]
@@ -57,6 +57,8 @@ if (!input || args.help) {
   --expect <payload> expected owner/order/viewer payload or 12-hex fingerprint
   --expect-fingerprint <16hex> registered perceptual soft-binding fingerprint
   --max-distance <n> maximum perceptual Hamming distance 0–64 (default 10)
+  --no-orientations  perceptual match in the shipped orientation only (default:
+                       also probes flips/90° rotations/transposes of the suspect)
   --profile <p>      auto (default), standard, or robust
   --layout <n>       pin codeword layout 1-4 (default auto: tries 3, 4, 2, 1)
   --max-time-ms <n>  wall-clock budget for the whole search (default 0 = unlimited;
@@ -111,6 +113,7 @@ if ((args['expect-fingerprint'] && !expectedPerceptual) ||
 let bytes;
 let data;
 let info;
+let suspectThumb = null;
 let result;
 let suspectPerceptualFingerprint;
 try {
@@ -191,6 +194,7 @@ try {
   }).timeout({ seconds: 30 })
     .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
     .ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  suspectThumb = thumb;
   suspectPerceptualFingerprint = perceptualFingerprint(thumb.data, thumb.info.width, thumb.info.height);
 } catch (err) {
   if (args.json) console.log(JSON.stringify({ file: input, found: false, error: 'unreadable or unsupported suspect image' }, null, 2));
@@ -204,8 +208,23 @@ const expected = args.expect ? stegoFingerprint(args.expect) : null;
 // attributions keep resolving (12-hex expectations are identical).
 const expectedAlternatives = expected ? [...new Set([expected, legacyStegoFingerprint(args.expect)])] : null;
 const matchesExpectation = expectedAlternatives ? expectedAlternatives.includes(result.fingerprint) : null;
-const perceptualComparison = expectedPerceptual
-  ? comparePerceptualFingerprints(suspectPerceptualFingerprint, expectedPerceptual, { maxDistance: maxPerceptualDistance })
+// Orientation-tolerant soft-binding match: a flipped/rotated/transposed
+// leak still matches the registered fingerprint (identity stays the exact
+// full-resolution comparison; --no-orientations restores the strict form).
+const perceptualPixels = suspectThumb
+  ? { data: suspectThumb.data, width: suspectThumb.info.width, height: suspectThumb.info.height }
+  : { data, width: info.width, height: info.height };
+const perceptualMatch = expectedPerceptual
+  ? matchPerceptualFingerprint(perceptualPixels.data, perceptualPixels.width, perceptualPixels.height, expectedPerceptual, {
+      maxDistance: maxPerceptualDistance, orientations: !args['no-orientations'],
+    })
+  : null;
+const perceptualComparison = perceptualMatch
+  ? {
+      distance: perceptualMatch.distance, similarity: perceptualMatch.similarity,
+      match: perceptualMatch.match, orientation: perceptualMatch.orientation,
+      orientationsChecked: perceptualMatch.orientationsChecked,
+    }
   : null;
 
 if (args.json) {
@@ -234,7 +253,7 @@ if (args.json) {
   console.log(`  confidence  : ${result.confidence} (cell agreement ${result.agreement}, corrections ${result.corrections})`);
   if (result.geometry) console.log(`  geometry    : scale ${result.geometry.scaleX}×${result.geometry.scaleY}, origin ${result.geometry.originX},${result.geometry.originY}`);
   if (expected) console.log(`  expected    : ${expected} ${matchesExpectation ? '— MATCH' : '— does NOT match'}`);
-  console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'})` : ''}`);
+  console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'}${perceptualComparison.orientation !== 'identity' ? ` via ${perceptualComparison.orientation} correction` : ''})` : ''}`);
   if (result.mirrored) console.log('  note        : mark was recovered from a horizontally flipped suspect.');
   // Repaired decodes are weaker evidence: the CRC corrector flipped bits to
   // reach a valid codeword, and under multi-buyer collusion averaging that
@@ -253,7 +272,7 @@ if (args.json) {
 } else {
   console.log(`✘ No confident StegoMark found in ${input}`);
   console.log(`  best candidate: ${result.fingerprint} (confidence ${result.confidence}, CRC ${result.crcValid ? 'valid' : 'invalid'}, agreement ${result.agreement})`);
-  console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'})` : ''}`);
+  console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'}${perceptualComparison.orientation !== 'identity' ? ` via ${perceptualComparison.orientation} correction` : ''})` : ''}`);
   console.log('  Wrong key/grid, heavy filtering/regeneration, severe cropping, or an unmarked image can all cause this.');
 }
 

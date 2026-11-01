@@ -50,5 +50,5 @@ export { assayStegoCollusion } from './core/stego-assay.js';
 export { assayStegoEmbed } from './core/stego-assay.js';
 export {
   perceptualFingerprint, normalizePerceptualFingerprint,
-  perceptualFingerprintDistance, comparePerceptualFingerprints,
+  perceptualFingerprintDistance, comparePerceptualFingerprints, matchPerceptualFingerprint,
 } from './core/perceptual.js';

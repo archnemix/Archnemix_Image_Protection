@@ -10,7 +10,9 @@
  * pollution, mass assignment, deeply nested bodies, content-type
  * confusion), cache/CORS/error-surface leakage, attribution abuse
  * (wrong-key lottery, noise false positives, screenshot chains,
- * two-buyer collusion averaging), and resource bounds.
+ * two-buyer collusion averaging), orientation-damaged leaks (v1.25:
+ * flipped/rotated/transposed copies must still recognise, never
+ * misattribute), and resource bounds.
  *
  * Same rules as tools/red-team.mjs: every entry states the defense
  * it expects; FAIL exits 1; INFO reports measured limits.
@@ -24,7 +26,11 @@ import http from 'node:http';
 import net from 'node:net';
 import sharp from 'sharp';
 import { createArchxMiddleware } from '../server/middleware.js';
-import { decodeContainer, embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint } from '../src/scramble.js';
+import {
+  decodeContainer, embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint,
+  perceptualFingerprint, matchPerceptualFingerprint,
+} from '../src/scramble.js';
+import { transposePixels } from '../src/core/pixels.js';
 
 const SECRET = 'red-team-v2-secret-with-well-over-32-bytes!';
 const STEGO_KEY = 'red-team-v2-stego-key';
@@ -336,6 +342,48 @@ await attack('stego', 'two-buyer averaging collusion never attributes an innocen
   return {
     pass: !hit.found || allowed.has(hit.fingerprint),
     detail: hit.found ? 'average attributed to one actual participant' : 'average undecodable as a single buyer (assay territory, documented)',
+  };
+});
+
+
+/* ==================== F. orientation-damaged leaks (v1.25) ==================== */
+console.log('\nF. Orientation-damaged leaks (recognition after modification)');
+
+await attack('recognise', 'flipped and 90°-rotated marked copies never misattribute (stego)', async () => {
+  const flipped = await xform(markedA, H.w, H.h, (p) => p.flop());
+  const rotated = await xform(markedA, H.w, H.h, (p) => p.rotate(90));
+  const f = detectStegoFingerprint(flipped.buf, flipped.w, flipped.h, {
+    key: STEGO_KEY, profile: 'robust', searchGeometry: false, maxTimeMs: 20_000,
+  });
+  const r = detectStegoFingerprint(rotated.buf, rotated.w, rotated.h, {
+    key: STEGO_KEY, profile: 'robust', searchGeometry: false, maxTimeMs: 20_000,
+  });
+  const neverWrong = (!f.found || f.fingerprint === fpA) && (!r.found || r.fingerprint === fpA);
+  const recognised = (f.found && f.fingerprint === fpA) || (r.found && r.fingerprint === fpA);
+  return {
+    pass: neverWrong && recognised,
+    detail: `flip-x: ${f.found ? 'BUYER-A' : 'not found'}, rot90: ${r.found ? 'BUYER-A' : 'not found'}`,
+  };
+});
+await attack('recognise', 'perceptual soft binding matches flipped/rotated/transposed copies, never a stranger', async () => {
+  const ref = perceptualFingerprint(H.buf, H.w, H.h);
+  const variants = [
+    ['flip-x', await xform(H.buf, H.w, H.h, (p) => p.flop())],
+    ['flip-y', await xform(H.buf, H.w, H.h, (p) => p.flip())],
+    ['rotate-180', await xform(H.buf, H.w, H.h, (p) => p.rotate(180))],
+    ['rotate-90-ccw', await xform(H.buf, H.w, H.h, (p) => p.rotate(90))],
+    ['transpose', { buf: transposePixels(H.buf, H.w, H.h, false), w: H.h, h: H.w }],
+  ];
+  const misses = [];
+  for (const [want, v] of variants) {
+    const m = matchPerceptualFingerprint(v.buf, v.w, v.h, ref);
+    if (!m.match || m.orientation !== want) misses.push(`${want} (got ${m.orientation} d=${m.distance})`);
+  }
+  const strangerRaw = await sharp(await syntheticMaster(760, 520, 'STRANGER')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const stranger = matchPerceptualFingerprint(new Uint8Array(strangerRaw.data), strangerRaw.info.width, strangerRaw.info.height, ref);
+  return {
+    pass: misses.length === 0 && !stranger.match,
+    detail: misses.length ? `missed: ${misses.join('; ')}` : `5/5 orientations recognised; stranger distance ${stranger.distance}/64 across all orientations`,
   };
 });
 

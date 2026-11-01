@@ -302,3 +302,11 @@ export function perceptualFingerprintDistance(a: string, b: string): number;
 export function comparePerceptualFingerprints(
   a: string, b: string, options?: { maxDistance?: number },
 ): { distance: number; similarity: number; match: boolean };
+export function matchPerceptualFingerprint(
+  rgba: Uint8Array | Uint8ClampedArray, w: number, h: number, expected: string,
+  options?: { maxDistance?: number; orientations?: boolean },
+): {
+  match: boolean; distance: number; similarity: number;
+  orientation: 'identity' | 'flip-x' | 'flip-y' | 'rotate-180' | 'rotate-90-ccw' | 'rotate-90-cw' | 'transpose' | 'transpose-anti';
+  fingerprint: string; orientationsChecked: number;
+};
