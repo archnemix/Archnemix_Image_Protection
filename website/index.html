@@ -43,39 +43,20 @@
       display-resolution fragments. Your visitors get the photograph.
     </p>
 
-    <figure class="stage" id="stage">
-      <div class="stage-frame">
-        <canvas id="gl" tabindex="0" aria-label="Interactive 3D demonstration: a photograph split into tiles that scramble and reassemble. Drag to orbit, hover a tile to trace it, press space to scatter."></canvas>
-        <div class="stage-fallback" id="stageFallback" hidden>
-          <p>The 3D demonstration needs WebGL. The idea, in one line: the picture
-          travels as 64 permuted, mirrored tiles and only becomes a picture
-          inside the viewer.</p>
-        </div>
-        <span class="stage-tag" id="stageTag">Your visitor&rsquo;s view</span>
-      </div>
-      <figcaption class="stage-controls">
-        <div class="stage-buttons" role="group" aria-label="Demonstration controls">
-          <button type="button" id="btnView" class="btn is-active">Visitor&rsquo;s view</button>
-          <button type="button" id="btnWire" class="btn">On the wire</button>
-        </div>
-        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.</p>
-      </figcaption>
-      <div class="stage-tools">
-        <span class="tools-label">Grid</span>
-        <span class="seg" id="gridSeg" role="group" aria-label="Tile grid size">
-          <button type="button" data-g="4">4×4</button>
-          <button type="button" data-g="8" class="is-active">8×8</button>
-          <button type="button" data-g="16">16×16</button>
-        </span>
-        <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
-        <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>
-      </div>
-    </figure>
 
     <div class="install-row">
       <code class="install mono" id="installCmd">npm install @archnemix/image-protection</code>
       <button type="button" class="btn btn-small" id="copyInstall">Copy</button>
       <span class="install-note">Node ≥ 20.9 · pure-JS client · Sharp on the server · free for any use</span>
+    </div>
+  </section>
+
+  <!-- ============ THE FILM · scroll-scrubbed pipeline journey ============ -->
+  <section class="film-band" id="film" data-no-reveal aria-label="Animated journey of one photograph through the Archnemix pipeline: private master, scrambling and fingerprinting, one-time delivery, guarded viewing, and leak identification">
+    <div class="film-pin">
+      <div class="film-mount" data-film>
+        <p class="film-noscript">The animated journey needs JavaScript. In one paragraph: your master stays on private disk; each viewer triggers a display-size derivative that is invisibly fingerprinted, cut into permuted tiles, and delivered once against a signed token; the pieces become a picture only inside the guarded viewer; and a leaked copy can be rescanned offline to name the recipient it was issued to.</p>
+      </div>
     </div>
   </section>
 
@@ -248,18 +229,7 @@ Archx.load.image('#hero-photo', 'aurora-valley', {
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.min.js" } }
 </script>
-<script>
-// If the module/CDN never starts the stage, say so instead of showing a void.
-setTimeout(function () {
-  if (!window.__archxGlReady) {
-    var fb = document.getElementById('stageFallback');
-    var gl = document.getElementById('gl');
-    if (gl) gl.remove();
-    if (fb) fb.hidden = false;
-  }
-}, 7000);
-</script>
-<script type="module" src="main.js"></script>
+<script type="module" src="film.js"></script>
 <script src="motion.js" defer></script>
 </body>
 </html>

@@ -75,7 +75,7 @@
   }
 
   /* ---------------- section reveals (IntersectionObserver) ------------- */
-  const revealTargets = sections.filter((s) => !s.classList.contains('hero'));
+  const revealTargets = sections.filter((s) => !s.classList.contains('hero') && !s.hasAttribute('data-no-reveal'));
   revealTargets.forEach((s) => {
     s.classList.add('rv');
     [...s.children].slice(0, 8).forEach((child, i) => {
@@ -108,7 +108,6 @@
   if (!reduced) {
     addParallax(document.querySelector('.hero h1, .page-intro h1'), 0.6, -30); // headline: mid-layer
     addParallax(document.querySelector('.hero .lede, .page-intro .lede2'), 0.75, -15);
-    addParallax(document.querySelector('.hero .stage'), 1.2, 30); // 3D stage: foreground
     // Numerals sit inline in the flex band-head: only a whisper of drift
     // (±12px), or they detach from their headings and overlap content.
     document.querySelectorAll('.band-no').forEach((el) => addParallax(el, 0.35, -50, 12));
@@ -246,4 +245,24 @@
     requestAnimationFrame(frame); // browsers pause rAF on hidden tabs
   }
   requestAnimationFrame(frame);
+
+  /* ---------------- install-command copy button (site chrome) ---------- */
+  const copyBtn = document.getElementById('copyInstall');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const text = document.getElementById('installCmd')?.textContent?.trim() ?? '';
+      const done = () => {
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = 'Copied ✓';
+        setTimeout(() => { copyBtn.textContent = prev; }, 1600);
+      };
+      try { await navigator.clipboard.writeText(text); done(); }
+      catch {
+        const range = document.createRange();
+        const node = document.getElementById('installCmd');
+        if (node) { range.selectNode(node); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range); }
+        try { document.execCommand('copy'); done(); } catch { /* selection left in place for manual copy */ }
+      }
+    });
+  }
 })();

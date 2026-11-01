@@ -39,24 +39,19 @@
     <p class="lede">
       What you upload, what the server does to it, what travels on the wire,
       what your visitor sees, what an attacker walks away with — and how a
-      leaked copy is traced back. Every stage below is live: press the buttons,
-      try to steal the picture, switch the protection profiles.
+      leaked copy is traced back. Scroll the film to watch it happen, then
+      press the buttons: every stage below is live.
     </p>
 
-    <figure class="stage" id="pipeStage">
-      <div class="stage-frame">
-        <canvas id="glpipe" tabindex="0" aria-label="Interactive 3D view of a photograph built from separate tiles. Drag to orbit."></canvas>
-        <div class="stage-fallback" id="pipeFallback" hidden>
-          <p>The 3D view needs WebGL. The short version: the picture is never one
-          file on the wire — it is separate, permuted pieces that only become a
-          picture inside the viewer.</p>
-        </div>
-        <span class="stage-tag">The picture, as the pipeline sees it: pieces</span>
+  </section>
+
+  <!-- ============ THE FILM · scroll-scrubbed pipeline journey ============ -->
+  <section class="film-band" id="film" data-no-reveal aria-label="Animated journey of one photograph through the Archnemix pipeline: private master, scrambling and fingerprinting, one-time delivery, guarded viewing, and leak identification">
+    <div class="film-pin">
+      <div class="film-mount" data-film>
+        <p class="film-noscript">The animated journey needs JavaScript. In one paragraph: your master stays on private disk; each viewer triggers a display-size derivative that is invisibly fingerprinted, cut into permuted tiles, and delivered once against a signed token; the pieces become a picture only inside the guarded viewer; and a leaked copy can be rescanned offline to name the recipient it was issued to.</p>
       </div>
-      <figcaption class="stage-controls">
-        <p class="stage-caption">One photograph, sixty-four separate tiles. Drag to orbit. Below, the same photograph travels the full server pipeline, stage by stage.</p>
-      </figcaption>
-    </figure>
+    </div>
   </section>
 
   <!-- ============ 01 · THE JOURNEY ============ -->
@@ -204,17 +199,7 @@
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.min.js" } }
 </script>
-<script>
-// If WebGL never starts, say so instead of showing a void.
-setTimeout(function () {
-  if (!window.__archxPipeGlReady) {
-    var fb = document.getElementById('pipeFallback');
-    var gl = document.getElementById('glpipe');
-    if (gl) gl.remove();
-    if (fb) fb.hidden = false;
-  }
-}, 7000);
-</script>
+<script type="module" src="film.js"></script>
 <script type="module" src="pipeline.js"></script>
 <script src="motion.js" defer></script>
 </body>
