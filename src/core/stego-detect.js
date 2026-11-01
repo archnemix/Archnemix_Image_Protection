@@ -394,9 +394,10 @@ export function detectStegoFingerprint(rgba, w, h, {
     planes.integral = built.integral;
   }
   const integral = planes.integral;
+  const integralStride = w + 1;
   const rectSum = (rx0, ry0, rx1, ry1) =>
-    integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] -
-    integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
+    integral[ry1 * integralStride + rx1] - integral[ry0 * integralStride + rx1] -
+    integral[ry1 * integralStride + rx0] + integral[ry0 * integralStride + rx0];
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
 
   // Reused scratch across this call's (synchronous) evaluate() probes:
@@ -414,6 +415,36 @@ export function detectStegoFingerprint(rgba, w, h, {
   const _cellScore = new Float32Array(gx * gy);
   const _disagreeByBit = new Uint16Array(codeLength);
   const _segmentResponses = [];
+  // Per-call geometry scratch for evaluate(): row/column bounds and
+  // segment/band split points depend only on (cy, segment) and
+  // (cx, band), so they are computed once per probe instead of once
+  // per cell per segment. The stored integers come from the exact
+  // same Math.round/clamp expressions the inline code used, so every
+  // rectSum argument — and therefore every score — is bit-identical.
+  const _rowY0 = new Int32Array(gy);
+  const _rowY1 = new Int32Array(gy);
+  const _rowOk = new Uint8Array(gy);
+  const _segYB = new Int32Array(gy * (rowSegments + 1));
+  const _colX0 = new Int32Array(gx);
+  const _colX1 = new Int32Array(gx);
+  const _colOk = new Uint8Array(gx);
+  const _bandXB = new Int32Array(gx * (columnBands + 1));
+  const _gains = new Uint16Array(codeLength);
+  // Layout-derived per-cell constants: code-bit index and the signed
+  // (polarity x segmentPolarity) product. Both are exact integer
+  // facts about the fixed layout; folding the +/-1 product into one
+  // Int8 keeps the floating-point score identical (multiplication
+  // by +/-1 is an exact sign flip, and sign flips compose exactly).
+  const _cellBitAll = new Uint16Array(cellCount);
+  const _signPol = new Int8Array(cellCount * rowSegments);
+  for (let i = 0; i < cellCount; i++) {
+    _cellBitAll[i] = order[i] % codeLength;
+    const pol = polarity[i];
+    const base = i * rowSegments;
+    for (let segment = 0; segment < rowSegments; segment++) {
+      _signPol[base + segment] = pol * segmentPolarity[base + segment];
+    }
+  }
   let _evalTick = 0;
   // OSD reprocessing budget for this detect call: the ML fallback
   // may run inside thousands of geometry probes, so escalations
@@ -485,29 +516,54 @@ export function detectStegoFingerprint(rgba, w, h, {
     const bitScores = _bitScores.fill(0);
     const bitCounts = _bitCounts.fill(0);
     let cellLen = 0;
+    // Hoisted row/column geometry (see scratch note above): identical
+    // rounding and skip predicates, evaluated gy+gx times per probe
+    // instead of per cell.
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
       const rawY1 = rawY0 + cellH0;
       const y0 = Math.max(0, Math.round(rawY0));
       const y1 = Math.min(h, Math.round(rawY1));
-      if (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) continue;
+      _rowY0[cy] = y0;
+      _rowY1[cy] = y1;
+      _rowOk[cy] = (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) ? 0 : 1;
+      const segBase = cy * (rowSegments + 1);
+      for (let s2 = 0; s2 <= rowSegments; s2++) {
+        _segYB[segBase + s2] = Math.round(rawY0 + (s2 * cellH0) / rowSegments);
+      }
+    }
+    for (let cx = 0; cx < gx; cx++) {
+      const rawX0 = ox + cx * cellW0;
+      const rawX1 = rawX0 + cellW0;
+      const x0 = Math.max(0, Math.round(rawX0));
+      const x1 = Math.min(w, Math.round(rawX1));
+      _colX0[cx] = x0;
+      _colX1[cx] = x1;
+      _colOk[cx] = (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) ? 0 : 1;
+      const bandBase = cx * (columnBands + 1);
+      for (let b2 = 0; b2 <= columnBands; b2++) {
+        _bandXB[bandBase + b2] = Math.round(rawX0 + (b2 * cellW0) / columnBands);
+      }
+    }
+    for (let cy = 0; cy < gy; cy++) {
+      if (!_rowOk[cy]) continue;
+      const y0 = _rowY0[cy];
+      const y1 = _rowY1[cy];
+      const segBase = cy * (rowSegments + 1);
       for (let cx = 0; cx < gx; cx++) {
-        const rawX0 = ox + cx * cellW0;
-        const rawX1 = rawX0 + cellW0;
-        const x0 = Math.max(0, Math.round(rawX0));
-        const x1 = Math.min(w, Math.round(rawX1));
-        if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
+        if (!_colOk[cx]) continue;
+        const x0 = _colX0[cx];
+        const x1 = _colX1[cx];
+        const bandBase = cx * (columnBands + 1);
         const sums = _sums.fill(0);
         const counts = _counts.fill(0);
-        const cellW = x1 - x0;
-        const cellH = y1 - y0;
         for (let segment = 0; segment < rowSegments; segment++) {
-          const ry0 = Math.max(y0, Math.round(rawY0 + (segment * cellH0) / rowSegments));
-          const ry1 = Math.min(y1, Math.round(rawY0 + ((segment + 1) * cellH0) / rowSegments));
+          const ry0 = Math.max(y0, _segYB[segBase + segment]);
+          const ry1 = Math.min(y1, _segYB[segBase + segment + 1]);
           if (ry1 <= ry0) continue;
           for (let band = 0; band < columnBands; band++) {
-            const rx0 = Math.max(x0, Math.round(rawX0 + (band * cellW0) / columnBands));
-            const rx1 = Math.min(x1, Math.round(rawX0 + ((band + 1) * cellW0) / columnBands));
+            const rx0 = Math.max(x0, _bandXB[bandBase + band]);
+            const rx1 = Math.min(x1, _bandXB[bandBase + band + 1]);
             if (rx1 <= rx0) continue;
             const idx = segment * columnBands + band;
             sums[idx] = rectSum(rx0, ry0, rx1, ry1);
@@ -538,8 +594,7 @@ export function detectStegoFingerprint(rgba, w, h, {
           // robust profile gains low-frequency resilience from its larger
           // macro-cells/bands, redundant 96-bit codeword, and higher amplitude.
           const response = (-(-m0 + 3 * m1 - 3 * (sums[base + 2] / counts[base + 2]) + (sums[base + 3] / counts[base + 3])) / 8);
-          const signedResponse = response *
-            polarity[cellIndex] * segmentPolarity[cellIndex * rowSegments + segment];
+          const signedResponse = response * _signPol[cellIndex * rowSegments + segment];
           if (robust) robustSegmentResponses.push(signedResponse);
           segmentScoreSum += signedResponse * weight;
           segmentWeightSum += weight;
@@ -558,7 +613,7 @@ export function detectStegoFingerprint(rgba, w, h, {
         // Clip outliers: one hard image edge crossing a cell can otherwise
         // outvote five correctly-marked repetitions of the same code bit.
         const score = Math.max(-12, Math.min(12, rawScore));
-        const bitIndex = order[cy * gx + cx] % codeLength;
+        const bitIndex = _cellBitAll[cellIndex];
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         _cellBitIdx[cellLen] = bitIndex;
@@ -598,10 +653,17 @@ export function detectStegoFingerprint(rgba, w, h, {
     // accept 2-3 corrections when raw signal is clearly genuine, so on
     // weak candidates a deep MAC search would manufacture rejects at
     // full HMAC cost across every geometry probe.
-    const meanAbsPre = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    let voteAbsSum = 0;
+    for (let i = 0; i < codeLength; i++) voteAbsSum += Math.abs(voteScores[i]);
+    const meanAbsPre = voteAbsSum / codeLength;
+    // Agreement and per-bit disagreement are complementary views of
+    // the same comparison; one fused pass computes both (the counts
+    // feed the repair pre-gate's agreement bound below).
     let preAgreeing = 0;
+    const disagreeByBit = _disagreeByBit.fill(0);
     for (let ci = 0; ci < cellLen; ci++) {
       if ((_cellScore[ci] >= 0) === !!votedBits[_cellBitIdx[ci]]) preAgreeing++;
+      else disagreeByBit[_cellBitIdx[ci]]++;
     }
     const preAgreement = cellLen ? preAgreeing / cellLen : 0;
     const standardDepth = meanAbsPre >= 2.0 && preAgreement >= 0.82 ? 3 : 1;
@@ -613,8 +675,13 @@ export function detectStegoFingerprint(rgba, w, h, {
     // When even that bound misses the found-gates, the candidate is
     // rejected without running the search (tag fields then report
     // "not evaluated": corrections -1, tagScheme null).
-    const minBitCountPre = Math.min(...bitCounts);
-    const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    let minBitCountPre = Infinity;
+    let observedBitsPre = 0;
+    for (let i = 0; i < codeLength; i++) {
+      const c = bitCounts[i];
+      if (c < minBitCountPre) minBitCountPre = c;
+      if (c > 0) observedBitsPre++;
+    }
     const coverageOkPre = isV4
       ? observedBitsPre >= 88 && cellLen >= 96
       : robust
@@ -622,14 +689,24 @@ export function detectStegoFingerprint(rgba, w, h, {
       : minBitCountPre >= 2 && cellLen >= codeLength * 3;
     let agreementBound = preAgreement;
     if (cellLen) {
-      const disagreeByBit = _disagreeByBit.fill(0);
-      for (let ci = 0; ci < cellLen; ci++) {
-        if ((_cellScore[ci] >= 0) !== !!votedBits[_cellBitIdx[ci]]) disagreeByBit[_cellBitIdx[ci]]++;
-      }
-      const gains = [...disagreeByBit].sort((a, b) => b - a);
+      // Sum of the largest maxFlips disagreement counts, via bounded
+      // selection on a scratch copy (maxFlips <= 5): identical integer
+      // sum to sorting descending, without allocating + sorting an
+      // Array view of the typed array on every probe.
       const maxFlips = robust ? 5 : standardDepth;
+      _gains.set(disagreeByBit);
       let gainSum = 0;
-      for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
+      const kMax = Math.min(maxFlips, codeLength);
+      for (let k = 0; k < kMax; k++) {
+        let bestIdx = -1;
+        let bestVal = 0;
+        for (let i = 0; i < codeLength; i++) {
+          if (_gains[i] > bestVal) { bestVal = _gains[i]; bestIdx = i; }
+        }
+        if (bestIdx < 0) break;
+        gainSum += bestVal;
+        _gains[bestIdx] = 0;
+      }
       agreementBound = (preAgreeing + gainSum) / cellLen;
     }
     // v4's BCH attempt is cheap (0.1 ms algebraic decode vs the
