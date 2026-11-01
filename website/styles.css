@@ -2,6 +2,7 @@
    No gradients-as-decoration, no glass, no neon. */
 
 :root {
+  color-scheme: light;
   --paper: #f3ede1;
   --paper-2: #ece3d0;
   --ink: #191612;
@@ -16,7 +17,26 @@
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html {
+  /* Native browser scrolling and a real, always-visible scrollbar.
+     Animation code does not own or replace either any more. */
+  scroll-behavior: auto;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: #9a3a24 #ded0ae;
+}
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track { background: #ded0ae; border-left: 1px solid #c7b98f; }
+::-webkit-scrollbar-thumb {
+  background: #9a3a24;
+  border: 3px solid #ded0ae;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: #b13a22; }
+@supports (overflow: clip) {
+  html, body { overflow-x: clip; }
+}
 body {
   margin: 0;
   background: var(--paper);
@@ -25,6 +45,7 @@ body {
   font-size: 17px;
   line-height: 1.62;
   -webkit-font-smoothing: antialiased;
+  cursor: auto;
 }
 /* paper grain */
 body::before {
@@ -486,153 +507,166 @@ table.layers td:last-child { color: var(--ink-soft); white-space: nowrap; }
   .masthead-meta { display: none; }
 }
 
-/* ---------- motion layer (motion.js) ---------- */
-/* Depth stage: perspective on the scroll container; layers separate via
-   translateZ in JS. Fixed chrome (progress/dots/cursor) lives on body,
-   outside main, so the perspective never traps it. */
-.motion-on main { perspective: 1400px; }
-.motion-on [data-parallax], .motion-on .band-no { will-change: transform; }
-
-/* ambient reactive background: three blurred orbs behind everything */
-.motion-orbs {
-  position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden;
+/* ---------- lightweight site layer (site.js) ---------- */
+/* Native scrollbar, native cursor, no perpetual JavaScript frame loop.
+   Sections receive .reveal only when IntersectionObserver is available;
+   each reveal is a one-time CSS transition and then is unobserved. */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity .65s ease, transform .65s cubic-bezier(.2, .65, .25, 1);
 }
-.orb {
-  position: absolute; border-radius: 50%; opacity: .45; will-change: transform;
-  filter: blur(90px); mix-blend-mode: multiply;
-}
-.orb-a { width: 420px; height: 420px; left: -120px; top: -80px; background: radial-gradient(circle, rgba(177,58,34,.55), rgba(177,58,34,0) 70%); }
-.orb-b { width: 520px; height: 520px; right: -180px; top: 32%; background: radial-gradient(circle, rgba(109,154,126,.5), rgba(109,154,126,0) 70%); }
-.orb-c { width: 360px; height: 360px; left: 34%; bottom: -140px; background: radial-gradient(circle, rgba(217,201,163,.65), rgba(217,201,163,0) 70%); }
-
-/* scroll progress */
-.scroll-progress {
-  position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 80;
-  background: transparent; pointer-events: none;
-}
-.scroll-progress-fill {
-  display: block; height: 100%; background: var(--rust);
-  transform-origin: 0 50%; transform: scaleX(0); will-change: transform;
-}
-
-/* chapter dots */
-.chapter-dots {
-  position: fixed; right: 16px; top: 50%; transform: translateY(-50%);
-  z-index: 80; display: grid; gap: 12px;
-}
-.chapter-dot {
-  width: 10px; height: 10px; border-radius: 50%; padding: 0;
-  border: 1.5px solid var(--ink); background: transparent; cursor: pointer;
-  transition: transform .3s ease, background .3s ease, border-color .3s ease;
-}
-.chapter-dot:hover { transform: scale(1.35); }
-.chapter-dot.active { background: var(--rust); border-color: var(--rust); transform: scale(1.5); }
-@media (max-width: 900px) { .chapter-dots { display: none; } }
-
-/* hero cinematic entrance + floating shapes */
-.motion-on .hero, .motion-on .page-intro { animation: heroZoom 1.2s ease-out both; }
-@keyframes heroZoom { from { transform: scale(1.08); } to { transform: scale(1); } }
-.has-floats { position: relative; }
-.float-shape { position: absolute; z-index: 0; pointer-events: none; will-change: transform; }
-.float-shape-inner {
-  display: block; width: 16px; height: 16px; opacity: .4;
-  animation: floatDrift 5s ease-in-out infinite alternate;
-}
-.float-shape-inner.sq { border: 2px solid var(--ink); transform: rotate(45deg); }
-.float-shape-inner.ring { border: 2px solid var(--ink); border-radius: 50%; width: 20px; height: 20px; }
-.float-shape-inner.dot { background: var(--ink); border-radius: 50%; width: 8px; height: 8px; }
-.float-shape-inner.rust { border-color: var(--rust); }
-.float-shape-inner.dot.rust { background: var(--rust); }
-@keyframes floatDrift { from { transform: translateY(-12px) rotate(0deg); } to { transform: translateY(12px) rotate(20deg); } }
-.float-shape-inner.sq { animation-name: floatDriftSq; }
-@keyframes floatDriftSq { from { transform: translateY(-12px) rotate(45deg); } to { transform: translateY(12px) rotate(60deg); } }
-
-/* section reveals: fade + rise + settle, children staggered by --d */
-.motion-on .rv { opacity: 0; transform: translateY(40px) scale(.92); }
-.motion-on .rv.in {
-  opacity: 1; transform: translateY(0) scale(1);
-  transition: opacity .85s ease, transform .85s cubic-bezier(.22, 1, .36, 1);
-}
-.motion-on .rv .rv-child { opacity: 0; transform: translateY(24px); }
-.motion-on .rv.in .rv-child {
-  opacity: 1; transform: translateY(0);
-  transition: opacity .7s ease, transform .7s cubic-bezier(.22, 1, .36, 1);
-  transition-delay: var(--d, 0ms);
-}
-/* reduced motion: opacity fades only */
-.motion-reduced .rv { opacity: 0; }
-.motion-reduced .rv.in { opacity: 1; transition: opacity .6s ease; }
-
-/* 3D tilt cards with mouse-tracked specular highlight */
-.tilt { position: relative; transform-style: preserve-3d; touch-action: pan-y; }
-.tilt::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0;
-  background: radial-gradient(320px circle at var(--mx, 50%) var(--my, 50%), rgba(255,252,240,.28), rgba(255,252,240,0) 65%);
-  transition: opacity .35s ease;
-}
-.tilt.tilting::after { opacity: 1; }
-.tilt { transition: transform .6s cubic-bezier(.23, 1, .32, 1); }
-
-/* magnetic elements */
-.magnetic { transition: transform .35s cubic-bezier(.23, 1, .32, 1); will-change: transform; }
-
-/* custom cursor (fine pointers only; JS adds .has-cursor) */
-body.has-cursor.cursor-seen, body.has-cursor.cursor-seen a, body.has-cursor.cursor-seen button,
-body.has-cursor.cursor-seen canvas, body.has-cursor.cursor-seen .btn, body.has-cursor.cursor-seen input { cursor: none; }
-body.has-cursor:not(.cursor-seen) .cursor-dot,
-body.has-cursor:not(.cursor-seen) .cursor-ring { opacity: 0; }
-.cursor-dot, .cursor-ring {
-  position: fixed; left: 0; top: 0; z-index: 200; pointer-events: none;
-  border-radius: 50%; will-change: transform;
-}
-.cursor-dot { width: 14px; height: 14px; background: var(--rust); }
-.cursor-ring {
-  width: 40px; height: 40px; border: 1.5px solid var(--ink);
-  transition: background .25s ease, border-color .25s ease;
-}
-.cursor-ring.hovering { background: transparent; border-color: #fff; mix-blend-mode: difference; }
-.cursor-ring.burst { border-color: var(--rust); }
-
-/* hard kill-switch for reduced motion, whatever JS decided */
+.reveal.is-inview { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) {
-  .motion-on .rv, .motion-on .rv .rv-child {
-    opacity: 1 !important; transform: none !important; transition: none !important;
-  }
-  .motion-on .hero, .motion-on .page-intro { animation: none !important; }
-  .float-shape-inner { animation: none !important; }
-  .float-shape { display: none; }
-  .tilt, .magnetic { transition: none !important; }
-}
-@media (max-width: 640px) {
-  .orb { filter: blur(70px); opacity: .38; }
-  .float-shape { display: none; }
+  .reveal { opacity: 1; transform: none; transition: none; }
 }
 
-/* Fixed full-viewport chrome (orbs/progress) aligns to the ICB, which
-   includes the classic scrollbar width; clip (not hidden — sticky
-   keeps working) so it can never widen the page on phones. */
-@supports (overflow: clip) {
-  html, body { overflow-x: clip; }
+/* The homepage begins inside the film, so its masthead is an overlay.
+   It scrolls away with the first viewport instead of becoming another
+   fixed layer competing with the scene. */
+.home-page { background: var(--paper); }
+.home-page .masthead {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 40;
+  border-bottom: 1px solid rgba(243, 237, 225, .20);
+  background: linear-gradient(rgba(8, 7, 5, .72), rgba(8, 7, 5, .34) 64%, transparent);
+  color: #f3ede1;
 }
+.home-page .masthead-inner { max-width: 1320px; }
+.home-page .wordmark, .home-page .masthead-nav a { color: #f3ede1; }
+.home-page .masthead-meta { color: #cbbfa2; }
+.home-page .masthead-nav a:hover { color: #ff8a70; }
+.home-page .masthead-nav a[aria-current="page"] { color: #ff8a70; }
+.home-page .masthead-nav .nav-gh { color: #ff8a70; }
+
+/* Detailed pipeline moved onto the homepage. A faint architectural
+   label and stronger specimen shadows make the paper lab feel like a
+   continuation of the film rather than a second, disconnected page. */
+.pipeline-detail {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(46% 20% at 88% 0%, rgba(177, 58, 34, .075), transparent 70%),
+    linear-gradient(var(--paper), #eee5cf);
+}
+.pipeline-detail::before {
+  content: "PIPELINE";
+  position: absolute;
+  z-index: -1;
+  top: 30px;
+  right: -12px;
+  font-family: var(--serif);
+  font-size: clamp(92px, 16vw, 220px);
+  font-weight: 900;
+  line-height: .8;
+  letter-spacing: -.04em;
+  color: transparent;
+  -webkit-text-stroke: 1px rgba(25, 22, 18, .07);
+  pointer-events: none;
+}
+.pipeline-detail .pipe-view .pipe-frame,
+#steal .pipe-frame { box-shadow: 0 24px 48px -28px rgba(42, 31, 18, .48); }
+.pipe-stage { transition: border-color .2s ease, background .2s ease, transform .2s ease; }
+.pipe-stage:hover { transform: translateY(-1px); }
+.pipe-stage.is-active { box-shadow: inset 3px 0 0 var(--rust), 0 12px 24px -18px rgba(42, 31, 18, .45); }
 
 /* ---------- pipeline film (film.js) ---------- */
 .film-band {
   height: 540vh; position: relative; color: var(--dark-ink);
   background:
-    radial-gradient(90% 60% at 18% 8%, rgba(177,58,34,.10), rgba(177,58,34,0) 60%),
-    radial-gradient(80% 60% at 84% 88%, rgba(109,154,126,.14), rgba(109,154,126,0) 60%),
-    linear-gradient(#1a1712, #100e0b 30%, #100e0b 70%, #171410);
+    radial-gradient(72% 48% at 12% 4%, rgba(255, 105, 68, .18), transparent 64%),
+    radial-gradient(62% 44% at 88% 10%, rgba(94, 201, 150, .16), transparent 68%),
+    radial-gradient(90% 52% at 50% 108%, rgba(41, 102, 78, .24), transparent 70%),
+    linear-gradient(#171510, #0d0c0a 30%, #0c0b09 72%, #171410);
 }
 .film-band.film-static { height: auto; }
 .film-pin { position: sticky; top: 0; height: 100vh; height: 100svh; }
 .film-static .film-pin { position: relative; height: 84vh; min-height: 540px; }
 .film-mount { height: 100%; }
-.film-viewport { position: relative; height: 100%; overflow: hidden; }
+.film-viewport {
+  position: relative; height: 100%; overflow: hidden;
+  background:
+    radial-gradient(55% 38% at 16% 8%, rgba(255, 116, 76, .15), transparent 68%),
+    radial-gradient(48% 40% at 84% 4%, rgba(94, 201, 150, .13), transparent 70%),
+    radial-gradient(75% 46% at 50% 110%, rgba(41, 102, 78, .20), transparent 72%);
+}
+.film-viewport::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(243, 237, 225, .032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(243, 237, 225, .032) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+.film-viewport::after {
+  content: ""; position: absolute; inset: 0; z-index: 4; pointer-events: none;
+  background:
+    linear-gradient(rgba(5, 5, 4, .34), transparent 18%, transparent 76%, rgba(5, 5, 4, .42)),
+    radial-gradient(90% 78% at 50% 46%, transparent 58%, rgba(0, 0, 0, .30));
+}
 .film-noscript { padding: 48px 22px; max-width: 640px; color: #e6dcc4; line-height: 1.6; }
-.film-gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.film-static-intro {
+  min-height: 100%; display: grid; align-content: center; text-align: center;
+  padding: 124px 24px 72px; color: #e6dcc4;
+  background:
+    radial-gradient(56% 38% at 16% 8%, rgba(255,116,76,.18), transparent 68%),
+    radial-gradient(52% 42% at 84% 4%, rgba(94,201,150,.16), transparent 70%),
+    linear-gradient(#171510, #0c0b09);
+}
+.film-static-intro h1 {
+  font-family: var(--serif); font-weight: 900; line-height: .96;
+  font-size: clamp(46px, 8vw, 96px); margin: 0 auto 22px; color: #f3ede1;
+}
+.film-static-intro h1 em { color: #ff7657; }
+.film-static-intro p { max-width: 720px; margin: 0 auto 14px; font-size: 18px; }
+.film-static-intro .film-static-note { font-family: var(--mono); font-size: 12px; color: #cbbfa2; }
+.film-gl { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; display: block; pointer-events: none; }
 .film-kicker {
-  position: absolute; top: 18px; left: 22px; z-index: 5; pointer-events: none;
+  position: absolute; top: 84px; left: 22px; z-index: 5; pointer-events: none;
   font-family: var(--mono); font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: #cbbfa2;
+}
+
+.film-intro {
+  position: absolute; left: 50%; top: 47%; z-index: 8;
+  width: min(1020px, calc(100% - 40px));
+  transform: translate(-50%, -50%);
+  text-align: center; pointer-events: none;
+}
+.film-intro::before {
+  content: ""; position: absolute; inset: -44px -56px; z-index: -1;
+  background: radial-gradient(ellipse at center, rgba(5,5,4,.52), rgba(5,5,4,.20) 52%, transparent 74%);
+}
+.film-intro-kicker {
+  margin: 0 0 18px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .23em; text-transform: uppercase; color: #ff9a82;
+}
+.film-intro h1 {
+  margin: 0; font-family: var(--serif); font-weight: 900;
+  font-size: clamp(48px, 8.3vw, 108px); line-height: .93; letter-spacing: -.025em;
+  color: #fff8ec; text-shadow: 0 6px 34px rgba(0,0,0,.58);
+}
+.film-intro h1 em { color: #ff7657; }
+.film-intro-lede {
+  max-width: 760px; margin: 24px auto 0; font-size: clamp(16px, 2vw, 20px);
+  line-height: 1.55; color: #e9dfc8; text-shadow: 0 2px 14px rgba(0,0,0,.72);
+}
+.film-intro-actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
+.film-intro-actions .btn { pointer-events: auto; box-shadow: 0 16px 32px -18px rgba(0,0,0,.8); }
+.film-intro-play { background: var(--rust); border-color: #ff8a70; color: #fff8ec; }
+.film-intro-play:hover { background: #c9462b; color: #fff; }
+.film-intro-journey { background: rgba(16,14,11,.46); color: #fff8ec; border-color: rgba(243,237,225,.62); }
+.film-intro-journey:hover { background: rgba(243,237,225,.14); color: #fff; }
+.film-intro-note {
+  margin: 18px 0 0; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: .13em; text-transform: uppercase; color: #cbbfa2;
+}
+.film-caption-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 13px; }
+.film-caption-chips span {
+  border: 1px solid rgba(243,237,225,.30); background: rgba(10,9,7,.48);
+  padding: 4px 7px; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; color: #e8dfc9;
 }
 .film-framebox {
   position: absolute; z-index: 3; pointer-events: none;
@@ -732,7 +766,19 @@ body.has-cursor:not(.cursor-seen) .cursor-ring { opacity: 0; }
 .film-storylist { color: #e6dcc4; max-width: 660px; line-height: 1.65; }
 
 @media (max-width: 760px) {
-  .film-kicker { left: 14px; top: 12px; font-size: 10px; }
+  .home-page .masthead-inner { padding: 12px 14px 10px; gap: 9px 14px; }
+  .home-page .wordmark { font-size: 21px; }
+  .home-page .masthead-nav { gap: 8px 12px; }
+  .home-page .masthead-nav a { font-size: 11.5px; }
+  .film-kicker { display: none; }
+  .film-intro { top: 47%; width: calc(100% - 28px); }
+  .film-intro-kicker { display: none; }
+  .film-intro::before { inset: -26px -8px; }
+  .film-intro h1 { font-size: clamp(43px, 14vw, 64px); }
+  .film-intro-lede { font-size: 15.5px; margin-top: 18px; }
+  .film-intro-actions { margin-top: 20px; }
+  .film-intro-actions .btn { padding: 10px 14px; }
+  .film-caption-chips span { font-size: 9px; padding: 3px 5px; }
   .film-caption {
     left: 14px; right: 14px; bottom: 112px; max-width: none;
     background: rgba(16,14,11,.74); border: 1px solid rgba(236,227,208,.22); padding: 11px 13px;
