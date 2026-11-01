@@ -3393,3 +3393,126 @@ fingerprint bit format, token semantics, and every server default.
 The only new API is additive (`matchPerceptualFingerprint`), and the
 only changed default is CLI-side (`--expect-fingerprint` now also
 probes orientations; `--no-orientations` restores the strict form).
+
+## 2.34 Detector performance round + security re-audit (v1.26.0)
+
+### Method: research first, then measure
+
+This round's brief was: compare what the codebase does against what
+the industry currently recommends, then (a) get the same math in
+less time without weakening security, and (b) get more security in
+the same time where a real gap exists. Everything below was
+measured before and after; nothing was changed on suspicion alone.
+
+Server-side, current Sharp/Node guidance prescribes: one chained
+pipeline per output (each terminal call is another decode/encode),
+sequential reads, hard pixel/format limits against decoder bombs,
+re-encoding to kill polyglots, tuned libvips concurrency/cache, and
+`timingSafeEqual` on every secret comparison with canonical
+encodings. The audit found all of it already in place
+(`server/scramble-image.js`: single decode + single encode per
+derivative, `sequentialRead`, `limitInputPixels`,
+`failOn: 'warning'`, per-kind timeouts, worker leases;
+`server/middleware.js`: sniff + Sharp dimension gate before serving;
+`server/tokens.js`: canonical base64url, MAC-before-parse on the
+single-secret path, strict claim allowlist, `timingSafeEqual`, and
+a DPoP-style proof verifier pinned to ES256/P-256 with exact field
+sets and 2-minute lifetimes). Profiling the derivative path showed
+Sharp decode/encode dominating so completely that toggling stego /
+forensic / watermark layers moved medians by less than run noise —
+there is no honest byte-identical win left there, and encoder
+effort/quality were deliberately left alone (they change derivative
+bytes). Conclusion for the server: no change this round.
+
+### Where the time actually went: the stego detector
+
+Direct core profiling (960×540 synthetic photo) put ordinary paths
+where they should be (embed ≈ 5–6 ms, clean detect ≈ 7 ms) but
+exposed the real outlier: **geometry searches on inputs with no
+recoverable mark run the full candidate grid — up to ~10 s per
+suspect** in the sandbox. That is the batch-screening worst case
+(most suspects in a leak sweep are negatives), so it was the target.
+
+Inside `evaluate()` (called once per candidate geometry — tens of
+thousands of times in a failed search), the row/segment and
+column/band boundary arithmetic depended only on `(cy, segment)` /
+`(cx, band)` but was recomputed for every cell: up to 24× redundant
+`Math.round`/`Math.max`/`Math.min` work per row of cells, plus
+per-cell `% codeLength` and sign multiplication, and a tail that
+allocated (`reduce` closures, `Math.min(...spread)`, a copied +
+sorted array for a ≤5-element top-K). The fix hoists all of it:
+
+- Per probe: row/column bounds, skip predicates, segment/band split
+  points, clamped segment heights / band widths, and segment
+  completeness become small typed-array tables computed once.
+- Per detect call: each cell's code-bit index and signed
+  (polarity × segmentPolarity) products are precomputed from the
+  fixed layout.
+- The tail now uses one fused agree/disagree pass, plain loops for
+  min/sum, and a bounded top-K selection instead of a full sort.
+
+Every stored integer comes from the identical `Math.round`/clamp
+expressions and every floating-point accumulation keeps its order
+(multiplication by ±1 is an exact sign flip, so folding the two
+polarities is bit-exact). This was proven, not assumed: a golden
+battery capturing embed SHA-256s and complete detect result objects
+across layouts 1–4 (clean, flipped, rotated, 70/75/80 % crops with
+geometry search, unmarked, wrong-key, offset probes) is
+**deep-identical** before and after; `npm test` 141/141 (including
+the v1.14 byte-freeze goldens), red-team 53/53 and 23/23, and
+`bench:stego` survival unchanged (robust 85/99).
+
+Measured on the failing-search cases (960×540, single runs,
+shared sandbox — ratios are the signal, not absolutes):
+
+| case | before | after |
+|---|---|---|
+| robust 70 % crop, geometry | 10 008 ms | 5 414 ms |
+| unmarked, geometry | 9 861 ms | 5 568 ms |
+| layout-4 75 % crop, geometry | 2 888 ms | 1 654 ms |
+| clean auto-detect (v4) | 92 ms | 52 ms |
+
+A second, smaller win: `stegoLayout`/`robustStegoLayout`
+(SHA-256-seeded shuffle, ~0.20 ms at 384 cells) were rebuilt for
+every layout × profile × orientation probe. They are pure functions
+of (kind, cellCount, version, key), so they now go through a
+bounded cache (64 entries, same policy as the v4 interleave cache)
+that hands out copies — callers keep the fresh-arrays contract and
+cannot poison the cache by mutating a returned layout. Layout
+derivation now costs ~0 ms after the first probe under a key, which
+is also the batch-screening shape (one key, many suspects).
+
+### Security deltas
+
+None were needed in the audited surface; claiming otherwise would
+be inventing work. Re-verified this round: token canonicalization
+and MAC-before-parse, DPoP proof pinning (algorithm, field set,
+thumbprint binding, `ath` timing-safe compare, lifetime/skew caps),
+watermark SVG XML-escaping of operator/viewer text, byte-bounded
+body parsing before `JSON.parse`, Sharp input inspection limits,
+and the offline detect worker's pixel/queue budgets. The one
+non-constant-time comparison found (the 16-bit stego MAC inside the
+detector) is offline-only and guards a 2^16 consistency tag, not a
+secret — the actual gate is the keyed layout — so it was left as is
+rather than dressed up.
+
+### What did not change
+
+Derivative bytes (every `optimization-bench` payload size is
+identical), stego layouts 1–4 and their codewords, scramble plans,
+the perceptual fingerprint bit format, container format, token
+format and semantics, server API and defaults, viewer behavior.
+`website/` was reverted to the v1.25.0 site (the scroll-film
+experiments of PRs #17/#18 removed) at the maintainer's direction;
+the site is being rebuilt separately and is not part of the npm
+package.
+
+### Deferred, with reasons
+
+- Build-assets decode sharing across widths (one `clone()` source):
+  plausible build-time win, but derivative byte-identity across the
+  refactor is unproven; not worth the risk for an offline path.
+- Branch-and-bound abandonment inside geometry search: could cut
+  the negative case further, but only with bounds proven exact
+  against the acceptance gates, evidence ranking, and the forensic
+  stash — future work with its own golden battery.

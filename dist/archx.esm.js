@@ -1576,8 +1576,29 @@ function layoutRand(seedString, version, legacyHashSeedArg) {
   if (version === 2) return sfc32(...cyrb128(seedString));
   return sha256SeededPrng(seedString);
 }
+var _layoutCache = /* @__PURE__ */ new Map();
+function layoutCacheCopy(cacheKey) {
+  if (cacheKey.length > 2048) return null;
+  const hit = _layoutCache.get(cacheKey);
+  if (!hit) return null;
+  return {
+    order: hit.order.slice(),
+    polarity: new Int8Array(hit.polarity),
+    segmentPolarity: new Int8Array(hit.segmentPolarity)
+  };
+}
+function layoutCacheStore(cacheKey, layout) {
+  if (cacheKey.length > 2048) return layout;
+  if (_layoutCache.size >= 64) _layoutCache.clear();
+  _layoutCache.set(cacheKey, layout);
+  return layoutCacheCopy(cacheKey);
+}
 function stegoLayout(cellCount, key, version = 2) {
-  const rand = layoutRand(String(key) + "::archx-stego-layout", version);
+  const seedString = String(key) + "::archx-stego-layout";
+  const cacheKey = `std|${cellCount}|${version}|${seedString}`;
+  const cached = layoutCacheCopy(cacheKey);
+  if (cached) return cached;
+  const rand = layoutRand(seedString, version);
   const order = Array.from({ length: cellCount }, (_, i) => i);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -1587,7 +1608,7 @@ function stegoLayout(cellCount, key, version = 2) {
   for (let i = 0; i < cellCount; i++) polarity[i] = rand() < 0.5 ? -1 : 1;
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
   for (let i = 0; i < segmentPolarity.length; i++) segmentPolarity[i] = rand() < 0.5 ? -1 : 1;
-  return { order, polarity, segmentPolarity };
+  return layoutCacheStore(cacheKey, { order, polarity, segmentPolarity });
 }
 function stegoGrid(w, h, gridX, gridY) {
   let gx = Math.max(4, Math.min(64, Math.round(gridX || 24)));
@@ -1601,10 +1622,14 @@ function stegoGrid(w, h, gridX, gridY) {
   return { gx, gy };
 }
 function robustStegoLayout(cellCount, key, version = 2) {
+  const seedString = "archx-stego-robust-layout:" + String(key ?? "");
+  const cacheKey = `rob|${cellCount}|${version}|${seedString}`;
+  const cached = layoutCacheCopy(cacheKey);
+  if (cached) return cached;
   const order = Array.from({ length: cellCount }, (_, i) => i);
   const polarity = new Int8Array(cellCount);
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
-  const rand = layoutRand("archx-stego-robust-layout:" + String(key ?? ""), version, 20907);
+  const rand = layoutRand(seedString, version, 20907);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
@@ -1615,7 +1640,7 @@ function robustStegoLayout(cellCount, key, version = 2) {
       segmentPolarity[i * STEGO_ROW_SEGMENTS + segment] = rand() > 0.5 ? 1 : -1;
     }
   }
-  return { order, polarity, segmentPolarity };
+  return layoutCacheStore(cacheKey, { order, polarity, segmentPolarity });
 }
 var STEGO_V4_CODE_BITS = BCH_CODE_BITS;
 var _v4PermCache = /* @__PURE__ */ new Map();
@@ -2450,7 +2475,8 @@ function detectStegoFingerprint(rgba, w, h, {
     planes.integral = built.integral;
   }
   const integral = planes.integral;
-  const rectSum = (rx0, ry0, rx1, ry1) => integral[ry1 * (w + 1) + rx1] - integral[ry0 * (w + 1) + rx1] - integral[ry1 * (w + 1) + rx0] + integral[ry0 * (w + 1) + rx0];
+  const integralStride = w + 1;
+  const rectSum = (rx0, ry0, rx1, ry1) => integral[ry1 * integralStride + rx1] - integral[ry0 * integralStride + rx1] - integral[ry1 * integralStride + rx0] + integral[ry0 * integralStride + rx0];
   const fractions = searchOffsets ? [-0.25, -0.125, 0, 0.125, 0.25] : [0];
   const _sums = new Float64Array(rowSegments * columnBands);
   const _counts = new Uint32Array(rowSegments * columnBands);
@@ -2464,6 +2490,30 @@ function detectStegoFingerprint(rgba, w, h, {
   const _cellScore = new Float32Array(gx * gy);
   const _disagreeByBit = new Uint16Array(codeLength);
   const _segmentResponses = [];
+  const _rowY0 = new Int32Array(gy);
+  const _rowY1 = new Int32Array(gy);
+  const _rowOk = new Uint8Array(gy);
+  const _segYB = new Int32Array(gy * (rowSegments + 1));
+  const _segY0 = new Int32Array(gy * rowSegments);
+  const _segH = new Int32Array(gy * rowSegments);
+  const _colX0 = new Int32Array(gx);
+  const _colX1 = new Int32Array(gx);
+  const _colOk = new Uint8Array(gx);
+  const _bandXB = new Int32Array(gx * (columnBands + 1));
+  const _bandX0 = new Int32Array(gx * columnBands);
+  const _bandW = new Int32Array(gx * columnBands);
+  const _colAllBands = new Uint8Array(gx);
+  const _gains = new Uint16Array(codeLength);
+  const _cellBitAll = new Uint16Array(cellCount);
+  const _signPol = new Int8Array(cellCount * rowSegments);
+  for (let i = 0; i < cellCount; i++) {
+    _cellBitAll[i] = order[i] % codeLength;
+    const pol = polarity[i];
+    const base = i * rowSegments;
+    for (let segment = 0; segment < rowSegments; segment++) {
+      _signPol[base + segment] = pol * segmentPolarity[base + segment];
+    }
+  }
   let _evalTick = 0;
   let osdEscalations = 0;
   let isdEscalations = 0;
@@ -2520,28 +2570,66 @@ function detectStegoFingerprint(rgba, w, h, {
       const rawY1 = rawY0 + cellH0;
       const y0 = Math.max(0, Math.round(rawY0));
       const y1 = Math.min(h, Math.round(rawY1));
-      if (y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45) continue;
+      _rowY0[cy] = y0;
+      _rowY1[cy] = y1;
+      _rowOk[cy] = y1 - y0 < 2 || (y1 - y0) / cellH0 < 0.45 ? 0 : 1;
+      const segBase = cy * (rowSegments + 1);
+      for (let s2 = 0; s2 <= rowSegments; s2++) {
+        _segYB[segBase + s2] = Math.round(rawY0 + s2 * cellH0 / rowSegments);
+      }
+      const segClampBase = cy * rowSegments;
+      for (let s2 = 0; s2 < rowSegments; s2++) {
+        const ry0 = Math.max(y0, _segYB[segBase + s2]);
+        const ry1 = Math.min(y1, _segYB[segBase + s2 + 1]);
+        _segY0[segClampBase + s2] = ry0;
+        _segH[segClampBase + s2] = ry1 - ry0;
+      }
+    }
+    for (let cx = 0; cx < gx; cx++) {
+      const rawX0 = ox + cx * cellW0;
+      const rawX1 = rawX0 + cellW0;
+      const x0 = Math.max(0, Math.round(rawX0));
+      const x1 = Math.min(w, Math.round(rawX1));
+      _colX0[cx] = x0;
+      _colX1[cx] = x1;
+      _colOk[cx] = x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45 ? 0 : 1;
+      const bandBase = cx * (columnBands + 1);
+      for (let b2 = 0; b2 <= columnBands; b2++) {
+        _bandXB[bandBase + b2] = Math.round(rawX0 + b2 * cellW0 / columnBands);
+      }
+      const bandClampBase = cx * columnBands;
+      let allBands = 1;
+      for (let b2 = 0; b2 < columnBands; b2++) {
+        const rx0 = Math.max(x0, _bandXB[bandBase + b2]);
+        const rx1 = Math.min(x1, _bandXB[bandBase + b2 + 1]);
+        _bandX0[bandClampBase + b2] = rx0;
+        _bandW[bandClampBase + b2] = rx1 - rx0;
+        if (rx1 - rx0 <= 0) allBands = 0;
+      }
+      _colAllBands[cx] = allBands;
+    }
+    for (let cy = 0; cy < gy; cy++) {
+      if (!_rowOk[cy]) continue;
+      const y0 = _rowY0[cy];
+      const y1 = _rowY1[cy];
+      const segClampBase = cy * rowSegments;
       for (let cx = 0; cx < gx; cx++) {
-        const rawX0 = ox + cx * cellW0;
-        const rawX1 = rawX0 + cellW0;
-        const x0 = Math.max(0, Math.round(rawX0));
-        const x1 = Math.min(w, Math.round(rawX1));
-        if (x1 - x0 < 4 || (x1 - x0) / cellW0 < 0.45) continue;
+        if (!_colOk[cx]) continue;
+        const bandClampBase = cx * columnBands;
         const sums = _sums.fill(0);
         const counts = _counts.fill(0);
-        const cellW = x1 - x0;
-        const cellH = y1 - y0;
         for (let segment = 0; segment < rowSegments; segment++) {
-          const ry0 = Math.max(y0, Math.round(rawY0 + segment * cellH0 / rowSegments));
-          const ry1 = Math.min(y1, Math.round(rawY0 + (segment + 1) * cellH0 / rowSegments));
-          if (ry1 <= ry0) continue;
+          const segH = _segH[segClampBase + segment];
+          if (segH <= 0) continue;
+          const ry0 = _segY0[segClampBase + segment];
+          const ry1 = ry0 + segH;
           for (let band = 0; band < columnBands; band++) {
-            const rx0 = Math.max(x0, Math.round(rawX0 + band * cellW0 / columnBands));
-            const rx1 = Math.min(x1, Math.round(rawX0 + (band + 1) * cellW0 / columnBands));
-            if (rx1 <= rx0) continue;
+            const bandW = _bandW[bandClampBase + band];
+            if (bandW <= 0) continue;
+            const rx0 = _bandX0[bandClampBase + band];
             const idx = segment * columnBands + band;
-            sums[idx] = rectSum(rx0, ry0, rx1, ry1);
-            counts[idx] = (rx1 - rx0) * (ry1 - ry0);
+            sums[idx] = rectSum(rx0, ry0, rx0 + bandW, ry1);
+            counts[idx] = bandW * segH;
           }
         }
         let segmentScoreSum = 0;
@@ -2551,20 +2639,13 @@ function detectStegoFingerprint(rgba, w, h, {
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < rowSegments; segment++) {
           const base = segment * columnBands;
-          let complete = true;
-          for (let band = 0; band < columnBands; band++) {
-            if (counts[base + band] === 0) {
-              complete = false;
-              break;
-            }
-          }
-          if (!complete) continue;
+          if (!_colAllBands[cx] || _segH[segClampBase + segment] <= 0) continue;
           validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
           const weight = Math.min(counts[base], counts[base + 1], counts[base + 2], counts[base + 3]);
           const response = -(-m0 + 3 * m1 - 3 * (sums[base + 2] / counts[base + 2]) + sums[base + 3] / counts[base + 3]) / 8;
-          const signedResponse = response * polarity[cellIndex] * segmentPolarity[cellIndex * rowSegments + segment];
+          const signedResponse = response * _signPol[cellIndex * rowSegments + segment];
           if (robust) robustSegmentResponses.push(signedResponse);
           segmentScoreSum += signedResponse * weight;
           segmentWeightSum += weight;
@@ -2577,7 +2658,7 @@ function detectStegoFingerprint(rgba, w, h, {
           rawScore = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
         }
         const score = Math.max(-12, Math.min(12, rawScore));
-        const bitIndex = order[cy * gx + cx] % codeLength;
+        const bitIndex = _cellBitAll[cellIndex];
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         _cellBitIdx[cellLen] = bitIndex;
@@ -2607,26 +2688,44 @@ function detectStegoFingerprint(rgba, w, h, {
         reliability[i] = Math.abs(voteScores[i]);
       }
     }
-    const meanAbsPre = voteScores.reduce((s, v) => s + Math.abs(v), 0) / codeLength;
+    let voteAbsSum = 0;
+    for (let i = 0; i < codeLength; i++) voteAbsSum += Math.abs(voteScores[i]);
+    const meanAbsPre = voteAbsSum / codeLength;
     let preAgreeing = 0;
+    const disagreeByBit = _disagreeByBit.fill(0);
     for (let ci = 0; ci < cellLen; ci++) {
       if (_cellScore[ci] >= 0 === !!votedBits[_cellBitIdx[ci]]) preAgreeing++;
+      else disagreeByBit[_cellBitIdx[ci]]++;
     }
     const preAgreement = cellLen ? preAgreeing / cellLen : 0;
     const standardDepth = meanAbsPre >= 2 && preAgreement >= 0.82 ? 3 : 1;
-    const minBitCountPre = Math.min(...bitCounts);
-    const observedBitsPre = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
+    let minBitCountPre = Infinity;
+    let observedBitsPre = 0;
+    for (let i = 0; i < codeLength; i++) {
+      const c = bitCounts[i];
+      if (c < minBitCountPre) minBitCountPre = c;
+      if (c > 0) observedBitsPre++;
+    }
     const coverageOkPre = isV4 ? observedBitsPre >= 88 && cellLen >= 96 : robust ? observedBitsPre >= 88 && cellLen >= 128 : minBitCountPre >= 2 && cellLen >= codeLength * 3;
     let agreementBound = preAgreement;
     if (cellLen) {
-      const disagreeByBit = _disagreeByBit.fill(0);
-      for (let ci = 0; ci < cellLen; ci++) {
-        if (_cellScore[ci] >= 0 !== !!votedBits[_cellBitIdx[ci]]) disagreeByBit[_cellBitIdx[ci]]++;
-      }
-      const gains = [...disagreeByBit].sort((a, b) => b - a);
       const maxFlips = robust ? 5 : standardDepth;
+      _gains.set(disagreeByBit);
       let gainSum = 0;
-      for (let i = 0; i < Math.min(maxFlips, gains.length); i++) gainSum += gains[i];
+      const kMax = Math.min(maxFlips, codeLength);
+      for (let k = 0; k < kMax; k++) {
+        let bestIdx = -1;
+        let bestVal = 0;
+        for (let i = 0; i < codeLength; i++) {
+          if (_gains[i] > bestVal) {
+            bestVal = _gains[i];
+            bestIdx = i;
+          }
+        }
+        if (bestIdx < 0) break;
+        gainSum += bestVal;
+        _gains[bestIdx] = 0;
+      }
       agreementBound = (preAgreeing + gainSum) / cellLen;
     }
     const repairable = isV4 ? meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre : meanAbsPre >= 1.2 && cellLen >= 96 && coverageOkPre && agreementBound >= 0.72;
