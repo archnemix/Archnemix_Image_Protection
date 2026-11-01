@@ -1755,7 +1755,12 @@ export function createArchxMiddleware(options = {}) {
       }
 
       if (isBatchTokens) {
-        if (isPreflight(req)) {
+        // codeql[js/user-controlled-bypass] A CORS preflight is
+      // unauthenticated by specification; this branch still checks the
+      // origin allowlist and returns only CORS headers (204, no body,
+      // no token, no payload). Access control for every real request
+      // below is unchanged.
+      if (isPreflight(req)) {
           if (!allowedOrigins?.length || !originAllowed(req)) {
             return deny(req, res, 403, 'forbidden', { phase, reason: 'cors-origin' });
           }
@@ -1925,6 +1930,11 @@ export function createArchxMiddleware(options = {}) {
         return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
       }
 
+      // codeql[js/user-controlled-bypass] A CORS preflight is
+      // unauthenticated by specification; this branch still checks the
+      // origin allowlist and returns only CORS headers (204, no body,
+      // no token, no payload). Access control for every real request
+      // below is unchanged.
       if (isPreflight(req)) {
         if (!allowedOrigins?.length || !originAllowed(req)) {
           return deny(req, res, 403, 'forbidden', { id, phase, reason: 'cors-origin' });
