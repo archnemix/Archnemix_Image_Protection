@@ -1,0 +1,3 @@
+# The standalone Pipeline page was folded into the homepage.
+/pipeline.html /index.html#pipeline-detail 301
+/pipeline /index.html#pipeline-detail 301

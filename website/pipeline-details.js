@@ -1,6 +1,10 @@
-/* Archnemix pipeline page — every artifact below is rendered live from one
- * procedurally painted "photograph", the same way the real pipeline derives
- * its artifacts from one master. No image files are loaded. */
+/* Archnemix homepage — detailed pipeline widgets.
+ *
+ * This module is lazy-loaded by site.js only when the pipeline section
+ * approaches the viewport. It is a static, in-browser visual model: no
+ * image files are loaded, nothing is uploaded, and no demo server or API
+ * is contacted. Every specimen is derived locally from the same
+ * procedurally painted sample photograph used by the opening film. */
 
 import { mulberry32, paintValley } from './photo.js';
 
@@ -19,7 +23,7 @@ function makeCanvas() {
 
 function scrambledFrom(src, seed, tint) {
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false, willReadFrequently: tint });
   const rand = mulberry32(seed);
   const cols = 8, rows = 8, tw = W / cols, th = H / rows;
   const order = Array.from({ length: cols * rows }, (_, i) => i);
@@ -51,7 +55,7 @@ function scrambledFrom(src, seed, tint) {
 
 function noiseFrom(seed) {
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false });
   const rand = mulberry32(seed);
   const img = x.createImageData(W, H);
   const d = img.data;
@@ -66,9 +70,9 @@ function noiseFrom(seed) {
 function lowResFrom(src) {
   const small = document.createElement('canvas');
   small.width = 72; small.height = 41;
-  small.getContext('2d').drawImage(src, 0, 0, 72, 41);
+  small.getContext('2d', { alpha: false }).drawImage(src, 0, 0, 72, 41);
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false });
   x.imageSmoothingEnabled = false;
   x.drawImage(small, 0, 0, W, H);
   return c;
@@ -76,7 +80,7 @@ function lowResFrom(src) {
 
 function visitorFrom(src, label) {
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false });
   x.drawImage(src, 0, 0);
   x.save();
   x.translate(W / 2, H / 2);
@@ -94,21 +98,24 @@ function visitorFrom(src, label) {
   return c;
 }
 
+const blackCanvasCache = new Map();
 function blackWith(text) {
+  if (blackCanvasCache.has(text)) return blackCanvasCache.get(text);
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false });
   x.fillStyle = '#0a0a09';
   x.fillRect(0, 0, W, H);
   x.font = '500 17px "IBM Plex Mono", monospace';
   x.textAlign = 'center';
   x.fillStyle = 'rgba(243,237,225,0.55)';
   x.fillText(text, W / 2, H / 2);
+  blackCanvasCache.set(text, c);
   return c;
 }
 
 function screenshotFrom(src) {
   const c = makeCanvas();
-  const x = c.getContext('2d');
+  const x = c.getContext('2d', { alpha: false });
   x.drawImage(src, 0, 0);
   // temporal-interlace striping a still capture keeps, faint moiré
   x.fillStyle = 'rgba(0,0,0,0.16)';
@@ -124,17 +131,26 @@ function screenshotFrom(src) {
   return c;
 }
 
-const wireCanvas = scrambledFrom(master, 0x51ab, true);
-const payloadCanvas = scrambledFrom(master, 0x9e37, false);
-const visitorCanvas = visitorFrom(master, 'ARCHNEMIX · PREVIEW');
-const noiseCanvas = noiseFrom(0x77c1);
-const lowResCanvas = lowResFrom(master);
-const screenshotCanvas = screenshotFrom(master);
+// Derived specimens are created on first use, not at module load. A
+// visitor who only reads Stage 0 should not pay for two full-frame
+// scrambles, a randomness pass, a screenshot composite and a low-res
+// resample they never ask to see.
+const artifactCache = new Map();
+function lazyArtifact(name, make) {
+  if (!artifactCache.has(name)) artifactCache.set(name, make());
+  return artifactCache.get(name);
+}
+const wireCanvas = () => lazyArtifact('wire', () => scrambledFrom(master, 0x51ab, true));
+const payloadCanvas = () => lazyArtifact('payload', () => scrambledFrom(master, 0x9e37, false));
+const visitorCanvas = () => lazyArtifact('visitor', () => visitorFrom(master, 'ARCHNEMIX · PREVIEW'));
+const noiseCanvas = () => lazyArtifact('noise', () => noiseFrom(0x77c1));
+const lowResCanvas = () => lazyArtifact('lowRes', () => lowResFrom(master));
+const screenshotCanvas = () => lazyArtifact('screenshot', () => screenshotFrom(master));
 
 /* ---------- 01 · journey ---------- */
 const stageFacts = [
-  ['Stage 0 · your master', 'Full-resolution master on private disk, <strong>outside the web root</strong>. The web server has no route to it; nothing in any page references its path.'],
-  ['Stage 1 · server processing', 'A derivative at (or below) the viewer&rsquo;s entitled width. The invisible <strong>StegoMark fingerprint</strong> for this recipient is embedded, tiles are permuted under a per-image key (plan v2), and vault modes add AES encryption.'],
+  ['Stage 0 · your master', 'Full-resolution master kept private, <strong>outside the public web root</strong>. Nothing in any page references its path or gives it a public URL.'],
+  ['Stage 1 · protection processing', 'A derivative at (or below) the viewer&rsquo;s entitled width. The invisible <strong>StegoMark fingerprint</strong> for this recipient is embedded, tiles are permuted under a per-image key (plan v2), and vault modes add AES encryption.'],
   ['Stage 2 · on the wire', 'Served only against a <strong>one-time HMAC token</strong>, with <span class="mono">Cache-Control: private, no-store</span>. A captured response is permuted pieces tied to an already-spent token — replaying it returns 403.'],
   ['Stage 3 · visitor&rsquo;s screen', 'Reassembled <strong>only inside the guarded viewer</strong> (canvas or WebGL). There is no <span class="mono">&lt;img src&gt;</span> to save, and programmatic read-back is poisoned or blocked by canvas tainting.'],
   ['Stage 4 · what extraction gets', 'Scrapers harvest permuted bytes; canvas extraction returns black or a decoy; a thumbnail pipeline sees at most a low-resolution fragment. The best available copy is a <strong>display-resolution screenshot</strong> — §03 lets you try.'],
@@ -143,7 +159,7 @@ const stageFacts = [
 
 const journeyTag = document.getElementById('journeyTag');
 const journeyFacts = document.getElementById('journeyFacts');
-const journeyCtx = document.getElementById('journeyCanvas')?.getContext('2d');
+const journeyCtx = document.getElementById('journeyCanvas')?.getContext('2d', { alpha: false });
 let scanAnim = null;
 
 function drawIdentify(progress) {
@@ -177,9 +193,9 @@ function setStage(n) {
   const renderers = [
     () => journeyCtx.drawImage(master, 0, 0),
     () => { journeyCtx.drawImage(master, 0, 0); journeyCtx.strokeStyle = 'rgba(177,58,34,0.5)'; journeyCtx.setLineDash([6, 5]); journeyCtx.lineWidth = 1.5; for (let i = 1; i < 8; i++) { journeyCtx.beginPath(); journeyCtx.moveTo((W / 8) * i, 0); journeyCtx.lineTo((W / 8) * i, H); journeyCtx.stroke(); journeyCtx.beginPath(); journeyCtx.moveTo(0, (H / 8) * i); journeyCtx.lineTo(W, (H / 8) * i); journeyCtx.stroke(); } journeyCtx.setLineDash([]); },
-    () => journeyCtx.drawImage(wireCanvas, 0, 0),
-    () => journeyCtx.drawImage(visitorCanvas, 0, 0),
-    () => { journeyCtx.drawImage(payloadCanvas, 0, 0, W, H / 2); journeyCtx.drawImage(blackWith('canvas read-back: black'), 0, H / 2, W / 2, H / 2); journeyCtx.drawImage(lowResCanvas, W / 2, H / 2, W / 2, H / 2); },
+    () => journeyCtx.drawImage(wireCanvas(), 0, 0),
+    () => journeyCtx.drawImage(visitorCanvas(), 0, 0),
+    () => { journeyCtx.drawImage(payloadCanvas(), 0, 0, W, H / 2); journeyCtx.drawImage(blackWith('canvas read-back: black'), 0, H / 2, W / 2, H / 2); journeyCtx.drawImage(lowResCanvas(), W / 2, H / 2, W / 2, H / 2); },
     () => {
       if (reducedMotion) { drawIdentify(1); return; }
       const t0 = performance.now();
@@ -293,17 +309,17 @@ const stealCases = {
   },
   network: {
     tag: 'Network capture: permuted pieces',
-    draw: (x) => { x.drawImage(payloadCanvas, 0, 0, W, H); x.drawImage(noiseCanvas, 0, H * 0.72, W, H * 0.28); },
+    draw: (x) => { x.drawImage(payloadCanvas(), 0, 0, W, H); x.drawImage(noiseCanvas(), 0, H * 0.72, W, H * 0.28); },
     verdict: '<strong>Artifact: noise.</strong> What crosses the wire is permuted tiles (encrypted outright in vault modes), useless without the server-side plan — which is itself bound to a token that stops existing after first use.',
   },
   screenshot: {
     tag: 'Screenshot: works — at display size, and it is evidence',
-    draw: (x) => x.drawImage(screenshotCanvas, 0, 0),
+    draw: (x) => x.drawImage(screenshotCanvas(), 0, 0),
     verdict: '<strong>Artifact: a display-resolution copy.</strong> Screenshots cannot be prevented on an open platform — anyone promising otherwise is selling something. What Archx guarantees instead: the copy is capped at display resolution, degraded by temporal interlace in max-protection mode, and carries the invisible fingerprint that names the recipient (§04).',
   },
 };
 
-const stealCtx = document.getElementById('stealCanvas')?.getContext('2d');
+const stealCtx = document.getElementById('stealCanvas')?.getContext('2d', { alpha: false });
 const stealTag = document.getElementById('stealTag');
 const stealVerdict = document.getElementById('stealVerdict');
 

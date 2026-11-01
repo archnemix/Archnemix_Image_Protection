@@ -1,7 +1,7 @@
 /* Shared procedural "photograph" for the website's live demos: a dusk
  * valley with aurora, moon, ridges, lake and pines, painted on a 2D
  * canvas so every page artifact derives from one image with zero
- * external assets. Used by pipeline.js (stage artifacts) and film.js
+ * external assets. Used by pipeline-details.js (stage artifacts) and film.js
  * (the scroll-scrubbed tile film). */
 
 export function mulberry32(a) {
