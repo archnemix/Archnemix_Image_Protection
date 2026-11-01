@@ -424,7 +424,7 @@ A confident result prints a 12-hex fingerprint, the detected profile, and the re
 
 Since 1.20 there is an opt-in **layout version 4** codeword (`steganography.layoutVersion: 4`): a shortened BCH(188,64) error-correcting code over the same cells, decoded by a bounded-distance → ML-erasure → OSD → information-set ladder. On the project's 99-case bench at strength 6 it trades blows with layout 3 (robust 84 vs 85 recovered, standard tied 63 = 63, false positives 0/369) while measuring **+0.7 to +1.7 dB PSNR** (photos ≈29.6 vs 28.6 dB robust) and recovering marks with over a third of all code bits erased — choose it per catalog when image quality or deep-crop erasure matters most; layout 3 stays the default, layouts 1–3 embeds are byte-frozen, and detection auto-covers all four. Measured native-resolution center-crop floor (900-px photo, robust, §2.31): layout 3 recovers to ≈0.6 linear keep (36% of area); at 0.5 linear keep the surviving cells no longer determine the codeword at any search budget — an information limit of whole-frame spreading, so deep-crop attribution should pin the layout, raise `maxTimeMs`, and not be promised below that floor. The pre-flight assay (`archx-protect --assay-stego`, `layoutVersion` honored) reports the PSNR/verification trade on your own masters before you commit. Auto-detection is two-phase since 1.20 (native screens for every layout before geometry searches, budget shared fairly) and mirrored/rotated/transposed suspects now resolve in well under a second instead of behind the full geometry sweep. Full measurements, including the rejected binary-document embedding experiments and the 1-bit re-binarization limit, are in `docs/RESEARCH.md` §2.28.
 
-The perceptual soft binding is a separate 64-bit DCT fingerprint of image structure. It is useful as a C2PA-style lookup key when metadata and pixel marks are separated from a copy, and the unit suite verifies a resized/JPEG copy within the default distance threshold. It can collide or drift under crops, compositing, heavy edits, adversarial perturbation, or semantic regeneration; corroborate a match with issuance records and the original before making an ownership claim.
+The perceptual soft binding is a separate 64-bit DCT fingerprint of image structure. It is useful as a C2PA-style lookup key when metadata and pixel marks are separated from a copy, and the unit suite verifies a resized/JPEG copy within the default distance threshold. Since 1.25 the comparison is orientation-tolerant at verification time (`matchPerceptualFingerprint`, used by `archx-detect` unless `--no-orientations` is passed): flipped, 90°/180°-rotated, and transposed copies — pixel-identical up to a rectangle symmetry — still match the registered fingerprint, and the result names the correction that matched. It can collide or drift under crops, compositing, heavy edits, adversarial perturbation, or semantic regeneration; corroborate a match with issuance records and the original before making an ownership claim.
 
 ### 7 · Make copies carry your name: signed ownership claims (v1.18)
 
@@ -731,7 +731,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 140 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 141 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,
@@ -764,7 +764,7 @@ npm run test:browser  # 125 checks in real headless Chromium (encapsulation, dec
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
 npm run redteam     # 55-case red-team suite against a live hardened server (forgery, replay races,
-npm run redteam:v2  # 21-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
+npm run redteam:v2  # 23-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
                     # surface, attribution abuse (wrong-key lottery, collusion averaging), resource bounds
                     # malleability, claim fuzzing, keyring confusion, IDOR/batch abuse, slow-trickle
                     # bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)

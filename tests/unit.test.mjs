@@ -16,7 +16,7 @@ import {
   embedStegoFingerprint, detectStegoFingerprint, stegoFingerprint, assayStegoCollusion, assayStegoEmbed,
   sha256Bytes, hmacSha256Bytes,
   sniffImageInfo, decodeBmpImage, base64ToBytes,
-  perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints,
+  perceptualFingerprint, perceptualFingerprintDistance, comparePerceptualFingerprints, matchPerceptualFingerprint,
 } from '../src/scramble.js';
 // (decryptPayload used by the AES .archx test below)
 import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative, configureSharpSecurity } from '../server/scramble-image.js';
@@ -4461,4 +4461,81 @@ test('v1.24: preflight-only OPTIONS and HMAC key-cache byte identity', async (t)
     headers: { origin: 'https://evil.example', 'access-control-request-method': 'GET' },
   });
   assert.equal(evilPreflight.status, 403);
+});
+
+test('v1.25: perceptual matcher recognises flipped/rotated/transposed suspects', async () => {
+  const { flipPixels, rotatePixels90, transposePixels } = await import('../src/core/pixels.js');
+  // Asymmetric synthetic image (landmarks break every rectangle symmetry).
+  const paint = (w, h) => {
+    const img = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      img[i] = Math.min(255, x * 2 + y);
+      img[i + 1] = Math.min(255, Math.abs((w * 4 / 5) - x) + y);
+      img[i + 2] = (x * x + y * 3) % 256;
+      img[i + 3] = 255;
+      if (x > w * 0.68 && y < h * 0.24) { img[i] = 255; img[i + 1] = 240; img[i + 2] = 200; }
+      if (y > h * 0.78 && x < w * 0.26) { img[i] = 10; img[i + 1] = 30; img[i + 2] = 90; }
+    }
+    return img;
+  };
+  const w = 160, h = 120;
+  const img = paint(w, h);
+  const ref = perceptualFingerprint(img, w, h);
+
+  // Identity stays the exact shipped comparison (distance 0, one probe).
+  const identity = matchPerceptualFingerprint(img, w, h, ref);
+  assert.equal(identity.match, true);
+  assert.equal(identity.distance, 0);
+  assert.equal(identity.orientation, 'identity');
+  assert.equal(identity.orientationsChecked, 1);
+  assert.equal(identity.fingerprint, ref);
+
+  // Every other dihedral damage is recognised, with the correcting
+  // orientation named, while the plain orientation-sensitive distance
+  // (the pre-v1.25 behaviour) would have missed every one of them.
+  const cases = [
+    [flipPixels(img, w, h, true, false), w, h, 'flip-x'],
+    [flipPixels(img, w, h, false, true), w, h, 'flip-y'],
+    [flipPixels(img, w, h, true, true), w, h, 'rotate-180'],
+    [rotatePixels90(img, w, h, true), h, w, 'rotate-90-ccw'],
+    [rotatePixels90(img, w, h, false), h, w, 'rotate-90-cw'],
+    [transposePixels(img, w, h, false), h, w, 'transpose'],
+    [transposePixels(img, w, h, true), h, w, 'transpose-anti'],
+  ];
+  for (const [data, dw, dh, want] of cases) {
+    assert.ok(perceptualFingerprintDistance(perceptualFingerprint(data, dw, dh), ref) > 10,
+      `naive distance for ${want} damage should miss`);
+    const m = matchPerceptualFingerprint(data, dw, dh, ref);
+    assert.equal(m.match, true, want);
+    assert.equal(m.distance, 0, want);
+    assert.equal(m.orientation, want);
+  }
+
+  // Orientations can be switched off (strict shipped-orientation form).
+  const off = matchPerceptualFingerprint(cases[0][0], w, h, ref, { orientations: false });
+  assert.equal(off.match, false);
+  assert.equal(off.orientationsChecked, 1);
+
+  // An unrelated image matches in NO orientation (all 8 checked).
+  const other = new Uint8Array(w * h * 4);
+  for (let i = 0; i < other.length; i += 4) {
+    const v = (((i * 2654435761) >>> 16) % 256);
+    other[i] = v; other[i + 1] = 255 - v; other[i + 2] = v; other[i + 3] = 255;
+  }
+  const no = matchPerceptualFingerprint(other, w, h, ref);
+  assert.equal(no.match, false);
+  assert.equal(no.orientationsChecked, 8);
+
+  // Large suspects take the bounded-proxy path and still match a flip.
+  const W = 640, H = 420;
+  const big = paint(W, H);
+  const bigRef = perceptualFingerprint(big, W, H);
+  const bigMatch = matchPerceptualFingerprint(flipPixels(big, W, H, true, false), W, H, bigRef);
+  assert.equal(bigMatch.match, true);
+  assert.equal(bigMatch.orientation, 'flip-x');
+  assert.ok(bigMatch.distance <= 10);
+
+  assert.throws(() => matchPerceptualFingerprint(img, w, h, 'not-a-fingerprint'), TypeError);
+  assert.throws(() => matchPerceptualFingerprint(img, w, h, ref, { maxDistance: 65 }), RangeError);
 });

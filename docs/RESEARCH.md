@@ -3293,3 +3293,103 @@ Derivative bytes, stego layouts 1–4, scramble plans, pHash bits,
 token semantics (MACs are byte-identical; only key *handling*
 changed). The one behavior change is the bare-`OPTIONS` narrowing
 above; standards-compliant CORS is untouched.
+
+---
+
+## 2.33 Orientation-tolerant recognition and the scroll-driven website (v1.25.0)
+
+### The recognition gap this closes
+
+The 64-bit perceptual soft-binding fingerprint (frozen format, §2.x) is
+orientation-sensitive by construction: it area-averages to a 32×32 grid
+and thresholds DCT coefficients, so mirroring or rotating an image
+rearranges the grid and produces an unrelated fingerprint. Measured on
+the test image, a plain flip/rotate/transpose moves the Hamming
+distance to **20–34 of 64** — far outside the default match threshold
+of 10 — even though the copy is pixel-identical up to a rectangle
+symmetry. Flips and 90° rotations are among the most common
+transformations a leaked copy undergoes (one-click editor operations;
+all eight EXIF orientations are exactly these symmetries). The
+StegoMark detector already searched mirrors/rotations/transposes
+(§2.24–2.25); the *perceptual* layer did not, so the corroborating
+soft binding silently failed on precisely the copies most likely to
+surface.
+
+### `matchPerceptualFingerprint` (verification-side only)
+
+Registered fingerprints and the bit format are untouched. The matcher
+fingerprints the identity view at full resolution exactly as before;
+only when that misses does it probe the other seven dihedral
+symmetries (flip-x, flip-y, rotate-180, both 90° rotations, both
+transposes), returning the best distance and the correction that
+produced it. Two design points keep it cheap enough for monitoring
+pipelines that scan many suspects:
+
+- Probes run on a **bounded ≤256 px proxy** (the transforms are pure
+  permutations, so a small suspect matches at distance 0; a large
+  one within resampling tolerance). Measured at 2400×1600: full
+  match in ~108 ms vs ~489 ms for eight naive full-resolution
+  fingerprints (**4.5×**), and peak extra memory is a 256² proxy
+  instead of seven full-frame copies. The identity path — the common
+  case — is unchanged in cost and output.
+- If the identity view is already within tolerance, probes do not
+  run and the orientation reports `identity`. A near-symmetric image
+  can therefore match as identity even if an orientation would score
+  lower; the *match* is what is being asserted, the orientation is
+  diagnostic.
+
+`archx-detect --expect-fingerprint` uses the matcher (on the same
+bounded thumbnail it already computed), reports the correction in
+JSON and human output, and gains `--no-orientations` for the strict
+form. Red-team v2 grows section F: the stego layer identifies
+BUYER-A through flip-x and rot90, the perceptual layer recognises
+5/5 orientation damages with correct labels, and a stranger image
+stays at distance 18/64 in every orientation — **23/23 held**.
+
+**What this does not do.** Crops, compositing, perspective, and
+regeneration still defeat the soft binding (a crop changes which
+pixels the 32×32 grid summarises; no fingerprint-only matcher can
+undo that without the reference image). The measured stego crop
+floor (≈0.6 linear keep, §2.31) is unchanged. This release removes
+one *exact-symmetry* blind spot; it does not move the heavy-edit
+limits, and the docs continue to say so.
+
+### Performance notes
+
+`bench:opt` re-run shows no regression attributable to this release
+(sandbox variance aside): token sign/verify isolate at ≈0.014 ms
+each with the v1.24 key cache; encoder costs unchanged (catalog
+q88→960 ≈55–75 ms band on the shared 2-vCPU box). The matcher's
+proxy design (above) is the release's CPU/RAM improvement: the
+feature was affordable *because* it never touches full frames more
+than once.
+
+### Website motion layer
+
+`website/motion.js` adds the requested immersive layer in vanilla JS
+over the unchanged editorial design: lerped (0.1) scroll progress
+driving one rAF loop; parallax depth (headline 0.6×, 3D stage 1.2×,
+numerals 0.35× background with an amplitude cap after screenshots
+showed inline numerals detaching from headings at full drift);
+IntersectionObserver reveals with 80 ms child stagger and a
+jump-scroll guard so content can never be stranded invisible;
+pointer-tracked 3D tilt with specular highlight on cards; hero
+cinematic zoom + floating shapes; magnetic cursor (difference-blend
+ring, ≤8 px pull, click burst) shown only after the first real
+pointermove; ambient hue-rotating orbs; 3 px progress bar and
+chapter dots. `prefers-reduced-motion` gets opacity fades only (JS
+gate plus a CSS kill-switch), touch devices get half-depth parallax
+and no cursor, and `overflow-x: clip` keeps fixed chrome from
+widening phone layouts (measured: 375 px clean again after an
+initial 391 px regression from the fixed elements). All listeners
+are passive; only transform/opacity animate; the existing Three.js
+scenes and every interactive demo verified working headless with
+zero page errors.
+
+### What did not change
+
+Derivative bytes, stego layouts 1–4, scramble plans, the perceptual
+fingerprint bit format, token semantics, and every server default.
+The only new API is additive (`matchPerceptualFingerprint`), and the
+only changed default is CLI-side (`--expect-fingerprint` now also
+probes orientations; `--no-orientations` restores the strict form).
