@@ -45,6 +45,7 @@ export const DEFAULTS = {
   onExtract: 'black',           // 'black' | 'lowres' | 'scrambled'
   taintReadback: 'auto',        // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
   taintUrl: null,               // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
+  taintFallback: 'warn',        // 'warn' | 'webgl' | 'off' — when no cross-origin taint pixel is available in a 2D mode: surface it (telemetry + one console warning), promote this instance to the WebGL renderer, or stay silent
   splitCanvases: false,         // shield+: one canvas per tile (hero images)
   splitGrid: 3,
   maxBackingWidth: 1920,        // never paint a wider backing store than this
@@ -242,6 +243,33 @@ export const PRESETS = Object.freeze({
     cacheBitmap: true, cachePayload: true, renderLoop: 'static',
     reloadOnResize: 'upscale', forensic: true,
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+  }),
+  performance: Object.freeze({
+    // CPU/RAM-first profile (v1.23): every protection layer stays on,
+    // budgets shrink. 2D canvas (no GL contexts to budget), catalog
+    // sampling, batched mints, bounded bitmap cache, static loop.
+    // Server counterpart: withPerformanceDefaults().
+    mode: 'shield', renderer: 'canvas', qualityProfile: 'catalog', sourceOversample: 1,
+    dprCap: 2, lazy: true, unloadOnExit: true, cacheBitmap: true, cachePayload: true,
+    renderLoop: 'static', reloadOnResize: 'never', tokenBatch: true,
+    tokenBatchDelayMs: 20, tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS, networkAware: true,
+    bitmapCacheMaxEntries: 16, bitmapCacheMaxBytes: 96 * 1024 * 1024,
+    taintFallback: 'warn', forensic: true,
+    guards: Object.freeze({ blurOnBlur: false }),
+  }),
+  maxProtection: Object.freeze({
+    // Protection + content-identification first (v1.23, the
+    // state-of-the-art profile): WebGL renderer (black readback),
+    // taint-or-promote, sender-constrained tokens required, 60 Hz
+    // temporal interlace, dynamic trace, forensic blocks. Still
+    // budget-bounded — budgets are spent on protection, not removed.
+    // Server counterpart: withMaxProtectionDefaults().
+    mode: 'vault', renderer: 'webgl', qualityProfile: 'original', onExtract: 'black',
+    taintFallback: 'webgl', proofOfPossession: 'required', forensic: true,
+    temporalInterlace: 'balanced60',
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+    cacheBitmap: true, cachePayload: true, renderLoop: 'auto', reloadOnResize: 'upscale',
   }),
   screenshotResistant: Object.freeze({
     mode: 'fortress', qualityProfile: 'original', lens: true,

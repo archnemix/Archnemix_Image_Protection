@@ -4385,6 +4385,8 @@ var DEFAULTS = {
   // 'auto' | 'off' — origin-taint 2D display canvases so even prototype-call readbacks throw
   taintUrl: null,
   // explicit cross-origin 1x1 image URL for tainting; auto-derived from a cross-origin token endpoint when null
+  taintFallback: "warn",
+  // 'warn' | 'webgl' | 'off' — when no cross-origin taint pixel is available in a 2D mode: surface it (telemetry + one console warning), promote this instance to the WebGL renderer, or stay silent
   splitCanvases: false,
   // shield+: one canvas per tile (hero images)
   splitGrid: 3,
@@ -4650,6 +4652,54 @@ var PRESETS = Object.freeze({
     reloadOnResize: "upscale",
     forensic: true,
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
+  }),
+  performance: Object.freeze({
+    // CPU/RAM-first profile (v1.23): every protection layer stays on,
+    // budgets shrink. 2D canvas (no GL contexts to budget), catalog
+    // sampling, batched mints, bounded bitmap cache, static loop.
+    // Server counterpart: withPerformanceDefaults().
+    mode: "shield",
+    renderer: "canvas",
+    qualityProfile: "catalog",
+    sourceOversample: 1,
+    dprCap: 2,
+    lazy: true,
+    unloadOnExit: true,
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "never",
+    tokenBatch: true,
+    tokenBatchDelayMs: 20,
+    tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    networkAware: true,
+    bitmapCacheMaxEntries: 16,
+    bitmapCacheMaxBytes: 96 * 1024 * 1024,
+    taintFallback: "warn",
+    forensic: true,
+    guards: Object.freeze({ blurOnBlur: false })
+  }),
+  maxProtection: Object.freeze({
+    // Protection + content-identification first (v1.23, the
+    // state-of-the-art profile): WebGL renderer (black readback),
+    // taint-or-promote, sender-constrained tokens required, 60 Hz
+    // temporal interlace, dynamic trace, forensic blocks. Still
+    // budget-bounded — budgets are spent on protection, not removed.
+    // Server counterpart: withMaxProtectionDefaults().
+    mode: "vault",
+    renderer: "webgl",
+    qualityProfile: "original",
+    onExtract: "black",
+    taintFallback: "webgl",
+    proofOfPossession: "required",
+    forensic: true,
+    temporalInterlace: "balanced60",
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "auto",
+    reloadOnResize: "upscale"
   }),
   screenshotResistant: Object.freeze({
     mode: "fortress",
@@ -6358,7 +6408,8 @@ var SHADOW_CSS = `
 `;
 
 // src/client/viewer.js
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
+var taintConsoleWarned = false;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -6384,6 +6435,7 @@ var ProtectedImage = class {
     __privateAdd(this, _destroyed, false);
     __privateAdd(this, _glBudgetWarned, false);
     __privateAdd(this, _taintWarned, false);
+    __privateAdd(this, _taintPromotedWebGL, false);
     __privateAdd(this, _canaryDone, false);
     __privateAdd(this, _canaryPause, false);
     __privateAdd(this, _canaryProbe, null);
@@ -7211,10 +7263,28 @@ var ProtectedImage = class {
         if (__privateGet(this, _destroyed)) return;
         if (!__privateGet(this, _taintImage) && !__privateGet(this, _taintWarned) && __privateGet(this, _options).taintReadback !== "off" && __privateGet(this, _options).taintReadback !== false) {
           __privateSet(this, _taintWarned, true);
+          const fallback = __privateGet(this, _options).taintFallback;
+          let promoted = false;
+          if (fallback === "webgl" && __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this)?.engine !== "frames") {
+            __privateSet(this, _taintPromotedWebGL, true);
+            promoted = true;
+          }
+          const reason = resolveTaintUrl(__privateGet(this, _options), __privateGet(this, _source)) ? "taint-load-failed" : "no-cross-origin-taint-source";
           __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-taint-unavailable", {
-            detail: { mode: __privateGet(this, _options).mode },
+            detail: { mode: __privateGet(this, _options).mode, reason, promoted },
             bubbles: true
           }));
+          emitClientEvent("archx.taint_unavailable", {
+            reason,
+            outcome: promoted ? "webgl-promoted" : "instance-poisoning-only"
+          }, this);
+          if (!promoted && fallback !== "off" && !taintConsoleWarned) {
+            taintConsoleWarned = true;
+            try {
+              console.warn('[archx] origin-taint readback protection is unavailable (same-origin deployment or the taint pixel failed to load): 2D modes are relying on instance poisoning only, which prototype-call readbacks bypass. Serve the Archx API or taintUrl from a different origin, use vault/WebGL mode, or set taintFallback:"webgl". Machine-readable signal: the archx.taint_unavailable telemetry event.');
+            } catch {
+            }
+          }
         }
       }
       this._render();
@@ -7285,7 +7355,7 @@ var ProtectedImage = class {
     if (!__privateGet(this, _bitmap) || __privateGet(this, _destroyed)) return;
     const mode = __privateGet(this, _options).mode;
     const temporal = __privateMethod(this, _ProtectedImage_instances, temporalConfig_fn).call(this);
-    let wantsWebGL = __privateGet(this, _options).renderer === "webgl" || __privateGet(this, _options).renderer !== "canvas" && mode === "vault";
+    let wantsWebGL = __privateGet(this, _options).renderer === "webgl" || __privateGet(this, _options).renderer !== "canvas" && mode === "vault" || __privateGet(this, _options).renderer !== "canvas" && __privateGet(this, _taintPromotedWebGL);
     if (temporal?.engine === "shader") wantsWebGL = true;
     else if (temporal?.engine === "frames") wantsWebGL = false;
     __privateSet(this, _temporalEngineActual, null);
@@ -7746,6 +7816,19 @@ var ProtectedImage = class {
       __privateSet(this, _gl, gl);
       acquireGlSlot();
       this._poison(canvas, null);
+      try {
+        Object.defineProperty(gl, "readPixels", {
+          value: function(x, y, width, height, format, type, pixels) {
+            try {
+              if (pixels && typeof pixels.fill === "function") pixels.fill(0);
+            } catch {
+            }
+          },
+          writable: false,
+          configurable: false
+        });
+      } catch {
+      }
       canvas.addEventListener("webglcontextlost", (e) => {
         e.preventDefault();
         __privateSet(this, _gl, null);
@@ -8475,6 +8558,7 @@ _loaded = new WeakMap();
 _destroyed = new WeakMap();
 _glBudgetWarned = new WeakMap();
 _taintWarned = new WeakMap();
+_taintPromotedWebGL = new WeakMap();
 _canaryDone = new WeakMap();
 _canaryPause = new WeakMap();
 _canaryProbe = new WeakMap();
@@ -9645,7 +9729,7 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.22.0";
+var VERSION2 = "1.23.0";
 var Archx = {
   version: VERSION2,
   ProtectedImage,

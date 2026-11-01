@@ -784,7 +784,7 @@ function inspectServerConfig(options = {}) {
   if (!config.widthBuckets?.length) warn('widthBuckets is not configured: every viewport/DPR combination can create a distinct derivative and fragment the output cache; image-heavy sites should use canonical widths');
   if (!config.outputCacheDir && !suppliedStateStore) warn('no persistent outputCacheDir or shared state-store cache is configured: derivative reuse is limited to this process memory and is lost on restart');
   if (options.scrambleKeyMode === 'per-token') warn('scrambleKeyMode per-token makes every issued view a distinct derivative, defeating cross-viewer output caching');
-  if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only and can be reassembled keylessly by tile-edge continuity (jigsaw) solvers — enable encrypt:true for payload secrecy');
+  if (options.encrypt !== true) warn('encrypt is off: scrambled payloads are obfuscation only — tile-edge (jigsaw) solvers attack them without any key, and measured solver success varies by image, grid, and solver; payload secrecy must never depend on solver weakness. Enable encrypt:true for payload secrecy');
   const avifEffortWarn = options.processing?.avifEffort ?? options.avifEffort;
   if (options.lossless === true && (options.maxWidthFraction ?? 1) >= 1 && (options.maxWidthCap ?? 1920) >= 1920) {
     warn('lossless delivery with maxWidthFraction 1 and a high maxWidthCap lets an entitled viewer receive the master\'s FULL-RESOLUTION pixels (the original file/metadata are still never served, but pixel-for-pixel content is). If these asset classes must stay previews, set maxWidthFraction < 1 (e.g. 0.6) or disable lossless');
@@ -888,9 +888,10 @@ export function withHardenedProductionDefaults(options = {}) {
     // derivative caching (the catalog preset keeps per-image keys,
     // which since 1.15 are variant-scoped w/q/fmt).
     scrambleKeyMode: 'per-token',
-    // Scrambling alone is obfuscation: tile-edge continuity solvers can
-    // reassemble unencrypted payloads without any key. AES-256-GCM is the
-    // actual secrecy layer, so the hardened preset turns it on.
+    // Scrambling alone is obfuscation: tile-edge (jigsaw) solvers attack
+    // unencrypted payloads keylessly, and secrecy must not depend on how
+    // far a given solver gets. AES-256-GCM is the actual secrecy layer,
+    // so the hardened preset turns it on.
     encrypt: true,
     stegoRegistryFailure: 'deny',
     provenanceFailure: 'deny',
@@ -941,6 +942,12 @@ export function withCatalogThroughputDefaults(options = {}) {
     quality: 88,
     format: 'webp',
     scrambleKeyMode: 'per-image',
+    // The security floor is not a throughput trade: catalog payloads stay
+    // encrypted on the 128-bit-seeded plan (audit D5). Explicit operator
+    // overrides still win via the ...options spread below, and the
+    // production audit blocks weakening either setting.
+    encrypt: true,
+    scramblePlanVersion: 2,
     widthBuckets: [...DEFAULT_WIDTH_BUCKETS],
     batchTokenMaxItems: 100,
     outputCacheMax: 1000,
@@ -964,6 +971,55 @@ export function withCatalogThroughputDefaults(options = {}) {
     },
   };
   if (options.steganography !== undefined) out.steganography = steganography;
+  return out;
+}
+
+/**
+ * Performance profile (v1.23): CPU/RAM-first composition for image-heavy
+ * catalogs. Every protection layer remains available; what changes is
+ * where the budgets sit — shared canonical derivatives, bounded caches,
+ * compact memory profile, and (via withCatalogThroughputDefaults) the
+ * unchanged security floor of encrypt:true + scramblePlanVersion:2.
+ * StegoMark enabled as `true` uses the shared per-image standard
+ * profile so marked derivatives stay reusable across viewers.
+ * Client counterpart: Archx.preset('performance').
+ */
+export function withPerformanceDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx performance defaults: options must be an object');
+  }
+  const out = withCatalogThroughputDefaults({ memoryProfile: 'compact', ...options });
+  if (options.steganography === true) {
+    out.steganography = { perToken: false, scope: 'image', profile: 'standard' };
+  }
+  return out;
+}
+
+/**
+ * Max-protection profile (v1.23): protection and content identification
+ * first — the state-of-the-art composition. Starts from the hardened
+ * production baseline (sender-constrained one-time tokens, strict replay
+ * saturation, encrypted per-token payloads on the 128-bit plan), makes
+ * abuse detection deny by default, and (when StegoMark is enabled)
+ * fingerprints per viewer with the robust profile so a leaked copy
+ * identifies its source. Budgets stay bounded; they are spent on
+ * protection and attribution depth rather than throughput.
+ * Client counterpart: Archx.preset('maxProtection').
+ */
+export function withMaxProtectionDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx max-protection defaults: options must be an object');
+  }
+  const abuse = isPlainObject(options.abuseDetection) ? options.abuseDetection : {};
+  const out = withHardenedProductionDefaults({
+    ...options,
+    abuseDetection: { action: 'deny', ...abuse },
+  });
+  if (options.steganography === true) {
+    out.steganography = { perToken: true, scope: 'viewer', profile: 'robust' };
+  } else if (isPlainObject(options.steganography)) {
+    out.steganography = { perToken: true, scope: 'viewer', profile: 'robust', ...options.steganography };
+  }
   return out;
 }
 
@@ -992,8 +1048,10 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (summary.oneTimeTokens && summary.replaySaturation !== 'strict') {
       recommendations.push("replaySaturation is 'evict' (availability mode): under sustained mint pressure the in-memory store can evict a live JTI and reopen a narrow replay window for that one signed, re-authorized token (watch archx.replay_store_evicted). Set replaySaturation: 'strict' to reject new claims instead, accepting redemption failures while saturated — size oneTimeTokenMaxEntries to peak-claim-rate × token TTL × safety margin either way");
     }
-    if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are reassembled keylessly by tile-edge (jigsaw) solvers in well under a second');
+    if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are obfuscation, not secrecy — keyless tile-edge (jigsaw) attacks exist (independent solvers recovered at most 15/64 tiles on audited test images, but solvers improve and results vary by content); payload secrecy must not rely on solver weakness');
     if (summary.scramblePlanVersion !== 2) blockers.push('scramblePlanVersion must be 2: the v1 plan seed is 32-bit and brute-forceable');
+    if (summary.taintImage === false) blockers.push('taintImage endpoint must stay enabled: it is the automatic cross-origin pixel browsers use to origin-taint 2D display canvases (browser-enforced readback denial that prototype-call readbacks cannot bypass); disabling it silently drops that layer');
+    if (summary.taintImage !== false) recommendations.push('browser-enforced readback taint (client 2D modes) only engages when the taint pixel is CROSS-ORIGIN to the page: a same-origin deployment silently falls back to instance poisoning, which prototype-call readbacks bypass — serve the Archx API from a different origin than the page, set a cross-origin client taintUrl, use the vault/WebGL renderer, or set client taintFallback:"webgl"; alert on the client archx.taint_unavailable telemetry event');
     if (summary.tokenMethods.some((method) => method !== 'POST')) blockers.push("tokenMethods must be ['POST'] for the hardened baseline");
     if (!summary.requireTokenRequestHeader) blockers.push('requireTokenRequestHeader must be enabled');
     if (!summary.requireSameSiteTokenRequests) blockers.push('requireSameSiteTokenRequests must be enabled');

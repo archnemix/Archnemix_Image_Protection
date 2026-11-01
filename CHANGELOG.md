@@ -3,7 +3,52 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-## Unreleased
+## [1.23.0] — 2026-11-01
+
+Independent-audit response (`docs/RESEARCH.md` §2.31). Stego layouts
+1-4, scramble plans, pHash bits, and token semantics are unchanged;
+derivative bytes change only where an operator adopts a new preset
+floor (cache keys already version those inputs).
+
+- **D1 fixed — same-origin readback degradation is no longer silent.**
+  Origin-tainting needs a cross-origin pixel, so same-origin 2D modes
+  previously fell back to instance poisoning with only a per-host DOM
+  event and a clean production audit. Now: `archx.taint_unavailable`
+  telemetry on `Archx.on()` (reason + outcome), one console warning per
+  page, new client option `taintFallback: 'warn' | 'webgl' | 'off'`
+  (`'webgl'` promotes the instance to the black-readback WebGL
+  renderer), a production-audit blocker for `taintImage:false`, and a
+  topology recommendation. Browser checks cover the same-origin case.
+- **Performance & max-protection profiles.** Server:
+  `withPerformanceDefaults()` (compact memory, shared canonical
+  derivatives, standard per-image StegoMark, security floor intact) and
+  `withMaxProtectionDefaults()` (hardened baseline, denial-by-default
+  abuse action, per-viewer robust StegoMark; passes the production
+  audit with zero blockers). Client: `Archx.preset('performance')`
+  (CPU/RAM-first) and `Archx.preset('maxProtection')` (WebGL-first,
+  taint-or-promote, sender-constrained tokens required, 60 Hz
+  interlace).
+- **D5:** `withCatalogThroughputDefaults()` now sets `encrypt:true`
+  and `scramblePlanVersion:2` — the security floor is not a throughput
+  trade (explicit overrides still win and remain audit-blocked).
+- **D4:** jigsaw claim corrected to measurement. The audit blocker no
+  longer asserts sub-second keyless reassembly (independent solvers
+  recovered at most 15/64 tiles); it states that secrecy must not
+  depend on solver weakness. The `encrypt:true` gate is unchanged.
+- **D6:** DPoP proof-key cache is a true bounded LRU (was a wholesale
+  `clear()` at 512 entries).
+- **D8:** WebGL instance `readPixels` is shadowed like the 2D readback
+  APIs (defence in depth; the preserve-rewrite canary uses the
+  captured native and is unaffected).
+- **D3 measured, tiled layout 5 rejected.** Native-crop attribution
+  floor quantified (layout-3 robust recovers to ≈0.6 linear keep on a
+  900-px photo; 0.5 keep is beyond the whole-frame code's erasure
+  capacity at any budget). A tiled-replication layout-5 prototype was
+  built and measured against the pre-registered bar; it did not
+  recover the crop tiers (no complete aligned supertile survives a
+  center crop) and was reverted rather than shipped. Detector and
+  embedder bytes are unchanged.
+- **Test counts:** 139 Node tests, 125 real-Chromium browser checks.
 
 - **npm `bin` path normalization**: CLI bin targets in `package.json` no
   longer use `./` prefixes; current npm rewrites/removes such entries during

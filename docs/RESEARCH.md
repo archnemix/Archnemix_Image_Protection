@@ -3110,3 +3110,82 @@ credential. The shape was replaced with real mutations.
 
 Every output byte: stego formats 1–4, scramble plans, pHash
 bits, forensic marks, derivative bytes, token semantics.
+
+## 2.31 Independent-audit response (v1.23.0): one real defect, several corrections, one measured dead end
+
+An independent security & capability audit of v1.22.0 (2026-11-01,
+8/10) verified most claims empirically and filed one genuine defect
+plus corrections. Disposition of every item:
+
+**D1 — same-origin taint blind spot (fixed).** Verified exactly as
+filed: in same-origin deployments no cross-origin taint pixel exists,
+so 2D modes relied on instance poisoning (defeated by prototype-call
+readbacks: auditor captured a real 464 KB PNG same-origin; the same
+code cross-origin threw SecurityError), the only signal was a
+per-host DOM event, and the production audit said `ready:true` with
+zero taint mentions. v1.23: `archx.taint_unavailable` is now emitted
+on the `Archx.on()` telemetry stream with reason/outcome, a one-time
+console warning names the remedies, a new client option
+`taintFallback:'webgl'` promotes degraded 2D instances to the WebGL
+renderer (black readback), and the production audit hard-blocks
+`taintImage:false` and recommends on topology for every taint-enabled
+deployment. Browser checks 8e pin the telemetry, the promotion, and
+the readPixels shadow in the same-origin topology.
+
+**D4 — jigsaw rationale corrected.** The audit blocker claimed
+unencrypted payloads reassemble "in well under a second"; the
+auditor's five independent solvers recovered at most 15/64 tiles with
+MAD at the unsolved-mosaic floor. The claim was wrong (conservatively
+so); blocker/warning/preset text now states the measured position.
+The `encrypt:true` gate is unchanged: secrecy must not depend on
+solver weakness.
+
+**D5/D6/D8 — fixed.** `withCatalogThroughputDefaults` now sets
+`encrypt:true` + `scramblePlanVersion:2`; `proofKeyCache` is a true
+bounded LRU (was wholesale `clear()` at 512); WebGL instance
+`readPixels` is shadowed like the 2D APIs (canary unaffected — it
+uses the captured native).
+
+**D3 — crop attribution floor, measured; tiled layout 5 rejected.**
+Whole-frame spreading has an information floor, measured on a
+900×491 photo, robust profile, native-resolution center crops:
+keep 0.7 → L3 6.0 s / L4 10.1 s (auto, 20 s budget); keep 0.632 →
+found both; keep 0.6 → L3 found (2.1 s pinned), L4 not found even
+pinned at 60 s (finished 16.6 s — not a budget loss); keep 0.5 →
+neither layout at any budget (search completes: the surviving cells
+no longer determine the codeword). A layout-5 prototype (the
+layout-4 codeword replicated per ~192–288 px supertile, window-scan
+detector reusing the pinned L4 decoder) was implemented against the
+usual pre-registered bar (must beat L3 robust 85/99 with 0 false
+positives and recover the 0.5-keep crop tier): uncropped and
+manual-supertile reads verified at 0.99, but center crops contain no
+complete, aligned supertile at these tile sizes and partial-tile
+reads did not decode — 0/6 crop tiers on the probe photo. The
+reachable design (autocorrelation/FFT-synchronised tile folding) is
+a detector-internals research project, not a safe incremental
+change; the prototype was reverted, not shipped. Layout 3's crop
+guidance stands: pin the layout and raise `maxTimeMs` for forensic
+searches; expect recovery to ≈0.6 linear keep on photos, not below.
+
+**D2/D7/D9 — accepted as designed.** Plan v1 stays frozen for
+back-compat (new payloads cannot emit it by accident; startup warns;
+production audit blocks); removing it would orphan existing assets,
+which is worse. The integrity audit remains a documented tripwire.
+D9 items are operator choices/inherent limits.
+
+**Profiles.** v1.23 adds the two named compositions the audit's
+"most/least" analysis pointed at: `withPerformanceDefaults()` /
+`Archx.preset('performance')` (CPU/RAM-first, compact memory, shared
+derivatives, standard per-image stego; security floor intact) and
+`withMaxProtectionDefaults()` / `Archx.preset('maxProtection')`
+(protection + identification first: hardened baseline, deny-by-
+default abuse action, per-viewer robust stego; client WebGL-first
+with taint-or-promote). The max-protection server composition passes
+the production audit with zero blockers (unit-pinned).
+
+### What did not change
+
+Stego layouts 1–4 bytes, scramble plans, pHash bits, token
+semantics. Derivative bytes change only where an operator adopts the
+new preset floors (encrypt/plan in the throughput preset) — cache
+keys already version those inputs.

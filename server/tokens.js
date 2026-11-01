@@ -229,9 +229,20 @@ export function verifyProofOfPossession({ header, token, expectedJkt, method, ta
     // non-signature cost of proof verification; cache by RFC 7638
     // thumbprint, which was just proven to identify this exact JWK.
     let publicKey = proofKeyCache.get(expectedJkt);
-    if (!publicKey) {
+    if (publicKey) {
+      // LRU touch: hot proof keys stay resident under churn.
+      proofKeyCache.delete(expectedJkt);
+      proofKeyCache.set(expectedJkt, publicKey);
+    } else {
       publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-      if (proofKeyCache.size >= 512) proofKeyCache.clear();
+      // Bounded LRU eviction (oldest first). The previous wholesale
+      // clear() turned this cache into a periodic full-recompute under
+      // DPoP-heavy traffic (audit D6).
+      while (proofKeyCache.size >= 512) {
+        const oldest = proofKeyCache.keys().next().value;
+        if (oldest === undefined) break;
+        proofKeyCache.delete(oldest);
+      }
       proofKeyCache.set(expectedJkt, publicKey);
     }
     const ok = crypto.verify(

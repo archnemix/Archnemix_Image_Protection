@@ -440,6 +440,12 @@ export function withHardenedProductionDefaults(
 export function withCatalogThroughputDefaults(
   options?: ArchxServerOptions,
 ): ArchxServerOptions;
+export function withPerformanceDefaults(
+  options?: ArchxServerOptions,
+): ArchxServerOptions;
+export function withMaxProtectionDefaults(
+  options?: ArchxServerOptions,
+): ArchxServerOptions;
 
 export function deriveStegoFingerprint(args: {
   id: string;

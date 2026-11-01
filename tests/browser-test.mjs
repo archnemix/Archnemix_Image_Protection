@@ -1610,6 +1610,51 @@ try {
     document.querySelector('#t-tainted')?.remove();
   });
 
+  console.log('\n[8d2] Same-origin taint degradation is surfaced (audit D1) — telemetry + WebGL promotion');
+  const sameOriginTaint = await page.evaluate(async () => {
+    const events = [];
+    const off = window.Archx.on((e) => { if (e.type === 'archx.taint_unavailable') events.push(e); });
+    const mk = async (id, opts) => {
+      const host = document.createElement('div');
+      host.id = id;
+      host.style.cssText = 'width:320px;height:240px';
+      document.body.appendChild(host);
+      const inst = window.Archx.load.image(host, { id: 'aurora-valley' }, {
+        mode: 'shield', lazy: false, debug: true, shadow: 'open', ...opts,
+      });
+      await inst.ready;
+      return inst;
+    };
+    const plain = await mk('t-sameorigin', {});
+    const promoted = await mk('t-promoted', { taintFallback: 'webgl' });
+    const glCanvas = promoted._debug().canvas;
+    let glInfo = { isGl: false, readPixelsShadowed: false };
+    try {
+      const gl = glCanvas.getContext('webgl2') || glCanvas.getContext('webgl');
+      if (gl) {
+        glInfo.isGl = true;
+        glInfo.readPixelsShadowed = Object.prototype.hasOwnProperty.call(gl, 'readPixels');
+      }
+    } catch { /* context probe only */ }
+    off();
+    const out = { events, glInfo, plainLoaded: plain.loaded, promotedLoaded: promoted.loaded };
+    plain.destroy(); promoted.destroy();
+    document.querySelector('#t-sameorigin')?.remove();
+    document.querySelector('#t-promoted')?.remove();
+    return out;
+  });
+  check('same-origin shield load emits archx.taint_unavailable telemetry (instance-poisoning-only)',
+    sameOriginTaint.plainLoaded
+      && sameOriginTaint.events.some((e) => e.outcome === 'instance-poisoning-only' && e.reason === 'no-cross-origin-taint-source'),
+    JSON.stringify(sameOriginTaint.events));
+  check('taintFallback:"webgl" promotes a same-origin shield instance to the WebGL renderer',
+    sameOriginTaint.promotedLoaded
+      && sameOriginTaint.events.some((e) => e.outcome === 'webgl-promoted')
+      && sameOriginTaint.glInfo.isGl === true,
+    JSON.stringify(sameOriginTaint));
+  check('promoted WebGL context shadows instance readPixels (audit D8 defence in depth)',
+    sameOriginTaint.glInfo.readPixelsShadowed === true, JSON.stringify(sameOriginTaint.glInfo));
+
   const vaultShadow = await page.evaluate(() => {
     const canvas = window.__instances.vault._debug().canvas;
     return {

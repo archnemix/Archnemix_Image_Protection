@@ -22,13 +22,14 @@ import {
 import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative, configureSharpSecurity } from '../server/scramble-image.js';
 import { buildArchxAssets } from '../server/build-assets.js';
 import {
-  DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS,
+  DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS, preset,
   TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace,
 } from '../src/archx.js';
 import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
   auditArchxServerConfig, auditArchxProductionConfig, withHardenedProductionDefaults,
-  withCatalogThroughputDefaults, canonicalDerivativeWidth, DEFAULT_WIDTH_BUCKETS,
+  withCatalogThroughputDefaults, withPerformanceDefaults, withMaxProtectionDefaults,
+  canonicalDerivativeWidth, DEFAULT_WIDTH_BUCKETS,
   validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
   SlidingWindowLimiter, BoundedTtlSet, AsyncSemaphore,
@@ -1756,6 +1757,42 @@ test('catalog scale helpers canonicalize widths and expose throughput trade-offs
   ]) {
     assert.equal(auditArchxServerConfig({ ...base, ...bad }).ok, false, JSON.stringify(bad));
   }
+});
+
+test('v1.23 profiles and taint audit: performance keeps the security floor, max-protection is audit-ready, taint degradation is a blocker', () => {
+  const base = {
+    secret: 'v123-profiles-secret-for-unit-tests-32x',
+    imagesDir: '/tmp/archx-v123-images',
+    authorize: async () => true,
+  };
+  const perf = withPerformanceDefaults({ ...base, steganography: true });
+  assert.equal(perf.encrypt, true);
+  assert.equal(perf.scramblePlanVersion, 2);
+  assert.equal(perf.memoryProfile, 'compact');
+  assert.deepEqual(perf.steganography, { perToken: false, scope: 'image', profile: 'standard' });
+  const throughput = withCatalogThroughputDefaults(base);
+  assert.equal(throughput.encrypt, true, 'D5: throughput preset must keep encrypt');
+  assert.equal(throughput.scramblePlanVersion, 2, 'D5: throughput preset must keep plan v2');
+
+  const max = withMaxProtectionDefaults({ ...base, steganography: true, onStegoIssue: () => {} });
+  assert.equal(max.proofOfPossession, 'required');
+  assert.equal(max.replaySaturation, 'strict');
+  assert.equal(max.abuseDetection.action, 'deny');
+  assert.deepEqual(max.steganography, { perToken: true, scope: 'viewer', profile: 'robust' });
+  const maxAudit = auditArchxProductionConfig(max);
+  assert.equal(maxAudit.ready, true, JSON.stringify(maxAudit.blockers));
+  assert.ok(maxAudit.recommendations.some((r) => /taint/i.test(r) && /CROSS-ORIGIN/.test(r)),
+    'production audit must explain the cross-origin taint requirement');
+  const noTaint = auditArchxProductionConfig({ ...max, taintImage: false });
+  assert.ok(noTaint.blockers.some((b) => /taintImage endpoint/.test(b)),
+    'D1: disabling the taint endpoint blocks production readiness');
+
+  assert.equal(PRESETS.performance.mode, 'shield');
+  assert.equal(PRESETS.performance.renderer, 'canvas');
+  assert.equal(PRESETS.maxProtection.mode, 'vault');
+  assert.equal(PRESETS.maxProtection.renderer, 'webgl');
+  assert.equal(PRESETS.maxProtection.taintFallback, 'webgl');
+  assert.equal(preset('maxProtection').proofOfPossession, 'required');
 });
 
 test('catalog HTTP path: canonical widths, batch minting, and persistent cross-viewer derivative reuse', async (t) => {
