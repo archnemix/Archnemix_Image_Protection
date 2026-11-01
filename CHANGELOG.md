@@ -5,6 +5,12 @@ here. The project follows semantic versioning once a version is released.
 
 ## Unreleased
 
+- **npm `bin` path normalization**: CLI bin targets in `package.json` no
+  longer use `./` prefixes; current npm rewrites/removes such entries during
+  publish (observed as “script name … was invalid and removed”), which could
+  drop `archx-protect`, `archx-build`, and `archx-detect` from the published
+  manifest. No runtime code or payload format change.
+
 - **Test-suite Windows portability** (no shipped-code change; tests are not
   in the npm artifact): three tests derived the repo root from
   `new URL(import.meta.url).pathname`, which on Windows yields `/F:/...`

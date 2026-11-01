@@ -92,9 +92,9 @@
     "server/config.js"
   ],
   "bin": {
-    "archx-protect": "./server/scramble-cli.js",
-    "archx-build": "./server/build-assets-cli.js",
-    "archx-detect": "./server/detect-stego-cli.js"
+    "archx-protect": "server/scramble-cli.js",
+    "archx-build": "server/build-assets-cli.js",
+    "archx-detect": "server/detect-stego-cli.js"
   },
   "scripts": {
     "build": "node tools/build.mjs",
