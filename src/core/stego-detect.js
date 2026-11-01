@@ -425,10 +425,15 @@ export function detectStegoFingerprint(rgba, w, h, {
   const _rowY1 = new Int32Array(gy);
   const _rowOk = new Uint8Array(gy);
   const _segYB = new Int32Array(gy * (rowSegments + 1));
+  const _segY0 = new Int32Array(gy * rowSegments);
+  const _segH = new Int32Array(gy * rowSegments);
   const _colX0 = new Int32Array(gx);
   const _colX1 = new Int32Array(gx);
   const _colOk = new Uint8Array(gx);
   const _bandXB = new Int32Array(gx * (columnBands + 1));
+  const _bandX0 = new Int32Array(gx * columnBands);
+  const _bandW = new Int32Array(gx * columnBands);
+  const _colAllBands = new Uint8Array(gx);
   const _gains = new Uint16Array(codeLength);
   // Layout-derived per-cell constants: code-bit index and the signed
   // (polarity x segmentPolarity) product. Both are exact integer
@@ -531,6 +536,13 @@ export function detectStegoFingerprint(rgba, w, h, {
       for (let s2 = 0; s2 <= rowSegments; s2++) {
         _segYB[segBase + s2] = Math.round(rawY0 + (s2 * cellH0) / rowSegments);
       }
+      const segClampBase = cy * rowSegments;
+      for (let s2 = 0; s2 < rowSegments; s2++) {
+        const ry0 = Math.max(y0, _segYB[segBase + s2]);
+        const ry1 = Math.min(y1, _segYB[segBase + s2 + 1]);
+        _segY0[segClampBase + s2] = ry0;
+        _segH[segClampBase + s2] = ry1 - ry0;
+      }
     }
     for (let cx = 0; cx < gx; cx++) {
       const rawX0 = ox + cx * cellW0;
@@ -544,30 +556,39 @@ export function detectStegoFingerprint(rgba, w, h, {
       for (let b2 = 0; b2 <= columnBands; b2++) {
         _bandXB[bandBase + b2] = Math.round(rawX0 + (b2 * cellW0) / columnBands);
       }
+      const bandClampBase = cx * columnBands;
+      let allBands = 1;
+      for (let b2 = 0; b2 < columnBands; b2++) {
+        const rx0 = Math.max(x0, _bandXB[bandBase + b2]);
+        const rx1 = Math.min(x1, _bandXB[bandBase + b2 + 1]);
+        _bandX0[bandClampBase + b2] = rx0;
+        _bandW[bandClampBase + b2] = rx1 - rx0;
+        if (rx1 - rx0 <= 0) allBands = 0;
+      }
+      _colAllBands[cx] = allBands;
     }
     for (let cy = 0; cy < gy; cy++) {
       if (!_rowOk[cy]) continue;
       const y0 = _rowY0[cy];
       const y1 = _rowY1[cy];
-      const segBase = cy * (rowSegments + 1);
+      const segClampBase = cy * rowSegments;
       for (let cx = 0; cx < gx; cx++) {
         if (!_colOk[cx]) continue;
-        const x0 = _colX0[cx];
-        const x1 = _colX1[cx];
-        const bandBase = cx * (columnBands + 1);
+        const bandClampBase = cx * columnBands;
         const sums = _sums.fill(0);
         const counts = _counts.fill(0);
         for (let segment = 0; segment < rowSegments; segment++) {
-          const ry0 = Math.max(y0, _segYB[segBase + segment]);
-          const ry1 = Math.min(y1, _segYB[segBase + segment + 1]);
-          if (ry1 <= ry0) continue;
+          const segH = _segH[segClampBase + segment];
+          if (segH <= 0) continue;
+          const ry0 = _segY0[segClampBase + segment];
+          const ry1 = ry0 + segH;
           for (let band = 0; band < columnBands; band++) {
-            const rx0 = Math.max(x0, _bandXB[bandBase + band]);
-            const rx1 = Math.min(x1, _bandXB[bandBase + band + 1]);
-            if (rx1 <= rx0) continue;
+            const bandW = _bandW[bandClampBase + band];
+            if (bandW <= 0) continue;
+            const rx0 = _bandX0[bandClampBase + band];
             const idx = segment * columnBands + band;
-            sums[idx] = rectSum(rx0, ry0, rx1, ry1);
-            counts[idx] = (rx1 - rx0) * (ry1 - ry0);
+            sums[idx] = rectSum(rx0, ry0, rx0 + bandW, ry1);
+            counts[idx] = bandW * segH;
           }
         }
         // Third-difference responds to +−+− alternation and cancels linear /
@@ -580,11 +601,10 @@ export function detectStegoFingerprint(rgba, w, h, {
         const cellIndex = cy * gx + cx;
         for (let segment = 0; segment < rowSegments; segment++) {
           const base = segment * columnBands;
-          let complete = true;
-          for (let band = 0; band < columnBands; band++) {
-            if (counts[base + band] === 0) { complete = false; break; }
-          }
-          if (!complete) continue;
+          // A segment is complete iff every band of this cell got a
+          // nonzero pixel count, which is exactly
+          // segH > 0 && all band widths > 0 for this column.
+          if (!_colAllBands[cx] || _segH[segClampBase + segment] <= 0) continue;
           validSegments++;
           const m0 = sums[base] / counts[base];
           const m1 = sums[base + 1] / counts[base + 1];
