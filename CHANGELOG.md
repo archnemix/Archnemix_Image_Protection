@@ -3,6 +3,53 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.26.0] — 2026-11-02
+
+Stego-detect performance round (`docs/RESEARCH.md` §2.34): the
+detector computes the exact same scores, evidence, and results in
+measurably less time. Derivative bytes, stego layouts 1–4, scramble
+plans, the perceptual fingerprint bit format, token semantics, and
+server behavior are unchanged — verified by a golden battery
+(embed hashes + full result objects across layouts 1–4, clean /
+flipped / rotated / cropped / unmarked / wrong-key), the full test
+suite (141/141), red-team v1 (53/53) and v2 (23/23), and the stego
+survival bench (robust 85/99, unchanged).
+
+### Performance
+
+- `detectStegoFingerprint` inner loop: per-probe geometry (row /
+  column bounds, segment and band split points, clamped segment /
+  band sizes, segment completeness) is computed once per probe
+  instead of once per cell; per-cell code-bit indices and signed
+  polarity products are precomputed once per detect call; the
+  scoring tail uses allocation-free loops (fused agree/disagree
+  pass, bounded top-K instead of a full sort). Worst-case failing
+  geometry searches run ~1.7× faster (960×540, sandbox: 10.0 s →
+  5.4 s, 9.9 s → 5.6 s, 2.9 s → 1.65 s); ordinary detections are
+  unchanged to modestly faster.
+- `stegoLayout` / `robustStegoLayout` are memoized (bounded cache,
+  copy-on-return): layout derivations drop from ~0.20 ms to ~0 ms
+  per probe at 384 cells, which compounds across the layout ×
+  profile × orientation probes of one auto-detect and across batch
+  screening runs under one key.
+
+### Security
+
+- Re-audited against current Sharp/Node guidance (single-pipeline
+  transforms, pixel/format limits, `timingSafeEqual` discipline,
+  MAC-before-parse, DPoP-style proof pinning, strict claim
+  allowlists, bounded body parsing, SVG escaping): all present
+  already; no exploitable issue found and no behavior changed.
+  Server throughput benchmarks (`tools/optimization-bench.mjs`)
+  show identical payload bytes on every row.
+
+### Repository
+
+- `website/` reverted to the v1.25.0 site; the scroll-film
+  experiments that shipped in PRs #17/#18 are removed here (the
+  website is being rebuilt separately). The website is not part of
+  the npm package payload.
+
 ## [1.25.0] — 2026-11-01
 
 Orientation-tolerant leak recognition, red-team v2 section F, and a

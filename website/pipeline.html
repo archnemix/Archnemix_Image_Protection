@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Pipeline — Archnemix Image Protection</title>
+<meta name="description" content="Follow one photograph through the Archnemix server pipeline: what you send, what travels on the wire, what your visitor sees, what an attacker extracts, and how a leaked copy is identified. Interactive, with measured mode profiles.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html" aria-label="Archnemix home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <span>Archnemix</span>
+    </a>
+    <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
+    <nav class="masthead-nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="pipeline.html" aria-current="page">Pipeline</a>
+      <a href="technical.html">Technical</a>
+      <a href="limits.html">Threat model</a>
+      <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ HERO ============ -->
+  <section class="hero">
+    <p class="kicker">Inside the server · an interactive walkthrough</p>
+    <h1>Follow one<br><em>photograph.</em></h1>
+    <p class="lede">
+      What you upload, what the server does to it, what travels on the wire,
+      what your visitor sees, what an attacker walks away with — and how a
+      leaked copy is traced back. Every stage below is live: press the buttons,
+      try to steal the picture, switch the protection profiles.
+    </p>
+
+    <figure class="stage" id="pipeStage">
+      <div class="stage-frame">
+        <canvas id="glpipe" tabindex="0" aria-label="Interactive 3D view of a photograph built from separate tiles. Drag to orbit."></canvas>
+        <div class="stage-fallback" id="pipeFallback" hidden>
+          <p>The 3D view needs WebGL. The short version: the picture is never one
+          file on the wire — it is separate, permuted pieces that only become a
+          picture inside the viewer.</p>
+        </div>
+        <span class="stage-tag">The picture, as the pipeline sees it: pieces</span>
+      </div>
+      <figcaption class="stage-controls">
+        <p class="stage-caption">One photograph, sixty-four separate tiles. Drag to orbit. Below, the same photograph travels the full server pipeline, stage by stage.</p>
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ============ 01 · THE JOURNEY ============ -->
+  <section class="band" id="journey">
+    <header class="band-head"><span class="band-no">01</span><h2>The journey, stage by stage</h2></header>
+    <p class="band-intro">Six stages between your master file and a stranger&rsquo;s hard drive. Step through them — the picture on the left is rendered live for the stage you pick.</p>
+
+    <div class="pipe-journey">
+      <figure class="pipe-view">
+        <div class="pipe-frame">
+          <canvas id="journeyCanvas" width="720" height="405" aria-label="Live rendering of the sample photograph at the selected pipeline stage"></canvas>
+          <span class="stage-tag" id="journeyTag">Stage 0 · your master</span>
+        </div>
+        <figcaption class="pipe-facts" id="journeyFacts"></figcaption>
+      </figure>
+
+      <div class="pipe-stages" role="group" aria-label="Pipeline stages">
+        <button type="button" class="pipe-stage is-active" data-stage="0">
+          <span class="pipe-stage-no">0</span>
+          <span><strong>Your master</strong><small>Private disk, outside the web root. Never served, never given a URL.</small></span>
+        </button>
+        <button type="button" class="pipe-stage" data-stage="1">
+          <span class="pipe-stage-no">1</span>
+          <span><strong>Server processing</strong><small>Resized to what the viewer is entitled to, invisibly fingerprinted per recipient, then scrambled (and optionally encrypted).</small></span>
+        </button>
+        <button type="button" class="pipe-stage" data-stage="2">
+          <span class="pipe-stage-no">2</span>
+          <span><strong>On the wire</strong><small>A one-time, token-bound payload of permuted pieces. No cache may store it; a captured copy is already spent.</small></span>
+        </button>
+        <button type="button" class="pipe-stage" data-stage="3">
+          <span class="pipe-stage-no">3</span>
+          <span><strong>Your visitor&rsquo;s screen</strong><small>Reassembled inside a guarded canvas/WebGL viewer — visible in full, but never present as a saveable file.</small></span>
+        </button>
+        <button type="button" class="pipe-stage" data-stage="4">
+          <span class="pipe-stage-no">4</span>
+          <span><strong>What extraction gets</strong><small>DevTools, view-source and scrapers meet permuted bytes, black read-backs and display-resolution fragments — try it in §03.</small></span>
+        </button>
+        <button type="button" class="pipe-stage" data-stage="5">
+          <span class="pipe-stage-no">5</span>
+          <span><strong>Identification</strong><small>A leaked copy can be rescanned: the invisible fingerprint identifies which recipient it came from. Measured limits in §04.</small></span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 02 · MODES & PROFILES ============ -->
+  <section class="band" id="profiles">
+    <header class="band-head"><span class="band-no">02</span><h2>Modes &amp; profiles, measured</h2></header>
+    <p class="band-intro">Three one-line starting points — every individual flag stays adjustable afterwards. Switch profiles and watch what each one turns on, and what it costs. Numbers are from <span class="mono">npm run bench:opt</span> on a 2&nbsp;vCPU box; your hardware will differ, the ratios are the point.</p>
+
+    <div class="pipe-profiles" role="group" aria-label="Protection profiles">
+      <button type="button" class="btn" data-profile="performance">Performance</button>
+      <button type="button" class="btn is-active" data-profile="balanced">Balanced (catalog)</button>
+      <button type="button" class="btn" data-profile="max">Max protection</button>
+    </div>
+    <p class="pipe-profile-line" id="profileLine"></p>
+
+    <div class="cols-2">
+      <div>
+        <h3>Cost per image</h3>
+        <div class="pipe-bars" id="profileBars" aria-live="polite"></div>
+        <p class="pipe-note">Server work is dominated by the photo encode; token minting is ~0.25&nbsp;ms each in batches. Warm delivery after the first view is served from bounded caches.</p>
+      </div>
+      <div>
+        <h3>Layers switched on</h3>
+        <ul class="pipe-layers" id="profileLayers"></ul>
+        <p class="pipe-note">Server presets: <span class="mono">withPerformanceDefaults()</span>, <span class="mono">withCatalogThroughputDefaults()</span>, <span class="mono">withMaxProtectionDefaults()</span> — client mirrors: <span class="mono">Archx.preset('performance' | 'catalog' | 'maxProtection')</span>.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 03 · TRY TO STEAL IT ============ -->
+  <section class="band" id="steal">
+    <header class="band-head"><span class="band-no">03</span><h2>Try to steal it</h2></header>
+    <p class="band-intro">Four things people actually try. Pick one and see the artifact it produces — rendered here the way the real pipeline produces it. Nothing on this page is the master; that is rather the point.</p>
+
+    <div class="pipe-steal">
+      <div class="pipe-steal-buttons" role="group" aria-label="Extraction attempts">
+        <button type="button" class="btn is-active" data-steal="save">Right-click → Save image</button>
+        <button type="button" class="btn" data-steal="source">View source / copy the URL</button>
+        <button type="button" class="btn" data-steal="network">Capture the network payload</button>
+        <button type="button" class="btn" data-steal="screenshot">Screenshot it</button>
+      </div>
+      <figure class="pipe-view">
+        <div class="pipe-frame">
+          <canvas id="stealCanvas" width="720" height="405" aria-label="The artifact produced by the selected extraction attempt"></canvas>
+          <span class="stage-tag" id="stealTag">Result</span>
+        </div>
+        <figcaption class="pipe-facts" id="stealVerdict" aria-live="polite"></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============ 04 · IDENTIFICATION ============ -->
+  <section class="band" id="identify">
+    <header class="band-head"><span class="band-no">04</span><h2>When a copy surfaces</h2></header>
+    <p class="band-intro">You find your picture on a forum. Rescan it offline — no server, no phone-home. The detector reads the invisible per-recipient fingerprint back out of the pixels and tells you which copy it was. What it can and cannot survive is measured, not asserted:</p>
+
+    <div class="cols-2">
+      <div class="pipe-readout" aria-label="Example detector readout">
+        <p class="pipe-readout-head"><span class="mono">$ archx-detect suspect.jpg --key-env ARCHX_STEGO_KEY</span></p>
+        <pre class="pipe-readout-body">{
+  "found": true,
+  "fingerprint": 9182736450,
+  "recipient": "buyer-1042@example.com",
+  "layout": 3,
+  "note": "compare against your issuance log before accusing anyone"
+}</pre>
+        <p class="pipe-note">The fingerprint is evidence for <em>your</em> investigation — corroborate with issuance logs and a perceptual-hash match before acting on it.</p>
+      </div>
+      <div>
+        <table class="pipe-table">
+          <thead><tr><th scope="col">Attack on the copy</th><th scope="col">Measured outcome</th></tr></thead>
+          <tbody>
+            <tr><td>Screenshot chain (resize, blur, JPEG, brighten)</td><td>Still identifies the right recipient</td></tr>
+            <tr><td>Robust transform battery (99 cases)</td><td>Recovered in 85 of 99</td></tr>
+            <tr><td>Wrong detector key (12 keys tried)</td><td>0 false attributions</td></tr>
+            <tr><td>Unmarked images screened (369)</td><td>0 false positives</td></tr>
+            <tr><td>Center crop</td><td>Works to ≈60% of width kept; below that, no</td></tr>
+            <tr><td>AI regeneration / heavy re-creation</td><td>Mark destroyed — everyone&rsquo;s is; provenance &amp; logs remain</td></tr>
+          </tbody>
+        </table>
+        <p class="pipe-note">Full methodology and the attacks that succeed: <a href="limits.html">the threat-model page</a> and <span class="mono">docs/RESEARCH.md</span> in the repo.</p>
+      </div>
+    </div>
+
+    <div class="install-row">
+      <code class="install"><span>npm i @archnemix/image-protection</span></code>
+      <p class="install-note">0BSD — use it for anything, no attribution required. <a href="index.html">Start on the overview</a> or read the <a href="technical.html">technical atlas</a>.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="wordmark wordmark-small">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      Archnemix
+    </span>
+    <p>Displayed pixels can always be photographed; Archx makes theft slow, lossy and traceable instead of silent. © 2026 Archnemix contributors · 0BSD · <a href="limits.html">what it does not claim</a> · every artifact on this page is rendered live from one sample photograph.</p>
+  </div>
+</footer>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+<script>
+// If WebGL never starts, say so instead of showing a void.
+setTimeout(function () {
+  if (!window.__archxPipeGlReady) {
+    var fb = document.getElementById('pipeFallback');
+    var gl = document.getElementById('glpipe');
+    if (gl) gl.remove();
+    if (fb) fb.hidden = false;
+  }
+}, 7000);
+</script>
+<script type="module" src="pipeline.js"></script>
+<script src="motion.js" defer></script>
+</body>
+</html>

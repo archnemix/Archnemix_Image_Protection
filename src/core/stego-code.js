@@ -274,8 +274,38 @@ function layoutRand(seedString, version, legacyHashSeedArg) {
   return sha256SeededPrng(seedString);
 }
 
+// Layout derivation is a pure function of (kind, cellCount, version,
+// key) but costs a SHA-256-seeded shuffle plus ~5 PRNG draws per cell.
+// One auto-detect rebuilds it per layout x profile x orientation
+// probe, and batch screening repeats that per suspect under the same
+// key. Cache the master arrays (bounded, same policy as the v4
+// interleave cache below) and hand out copies, so callers keep the
+// fresh-arrays contract and can never poison the cache by mutating
+// a returned layout. Absurdly long keys skip the cache.
+const _layoutCache = new Map();
+function layoutCacheCopy(cacheKey) {
+  if (cacheKey.length > 2048) return null;
+  const hit = _layoutCache.get(cacheKey);
+  if (!hit) return null;
+  return {
+    order: hit.order.slice(),
+    polarity: new Int8Array(hit.polarity),
+    segmentPolarity: new Int8Array(hit.segmentPolarity),
+  };
+}
+function layoutCacheStore(cacheKey, layout) {
+  if (cacheKey.length > 2048) return layout;
+  if (_layoutCache.size >= 64) _layoutCache.clear();
+  _layoutCache.set(cacheKey, layout);
+  return layoutCacheCopy(cacheKey);
+}
+
 export function stegoLayout(cellCount, key, version = 2) {
-  const rand = layoutRand(String(key) + '::archx-stego-layout', version);
+  const seedString = String(key) + '::archx-stego-layout';
+  const cacheKey = `std|${cellCount}|${version}|${seedString}`;
+  const cached = layoutCacheCopy(cacheKey);
+  if (cached) return cached;
+  const rand = layoutRand(seedString, version);
   const order = Array.from({ length: cellCount }, (_, i) => i);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -285,7 +315,7 @@ export function stegoLayout(cellCount, key, version = 2) {
   for (let i = 0; i < cellCount; i++) polarity[i] = rand() < 0.5 ? -1 : 1;
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
   for (let i = 0; i < segmentPolarity.length; i++) segmentPolarity[i] = rand() < 0.5 ? -1 : 1;
-  return { order, polarity, segmentPolarity };
+  return layoutCacheStore(cacheKey, { order, polarity, segmentPolarity });
 }
 
 export function stegoGrid(w, h, gridX, gridY) {
@@ -300,10 +330,14 @@ export function stegoGrid(w, h, gridX, gridY) {
 }
 
 export function robustStegoLayout(cellCount, key, version = 2) {
+  const seedString = 'archx-stego-robust-layout:' + String(key ?? '');
+  const cacheKey = `rob|${cellCount}|${version}|${seedString}`;
+  const cached = layoutCacheCopy(cacheKey);
+  if (cached) return cached;
   const order = Array.from({ length: cellCount }, (_, i) => i);
   const polarity = new Int8Array(cellCount);
   const segmentPolarity = new Int8Array(cellCount * STEGO_ROW_SEGMENTS);
-  const rand = layoutRand('archx-stego-robust-layout:' + String(key ?? ''), version, 0x51ab);
+  const rand = layoutRand(seedString, version, 0x51ab);
   for (let i = cellCount - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [order[i], order[j]] = [order[j], order[i]];
@@ -314,7 +348,7 @@ export function robustStegoLayout(cellCount, key, version = 2) {
       segmentPolarity[i * STEGO_ROW_SEGMENTS + segment] = rand() > 0.5 ? 1 : -1;
     }
   }
-  return { order, polarity, segmentPolarity };
+  return layoutCacheStore(cacheKey, { order, polarity, segmentPolarity });
 }
 
 /* ---------- Layout v4: BCH error correction (v1.20) ---------- */
