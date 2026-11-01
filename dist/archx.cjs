@@ -72,6 +72,7 @@ __export(index_exports, {
   isArchxContainer: () => isArchxContainer,
   legacyStegoFingerprint: () => legacyStegoFingerprint,
   listPlugins: () => listPlugins,
+  matchPerceptualFingerprint: () => matchPerceptualFingerprint,
   mulberry32: () => mulberry32,
   normalizePerceptualFingerprint: () => normalizePerceptualFingerprint,
   normalizeTemporalInterlace: () => normalizeTemporalInterlace,
@@ -3908,6 +3909,59 @@ function comparePerceptualFingerprints(a, b, { maxDistance = 10 } = {}) {
     distance,
     similarity: 1 - distance / 64,
     match: distance <= maxDistance
+  });
+}
+var _ORIENTATION_PROBES = [
+  ["flip-x", (src, w, h) => ({ data: flipPixels(src, w, h, true, false), w, h })],
+  ["flip-y", (src, w, h) => ({ data: flipPixels(src, w, h, false, true), w, h })],
+  ["rotate-180", (src, w, h) => ({ data: flipPixels(src, w, h, true, true), w, h })],
+  ["rotate-90-ccw", (src, w, h) => ({ data: rotatePixels90(src, w, h, false), w: h, h: w })],
+  ["rotate-90-cw", (src, w, h) => ({ data: rotatePixels90(src, w, h, true), w: h, h: w })],
+  ["transpose", (src, w, h) => ({ data: transposePixels(src, w, h, false), w: h, h: w })],
+  ["transpose-anti", (src, w, h) => ({ data: transposePixels(src, w, h, true), w: h, h: w })]
+];
+function matchPerceptualFingerprint(rgba, w, h, expected, {
+  maxDistance = 10,
+  orientations = true
+} = {}) {
+  if (!Number.isInteger(maxDistance) || maxDistance < 0 || maxDistance > 64) {
+    throw new RangeError("Archx: perceptual fingerprint maxDistance must be an integer from 0 to 64");
+  }
+  const expectedNorm = normalizePerceptualFingerprint(expected);
+  if (!expectedNorm) throw new TypeError("Archx: perceptual fingerprint must be 16 hex characters");
+  const src = asBytes(rgba);
+  const identityFingerprint = perceptualFingerprint(src, w, h);
+  let best = {
+    orientation: "identity",
+    fingerprint: identityFingerprint,
+    distance: perceptualFingerprintDistance(identityFingerprint, expectedNorm)
+  };
+  let orientationsChecked = 1;
+  if (best.distance > maxDistance && orientations) {
+    let probe = src, pw = w, ph = h;
+    const longest = Math.max(w, h);
+    if (longest > 256) {
+      const scale = 256 / longest;
+      pw = Math.max(1, Math.round(w * scale));
+      ph = Math.max(1, Math.round(h * scale));
+      probe = resampleRgba(src, w, h, pw, ph);
+    }
+    for (const [label, applyOrientation] of _ORIENTATION_PROBES) {
+      const view = applyOrientation(probe, pw, ph);
+      const fingerprint = perceptualFingerprint(view.data, view.w, view.h);
+      const distance = perceptualFingerprintDistance(fingerprint, expectedNorm);
+      orientationsChecked += 1;
+      if (distance < best.distance) best = { orientation: label, fingerprint, distance };
+      if (best.distance === 0) break;
+    }
+  }
+  return Object.freeze({
+    match: best.distance <= maxDistance,
+    distance: best.distance,
+    similarity: 1 - best.distance / 64,
+    orientation: best.orientation,
+    fingerprint: best.fingerprint,
+    orientationsChecked
   });
 }
 

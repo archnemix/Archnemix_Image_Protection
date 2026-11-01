@@ -3,6 +3,45 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.25.0] — 2026-11-01
+
+Orientation-tolerant leak recognition, red-team v2 section F, and a
+scroll-driven 3D motion layer for the website (`docs/RESEARCH.md`
+§2.33). Derivative bytes, stego layouts 1–4, scramble plans, the
+perceptual fingerprint bit format, and token semantics are unchanged.
+
+### Added
+
+- `matchPerceptualFingerprint(rgba, w, h, expected, options)`:
+  recognises flipped, 90°-rotated, 180°-rotated, and transposed
+  copies of a registered perceptual fingerprint (the identity check
+  is the exact shipped comparison; the seven other rectangle
+  symmetries are probed on a bounded ≤256 px proxy — measured 4.5×
+  faster than naive full-resolution probing at 2400×1600, with no
+  full-frame copies). Reports the correction that matched.
+- `archx-detect --expect-fingerprint` is orientation-tolerant by
+  default now; `--no-orientations` restores the strict form. JSON
+  and human output name the applied correction.
+- Red-team v2 section F (suite now 23 cases, 23/23 held): stego
+  identification through flip-x and 90° rotation; perceptual
+  recognition across five orientation damages with a stranger-image
+  negative control.
+- Website motion layer (`website/motion.js` on all pages):
+  inertia-smoothed scroll progress, parallax depth layers, section
+  reveals with staggered children, pointer-tracked 3D tilt with
+  specular highlight, cinematic hero + floating shapes, magnetic
+  cursor, ambient hue-shifting orbs, progress bar, and chapter
+  dots. Reduced-motion and touch fallbacks included; content,
+  layout, and the Three.js scenes are unchanged.
+
+### Notes
+
+- The perceptual matcher closes an exact-symmetry blind spot only:
+  crops, compositing, and regeneration still defeat the soft
+  binding, exactly as documented. It is verification-side —
+  registered fingerprints issued by every earlier version keep
+  working unchanged.
+
 ## [1.24.0] — 2026-11-01
 
 Red-team suite v2, a measured token-path optimization, one CORS
