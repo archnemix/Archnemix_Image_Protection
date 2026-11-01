@@ -48,7 +48,7 @@ import { FORMAT_EXTENSIONS, TAINT_PNG, auditArchxServerConfig, canonicalDerivati
 import { TOKEN_AUDIENCE, TOKEN_SCOPE, deriveStegoFingerprint, deriveStegoKey, normalizeBindTokenTo, parseProofPublicKeyHeader, signToken, validateTokenClaims, verifyProofOfPossession, verifyToken } from './tokens.js';
 
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
-export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults } from './config.js';
+export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withPerformanceDefaults, withMaxProtectionDefaults } from './config.js';
 export { computeJwkThumbprint, deriveStegoFingerprint, deriveStegoKey, validateTokenClaims } from './tokens.js';
 export {
   scrambleImage, unscrambleImage, inspectImageMetadata,

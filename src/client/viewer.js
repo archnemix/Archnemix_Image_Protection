@@ -16,6 +16,11 @@ import { buildScramblePlan, decodeContainer, decryptPayload, hashSeed, isArchxCo
 import { SHADOW_CSS } from './styles.js';
 import { limiter, normalizeTemporalInterlace } from './temporal.js';
 
+// One console warning per page for the same-origin taint degradation
+// (audit D1): telemetry carries the machine-readable signal; this is for
+// the human reading DevTools while integrating.
+let taintConsoleWarned = false;
+
 export class ProtectedImage {
   /* Everything sensitive is a #private field: page scripts and extension
    * content scripts that obtain an instance (or its host element) get no
@@ -23,7 +28,7 @@ export class ProtectedImage {
   #options; #host; #root; #wrap; #canvas; #tilesEl; #shieldEl;
   #source; #bitmap = null; #meta = null; #abort = new AbortController();
   #decoy = null; #decoySize = null; #gl = null; #raf = 0; #loaded = false; #destroyed = false;
-  #glBudgetWarned = false; #taintWarned = false;
+  #glBudgetWarned = false; #taintWarned = false; #taintPromotedWebGL = false;
   #canaryDone = false; #canaryPause = false; #canaryProbe = null; #canaryWait = 0; #canaryNextTry = 1;
   #preserveFlagged = false; #integrityHardLock = false; #glReleasing = false;
   #taintImage = null;
@@ -1156,9 +1161,31 @@ export class ProtectedImage {
         if (!this.#taintImage && !this.#taintWarned &&
             this.#options.taintReadback !== 'off' && this.#options.taintReadback !== false) {
           this.#taintWarned = true;
+          const fallback = this.#options.taintFallback;
+          // taintFallback 'webgl': promote this instance to the WebGL
+          // renderer, whose readback is black by construction
+          // (preserveDrawingBuffer:false + shadowed readPixels), instead
+          // of silently accepting the weaker 2D layer. The frame-based
+          // temporal engine cannot run on GL, so promotion skips there.
+          let promoted = false;
+          if (fallback === 'webgl' && this.#temporalConfig()?.engine !== 'frames') {
+            this.#taintPromotedWebGL = true;
+            promoted = true;
+          }
+          const reason = resolveTaintUrl(this.#options, this.#source)
+            ? 'taint-load-failed' : 'no-cross-origin-taint-source';
           this.#host.dispatchEvent(new CustomEvent('archx-taint-unavailable', {
-            detail: { mode: this.#options.mode }, bubbles: true,
+            detail: { mode: this.#options.mode, reason, promoted }, bubbles: true,
           }));
+          emitClientEvent('archx.taint_unavailable', {
+            reason, outcome: promoted ? 'webgl-promoted' : 'instance-poisoning-only',
+          }, this);
+          if (!promoted && fallback !== 'off' && !taintConsoleWarned) {
+            taintConsoleWarned = true;
+            try {
+              console.warn('[archx] origin-taint readback protection is unavailable (same-origin deployment or the taint pixel failed to load): 2D modes are relying on instance poisoning only, which prototype-call readbacks bypass. Serve the Archx API or taintUrl from a different origin, use vault/WebGL mode, or set taintFallback:"webgl". Machine-readable signal: the archx.taint_unavailable telemetry event.');
+            } catch { /* console unavailable */ }
+          }
         }
       }
       this._render();
@@ -1244,7 +1271,8 @@ export class ProtectedImage {
     const mode = this.#options.mode;
     const temporal = this.#temporalConfig();
     let wantsWebGL = this.#options.renderer === 'webgl' ||
-      (this.#options.renderer !== 'canvas' && mode === 'vault');
+      (this.#options.renderer !== 'canvas' && mode === 'vault') ||
+      (this.#options.renderer !== 'canvas' && this.#taintPromotedWebGL);
     if (temporal?.engine === 'shader') wantsWebGL = true;
     else if (temporal?.engine === 'frames') wantsWebGL = false;
     this.#temporalEngineActual = null;
@@ -2146,6 +2174,21 @@ export class ProtectedImage {
       // preserved), but captureStream() could record frames WHILE temporal
       // animation draws them; shadow the instance APIs here too.
       this._poison(canvas, null);
+      // Defence in depth (audit D8): shadow instance readPixels too.
+      // Prototype-call readbacks still return the cleared (black) buffer
+      // because preserveDrawingBuffer stays false; this ensures a direct
+      // gl.readPixels() instance call can never observe a live frame even
+      // if a future path or browser retained the drawing buffer. The
+      // internal preserve-rewrite canary uses the captured native
+      // function and is unaffected.
+      try {
+        Object.defineProperty(gl, 'readPixels', {
+          value: function (x, y, width, height, format, type, pixels) {
+            try { if (pixels && typeof pixels.fill === 'function') pixels.fill(0); } catch { /* stay silent */ }
+          },
+          writable: false, configurable: false,
+        });
+      } catch { /* platform object refused the shadow; buffer policy still applies */ }
       canvas.addEventListener('webglcontextlost', (e) => {
         e.preventDefault();
         this.#gl = null; releaseGlSlot();

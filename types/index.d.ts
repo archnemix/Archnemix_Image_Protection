@@ -85,6 +85,8 @@ export interface ArchxLoadOptions {
   taintReadback?: 'auto' | 'off';
   /** Taint pixel URL override (default: same-origin `{basePath}/taint.png`). */
   taintUrl?: string;
+  /** When no cross-origin taint pixel is available in a 2D mode: 'warn' surfaces telemetry + one console warning, 'webgl' promotes the instance to the WebGL renderer, 'off' stays silent. */
+  taintFallback?: 'warn' | 'webgl' | 'off';
   splitCanvases?: boolean;
   splitGrid?: number;
   maxBackingWidth?: number;
