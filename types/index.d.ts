@@ -83,7 +83,7 @@ export interface ArchxLoadOptions {
   onExtract?: 'black' | 'lowres' | 'scrambled';
   /** Origin-taint 2D display canvases so prototype-call readbacks throw. */
   taintReadback?: 'auto' | 'off';
-  /** Taint pixel URL override (default: same-origin `{basePath}/taint.png`). */
+  /** Taint pixel URL override (default: `{basePath}/taint.png` derived from a cross-origin token endpoint; a same-origin URL cannot taint). */
   taintUrl?: string;
   /** When no cross-origin taint pixel is available in a 2D mode: 'warn' surfaces telemetry + one console warning, 'webgl' promotes the instance to the WebGL renderer, 'off' stays silent. */
   taintFallback?: 'warn' | 'webgl' | 'off';
