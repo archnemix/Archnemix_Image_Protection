@@ -3,6 +3,51 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+## [1.24.0] — 2026-11-01
+
+Red-team suite v2, a measured token-path optimization, one CORS
+tightening, and an interactive website pipeline walkthrough
+(`docs/RESEARCH.md` §2.32). Derivative bytes, stego layouts 1–4,
+scramble plans, pHash bits, and token semantics are unchanged.
+
+### Added
+
+- `tools/red-team-v2.mjs` (`npm run redteam:v2`): 21 attacks in new
+  categories — HTTP parsing ambiguity (duplicate token headers,
+  method override, parameter pollution, duplicate Content-Length,
+  absolute-form targets, oversized headers), JSON-plane injection
+  (prototype pollution, mass assignment, deep nesting, content-type
+  confusion), cache/CORS/error surface, attribution abuse (wrong-key
+  lottery, noise false-positives, screenshot chain, two-buyer
+  averaging), and resource bounds. Final: 21/21 held.
+- Website `pipeline.html`: interactive, live-rendered walkthrough of
+  the server pipeline (six stages), measured profile simulator,
+  "try to steal it" artifact lab, and the identification outcome
+  table. Added to the nav on all pages.
+
+### Security
+
+- Only true CORS preflights (both `Origin` and
+  `Access-Control-Request-Method` present) receive the 204 preflight
+  response now; bare `OPTIONS` requests hit the normal method checks
+  (405) instead of advertising route methods to non-browser callers.
+  Found by red-team v2; browser CORS behavior is unchanged and the
+  405/204/403 cases are unit-pinned.
+
+### Performance
+
+- HMAC secrets are converted to Buffers once through a bounded cache
+  in `server/tokens.js` (~1.5× on the sign/verify hot path, measured;
+  MACs are byte-identical because `createHmac` UTF-8-encodes string
+  keys). Considered-and-rejected optimizations are documented with
+  reasons in §2.32.
+
+### Fixed
+
+- Website small-screen layout: pipeline readout/table overflow,
+  pre-existing wide-table overflow on the overview and limits pages
+  at phone widths, masthead crowding, stage-tag sizing.
+
 ## [1.23.0] — 2026-11-01
 
 Independent-audit response (`docs/RESEARCH.md` §2.31). Stego layouts

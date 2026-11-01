@@ -731,7 +731,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 139 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 140 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,
@@ -764,6 +764,8 @@ npm run test:browser  # 125 checks in real headless Chromium (encapsulation, dec
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
 npm run redteam     # 55-case red-team suite against a live hardened server (forgery, replay races,
+npm run redteam:v2  # 21-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
+                    # surface, attribution abuse (wrong-key lottery, collusion averaging), resource bounds
                     # malleability, claim fuzzing, keyring confusion, IDOR/batch abuse, slow-trickle
                     # bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)
 npm run bench:stego # StegoMark survival benchmark (9 images x 11 transforms; --fp for the 369-case

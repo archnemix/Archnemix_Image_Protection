@@ -3189,3 +3189,107 @@ Stego layouts 1–4 bytes, scramble plans, pHash bits, token
 semantics. Derivative bytes change only where an operator adopts the
 new preset floors (encrypt/plan in the throughput preset) — cache
 keys already version those inputs.
+
+---
+
+## 2.32 Red-team suite v2, HMAC hot-path optimization, and the interactive pipeline page (v1.24.0)
+
+### What was asked for and what was done
+
+A second adversarial pass aimed at attack *categories the v1 suite did
+not cover*, a hunt for remaining measured optimizations, and a website
+area that shows the server pipeline visually. As with §2.29, the
+method was: take the checklist from current public sources (OWASP
+WSTG/API Security Top 10, Node.js 2026 hardening checklists, 2026
+Sharp/libvips production guidance), map each item to either "already
+covered by an existing test" or "new attack", and only implement
+changes that are (a) verified against the code and (b) measured. This
+remains an agent-run exercise by the project itself, **not** an
+independent penetration test.
+
+### Red-team v2 (`tools/red-team-v2.mjs`, `npm run redteam:v2`)
+
+21 new attacks in five groups, against a live max-protection server:
+
+- **HTTP parsing & ambiguity** — duplicate token headers (garbage
+  first, valid second), `X-HTTP-Method-Override` on both routes,
+  HTTP parameter pollution in both orders, duplicate `Content-Length`
+  (raw-socket smuggling shape), absolute-form request targets, and a
+  128 KB single header. All held; the duplicate-header case also
+  proves the rejected attempt does not burn the one-time claim.
+- **JSON/config-plane injection** — prototype pollution via the batch
+  body (checked against `Object.prototype` in-process), mass-assignment
+  query parameters (verified by decoding the minted claims: TTL and
+  width byte-for-byte the entitled values), 400-deep nested JSON, and
+  content-type confusion. All held.
+- **Cache, CORS & error surface** — evil-origin preflight, unkeyed-header
+  cache-poisoning shape (payload stays `private, no-store`; the public
+  taint asset is byte-constant under a poisoned `X-Forwarded-Host`),
+  error-body disclosure screen, and TRACE/OPTIONS method handling.
+- **Attribution abuse** — a 12-wrong-key lottery (0 attributions),
+  unmarked-noise suspects (0/3), a composed screenshot chain
+  (0.8× resize + blur + JPEG 50 + brightness) which still identifies
+  the correct recipient, and a two-buyer averaging collusion which
+  decodes to **nobody** rather than to an innocent third party —
+  the correct-or-never-false property the system is designed for;
+  identifying colluders remains the assay's candidate-testing
+  workflow, as documented in §2.27.
+- **Resource bounds** — truncated-JPEG master (controlled 415, server
+  alive), 100 KB batch item id (413), 30-way parallel mint stampede.
+
+**One initial failure, fixed.** Bare `OPTIONS` requests (no `Origin`,
+no `Access-Control-Request-Method`) received the CORS-preflight 204
+response even from non-browser callers, advertising route methods to
+anyone. Not a data exposure — no body, no claim burn — but sloppy.
+The preflight branch now requires both preflight headers; bare
+`OPTIONS` falls through to the normal method checks (405). Real
+browser preflights are unaffected (unit-pinned: 405/204/403 cases).
+Final result: **21/21 held**, ~5 s runtime. Suite v1 remains 53/53
+held + 2 informational.
+
+### Optimization: HMAC key handling on the token hot path
+
+`createHmac` re-encodes a string key on every call. Measured locally
+(20 000 iterations, 48-char secret): string keys ≈299k HMAC/s vs a
+reused `Buffer` ≈443k/s (~1.5×), with digests verified equal —
+`createHmac` encodes string keys as UTF-8, so `Buffer.from(secret)`
+is byte-identical by construction. `server/tokens.js` now converts
+secrets to Buffers once through a bounded cache (FIFO, cap 16,
+covering single-secret, keyring-candidate, and derive paths). Token
+bytes are unchanged; a unit test pins string-vs-Buffer identity on
+both the miss and hit paths. In absolute terms this is sub-millisecond
+per request — it matters only at high mint/verify rates, and it is
+free.
+
+**Considered and rejected, with reasons.** (1) Sharing Sharp decodes
+across responsive variants in `build-assets`: each variant still needs
+its own resize/encode/scramble, Sharp already uses shrink-on-load, so
+the saving is a fraction of one decode against a real risk of changing
+derivative bytes. (2) Blindly adding `sequentialRead`: the two
+streaming paths that benefit already set it; the remaining pipelines
+do random-access raw extraction. (3) Encoder-effort changes: they
+change derivative bytes, which v1.24 does not do. The `bench:opt`
+baseline otherwise matches v1.23 (warm mint+redeem ≈457 flows/s on
+the 2-vCPU bench box; catalog 960 px encode ≈55 ms vs ≈257 ms at
+original-quality effort — the documented cost of the max-protection
+quality floor, paid once per derivative and then cached).
+
+### Website: `pipeline.html`
+
+A new page renders the whole journey live from one procedural sample
+image (no external assets): six clickable stages (master → server
+processing → wire → visitor → extraction → identification, the last
+with a scanning detector animation), a profile simulator whose bars
+are the real `bench:opt` numbers, a "try to steal it" lab (save /
+view-source / network capture / screenshot, each showing the actual
+artifact class), and the identification outcome table from §2.31's
+measurements. Browser probing at 375 px also found and fixed
+pre-existing small-screen table overflow on the overview and limits
+pages.
+
+### What did not change
+
+Derivative bytes, stego layouts 1–4, scramble plans, pHash bits,
+token semantics (MACs are byte-identical; only key *handling*
+changed). The one behavior change is the bare-`OPTIONS` narrowing
+above; standards-compliant CORS is untouched.
