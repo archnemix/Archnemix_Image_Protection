@@ -114,7 +114,8 @@
     "test:pack": "node tools/pack-smoke.mjs",
     "test:redis": "node --test tests/redis-integration.test.mjs",
     "bench:stego": "node tools/stego-bench.mjs",
-    "redteam": "node tools/red-team.mjs"
+    "redteam": "node tools/red-team.mjs",
+    "redteam:v2": "node tools/red-team-v2.mjs"
   },
   "keywords": [
     "image-protection",

@@ -1038,6 +1038,17 @@ export function createArchxMiddleware(options = {}) {
     return null;
   }
 
+  // A CORS preflight is an OPTIONS carrying BOTH Origin and
+  // Access-Control-Request-Method. Bare OPTIONS requests (curl,
+  // scanners, method probes) are not preflights and fall through to
+  // the normal method checks (405), instead of receiving a permissive
+  // 204 that advertises the route's methods to non-browser callers.
+  function isPreflight(req) {
+    return req.method === 'OPTIONS'
+      && typeof req.headers?.origin === 'string' && req.headers.origin.length > 0
+      && typeof req.headers?.['access-control-request-method'] === 'string'
+      && req.headers['access-control-request-method'].length > 0;
+  }
   function originAllowed(req) {
     // Origin/Referer are useful CSRF/CORS signals, never credentials. The
     // authorize() callback above remains the actual access-control boundary.
@@ -1744,7 +1755,7 @@ export function createArchxMiddleware(options = {}) {
       }
 
       if (isBatchTokens) {
-        if (req.method === 'OPTIONS') {
+        if (isPreflight(req)) {
           if (!allowedOrigins?.length || !originAllowed(req)) {
             return deny(req, res, 403, 'forbidden', { phase, reason: 'cors-origin' });
           }
@@ -1914,7 +1925,7 @@ export function createArchxMiddleware(options = {}) {
         return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
       }
 
-      if (req.method === 'OPTIONS') {
+      if (isPreflight(req)) {
         if (!allowedOrigins?.length || !originAllowed(req)) {
           return deny(req, res, 403, 'forbidden', { id, phase, reason: 'cors-origin' });
         }
