@@ -63,7 +63,9 @@
       branches start switched on so every path is visible. Each toggle prints the base middleware default;
       switch a branch off to see what that deployment would skip. The tile animation uses the page’s real
       plan-v2 builder, but the drawing itself is explanatory — no image, token, or server request leaves
-      this page.</p>
+      this page. Stage timing is budgeted by visible beats and active branches rather than one fixed
+      interval: simple holds are short, while gates, scans and transforms get sequential time; each stage’s
+      viewing budget is printed with its step below. Those budgets are reading time, not server runtimes.</p>
 
       <div class="flow-controls">
         <div class="flow-control-group">
