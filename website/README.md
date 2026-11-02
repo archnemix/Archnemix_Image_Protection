@@ -1,11 +1,15 @@
 # Archnemix website
 
-The static three-page site for **Archnemix Image Protection**. No build
+The static four-page site for **Archnemix Image Protection**. No build
 step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`):
 
 - `index.html` — overview: interactive 3D hero (drag-orbit, per-tile trace
   readout, 4×4–16×16 grids), pipeline, measured results, honest limits
   (readable with no JavaScript at all)
+- `pipeline.html` + `pipeline.js` — the pipeline walkthrough: follow one
+  image stage by stage from master to protected derivative, measured
+  modes & profiles, a "try to steal it" interactive, and what happens
+  when a copy surfaces
 - `technical.html` + `technical.js` — the decision atlas: 21 engineering
   decisions (problem / chosen / alternatives rejected / pros / cons /
   evidence), searchable and tag-filtered, with five live widgets — a
@@ -15,9 +19,12 @@ step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`):
   errors/erasures recovery map, and the measured watermark-survival chart
 - `limits.html` + `limits.js` — threat model: eight-attacker interactive
   matrix, measured edges, and when to choose DRM/C2PA/neural instead
-- `styles.css` — warm-paper editorial theme (shared by all three pages)
+- `styles.css` — warm-paper editorial theme (shared by all four pages)
 - `main.js` — the 3D tile-scramble hero (procedural painted-valley
   texture, pointer lift field, raycast tile tracing, drag orbit)
+- `motion.js` — the scroll-driven motion layer on every page: parallax
+  depth, section reveals, pointer-tracked tilt, progress bar and
+  chapter dots (`prefers-reduced-motion` collapses it to plain fades)
 
 ## Run it locally
 

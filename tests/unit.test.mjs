@@ -23,7 +23,7 @@ import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivative
 import { buildArchxAssets } from '../server/build-assets.js';
 import {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS, preset,
-  TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace,
+  TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace, VERSION,
 } from '../src/archx.js';
 import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
@@ -4538,4 +4538,13 @@ test('v1.25: perceptual matcher recognises flipped/rotated/transposed suspects',
 
   assert.throws(() => matchPerceptualFingerprint(img, w, h, 'not-a-fingerprint'), TypeError);
   assert.throws(() => matchPerceptualFingerprint(img, w, h, ref, { maxDistance: 65 }), RangeError);
+});
+
+test('release coherence: exported VERSION equals package.json version', () => {
+  // VERSION sat at '1.23.0' through the 1.24-1.26 bumps because nothing
+  // compared it to the package version (pack-smoke only regex-checked
+  // its shape). Archx.version lying to embedders is exactly the kind of
+  // drift this test now makes impossible: bump both, or fail loudly.
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(VERSION, pkg.version);
 });

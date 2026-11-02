@@ -12,7 +12,7 @@ plans, the perceptual fingerprint bit format, token semantics, and
 server behavior are unchanged — verified by a golden battery
 (embed hashes + full result objects across layouts 1–4, clean /
 flipped / rotated / cropped / unmarked / wrong-key), the full test
-suite (141/141), red-team v1 (53/53) and v2 (23/23), and the stego
+suite (142/142), red-team v1 (53/53) and v2 (23/23), and the stego
 survival bench (robust 85/99, unchanged).
 
 ### Performance
@@ -43,12 +43,25 @@ survival bench (robust 85/99, unchanged).
   Server throughput benchmarks (`tools/optimization-bench.mjs`)
   show identical payload bytes on every row.
 
+### Fixed
+
+- The exported `VERSION` constant (and `Archx.version`) still said
+  `1.23.0` — stale since the 1.24 bump, because nothing compared it
+  to the package version. It now reports the package version, and
+  cannot drift again: a unit test asserts `VERSION` equals
+  `package.json`'s version, and pack-smoke asserts the same inside
+  the packed artifact. Caught by a pre-publish consistency pass
+  over code, docs, and website (which otherwise found the tree in
+  agreement); since 1.26.0 had not been published yet, the fix
+  ships inside 1.26.0.
+
 ### Repository
 
 - `website/` reverted to the v1.25.0 site; the scroll-film
   experiments that shipped in PRs #17/#18 are removed here (the
-  website is being rebuilt separately). The website is not part of
-  the npm package payload.
+  website is being rebuilt separately; its v1.25-era custom
+  magnetic cursor was also removed, restoring the plain OS
+  cursor). The website is not part of the npm package payload.
 
 ## [1.25.0] — 2026-11-01
 
