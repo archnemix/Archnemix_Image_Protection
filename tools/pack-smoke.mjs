@@ -46,7 +46,8 @@ step('clean install from tarball', () => {
   run('npm', ['install', '--no-audit', '--no-fund', tarball, 'sharp@^0.35.5'], { cwd: appDir, timeout: 300_000 });
 });
 
-const name = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).name;
+const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
+const name = pkg.name;
 const smoke = `
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -58,6 +59,7 @@ import {} from '${name}/redis';
 import {} from '${name}/scramble';
 assert.equal(typeof Archx.load.image, 'function');
 assert.match(VERSION, /^\\d+\\.\\d+\\.\\d+$/);
+assert.equal(VERSION, '${pkg.version}', 'exported VERSION must equal the packaged version');
 const require = createRequire(import.meta.url);
 const cjs = require('${name}');
 assert.equal(typeof (cjs.default || cjs).load.image, 'function', 'CJS entry exposes the loader');

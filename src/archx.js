@@ -55,7 +55,7 @@ import {
 import { onClientEvent, offClientEvent, usePlugin, listPlugins } from './client/events.js';
 import { loadImage, loadGallery, protectAll, preloadAssets, defineElement } from './client/loaders.js';
 
-export const VERSION = '1.23.0';
+export const VERSION = '1.26.0'; // must equal package.json version (enforced by a unit test + pack-smoke)
 
 const Archx = {
   version: VERSION,

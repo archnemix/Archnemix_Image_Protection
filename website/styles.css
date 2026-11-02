@@ -488,7 +488,7 @@ table.layers td:last-child { color: var(--ink-soft); white-space: nowrap; }
 
 /* ---------- motion layer (motion.js) ---------- */
 /* Depth stage: perspective on the scroll container; layers separate via
-   translateZ in JS. Fixed chrome (progress/dots/cursor) lives on body,
+   translateZ in JS. Fixed chrome (progress/dots) lives on body,
    outside main, so the perspective never traps it. */
 .motion-on main { perspective: 1400px; }
 .motion-on [data-parallax], .motion-on .band-no { will-change: transform; }
@@ -573,26 +573,6 @@ table.layers td:last-child { color: var(--ink-soft); white-space: nowrap; }
 .tilt.tilting::after { opacity: 1; }
 .tilt { transition: transform .6s cubic-bezier(.23, 1, .32, 1); }
 
-/* magnetic elements */
-.magnetic { transition: transform .35s cubic-bezier(.23, 1, .32, 1); will-change: transform; }
-
-/* custom cursor (fine pointers only; JS adds .has-cursor) */
-body.has-cursor.cursor-seen, body.has-cursor.cursor-seen a, body.has-cursor.cursor-seen button,
-body.has-cursor.cursor-seen canvas, body.has-cursor.cursor-seen .btn, body.has-cursor.cursor-seen input { cursor: none; }
-body.has-cursor:not(.cursor-seen) .cursor-dot,
-body.has-cursor:not(.cursor-seen) .cursor-ring { opacity: 0; }
-.cursor-dot, .cursor-ring {
-  position: fixed; left: 0; top: 0; z-index: 200; pointer-events: none;
-  border-radius: 50%; will-change: transform;
-}
-.cursor-dot { width: 14px; height: 14px; background: var(--rust); }
-.cursor-ring {
-  width: 40px; height: 40px; border: 1.5px solid var(--ink);
-  transition: background .25s ease, border-color .25s ease;
-}
-.cursor-ring.hovering { background: transparent; border-color: #fff; mix-blend-mode: difference; }
-.cursor-ring.burst { border-color: var(--rust); }
-
 /* hard kill-switch for reduced motion, whatever JS decided */
 @media (prefers-reduced-motion: reduce) {
   .motion-on .rv, .motion-on .rv .rv-child {
@@ -601,7 +581,7 @@ body.has-cursor:not(.cursor-seen) .cursor-ring { opacity: 0; }
   .motion-on .hero, .motion-on .page-intro { animation: none !important; }
   .float-shape-inner { animation: none !important; }
   .float-shape { display: none; }
-  .tilt, .magnetic { transition: none !important; }
+  .tilt { transition: none !important; }
 }
 @media (max-width: 640px) {
   .orb { filter: blur(70px); opacity: .38; }

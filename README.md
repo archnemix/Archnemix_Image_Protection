@@ -731,7 +731,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 141 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 142 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,

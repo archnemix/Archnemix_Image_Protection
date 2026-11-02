@@ -3516,3 +3516,25 @@ package.
   the negative case further, but only with bounds proven exact
   against the acceptance gates, evidence ranking, and the forensic
   stash — future work with its own golden battery.
+
+**Pre-publish correction (before 1.26.0 reached npm — the registry
+still carried 1.22.0 as latest).** A consistency pass over code,
+docs, and website found one real defect the gates had missed: the
+exported `VERSION` constant still read `1.23.0`, stale since the
+1.24 bump, so `Archx.version` disagreed with the package version.
+Fixed inside the never-published 1.26.0 with `dist/` rebuilt, and
+two guards now make the drift impossible — a unit test asserting
+`VERSION === package.json` version (the suite above is therefore
+142 tests in the shipped tree) and the same equality inside
+pack-smoke against the packed artifact. The same pass removed the
+v1.25 site's custom magnetic cursor at the maintainer's request
+(plain OS cursor restored; tilt/parallax/reveals untouched) and
+corrected `website/README.md`'s page count (four pages since the
+v1.24 pipeline page). Everything else audited already agreed:
+survival numbers vs §2.28 (widget data byte-checked), 53/53 +
+23/23 red-team counts, 0/369 false positives, `engines ≥20.9.0`
+and Sharp `^0.35.5` across README/COMPATIBILITY/website, every
+`npm run …` command cited in docs or website exists in
+`package.json`, every documented API name exists in the shipped
+exports, and the defaults the docs state (layout 3, strength 6,
+saturation `evict`) match `server/config.js` / `stego-embed.js`.

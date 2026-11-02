@@ -9967,7 +9967,7 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.23.0";
+var VERSION2 = "1.26.0";
 var Archx = {
   version: VERSION2,
   ProtectedImage,

@@ -1,5 +1,5 @@
-/* Archnemix motion layer — scroll-driven depth, reveals, tilt, and a
- * magnetic cursor, layered over the existing editorial design without
+/* Archnemix motion layer — scroll-driven depth, reveals, and tilt,
+ * layered over the existing editorial design without
  * changing content, fonts, colors, or layout. Vanilla JS; one
  * requestAnimationFrame loop drives everything (lerped scroll with
  * inertia); only transform/opacity are animated; all listeners are
@@ -10,8 +10,7 @@
   const docEl = document.documentElement;
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // "Fine pointer" = primary pointer is not coarse. (Headless browsers
-  // report no pointer at all; touchscreen laptops report fine. Cursor
-  // chrome stays invisible until the first real pointermove either way.)
+  // report no pointer at all; touchscreen laptops report fine.)
   const finePointer = !window.matchMedia('(pointer: coarse)').matches;
   const parallaxScale = finePointer ? 1 : 0.5; // phones: half depth
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -156,42 +155,6 @@
     });
   }
 
-  /* ---------------- magnetic cursor (fine pointers only) ---------------- */
-  let cursor = null;
-  if (finePointer && !reduced) {
-    document.body.classList.add('has-cursor');
-    const dot = document.createElement('span');
-    dot.className = 'cursor-dot';
-    const ring = document.createElement('span');
-    ring.className = 'cursor-ring';
-    dot.setAttribute('aria-hidden', 'true');
-    ring.setAttribute('aria-hidden', 'true');
-    document.body.append(dot, ring);
-    cursor = { dot, ring, x: innerWidth / 2, y: innerHeight / 2, rx: innerWidth / 2, ry: innerHeight / 2, hovering: false, burstUntil: 0 };
-    window.addEventListener('pointermove', (e) => {
-      cursor.x = e.clientX; cursor.y = e.clientY;
-      document.body.classList.add('cursor-seen');
-    }, { passive: true });
-    window.addEventListener('pointerdown', () => { cursor.burstUntil = performance.now() + 300; ring.classList.add('burst'); }, { passive: true });
-    const hoverSel = 'a, button, .tilt, canvas, input, select, textarea, [role="button"]';
-    document.addEventListener('pointerover', (e) => {
-      cursor.hovering = !!e.target.closest?.(hoverSel);
-      ring.classList.toggle('hovering', cursor.hovering);
-    }, { passive: true });
-
-    // Magnetic pull: buttons/nav drift up to 8px toward the cursor.
-    document.querySelectorAll('.btn, .masthead-nav a, .wordmark, .chapter-dot').forEach((el) => {
-      el.classList.add('magnetic');
-      el.addEventListener('pointermove', (e) => {
-        const r = el.getBoundingClientRect();
-        const dx = clamp((e.clientX - (r.left + r.width / 2)) * 0.18, -8, 8);
-        const dy = clamp((e.clientY - (r.top + r.height / 2)) * 0.18, -8, 8);
-        el.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
-      }, { passive: true });
-      el.addEventListener('pointerleave', () => { el.style.transform = ''; }, { passive: true });
-    });
-  }
-
   /* ---------------- the single animation loop --------------------------- */
   let smoothY = window.scrollY;
   let lastActive = -1;
@@ -232,16 +195,6 @@
       dots.forEach((d, i) => d.classList.toggle('active', i === active));
     }
 
-    if (cursor) {
-      cursor.rx = lerp(cursor.rx, cursor.x, 0.15);
-      cursor.ry = lerp(cursor.ry, cursor.y, 0.15);
-      cursor.dot.style.transform = `translate3d(${cursor.x}px, ${cursor.y}px, 0) translate(-50%, -50%)`;
-      const bursting = now < cursor.burstUntil;
-      if (!bursting) cursor.ring.classList.remove('burst');
-      const scale = bursting ? 2 : cursor.hovering ? 1.5 : 1;
-      cursor.ring.style.transform = `translate3d(${cursor.rx.toFixed(1)}px, ${cursor.ry.toFixed(1)}px, 0) translate(-50%, -50%) scale(${scale})`;
-      cursor.ring.style.opacity = bursting ? String(Math.max(0, (cursor.burstUntil - now) / 300)) : '';
-    }
 
     requestAnimationFrame(frame); // browsers pause rAF on hidden tabs
   }
