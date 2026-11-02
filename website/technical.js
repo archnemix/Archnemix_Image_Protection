@@ -548,12 +548,49 @@ if (document.getElementById('w-survival')) {
     raf: 0,
     visible: true,
     now: 0,
+    durations: [],
+    routeMs: 0,
   };
   flowRoot.querySelectorAll('[data-flow-opt]').forEach((btn) => {
     flowState.opts[btn.dataset.flowOpt] = btn.classList.contains('is-active');
   });
 
-  const FLOW_STEP_MS = 3300;
+  /* Viewing-time budgets, not server runtimes. The old chart gave every stage
+     the same 3.3s (33.0s total). These budgets are set by the number of
+     visible beats and active branches in each stage: a static vault hold is
+     short, while gate/checklist/transform stages get enough sequential time
+     for each beat to land. Detailed text remains below the canvas and the
+     transport can pause/step, so the animation itself only has to carry the
+     title + visual gist. Sub-motions stay in the familiar ~150–600ms band. */
+  const FLOW_LEGACY_TOTAL_MS = 33000;
+  function flowStageDurations() {
+    const marks = activeMarks().length;
+    const renderer = effectiveRenderer();
+    return [
+      1700, // 01 vault lock + denied loop: two beats, no checklist
+      flowState.opts.pop ? 2400 : 2150, // 02 measure + request (+ proof chip)
+      3500, // 03 four mint checks, then the HMAC seal
+      flowState.opts.pop ? 3900 : 3650, // 04 redeem gate checks + SPENT stamp
+      2900, // 05 sniff/scan, resize contract, derivative settle
+      marks ? 1300 + 550 * marks : 1500, // 06 one beat per baked mark layer
+      2700 + (flowState.opts.encrypt ? 600 : 0), // 07 tile burst + package seal
+      2400 + (flowState.opts.encrypt ? 400 : 0), // 08 wire loop + validate scan
+      (renderer === 'webgl' ? 3400 : 3000) + (flowState.mode === 'fortress' ? 200 : 0),
+      3200, // 10 three extraction outputs fan out one by one
+    ];
+  }
+  function refreshFlowDurations() {
+    flowState.durations = flowStageDurations();
+    flowState.routeMs = flowState.durations.reduce((sum, ms) => sum + ms, 0);
+    return flowState.durations;
+  }
+  function flowStageDuration(index = flowState.step) {
+    if (!flowState.durations.length) refreshFlowDurations();
+    return flowState.durations[index] || 2500;
+  }
+  function formatFlowMs(ms) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
   const flowPlan = buildScramblePlan(8, 'archx-flow-explainer', 2);
   const clamp01 = (v) => Math.max(0, Math.min(1, v));
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -729,7 +766,7 @@ if (document.getElementById('w-survival')) {
   }
 
   /* ----- generated artwork for the canvas animation ----- */
-  function makeFlowArt(marked) {
+  function makeFlowArt(marked, markOpts = flowState.opts) {
     const c = document.createElement('canvas');
     c.width = 320; c.height = 200;
     const x = c.getContext('2d');
@@ -751,14 +788,14 @@ if (document.getElementById('w-survival')) {
       x.beginPath(); x.moveTo(tx - 4, 154); x.lineTo(tx + 8, 126); x.lineTo(tx + 20, 154); x.closePath(); x.fill();
     });
     if (marked) {
-      if (flowState.opts.serverForensic) {
+      if (markOpts.serverForensic) {
         for (let gy = 0; gy < 5; gy++) for (let gx = 0; gx < 8; gx++) {
           const v = Math.sin(gx * 12.9898 + gy * 78.233) * 43758.5453;
           x.fillStyle = (v - Math.floor(v)) > 0.5 ? 'rgba(255,253,247,.13)' : 'rgba(25,22,18,.11)';
           x.fillRect(gx * 40, gy * 40, 40, 40);
         }
       }
-      if (flowState.opts.watermark) {
+      if (markOpts.watermark) {
         x.save(); x.translate(160, 100); x.rotate(-0.32);
         x.font = '700 16px ui-monospace, monospace'; x.fillStyle = 'rgba(255,253,247,.55)';
         x.fillText('© ARCHX · VIEW 7F3A', -132, -28);
@@ -766,7 +803,7 @@ if (document.getElementById('w-survival')) {
         x.fillText('© ARCHX · VIEW 7F3A', -148, 76);
         x.restore();
       }
-      if (flowState.opts.stego) {
+      if (markOpts.stego) {
         x.fillStyle = 'rgba(177,58,34,.58)';
         for (let i = 0; i < 58; i++) {
           const px = 12 + ((Math.sin(i * 91.17) * 0.5 + 0.5) * 296);
@@ -778,7 +815,25 @@ if (document.getElementById('w-survival')) {
     return c;
   }
   const cleanArt = makeFlowArt(false);
-  let markedArt = makeFlowArt(true);
+  let markedArt = cleanArt;
+  let markedLayerArts = [];
+  function flowMarkLayers() {
+    const all = [
+      { key: 'watermark', label: 'visible ©' },
+      { key: 'serverForensic', label: 'forensic blocks' },
+      { key: 'stego', label: 'StegoMark dots' },
+    ];
+    return all.filter((layer) => flowState.opts[layer.key]);
+  }
+  function rebuildFlowArtwork() {
+    markedArt = makeFlowArt(true);
+    const subset = { watermark: false, serverForensic: false, stego: false };
+    markedLayerArts = flowMarkLayers().map((layer) => {
+      subset[layer.key] = true;
+      return { ...layer, art: makeFlowArt(true, { ...subset }) };
+    });
+  }
+  rebuildFlowArtwork();
   const lowArt = document.createElement('canvas');
   lowArt.width = 36; lowArt.height = 23;
   const lowCtx = lowArt.getContext('2d');
@@ -826,12 +881,26 @@ if (document.getElementById('w-survival')) {
         for (let orig = 0; orig < 64; orig++) {
           const dest = flowPlan.inverse[orig];
           const ox = x + (orig % g) * dw, oy = y + Math.floor(orig / g) * dh;
-          const dx = lerp(ox, x + (dest % g) * dw, e);
-          const dy = lerp(oy, y + Math.floor(dest / g) * dh, e);
-          const flip = e > 0.5 ? flowPlan.flips[dest] : { fx: false, fy: false };
+          const tx = x + (dest % g) * dw, ty = y + Math.floor(dest / g) * dh;
+          /* Stagger the tiles and bow their paths: a scramble should read as
+             many small pieces swapping places, not one picture sliding. The
+             endpoints are untouched, so scramble 0 and 1 stay exact. */
+          const delay = ((orig * 29) % 17) / 17 * 0.2;
+          const le = ease(clamp01((e - delay) / 0.8));
+          let dx = lerp(ox, tx, le);
+          let dy = lerp(oy, ty, le);
+          const vx = tx - ox, vy = ty - oy;
+          const dist = Math.hypot(vx, vy);
+          if (dist > 0.5) {
+            const bow = Math.sin(Math.PI * le) * Math.min(15, dist * 0.13) * (orig % 2 ? 1 : -1);
+            dx += (-vy / dist) * bow;
+            dy += (vx / dist) * bow;
+          }
+          const flip = le > 0.55 ? flowPlan.flips[dest] : { fx: false, fy: false };
+          const lift = 1 + Math.sin(Math.PI * le) * 0.06;
           fctx.save();
           fctx.translate(dx + dw / 2, dy + dh / 2);
-          fctx.scale(flip.fx ? -1 : 1, flip.fy ? -1 : 1);
+          fctx.scale((flip.fx ? -1 : 1) * lift, (flip.fy ? -1 : 1) * lift);
           fctx.drawImage(source, (orig % g) * sw, Math.floor(orig / g) * sh, sw, sh, -dw / 2, -dh / 2, dw + 0.6, dh + 0.6);
           fctx.restore();
         }
@@ -919,6 +988,116 @@ if (document.getElementById('w-survival')) {
     fctx.beginPath(); fctx.moveTo(x2, y); fctx.lineTo(x2 - dir * 9, y - 5); fctx.lineTo(x2 - dir * 9, y + 5); fctx.closePath(); fctx.fill();
     fctx.restore();
   }
+  function flowCurvePoint(p, tt) {
+    const u = clamp01(tt), v = 1 - u;
+    return [
+      v * v * v * p[0][0] + 3 * v * v * u * p[1][0] + 3 * v * u * u * p[2][0] + u * u * u * p[3][0],
+      v * v * v * p[0][1] + 3 * v * v * u * p[1][1] + 3 * v * u * u * p[2][1] + u * u * u * p[3][1],
+    ];
+  }
+  function flowCurve(p, progress = 1, color = '#b13a22', dashed = false) {
+    if (!fctx) return;
+    const end = clamp01(progress);
+    if (end <= 0) return;
+    fctx.save();
+    fctx.strokeStyle = color; fctx.fillStyle = color; fctx.lineWidth = 2;
+    if (dashed) fctx.setLineDash([6, 5]);
+    fctx.beginPath();
+    const steps = Math.max(2, Math.round(44 * end));
+    for (let i = 0; i <= steps; i++) {
+      const [x, y] = flowCurvePoint(p, (i / steps) * end);
+      if (i === 0) fctx.moveTo(x, y); else fctx.lineTo(x, y);
+    }
+    fctx.stroke();
+    fctx.setLineDash([]);
+    const [x2, y2] = flowCurvePoint(p, end);
+    const [x1, y1] = flowCurvePoint(p, Math.max(0, end - 0.02));
+    const a = Math.atan2(y2 - y1, x2 - x1);
+    fctx.beginPath();
+    fctx.moveTo(x2, y2);
+    fctx.lineTo(x2 - 10 * Math.cos(a - 0.42), y2 - 10 * Math.sin(a - 0.42));
+    fctx.lineTo(x2 - 10 * Math.cos(a + 0.42), y2 - 10 * Math.sin(a + 0.42));
+    fctx.closePath(); fctx.fill();
+    fctx.restore();
+  }
+  function flowPulse(p, tt, color = '#b13a22', r = 6) {
+    if (!fctx) return;
+    const [x, y] = flowCurvePoint(p, tt);
+    fctx.save();
+    fctx.fillStyle = '#fffdf7'; fctx.strokeStyle = color; fctx.lineWidth = 2;
+    fctx.beginPath(); fctx.arc(x, y, r, 0, 6.3); fctx.fill(); fctx.stroke();
+    fctx.fillStyle = color;
+    fctx.beginPath(); fctx.arc(x, y, Math.max(2, r - 3), 0, 6.3); fctx.fill();
+    fctx.restore();
+  }
+  function flowScanFrame(x, y, w, h, p, color = '#b13a22') {
+    if (!fctx) return;
+    const q = clamp01(p);
+    const sx = x + w * q;
+    fctx.save();
+    fctx.fillStyle = 'rgba(177,58,34,.08)';
+    fctx.fillRect(x, y, Math.max(0, sx - x), h);
+    fctx.strokeStyle = color; fctx.lineWidth = 2;
+    fctx.beginPath(); fctx.moveTo(sx, y - 4); fctx.lineTo(sx, y + h + 4); fctx.stroke();
+    const c = 14;
+    fctx.beginPath();
+    fctx.moveTo(x - 5, y + c); fctx.lineTo(x - 5, y - 5); fctx.lineTo(x + c, y - 5);
+    fctx.moveTo(x + w - c, y - 5); fctx.lineTo(x + w + 5, y - 5); fctx.lineTo(x + w + 5, y + c);
+    fctx.moveTo(x + w + 5, y + h - c); fctx.lineTo(x + w + 5, y + h + 5); fctx.lineTo(x + w - c, y + h + 5);
+    fctx.moveTo(x + c, y + h + 5); fctx.lineTo(x - 5, y + h + 5); fctx.lineTo(x - 5, y + h - c);
+    fctx.stroke();
+    fctx.restore();
+  }
+  function flowGate(x, y, w, h, open) {
+    if (!fctx) return;
+    const q = clamp01(open);
+    fctx.save();
+    fctx.strokeStyle = '#191612'; fctx.fillStyle = '#191612'; fctx.lineWidth = 2;
+    fctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    const bars = 6;
+    for (let i = 0; i < bars; i++) {
+      const bx = x + 10 + i * ((w - 20) / (bars - 1));
+      const top = y + 8 + q * (h - 18) * (0.45 + 0.09 * i);
+      fctx.beginPath(); fctx.moveTo(bx, top); fctx.lineTo(bx, y + h - 8); fctx.stroke();
+    }
+    fctx.restore();
+  }
+  function flowSeal(cx, cy, p, label = '✓') {
+    if (!fctx) return;
+    const q = clamp01(p);
+    if (q <= 0) return;
+    fctx.save();
+    fctx.globalAlpha = Math.min(1, q * 1.4);
+    fctx.translate(cx, cy); fctx.scale(0.55 + 0.45 * ease(q), 0.55 + 0.45 * ease(q));
+    fctx.fillStyle = '#b13a22';
+    fctx.beginPath(); fctx.arc(0, 0, 19, 0, 6.3); fctx.fill();
+    fctx.strokeStyle = '#fffdf7'; fctx.lineWidth = 2;
+    fctx.beginPath(); fctx.arc(0, 0, 14.5, 0, 6.3); fctx.stroke();
+    fctx.fillStyle = '#fffdf7'; fctx.font = '700 15px ui-monospace, monospace'; fctx.textAlign = 'center';
+    fctx.fillText(label, 0, 5.5);
+    fctx.restore();
+  }
+  function drawFlowTimeline() {
+    if (!fctx || !flowState.durations.length) return;
+    const x0 = 18, totalW = 944, y = 41;
+    const total = Math.max(1, flowState.routeMs);
+    let x = x0;
+    fctx.save();
+    fctx.fillStyle = '#ddd0ae'; fctx.fillRect(x0, y, totalW, 3);
+    flowState.durations.forEach((ms, i) => {
+      const w = totalW * ms / total;
+      if (i < flowState.step) {
+        fctx.fillStyle = '#b13a22'; fctx.fillRect(x, y, w, 3);
+      } else if (i === flowState.step) {
+        fctx.fillStyle = '#191612'; fctx.fillRect(x, y, w * clamp01(flowState.t), 3);
+        fctx.fillStyle = '#b13a22';
+        fctx.beginPath(); fctx.arc(x + w * clamp01(flowState.t), y + 1.5, 4, 0, 6.3); fctx.fill();
+      }
+      x += w;
+      fctx.fillStyle = '#fffdf7'; fctx.fillRect(Math.min(961, x - 0.5), y - 2, 1, 7);
+    });
+    fctx.restore();
+  }
   function drawFlowZones() {
     if (!fctx || !flowCanvas) return;
     fctx.clearRect(0, 0, flowCanvas.width, flowCanvas.height);
@@ -935,6 +1114,7 @@ if (document.getElementById('w-survival')) {
     flowText('private master never leaves this side', 18, 410, '11px ui-monospace, monospace', '#6b6352');
     flowText('HTTPS', 552, 410, '11px ui-monospace, monospace', '#6b6352', 'center');
     flowText(rendererFact(), 962, 410, '11px ui-monospace, monospace', '#6b6352', 'right');
+    drawFlowTimeline();
   }
   function drawFlow() {
     if (!fctx) return;
@@ -950,10 +1130,14 @@ if (document.getElementById('w-survival')) {
       drawFlowImage(cleanArt, 42, 98, 268, 168);
       flowPacket(336, 106, 148, 126, 'SERVER ONLY', ['no public route', 'read by ID', 'startup checked']);
       drawFlowLock(410, 262, 1.05);
-      flowArrow(510, 190, 594);
-      if (fctx) {
+      /* The vault bars close over the master, then a direct grab is turned
+         back on itself — denial is a loop, not a slide. */
+      flowGate(42, 98, 268, 168, 1 - ease(phase(t, 0.02, 0.48)));
+      const denied = [[488, 178], [562, 92], [630, 120], [552, 220]];
+      flowCurve(denied, phase(t, 0.38, 0.9), '#b13a22', true);
+      if (t > 0.72 && fctx) {
         fctx.strokeStyle = '#b13a22'; fctx.lineWidth = 3;
-        fctx.beginPath(); fctx.moveTo(540, 176); fctx.lineTo(564, 204); fctx.moveTo(564, 176); fctx.lineTo(540, 204); fctx.stroke();
+        fctx.beginPath(); fctx.moveTo(540, 152); fctx.lineTo(564, 180); fctx.moveTo(564, 152); fctx.lineTo(540, 180); fctx.stroke();
       }
       flowEmpty(648, 98, 268, 168, ['NO PIXELS YET', 'no master URL']);
       flowText('The file people want is never web-addressable.', 42, 356, '600 16px Georgia, serif');
@@ -961,50 +1145,94 @@ if (document.getElementById('w-survival')) {
       flowText('MASTER STAYS PUT', 42, 88, '700 12px ui-monospace, monospace', '#b13a22');
       drawFlowImage(cleanArt, 42, 102, 204, 128, { alpha: 0.72 });
       flowEmpty(648, 88, 268, 168, ['VIEWER BOX', 'CSS × DPR × oversample']);
-      flowArrow(648, 318, 286);
-      const px = lerp(650, 272, e);
-      flowPacket(px, 282, 224, 68, 'TOKEN REQUEST · {id}', ['w · bw · bh · fit', flowState.opts.pop ? '+ proof public key' : 'no pixels · no path']);
+      /* First the box is measured in place; only then does the little request
+         card loop up and drop into the server inbox. */
+      flowScanFrame(648, 88, 268, 168, phase(t, 0.02, 0.45));
+      const reqPath = [[650, 282], [566, 212], [430, 350], [272, 282]];
+      const reqP = ease(phase(t, 0.2, 1));
+      flowCurve(reqPath, reqP, '#b13a22', true);
+      const [px, py] = flowCurvePoint(reqPath, reqP);
+      flowPacket(px, py, 224, 68, 'TOKEN REQUEST · {id}', ['w · bw · bh · fit', flowState.opts.pop ? '+ proof public key' : 'no pixels · no path']);
+      if (flowState.opts.pop) flowSeal(782, 274, phase(t, 0.08, 0.28), 'key');
       flowText('Permission and size are requested before any image bytes exist on the wire.', 42, 366, '600 15px Georgia, serif');
     } else if (s === 2) {
       drawFlowImage(cleanArt, 38, 102, 196, 123, { alpha: 0.62 });
       flowChecks(278, 84, 206, 'SERVER DECIDES', ['authorize viewer', 'cap width / quality', 'rate + quota', 'HMAC-sign claims'], phase(t, 0.08, 0.72));
-      const px = lerp(330, 636, ease(phase(t, 0.35, 1)));
-      flowPacket(px, 292, 238, 68, 'TOKEN RESPONSE', ['clean URL · key · grid', flowState.opts.encrypt ? 'expiry · + AES key' : 'short expiry']);
-      flowEmpty(676, 96, 224, 140, t > 0.78 ? ['TOKEN HELD', 'briefly, in memory'] : ['WAITING', 'for permission']);
+      /* The decision happens at the checklist; the seal stamps in place and
+         only the finished token arcs out to the browser. */
+      flowSeal(466, 102, phase(t, 0.64, 0.8));
+      const tokPath = [[330, 292], [438, 208], [566, 336], [636, 292]];
+      const tokP = ease(phase(t, 0.58, 1));
+      if (t > 0.52) {
+        flowCurve(tokPath, tokP, '#b13a22', true);
+        const [px, py] = flowCurvePoint(tokPath, tokP);
+        flowPacket(px, py, 238, 68, 'TOKEN RESPONSE', ['clean URL · key · grid', flowState.opts.encrypt ? 'expiry · + AES key' : 'short expiry']);
+      }
+      flowEmpty(676, 96, 224, 140, t > 0.9 ? ['TOKEN HELD', 'briefly, in memory'] : ['WAITING', 'for permission']);
     } else if (s === 3) {
       drawFlowImage(cleanArt, 38, 102, 196, 123, { alpha: 0.62 });
       flowChecks(278, 78, 206, 'REDEEM GATE', ['verify HMAC + expiry', flowState.opts.pop ? 'verify proof signature' : 'no proof supplied', 'authorize again', 'check bindings', 'claimOnce → spent'], phase(t, 0.2, 0.94));
-      const px = lerp(640, 340, ease(phase(t, 0, 0.62)));
-      flowPacket(px, 300, 238, 64, 'GET PAYLOAD', ['X-Archx-Token', flowState.opts.pop ? '+ signed proof' : 'clean URL']);
+      /* The payload request drops through the redeem gate on a lower arc;
+         the gate bars lift one check at a time as the list fills. */
+      flowGate(518, 150, 68, 118, phase(t, 0.24, 0.92));
+      const getPath = [[640, 300], [562, 362], [458, 236], [340, 300]];
+      const getP = ease(phase(t, 0, 0.62));
+      flowCurve(getPath, getP, '#b13a22', true);
+      const [px, py] = flowCurvePoint(getPath, getP);
+      flowPacket(px, py, 238, 64, 'GET PAYLOAD', ['X-Archx-Token', flowState.opts.pop ? '+ signed proof' : 'clean URL']);
+      if (t > 0.86) {
+        const replay = [[820, 240], [700, 318], [610, 250], [586, 286]];
+        flowCurve(replay, phase(t, 0.86, 1), '#8a8170', true);
+        flowText('replay ✗', 650, 374, '700 11px ui-monospace, monospace', '#8a8170');
+      }
       if (t > 0.82 && fctx) {
-        fctx.save(); fctx.translate(382, 286); fctx.rotate(-0.1);
+        fctx.save(); fctx.translate(459, 332); fctx.rotate(-0.08);
         fctx.strokeStyle = '#b13a22'; fctx.lineWidth = 2; fctx.strokeRect(-58, -15, 116, 30);
         flowText('SPENT ONCE', 0, 5, '700 13px ui-monospace, monospace', '#b13a22', 'center');
         fctx.restore();
       }
       flowEmpty(676, 96, 224, 140, ['TOKEN SENT BACK', 'for one payload']);
     } else if (s === 4) {
-      flowText('MASTER', 38, 88, '700 12px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(cleanArt, 38, 102, 214, 134);
-      flowArrow(258, 168, 292);
-      flowText('ENTITLED DERIVATIVE', 292, 88, '700 12px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(cleanArt, 292, 108, 178, 111, { alpha: phase(t, 0.25, 0.9) });
-      let bx = 38;
-      bx += flowBadge('sniff + budgets', bx, 282, t > 0.18);
-      bx += flowBadge('decode + orient', bx, 282, t > 0.44);
-      flowBadge('resize to entitlement', bx, 282, t > 0.7);
-      flowText('Only display geometry is built. Cache hits may skip this cold path.', 38, 342, '600 15px Georgia, serif');
+      /* Sharp works in place: the master is scanned inside its own dashed
+         bounds, then the frame contracts to the entitled derivative size. */
+      flowText(t < 0.5 ? 'MASTER · SNIFF + DECODE SCAN' : 'ENTITLED DERIVATIVE · DISPLAY GEOMETRY ONLY', 105, 88, '700 12px ui-monospace, monospace', '#b13a22');
+      if (fctx) {
+        fctx.save(); fctx.setLineDash([6, 5]); fctx.strokeStyle = '#8a8170'; fctx.lineWidth = 1.2;
+        fctx.strokeRect(105.5, 102.5, 299, 187); fctx.restore();
+      }
+      const shrink = ease(phase(t, 0.45, 0.88));
+      const iw = lerp(300, 218, shrink), ih = lerp(188, 136, shrink);
+      drawFlowImage(cleanArt, 255 - iw / 2, 196 - ih / 2, iw, ih);
+      flowScanFrame(105, 102, 300, 188, phase(t, 0.05, 0.45));
+      if (t > 0.45) flowText('master bounds stay behind', 255, 310, '11px ui-monospace, monospace', '#6b6352', 'center');
+      let bx = 70;
+      bx += flowBadge('sniff + budgets', bx, 324, t > 0.18);
+      bx += flowBadge('decode + orient', bx, 324, t > 0.44);
+      flowBadge('resize to entitlement', bx, 324, t > 0.7);
+      flowText('Only display geometry is built. Cache hits may skip this cold path.', 38, 366, '600 15px Georgia, serif');
       flowEmpty(676, 102, 224, 140, ['WAITING', 'response not started']);
     } else if (s === 5) {
       flowText('DERIVATIVE PIXELS · SERVER COPY', 94, 78, '700 12px ui-monospace, monospace', '#b13a22');
       drawFlowImage(cleanArt, 94, 92, 322, 201);
-      if (activeMarks().length) drawFlowImage(markedArt, 94, 92, 322, 201, { alpha: ease(phase(t, 0.15, 0.9)) });
+      /* Each enabled mark arrives as its own translucent sheet and fuses
+         into the pixels in server order — cumulative art, one beat each. */
+      const layers = markedLayerArts;
       let bx = 94;
-      if (activeMarks().length) {
-        activeMarks().forEach((m, i) => { bx += flowBadge(m, bx, 318, t > 0.2 + i * 0.18); });
+      if (layers.length) {
+        const seg = 0.72 / layers.length;
+        layers.forEach((layer, i) => {
+          const start = 0.12 + i * seg;
+          const p = ease(phase(t, start, start + seg));
+          if (p > 0) {
+            const off = (1 - p) * 24;
+            drawFlowImage(layer.art, 94 - off, 92 - off * 0.62, 322, 201, { alpha: 0.25 + 0.75 * p });
+          }
+          bx += flowBadge(layer.label, bx, 318, p > 0.82);
+        });
         if (flowState.opts.stego) flowText('Rust dots exaggerate the invisible StegoMark.', 94, 368, '11px ui-monospace, monospace', '#6b6352');
       } else {
         flowBadge('all optional marks OFF — pass through', bx, 318, false);
+        flowScanFrame(94, 92, 322, 201, phase(t, 0.1, 0.8), '#8a8170');
       }
       flowEmpty(676, 108, 224, 140, ['STILL SERVER-SIDE', 'nothing sent yet']);
     } else if (s === 6) {
@@ -1013,6 +1241,19 @@ if (document.getElementById('w-survival')) {
         scramble: phase(t, 0, 0.68),
         encrypt: flowState.opts.encrypt ? phase(t, 0.68, 1) : 0,
       });
+      /* Then the container closes around the scrambled tiles: header strip
+         first, border second, seal last. */
+      if (fctx && t > 0.52) {
+        const closeP = ease(phase(t, 0.52, 0.8));
+        const inset = lerp(14, 0, closeP);
+        fctx.save();
+        fctx.strokeStyle = '#191612'; fctx.lineWidth = 2;
+        fctx.strokeRect(94 - inset + 0.5, 92 - inset + 0.5, 322 + inset * 2 - 1, 201 + inset * 2 - 1);
+        fctx.fillStyle = '#b13a22';
+        fctx.fillRect(94, 92, 322 * clamp01(phase(t, 0.52, 0.72)), 6);
+        fctx.restore();
+      }
+      flowSeal(416, 92, phase(t, 0.74, 0.92), flowState.opts.encrypt ? 'AES' : '✓');
       let bx = 94;
       bx += flowBadge('8×8 plan v2 + mirrors', bx, 318, t > 0.25);
       bx += flowBadge('.archx header', bx, 318, t > 0.55);
@@ -1021,20 +1262,29 @@ if (document.getElementById('w-survival')) {
     } else if (s === 7) {
       flowText('MASTER STAYED', 40, 292, '700 11px ui-monospace, monospace', '#6b6352');
       drawFlowImage(cleanArt, 40, 302, 116, 73, { alpha: 0.45 });
-      flowArrow(250, 190, 720);
-      const px = lerp(72, 642, e);
-      flowText(px < 570 ? 'ON THE WIRE' : 'DECODED · STILL SCRAMBLED', px, 82, '700 12px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(markedArt, px, 94, 268, 168, {
+      /* The payload rides an S-loop through the wire, then stops at the
+         browser validation ring instead of sliding straight across. */
+      const wirePath = [[72, 94], [245, 34], [455, 238], [642, 94]];
+      const wireCenter = [[206, 178], [360, 96], [548, 286], [776, 178]];
+      const wireP = ease(phase(t, 0, 0.78));
+      flowCurve(wireCenter, wireP, '#b13a22', true);
+      const [px, py] = flowCurvePoint(wirePath, wireP);
+      flowText(wireP < 0.98 ? 'ON THE WIRE' : 'VALIDATE · DECODED · STILL SCRAMBLED', px, Math.max(82, py - 12), '700 12px ui-monospace, monospace', '#b13a22');
+      drawFlowImage(markedArt, px, py, 268, 168, {
         scramble: 1,
         encrypt: flowState.opts.encrypt ? 1 - phase(t, 0.8, 1) : 0,
       });
-      if (t > 0.82) flowBadge('validated + decoded', 676, 292, true);
+      if (t > 0.78) flowScanFrame(642, 94, 268, 168, phase(t, 0.78, 1));
+      if (t > 0.9) flowBadge('validated + decoded', 676, 292, true);
       flowText('What crossed is a bounded, scrambled derivative — never the master file.', 40, 360, '600 15px Georgia, serif');
     } else if (s === 8) {
       drawFlowImage(cleanArt, 42, 108, 178, 111, { alpha: 0.45 });
       flowText('MASTER · SERVER ONLY', 42, 242, '700 11px ui-monospace, monospace', '#6b6352');
       if (effectiveRenderer() === 'canvas') {
         flowText('PRIVATE CANVAS ASSEMBLY → DISPLAY', 650, 78, '700 12px ui-monospace, monospace', '#b13a22');
+        /* Ghost = the private work canvas behind the display. It fades and
+           collapses as the visible canvas takes over, then is zeroed. */
+        drawFlowImage(markedArt, 634, 82, 268, 168, { scramble: 1, alpha: 0.26 * (1 - phase(t, 0.6, 0.95)) });
         drawFlowImage(markedArt, 650, 94, 268, 168, {
           scramble: 1 - e,
           client: client && t > 0.55,
@@ -1053,24 +1303,34 @@ if (document.getElementById('w-survival')) {
           fctx.fillStyle = 'rgba(255,253,247,.72)';
           fctx.fillRect(772, 86 + 105 * e, 168, 105 * (1 - e));
         }
+        /* Column sweeps stand in for per-fragment tile mapping: the texture
+           stays scrambled while the shader resolves the output. */
+        flowScanFrame(772, 86, 168, 105, phase(t, 0.05, 0.9));
+        flowPulse([[742, 124], [750, 104], [760, 150], [772, 124]], (t * 1.6) % 1, '#b13a22', 5);
         flowPacket(650, 232, 268, 66, 'FRAGMENT SHADER', ['tile map + mirrors per fragment', flowState.mode === 'fortress' && t > 0.74 ? 'source bitmap released' : 'no clean CPU work canvas']);
       }
     } else {
       flowText('NETWORK CAPTURE', 52, 86, '700 11px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(markedArt, 52, 96, 190, 119, { scramble: 1, encrypt: flowState.opts.encrypt ? 1 : 0 });
+      drawFlowImage(markedArt, 52, 96, 190, 119, { scramble: 1, encrypt: flowState.opts.encrypt ? 1 : 0, alpha: ease(phase(t, 0.22, 0.48)) });
+      flowScanFrame(52, 96, 190, 119, phase(t, 0.24, 0.48), '#8a8170');
       flowText('MASTER · NEVER SENT', 282, 86, '700 11px ui-monospace, monospace', '#6b6352');
       drawFlowImage(cleanArt, 282, 96, 174, 109, { alpha: 0.52 });
       drawFlowLock(369, 150, 0.9);
       flowText('VISITOR VIEW · ENTITLED DERIVATIVE', 650, 72, '700 11px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(markedArt, 650, 82, 268, 150, { client, temporal });
+      drawFlowImage(markedArt, 650, 82, 268, 150, { client, temporal, alpha: ease(phase(t, 0.02, 0.26)) });
+      /* Extraction attempts branch downward out of the one legitimate view,
+         one sink at a time. */
+      flowCurve([[744, 232], [730, 244], [724, 250], [716, 264]], phase(t, 0.48, 0.62), '#b13a22', true);
+      flowCurve([[830, 232], [842, 244], [850, 250], [858, 264]], phase(t, 0.68, 0.82), '#b13a22', true);
       flowText('READBACK', 650, 254, '700 11px ui-monospace, monospace', '#b13a22');
       drawFlowImage(markedArt, 650, 264, 132, 88, {
         black: flowState.extract === 'black',
         pixelate: flowState.extract !== 'black',
         scramble: flowState.extract === 'scrambled' ? 1 : 0,
+        alpha: ease(phase(t, 0.52, 0.74)),
       });
       flowText('SCREENSHOT', 798, 254, '700 11px ui-monospace, monospace', '#b13a22');
-      drawFlowImage(markedArt, 798, 264, 120, 88, { client, temporal });
+      drawFlowImage(markedArt, 798, 264, 120, 88, { client, temporal, alpha: ease(phase(t, 0.72, 0.94)) });
       flowText('Display is viewable; extraction is capped, poisoned, or attributable.', 52, 360, '600 15px Georgia, serif');
     }
   }
@@ -1108,6 +1368,7 @@ if (document.getElementById('w-survival')) {
         ? 'One-time tokens are on by default in the middleware; this illustrated token is also sender-constrained to the browser’s proof key.'
         : 'One-time tokens are on by default in the middleware. Proof-of-possession is off in this illustration, so a stolen bearer token would need the server’s other limits and short expiry to contain it.';
     }
+    const durations = refreshFlowDurations();
     const info = modeInfo();
     if ($('flowModeTitle')) $('flowModeTitle').textContent = info.title;
     if ($('flowModeText')) $('flowModeText').textContent = info.text;
@@ -1120,7 +1381,13 @@ if (document.getElementById('w-survival')) {
     if ($('flowZone')) $('flowZone').textContent = cur.zone;
     if ($('flowStageTitle')) $('flowStageTitle').textContent = `${flowState.step + 1} · ${cur.title}`;
     if ($('flowStageText')) $('flowStageText').textContent = cur.body;
-    if ($('flowProgress')) $('flowProgress').textContent = `Stage ${flowState.step + 1} of 10`;
+    if ($('flowProgress')) {
+      const delta = FLOW_LEGACY_TOTAL_MS - flowState.routeMs;
+      const deltaText = delta >= 0
+        ? `${formatFlowMs(delta)} shorter than the old fixed 3.3s × 10`
+        : `${formatFlowMs(Math.abs(delta))} longer than the old fixed 3.3s × 10`;
+      $('flowProgress').textContent = `Stage ${flowState.step + 1} of 10 · this stage ${formatFlowMs(durations[flowState.step])} · route ${formatFlowMs(flowState.routeMs)} (${deltaText})`;
+    }
     flowRoot.querySelectorAll('.flow-step').forEach((btn) => {
       const idx = Number(btn.dataset.step);
       const on = idx === flowState.step;
@@ -1129,7 +1396,7 @@ if (document.getElementById('w-survival')) {
       const strong = btn.querySelector('strong');
       if (strong) strong.textContent = stages[idx].title;
       const small = btn.querySelector('[data-flow-step-text]');
-      if (small) small.textContent = stages[idx].short;
+      if (small) small.textContent = `${stages[idx].short} · ${formatFlowMs(durations[idx])}`;
     });
     syncFlowTransport();
   }
@@ -1162,7 +1429,7 @@ if (document.getElementById('w-survival')) {
     if (!flowState.playing) return;
     if (!flowState.visible || document.hidden) { flowState.last = 0; return; }
     flowState.now = now;
-    if (flowState.last) flowState.t += (now - flowState.last) / FLOW_STEP_MS;
+    if (flowState.last) flowState.t += (now - flowState.last) / flowStageDuration();
     flowState.last = now;
     if (flowState.t >= 1) {
       if (flowState.step < 9) {
@@ -1195,7 +1462,7 @@ if (document.getElementById('w-survival')) {
     b.addEventListener('click', () => {
       const key = b.dataset.flowOpt;
       flowState.opts[key] = !flowState.opts[key];
-      if (key === 'watermark' || key === 'serverForensic' || key === 'stego') markedArt = makeFlowArt(true);
+      if (key === 'watermark' || key === 'serverForensic' || key === 'stego') rebuildFlowArtwork();
       updateFlowText(); drawFlow();
     });
   });
