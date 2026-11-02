@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Technical decisions — Archnemix Image Protection</title>
-<meta name="description" content="Every major engineering decision in Archnemix Image Protection: what was chosen, what was rejected, the pros and cons, and the measured evidence. With live interactive widgets.">
+<meta name="description" content="Every major engineering decision in Archnemix Image Protection: what was chosen, what was rejected, the pros and cons, and the measured evidence. With an animated end-to-end flow explanation and local interactive widgets.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -22,7 +22,6 @@
     <p class="masthead-meta">Technical decisions</p>
     <nav class="masthead-nav" aria-label="Pages">
       <a href="index.html">Overview</a>
-      <a href="pipeline.html">Pipeline</a>
       <a href="technical.html" aria-current="page">Technical</a>
       <a href="limits.html">Threat model</a>
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
@@ -36,14 +35,157 @@
     <h1>Every choice, on the record.</h1>
     <p class="lede2">Twenty-one decisions shaped Archx. Each one below states the problem,
     what we chose, what we rejected and why, the honest pros and cons, and the measured
-    evidence — with live widgets where a mechanism is easier to feel than to read about.
+    evidence — with local widgets where a mechanism is easier to feel than to read about.
     Nothing here is marketing: where a choice costs something, the cost is printed.</p>
+  </section>
+
+  <section class="flow-band" id="image-flow" aria-labelledby="flowTitle">
+    <header class="band-head"><span class="band-no">↳</span><h2 id="flowTitle">One image, start to finish</h2></header>
+    <p class="band-intro">Follow a private master through the recommended <strong>server-delivery
+    (<span class="mono">{ id }</span>)</strong> path: permission first, pixels second. Choose a viewer mode,
+    renderer/extraction overrides, and server options — the moving picture, packets, and stage notes
+    change with that configuration.</p>
+
+    <aside class="no-demo-note" aria-label="No live demo on this website">
+      <strong>No live demo runs on this website — deliberately.</strong>
+      <p>This site is static, so there is no Archx Node server here to run <span class="mono">authorize</span>,
+      mint and spend tokens, keep the master outside the web root, or build a Sharp derivative. That server
+      is the main protection boundary. Simulating those steps in page JavaScript and calling it a product
+      demo would misrepresent where the security comes from; the animation below is an explanation only,
+      and every widget on this page runs locally.</p>
+      <p>For the real end-to-end demo, clone the repository and run:
+      <span class="mono">npm ci &amp;&amp; npm run demo:images &amp;&amp; npm run build &amp;&amp; npm run demo</span>.</p>
+    </aside>
+
+    <div class="widget flow-widget" id="w-flow">
+      <h4>Animated flowchart — master in, protected view out</h4>
+      <p class="w-note flow-config-note"><strong>Illustrated server configuration:</strong> the optional server
+      branches start switched on so every path is visible. Each toggle prints the base middleware default;
+      switch a branch off to see what that deployment would skip. The tile animation uses the page’s real
+      plan-v2 builder, but the drawing itself is explanatory — no image, token, or server request leaves
+      this page.</p>
+
+      <div class="flow-controls">
+        <div class="flow-control-group">
+          <span class="flow-label" id="flowModeLabel">Viewer mode</span>
+          <div class="seg flow-seg" role="group" aria-labelledby="flowModeLabel" id="flowModeSeg">
+            <button type="button" data-mode="lite" aria-pressed="false">Lite</button>
+            <button type="button" data-mode="shield" class="is-active" aria-pressed="true">Shield · default</button>
+            <button type="button" data-mode="vault" aria-pressed="false">Vault</button>
+            <button type="button" data-mode="fortress" aria-pressed="false">Fortress</button>
+            <button type="button" data-mode="custom" aria-pressed="false">Custom</button>
+          </div>
+        </div>
+        <div class="flow-control-group">
+          <span class="flow-label" id="flowRendererLabel">Renderer flag</span>
+          <div class="seg flow-seg" role="group" aria-labelledby="flowRendererLabel" id="flowRendererSeg">
+            <button type="button" data-renderer="auto" class="is-active" aria-pressed="true">Auto</button>
+            <button type="button" data-renderer="canvas" aria-pressed="false">Canvas</button>
+            <button type="button" data-renderer="webgl" aria-pressed="false">WebGL</button>
+          </div>
+        </div>
+        <div class="flow-control-group">
+          <span class="flow-label" id="flowExtractLabel"><span class="mono">onExtract</span></span>
+          <div class="seg flow-seg" role="group" aria-labelledby="flowExtractLabel" id="flowExtractSeg">
+            <button type="button" data-extract="black" class="is-active" aria-pressed="true">Black</button>
+            <button type="button" data-extract="lowres" aria-pressed="false">Low-res</button>
+            <button type="button" data-extract="scrambled" aria-pressed="false">Scrambled</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-server-options">
+        <span class="flow-label" id="flowServerLabel">Server options in this illustrated delivery</span>
+        <div class="flow-toggle-row" role="group" aria-labelledby="flowServerLabel">
+          <button type="button" class="flow-toggle is-active" data-flow-opt="pop" aria-pressed="true"><span class="mono">proofOfPossession</span><small>proof key supplied · server default optional</small></button>
+          <button type="button" class="flow-toggle is-active" data-flow-opt="encrypt" aria-pressed="true"><span class="mono">encrypt: true</span><small>AES-256-GCM · base default false</small></button>
+          <button type="button" class="flow-toggle is-active" data-flow-opt="watermark" aria-pressed="true"><span class="mono">serverWatermark</span><small>visible mark · base default none</small></button>
+          <button type="button" class="flow-toggle is-active" data-flow-opt="serverForensic" aria-pressed="true"><span class="mono">forensic: true</span><small>server blocks · base default false</small></button>
+          <button type="button" class="flow-toggle is-active" data-flow-opt="stego" aria-pressed="true"><span class="mono">steganography</span><small>StegoMark · base default false</small></button>
+        </div>
+        <p class="w-note" id="flowServerNote">One-time tokens are on by default in the middleware; this
+        illustrated token is also sender-constrained to the browser’s proof key.</p>
+      </div>
+
+      <div class="flow-transport" role="group" aria-label="Flowchart playback controls">
+        <button type="button" class="w-btn ghost" id="flowPrev">← Previous</button>
+        <button type="button" class="w-btn" id="flowPlay" aria-pressed="true">Pause</button>
+        <button type="button" class="w-btn ghost" id="flowNext">Next →</button>
+        <button type="button" class="w-btn ghost" id="flowRestart">Restart</button>
+        <span class="flow-progress" id="flowProgress">Stage 1 of 10</span>
+      </div>
+
+      <canvas id="flowCanvas" width="980" height="430" role="img"
+        aria-label="Animated explanation of an Archx server delivery: a private master stays on the server while a token is minted and redeemed, an entitled derivative is marked and scrambled, and the browser renders it in the selected viewer mode."></canvas>
+      <noscript><p class="w-note">The animation needs JavaScript; the complete numbered flow below is the static version.</p></noscript>
+
+      <div class="flow-caption" aria-live="polite">
+        <span class="flow-caption-kicker" id="flowZone">SERVER · PRIVATE</span>
+        <h4 id="flowStageTitle">1 · The master goes in — and stays there</h4>
+        <p id="flowStageText">The original is indexed by image ID in a masters directory outside every
+        public root. Startup refuses an overlapping public/private layout. There is no route that returns
+        this file.</p>
+      </div>
+
+      <div class="flow-mode-card">
+        <h4 id="flowModeTitle">Shield — the default viewer</h4>
+        <p id="flowModeText">Shield uses Canvas 2D when the renderer is left on auto. A private working canvas
+        unscrambles the entitled derivative at backing-store size, bakes any configured client watermark and
+        per-session forensic blocks, paints the visible canvas, then zeroes the working canvas. Instance-level
+        readback returns the selected decoy; a prototype-call readback additionally needs an origin-tainted
+        canvas (or promotion to WebGL) to be browser-blocked.</p>
+        <dl class="flow-facts">
+          <div><dt>Effective renderer</dt><dd id="flowRendererOut">Canvas 2D (auto from Shield)</dd></div>
+          <div><dt>What leaves the server</dt><dd id="flowWireOut">AES-256-GCM-encrypted .archx scrambled derivative · no master</dd></div>
+          <div><dt>Programmatic readback</dt><dd id="flowExtractOut">Black branded decoy from instance readback APIs</dd></div>
+        </dl>
+      </div>
+
+      <ol class="flow-steps" id="flowSteps">
+        <li><button type="button" class="flow-step is-current" data-step="0" aria-current="step"><span class="flow-step-no">01</span><span><strong>The master goes in</strong><small data-flow-step-text>Indexed by ID outside the public root; the middleware is the only reader and there is no master URL.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="1"><span class="flow-step-no">02</span><span><strong>The browser asks first</strong><small data-flow-step-text>The loader measures the display box, DPR and oversampling, then requests a token for that ID and size. No pixels move yet.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="2"><span class="flow-step-no">03</span><span><strong>The server decides and signs</strong><small data-flow-step-text>Host authorization, rate/quotas and entitlement caps run before an HMAC token, scramble key, grid and expiry are returned.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="3"><span class="flow-step-no">04</span><span><strong>The token is redeemed</strong><small data-flow-step-text>The payload request verifies the token and proof, re-runs authorization, checks bindings, then spends the one-time claim.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="4"><span class="flow-step-no">05</span><span><strong>Sharp builds only the entitled derivative</strong><small data-flow-step-text>Input is sniffed and budget-checked, decoded, orientation-baked when needed, and resized to the authorized display geometry.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="5"><span class="flow-step-no">06</span><span><strong>Server marks are baked in</strong><small data-flow-step-text>Optional visible watermark, server forensic blocks and StegoMark are applied to derivative pixels before scrambling.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="6"><span class="flow-step-no">07</span><span><strong>Tiles are scrambled and packaged</strong><small data-flow-step-text>Keyed padding, an 8×8 default tile permutation with mirrors, image encoding, .archx wrapping and optional AES-256-GCM.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="7"><span class="flow-step-no">08</span><span><strong>The browser opens the payload</strong><small data-flow-step-text>Bounded fetch, strict container and dimension checks, optional AES-GCM decrypt, then decode of a still-scrambled bitmap.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="8"><span class="flow-step-no">09</span><span><strong>The selected viewer renders it</strong><small data-flow-step-text>Shield assembles tiles in a private Canvas 2D working canvas and paints the guarded display canvas.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="9"><span class="flow-step-no">10</span><span><strong>What can come out</strong><small data-flow-step-text>The visitor sees the entitled derivative. Network capture gets protected payload bytes; readback is poisoned or black; a screenshot remains possible but is resolution-capped and may carry marks.</small></span></button></li>
+      </ol>
+
+      <p class="w-note"><strong>Scope:</strong> this chart follows token delivery. Precomputed
+      <span class="mono">{ assetId }</span> delivery is deliberately different — derivatives are scrambled at
+      build time and selected from a manifest on static/CDN hosting, so there is no per-view authorize,
+      mint, redemption or Sharp stage. Plain URL/Blob sources likewise skip the server boundary and must
+      not be described as if they had one.</p>
+    </div>
+
+    <div class="flow-presets">
+      <h3>Preset names are bundles over this same flow</h3>
+      <p>Presets do not create separate pipelines. They choose a base mode and pre-fill ordinary flags;
+      any flag can still be overridden when the preset object is spread.</p>
+      <div class="table-wrap">
+        <table class="layers">
+          <thead><tr><th scope="col">Preset</th><th scope="col">Base path</th><th scope="col">What the bundle changes</th></tr></thead>
+          <tbody>
+            <tr><td><span class="mono">gallery</span> / <span class="mono">catalog</span></td><td>Lite</td><td>Catalog sampling, canonical width buckets, batched token mints, cache/unload budgets for image-heavy pages.</td></tr>
+            <tr><td><span class="mono">editorial</span></td><td>Shield</td><td>Original-quality request profile with the default Canvas path unless a renderer flag says otherwise.</td></tr>
+            <tr><td><span class="mono">commerce</span> / <span class="mono">marketplace</span></td><td>Vault</td><td>WebGL path and capture shield; marketplace also enables batched mints for grids.</td></tr>
+            <tr><td><span class="mono">performance</span></td><td>Shield</td><td>Forces Canvas, catalog sampling, batched mints and smaller bitmap-cache budgets.</td></tr>
+            <tr><td><span class="mono">maxProtection</span></td><td>Vault</td><td>Forces WebGL, requires proof-of-possession, and enables the 60 Hz balanced temporal interlace.</td></tr>
+            <tr><td><span class="mono">screenshotResistant</span></td><td>Fortress</td><td>Adds the pointer Lens to Fortress’s temporal/capture/strike defaults; still not screenshot prevention.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </section>
 
   <div class="tech-layout">
     <aside class="tech-index">
       <h2>Index</h2>
       <nav id="techIndex" aria-label="Decisions index"><noscript><p>Enable JavaScript for the clickable index — all decisions follow in order below.</p></noscript></nav>
+      <p class="flow-index-link"><a href="#image-flow">↳ Start with one image, start to finish</a></p>
       <h2>How to read</h2>
       <p style="font-size:13.5px;color:var(--ink-soft);margin:0">“Evidence” cites the shipped
       benchmark/attack suites and <span class="mono">docs/RESEARCH.md</span> sections, so every claim
@@ -78,7 +220,7 @@
             <div><h4>Pros</h4><ul><li>Whole classes of static-file bugs become irrelevant.</li><li>One auditable read path for every byte that leaves.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Requires a server component (or the offline asset builder) — pure static hosting of originals is out.</li><li>Deployments must think about filesystem layout once.</li></ul></div>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>Red-team traversal/symlink/config attacks (suite sections C–D) all held; the demo deliberately 404s <span class="mono">/demo-masters/…</span> so anyone can test it. RESEARCH §2.29.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p>Red-team traversal/symlink/config attacks (suite sections C–D) all held; the repository demo deliberately 404s <span class="mono">/demo-masters/…</span> when run locally, so anyone can test it. RESEARCH §2.29.</p></div>
         </div>
       </article>
 
@@ -188,14 +330,14 @@
           <div class="widget" id="w-token">
             <h4>Widget — mint, inspect, and tamper with a real token</h4>
             <div class="w-row">
-              <label>Demo secret <input type="text" id="tokSecret" value="site-demo-secret-not-for-production" size="34"></label>
+              <label>Example local secret <input type="text" id="tokSecret" value="site-demo-secret-not-for-production" size="34"></label>
               <button class="w-btn" id="tokMint" type="button">Mint token</button>
               <button class="w-btn ghost" id="tokTamper" type="button">Tamper: width 240 → 4000</button>
               <button class="w-btn ghost" id="tokVariant" type="button">Padding-variant re-encode</button>
             </div>
             <label style="display:grid;gap:5px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--ink-soft)">Claims (JSON — edit me, then re-mint)
               <textarea id="tokClaims" spellcheck="false"></textarea></label>
-            <p class="w-out" id="tokOut">Press “Mint token”. Runs 100% locally with WebCrypto; the demo secret never leaves this page.</p>
+            <p class="w-out" id="tokOut">Press “Mint token”. Runs 100% locally with WebCrypto; the example secret never leaves this page and no Archx server is contacted.</p>
             <p class="w-note">Verification mirrors the server’s single-secret path: canonical-encoding check → HMAC compare → claim validation. The padding variant has a <em>valid</em> MAC but a non-canonical string — watch it fail anyway.</p>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>Red-team sections B + H: corrupted/tampered/wrong-secret/cross-image/replayed/expired/fuzzed-claim/kid-confused tokens all refused; a failed forgery does not burn the genuine claim; 16-way race admits exactly one redemption.</p></div>
@@ -302,7 +444,7 @@
             <div><h4>Pros</h4><ul><li>Single-shot screenshots arrive degraded by construction.</li><li>Cheap: shader mask or two pre-renders, no per-frame CPU.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Determined multi-frame capture + averaging partially recovers; camera photos of the screen integrate like the eye does. Both stated plainly.</li></ul></div>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>Browser suite covers shader/frames patterns + capture traces; demo exposes every interlace flag live.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p>Browser suite covers shader/frames patterns + capture traces; the repository demo exposes every interlace flag when run locally.</p></div>
         </div>
       </article>
 
@@ -528,6 +670,5 @@
 </footer>
 
 <script type="module" src="technical.js"></script>
-<script src="motion.js" defer></script>
 </body>
 </html>
