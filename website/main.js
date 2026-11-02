@@ -1,4 +1,4 @@
-/* Archnemix site — hero demonstration.
+/* Archnemix site — hero illustration (not a live server demo).
  * A painting is generated in-browser, split into an 8x8 field of 3D
  * tiles, and scrambled exactly the way Archx scrambles real payloads:
  * a keyed permutation with per-tile mirrors. "Visitor's view"

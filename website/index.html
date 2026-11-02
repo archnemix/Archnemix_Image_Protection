@@ -22,7 +22,6 @@
     <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
     <nav class="masthead-nav" aria-label="Pages">
       <a href="index.html" aria-current="page">Overview</a>
-      <a href="pipeline.html">Pipeline</a>
       <a href="technical.html">Technical</a>
       <a href="limits.html">Threat model</a>
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
@@ -45,16 +44,16 @@
 
     <figure class="stage" id="stage">
       <div class="stage-frame">
-        <canvas id="gl" tabindex="0" aria-label="Interactive 3D demonstration: a photograph split into tiles that scramble and reassemble. Drag to orbit, hover a tile to trace it, press space to scatter."></canvas>
+        <canvas id="gl" tabindex="0" aria-label="Interactive 3D illustration, not a live demo: tiles scramble and reassemble to explain the delivery idea. Drag to orbit, hover a tile to trace it, press space to scatter."></canvas>
         <div class="stage-fallback" id="stageFallback" hidden>
-          <p>The 3D demonstration needs WebGL. The idea, in one line: the picture
+          <p>The 3D illustration needs WebGL. The idea, in one line: the picture
           travels as 64 permuted, mirrored tiles and only becomes a picture
           inside the viewer.</p>
         </div>
         <span class="stage-tag" id="stageTag">Your visitor&rsquo;s view</span>
       </div>
       <figcaption class="stage-controls">
-        <div class="stage-buttons" role="group" aria-label="Demonstration controls">
+        <div class="stage-buttons" role="group" aria-label="Illustration controls">
           <button type="button" id="btnView" class="btn is-active">Visitor&rsquo;s view</button>
           <button type="button" id="btnWire" class="btn">On the wire</button>
         </div>
@@ -70,6 +69,10 @@
         <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
         <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>
       </div>
+      <p class="fineprint"><strong>No live demo on this static website:</strong> the hero is an explanatory
+      illustration only. There is no Archx server here to authorize a viewer, mint and spend a token,
+      keep a master private, or build a Sharp derivative — that server is the main protection boundary.
+      The real end-to-end demo is run locally from the GitHub repository.</p>
     </figure>
 
     <div class="install-row">
@@ -260,6 +263,5 @@ setTimeout(function () {
 }, 7000);
 </script>
 <script type="module" src="main.js"></script>
-<script src="motion.js" defer></script>
 </body>
 </html>
