@@ -69,8 +69,13 @@ deliberately re-balanced (migration notes below).
   stay Linux-only with the reason documented (the bundled Chromium
   is a Linux build; service containers are Linux-only) — a stated
   gap, not a claimed pass. `.gitattributes` pins LF so Windows
-  checkouts produce byte-identical sources. macOS remains untested
-  (no Mac available) and says so.
+  checkouts produce byte-identical sources. The Windows job earned
+  its keep on its first run: lint/build/types/docs-gate and the full
+  unit/fuzz suite passed, but the pack smoke failed — it spawned
+  `npm`/`npx` `.cmd` shims without a shell and executed the POSIX
+  `.bin/tsc` shim; both are fixed the cross-platform way (shell only
+  where Windows requires it, tsc via its JS entry). macOS remains
+  untested (no Mac available) and says so.
 - **Docs-consistency gate.** `npm run docs:check` recomputes the
   version, test counts, bundle size, gzip size, and SRI hash and
   fails if README/website/CHANGELOG disagree with the code; it also

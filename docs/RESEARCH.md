@@ -3758,7 +3758,12 @@ immutable) — recorded here because mis-specified tests are how suites
 learn to lie.
 
 **Platforms.** Windows joined CI (lint/build/types/docs-gate/unit+fuzz/
-pack). Excluded with reasons, not silence: browser suite (bundled
+pack) and caught a real bug on its first run: everything passed except
+the pack smoke, which spawned `npm`/`npx` `.cmd` shims without a shell
+(Node refuses that on Windows) and executed the POSIX `.bin/tsc` shim;
+fixed by shelling only where Windows requires it and running tsc via
+its JS entry — the canonical "works on my OS" class, now gated forever.
+Excluded with reasons, not silence: browser suite (bundled
 Chromium is a Linux build) and real-Redis (service containers are
 Linux-only). `.gitattributes` forces LF so byte-compared fixtures mean
 the same thing after a Windows checkout. macOS: still no Mac, still no
