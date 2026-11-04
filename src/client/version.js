@@ -4,4 +4,4 @@
  * import cycle through the public assembly (src/archx.js).
  * Must equal package.json's version — enforced by a unit test + pack-smoke.
  */
-export const VERSION = '1.27.0';
+export const VERSION = '1.28.0';

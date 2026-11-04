@@ -102,7 +102,7 @@ __export(index_exports, {
 module.exports = __toCommonJS(index_exports);
 
 // src/client/version.js
-var VERSION = "1.27.0";
+var VERSION = "1.28.0";
 
 // src/core/bytes.js
 function asBytes(bytes) {
@@ -4561,7 +4561,9 @@ var DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
 ]);
 var DEFAULTS = {
   mode: "shield",
-  // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
+  // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom' | 'performance' (=shield pipeline) | 'elite' (=fortress + PoP required)
+  profile: null,
+  // 1.28: null | 'lite' | 'performance' | 'elite' — applies the canonical bundle UNDER explicit options (explicit keys win); unknown values throw
   renderer: "auto",
   // 'auto' | 'canvas' | 'webgl' — direct renderer flag (lets custom setups skip preset modes)
   fit: "cover",
@@ -4729,6 +4731,27 @@ function mergeOptions(opts = {}) {
   if (opts.guards) {
     for (const [k, v] of Object.entries(opts.guards)) if (v !== void 0) merged.guards[k] = v;
   }
+  if (clean.profile !== void 0 && clean.profile !== null) {
+    const bundleName = String(clean.profile).toLowerCase();
+    if (!["lite", "performance", "elite"].includes(bundleName)) {
+      throw new TypeError(`Archx: unknown profile "${clean.profile}" (known: lite, performance, elite). For a fully custom setup use mode:'custom' with explicit flags.`);
+    }
+    const bundle = structuredCloneSafe(PRESETS[bundleName]);
+    for (const [k, v] of Object.entries(bundle)) {
+      if (k === "guards") continue;
+      if (clean[k] === void 0) {
+        merged[k] = v;
+        clean[k] = v;
+      }
+    }
+    if (bundle.guards) {
+      for (const [k, v] of Object.entries(bundle.guards)) {
+        if (!opts.guards || opts.guards[k] === void 0) merged.guards[k] = v;
+      }
+    }
+    merged.profile = bundleName;
+    if (clean.qualityProfile === void 0 && bundle.qualityProfile !== void 0) clean.qualityProfile = bundle.qualityProfile;
+  }
   const qualityProfiles = {
     original: { requestQuality: "lossless", sourceOversample: 2, dprCap: 3 },
     high: { requestQuality: 95, sourceOversample: 2, dprCap: 3 },
@@ -4764,8 +4787,19 @@ function mergeOptions(opts = {}) {
     merged.mode = merged.renderer === "webgl" ? "vault" : "shield";
   }
   if (merged.mode === "lite" && clean.forensic === void 0) merged.forensic = false;
-  if (merged.mode === "fortress") {
+  if (merged.mode === "performance") {
+    merged.requestedMode = "performance";
+    merged.mode = "shield";
+  } else if (merged.mode === "elite") {
+    merged.requestedMode = "elite";
+    merged.mode = "fortress";
+    if (clean.proofOfPossession === void 0) merged.proofOfPossession = "required";
+    if (clean.taintFallback === void 0) merged.taintFallback = "webgl";
+  } else if (merged.mode === "fortress") {
     merged.requestedMode = "fortress";
+  }
+  if (merged.mode === "fortress") {
+    if (!merged.requestedMode) merged.requestedMode = "fortress";
     merged.mode = "vault";
     if (clean.onExtract === void 0) merged.onExtract = "black";
     if (clean.integrity === void 0) merged.integrity = "lock";
@@ -4894,12 +4928,14 @@ var PRESETS = Object.freeze({
     forensic: true,
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true })
   }),
-  performance: Object.freeze({
-    // CPU/RAM-first profile (v1.23): every protection layer stays on,
-    // budgets shrink. 2D canvas (no GL contexts to budget), catalog
-    // sampling, batched mints, bounded bitmap cache, static loop.
-    // Server counterpart: withPerformanceDefaults().
-    mode: "shield",
+  // === The three canonical profiles (v1.28) ===
+  // lite: CPU/RAM/speed first. The 2D pipeline, catalog sampling,
+  // smallest caches, batched mints, static loop — every layer that costs
+  // nothing stays on (guards, taint, closed shadow DOM); the paid
+  // extras (GL, forensic blocks, temporal) stay off.
+  // Server counterpart: withLiteDefaults().
+  lite: Object.freeze({
+    mode: "lite",
     renderer: "canvas",
     qualityProfile: "catalog",
     sourceOversample: 1,
@@ -4915,18 +4951,63 @@ var PRESETS = Object.freeze({
     tokenBatchMaxDelayMs: 150,
     sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
     networkAware: true,
+    httpCache: "default",
+    assetHttpCache: "default",
     bitmapCacheMaxEntries: 16,
     bitmapCacheMaxBytes: 96 * 1024 * 1024,
+    taintFallback: "warn",
+    guards: Object.freeze({ blurOnBlur: false })
+  }),
+  // performance: the balanced default (rebalanced in v1.28; the v1.23
+  // CPU-first composition moved to 'lite'). Shield pipeline with the
+  // taint layer, balanced sampling, forensic blocks, moderate caches,
+  // batched mints. Server counterpart: withPerformanceDefaults().
+  performance: Object.freeze({
+    mode: "performance",
+    renderer: "canvas",
+    qualityProfile: "balanced",
+    sourceOversample: 1.5,
+    dprCap: 2.5,
+    lazy: true,
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "static",
+    reloadOnResize: "upscale",
+    tokenBatch: true,
+    tokenBatchDelayMs: 20,
+    tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS,
+    networkAware: true,
+    bitmapCacheMaxEntries: 24,
+    bitmapCacheMaxBytes: 128 * 1024 * 1024,
     taintFallback: "warn",
     forensic: true,
     guards: Object.freeze({ blurOnBlur: false })
   }),
+  // elite: security first — everything that can harden, on. WebGL
+  // pipeline (black readback), fortress extras (integrity lock, strict
+  // memory, local scramble, strikes, devtools guard), sender-constrained
+  // tokens required, 60 Hz temporal interlace, dynamic trace. Budgets
+  // are spent on protection, not removed.
+  // Server counterpart: withEliteDefaults().
+  elite: Object.freeze({
+    mode: "elite",
+    renderer: "webgl",
+    qualityProfile: "original",
+    onExtract: "black",
+    taintFallback: "webgl",
+    proofOfPossession: "required",
+    forensic: true,
+    temporalInterlace: "balanced60",
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+    cacheBitmap: true,
+    cachePayload: true,
+    renderLoop: "auto",
+    reloadOnResize: "upscale"
+  }),
   maxProtection: Object.freeze({
-    // Protection + content-identification first (v1.23, the
-    // state-of-the-art profile): WebGL renderer (black readback),
-    // taint-or-promote, sender-constrained tokens required, 60 Hz
-    // temporal interlace, dynamic trace, forensic blocks. Still
-    // budget-bounded — budgets are spent on protection, not removed.
+    // Legacy (v1.23) alias, kept working unchanged: vault + WebGL +
+    // PoP required + temporal, without the fortress extras elite adds.
     // Server counterpart: withMaxProtectionDefaults().
     mode: "vault",
     renderer: "webgl",
@@ -9887,7 +9968,7 @@ function defineElement() {
   };
   class ArchxImage extends HTMLElement {
     static get observedAttributes() {
-      return ["src", "image-id", "asset-id", "asset-manifest", "mode", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "temporal-interlace", "temporal-interlace-engine", "temporal-interlace-layout", "temporal-interlace-phases", "temporal-interlace-cell-size", "temporal-interlace-fill", "temporal-interlace-refresh-hz", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "token-batch", "fetch-priority", "proof-of-possession", "cache-scope", "taint-readback", "taint-url", "plan-version"];
+      return ["src", "image-id", "asset-id", "asset-manifest", "mode", "profile", "renderer", "preset", "quality-profile", "watermark", "alt", "fit", "grid", "key", "scrambled", "lens", "capture-shield", "temporal-shield", "camera-shield", "temporal-interlace", "temporal-interlace-engine", "temporal-interlace-layout", "temporal-interlace-phases", "temporal-interlace-cell-size", "temporal-interlace-fill", "temporal-interlace-refresh-hz", "render-loop", "reload-on-resize", "on-extract", "token-endpoint", "token-method", "token-transport", "token-batch", "fetch-priority", "proof-of-possession", "cache-scope", "taint-readback", "taint-url", "plan-version"];
     }
     connectedCallback() {
       if (elementInstances.has(this)) return;
@@ -9943,6 +10024,7 @@ function defineElement() {
       const inst = new ProtectedImage(inner, src, {
         ...presetOptions,
         mode: this.getAttribute("mode") || presetOptions.mode,
+        profile: this.getAttribute("profile") || void 0,
         renderer: this.getAttribute("renderer") || presetOptions.renderer,
         qualityProfile: this.getAttribute("quality-profile") || presetOptions.qualityProfile,
         watermark: this.getAttribute("watermark") || void 0,

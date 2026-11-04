@@ -80,6 +80,31 @@ iOS API to block screenshots. Operating systems and privileged browser
 extensions can capture the composited screen outside page JavaScript. Archx
 shortcut/visibility reactions are best-effort friction only on every OS.
 
+**Test coverage by OS (v1.28).** CI runs the full unit/fuzz suite, lint,
+types, the docs-consistency gate, and the packaged-artifact smoke on both
+**Linux** (Node 20 and 22) and **Windows** (Node 22). Two suites remain
+Linux-only, with the reason stated rather than hidden: the real-Chromium
+browser suite drives `@sparticuz/chromium`, which ships a Linux binary,
+and the real-Redis suite needs a service container (Linux-only on GitHub
+runners). A Windows browser matrix is a known gap, tracked here rather
+than implied. **macOS is untested** — development has no Mac available;
+nothing in the runtime is OS-specific (the server is Node + Sharp's
+prebuilt binaries, the client is browser APIs), but "should work" is not
+"tested", and this page will not claim otherwise. `.gitattributes` pins
+LF line endings so Windows checkouts are byte-identical to Linux ones
+(hash- and fixture-compared tests depend on it).
+
+**Profiles (v1.28).** `profile:'lite'|'performance'|'elite'`,
+`mode:'performance'|'elite'`, and the matching `Archx.preset(...)`
+bundles are additive option placements over the unchanged pipelines;
+legacy mode names keep their 1.x behavior and pixels. The one rename to
+note: the 1.23–1.27 CPU-first `preset('performance')` /
+`withPerformanceDefaults()` composition is now `preset('lite')` /
+`withLiteDefaults()` (identical values); `performance` now denotes the
+balanced profile. `withEliteDefaults()` defaults `maxWidthFraction` to
+0.6 for its own adopters only — `withMaxProtectionDefaults()` output is
+unchanged.
+
 For support purposes, record issues with:
 
 - browser name/version and OS/device;

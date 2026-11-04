@@ -420,6 +420,109 @@ await attack('dos', '30-way parallel mint stampede stays bounded and the server 
   };
 });
 
+/* ============ F. cache-deception & route ambiguities (v1.28) ============ */
+console.log('\nF. Cache-deception & route ambiguities (v1.28 additions)');
+
+await attack('cache', 'static-extension deception: payload path + .jpg / + /x.jpg never yields a cacheable 200', async () => {
+  const { body } = await mint();
+  if (!body) return { pass: false, detail: 'mint failed' };
+  const url = new URL(base + body.cleanUrl);
+  const tries = [];
+  for (const suffix of ['.jpg', '/x.jpg', ';v=1']) {
+    const forged = `${url.origin}${url.pathname}${suffix}${url.search}`;
+    const r = await fetch(forged, { headers: { 'x-archx-token': body.token, ...browserHeaders().headers } });
+    await r.arrayBuffer().catch(() => {});
+    tries.push({ suffix, status: r.status, cc: r.headers.get('cache-control') || '' });
+  }
+  const cacheable200 = tries.filter((t) => t.status === 200 && !/no-store/.test(t.cc));
+  const genuine = await redeem(base, body, browserHeaders());
+  await genuine.arrayBuffer().catch(() => {});
+  return {
+    pass: cacheable200.length === 0 && genuine.status === 200,
+    detail: tries.map((t) => `${t.suffix}→${t.status}`).join(' ') + `, genuine ${genuine.status}`,
+  };
+});
+await attack('cache', 'duplicate width params (w=200&w=1200) never widen past the entitlement', async () => {
+  const res = await postToken(`${base}/archx/token/cat?w=200&w=1200`, browserHeaders());
+  if (res.status !== 200) return { pass: res.status >= 400 && res.status < 500, detail: `mint rejected ${res.status}` };
+  const body = await res.json();
+  const r = await redeem(base, body, browserHeaders());
+  if (r.status !== 200) return { pass: false, detail: `redeem ${r.status}` };
+  const bytes = Buffer.from(await r.arrayBuffer());
+  const { header } = decodeContainer(bytes);
+  return { pass: header.w <= 240, detail: `delivered w=${header.w} (entitlement 240)` };
+});
+await attack('http', 'malformed sizing shapes are rejected at mint and cannot alter the minted envelope at redemption', async () => {
+  // Mint-side: non-decimal-integer widths are refused outright.
+  for (const bw of ['1e9', '-1', '200.9', '0xF0']) {
+    const r = await postToken(`${base}/archx/token/cat?w=200&bw=${encodeURIComponent(bw)}`, browserHeaders());
+    await r.text().catch(() => '');
+    if (r.status === 200) return { pass: false, detail: `mint accepted bw=${bw}` };
+  }
+  // Redemption-side: width comes from the signed claims, so junk sizing
+  // params on the payload URL must leave the delivered envelope alone.
+  const { body } = await mint();
+  if (!body) return { pass: false, detail: 'mint failed' };
+  const url = new URL(base + body.cleanUrl);
+  url.searchParams.set('bw', '1e9');
+  url.searchParams.set('w', '4000');
+  const r = await fetch(url, { headers: { 'x-archx-token': body.token, ...browserHeaders().headers } });
+  if (r.status !== 200) return { pass: true, detail: `redemption refused junk params (${r.status})` };
+  const bytes = Buffer.from(await r.arrayBuffer());
+  const { header } = decodeContainer(bytes);
+  return { pass: header.w <= 240, detail: `delivered w=${header.w} with junk bw/w attached (entitlement 240)` };
+});
+await attack('http', 'Range request on a payload is not honored (no 206 partial derivative)', async () => {
+  const { body } = await mint();
+  if (!body) return { pass: false, detail: 'mint failed' };
+  const r = await redeem(base, body, { headers: { range: 'bytes=0-99', ...browserHeaders().headers } });
+  const len = (await r.arrayBuffer()).byteLength;
+  return { pass: r.status !== 206, detail: `status ${r.status}, ${len} bytes` };
+});
+await attack('http', 'HEAD on the payload route neither delivers a body nor burns the one-time claim', async () => {
+  const { body } = await mint();
+  if (!body) return { pass: false, detail: 'mint failed' };
+  const head = await fetch(base + body.cleanUrl, {
+    method: 'HEAD',
+    headers: { 'x-archx-token': body.token, ...browserHeaders().headers },
+  });
+  const headBytes = (await head.arrayBuffer()).byteLength;
+  const genuine = await redeem(base, body, browserHeaders());
+  await genuine.arrayBuffer().catch(() => {});
+  return { pass: headBytes === 0 && genuine.status === 200, detail: `HEAD ${head.status}/${headBytes}B, GET after ${genuine.status}` };
+});
+await attack('token', 'query-string token transport is refused by default and does not burn the claim', async () => {
+  const { body } = await mint();
+  if (!body) return { pass: false, detail: 'mint failed' };
+  const sep = body.cleanUrl.includes('?') ? '&' : '?';
+  const q = await fetch(`${base}${body.cleanUrl}${sep}t=${encodeURIComponent(body.token)}`, browserHeaders());
+  await q.arrayBuffer().catch(() => {});
+  const genuine = await redeem(base, body, browserHeaders());
+  await genuine.arrayBuffer().catch(() => {});
+  return { pass: q.status >= 400 && genuine.status === 200, detail: `query ${q.status}, header after ${genuine.status}` };
+});
+await attack('path', 'encoded traversal and null-byte image ids are refused at mint', async () => {
+  const shapes = ['%2e%2e%2fcat', '..%5ccat', 'cat%00', '%2e%2e/cat', 'cat/..%2fdog'];
+  const out = [];
+  for (const id of shapes) {
+    const r = await postToken(`${base}/archx/token/${id}?w=200`, browserHeaders()).catch(() => ({ status: 0 }));
+    out.push(`${id}→${r.status}`);
+    if (r.status === 200) return { pass: false, detail: out.join(' ') };
+  }
+  return { pass: (await alive()), detail: out.join(' ') };
+});
+await attack('path', 'Unicode-confusable id (fullwidth ｃat) is a distinct unknown id, never normalized onto a real master', async () => {
+  const r = await postToken(`${base}/archx/token/${encodeURIComponent('ｃat')}?w=200`, browserHeaders());
+  await r.text().catch(() => '');
+  return { pass: r.status >= 400 && r.status < 500, detail: `status ${r.status}` };
+});
+await attack('dos', 'oversized 8KB request-target is refused without a hang or a 500', async () => {
+  const r = await postToken(`${base}/archx/token/${'a'.repeat(8000)}?w=200`, browserHeaders())
+    .then(async (res) => { await res.text().catch(() => ''); return { status: res.status }; })
+    .catch(() => ({ status: 0 }));
+  return { pass: r.status !== 200 && r.status < 500 || r.status === 0, detail: `status ${r.status}, alive: ${await alive()}` };
+});
+
 /* ============================== summary ============================== */
 server.close();
 handler.close?.();

@@ -1,12 +1,22 @@
-# Normalize text files to LF in the repository and working tree.
+# One line-ending policy on every OS. Golden SRI hashes, bundle metrics,
+# and test fixtures are byte-compared in CI; a CRLF checkout on Windows
+# would change text bytes and break those comparisons for no reason.
 * text=auto eol=lf
 
-# Binary assets must never be line-ending converted.
-*.gif binary
-*.jpeg binary
-*.jpg binary
+# Never treat binary artifacts as text.
 *.png binary
+*.jpg binary
+*.jpeg binary
 *.webp binary
+*.avif binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.archx binary
+*.br binary
+*.gz binary
+*.tgz binary
 *.zip binary
 
 # Generated outputs are committed for direct-download use, but should not

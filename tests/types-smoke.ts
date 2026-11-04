@@ -9,6 +9,7 @@ import Archx, {
 } from '../types/index.js';
 import {
   createArchxMiddleware, withHardenedProductionDefaults,
+  withLiteDefaults, withPerformanceDefaults, withEliteDefaults,
   auditArchxProductionConfig, auditArchxServerConfig,
   scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
   validateWatermarkValue, detectStegoFingerprintInWorker, closeStegoDetectWorker,
@@ -25,6 +26,7 @@ import {
 // --- client ---
 const options: ArchxLoadOptions = {
   mode: 'fortress',
+  profile: 'elite',
   planVersion: 2,
   taintReadback: 'auto',
   tokenEndpoint: '/archx/token/',
@@ -65,6 +67,12 @@ const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key:
 void marked;
 
 // --- server ---
+// Profile helpers (v1.28) accept and return server options.
+const liteOptions = withLiteDefaults({ secret: 's', imagesDir: '/srv/masters' });
+const balancedOptions = withPerformanceDefaults({ secret: 's', imagesDir: '/srv/masters' });
+const eliteOptions = withEliteDefaults({ secret: 's', imagesDir: '/srv/masters' });
+void liteOptions; void balancedOptions; void eliteOptions;
+
 const handler = createArchxMiddleware(withHardenedProductionDefaults({
   secret: 'x'.repeat(40),
   imagesDir: '/srv/masters',

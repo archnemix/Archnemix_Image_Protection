@@ -64,7 +64,12 @@ tokens, missing/optional proof of possession, reusable delivery tokens,
 long token TTLs, unregistered StegoMark issuance, and process-local state
 behind more than one instance. Keep its secret-free summary with release
 evidence. For a new production configuration, start from
-`withHardenedProductionDefaults(options)` and make any relaxation explicit,
+`withHardenedProductionDefaults(options)` (or, since 1.28, the named
+profiles: `withLiteDefaults()` for CPU/RAM-first catalogs,
+`withPerformanceDefaults()` for the balanced default, and
+`withEliteDefaults()` for security-first delivery — hardened baseline
+plus `maxWidthFraction: 0.6` so previews withhold native resolution by
+default) and make any relaxation explicit,
 owned, and tested rather than accidental.
 
 ## 2. Shared `stateStore` contract

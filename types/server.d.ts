@@ -473,7 +473,16 @@ export function withHardenedProductionDefaults(
 export function withCatalogThroughputDefaults(
   options?: ArchxServerOptions,
 ): ArchxServerOptions;
+/** Lite profile (v1.28): CPU/RAM/speed first (catalog throughput + compact stores). */
+export function withLiteDefaults(
+  options?: ArchxServerOptions,
+): ArchxServerOptions;
+/** Performance profile (rebalanced in v1.28): catalog sharing economics at quality 90 with full-effort WebP. The v1.23–1.27 CPU-first composition moved to withLiteDefaults(). */
 export function withPerformanceDefaults(
+  options?: ArchxServerOptions,
+): ArchxServerOptions;
+/** Elite profile (v1.28): security first — max-protection composition plus maxWidthFraction 0.6 by default. */
+export function withEliteDefaults(
   options?: ArchxServerOptions,
 ): ArchxServerOptions;
 export function withMaxProtectionDefaults(

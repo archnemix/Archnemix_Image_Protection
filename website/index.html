@@ -171,8 +171,8 @@
     <div class="stats">
       <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after crops, resizes, recompression &amp; screenshots (robust fingerprint profile)</span></div>
       <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">false accusations — unmarked images checked against wrong keys never produced a fingerprint</span></div>
-      <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">red-team attacks held — plus a second 23-case suite (HTTP ambiguity, prototype pollution, collusion averaging, orientation-damaged leaks): 23/23</span></div>
-      <div class="stat"><span class="stat-n">144<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
+      <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">red-team attacks held — plus a second 32-case suite (HTTP ambiguity, prototype pollution, collusion averaging, orientation-damaged leaks, cache-deception shapes): 32/32</span></div>
+      <div class="stat"><span class="stat-n">146<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
     </div>
     <aside class="honest">
       <h3>The honest limits</h3>
@@ -207,9 +207,12 @@ app.use(createArchxMiddleware({
 <pre class="code mono">import Archx from '@archnemix/image-protection';
 
 Archx.load.image('#hero-photo', 'aurora-valley', {
-  mode: 'vault',        // shield · vault · custom flags
+  profile: 'elite',     // lite · performance · elite — or custom flags
   temporalInterlace: { targetFps: 60 },
 });</pre>
+        <p class="fineprint">Three profiles set the defaults — <b>lite</b> spends the least
+        CPU and memory, <b>performance</b> balances protection and cost, <b>elite</b> turns
+        every hardening layer on — and any individual setting can still override them.</p>
         <p class="fineprint">Prefer static hosting? The build CLI pre-scrambles assets for any CDN:
         <span class="mono">npx archx-build</span>. Framework-free; Express, Fastify and plain
         <span class="mono">node:http</span> all work.</p>

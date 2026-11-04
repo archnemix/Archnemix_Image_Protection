@@ -32,6 +32,7 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm run test:types
+      - run: npm run docs:check
       - run: npm test
       - name: Browser tests
         if: matrix.node-version == 22
@@ -55,3 +56,28 @@ jobs:
           name: archx-sbom-cyclonedx
           path: sbom.cdx.json
           if-no-files-found: error
+
+  test-windows:
+    # Windows parity gate (v1.28): the code and tests must run the same
+    # on Windows as on Linux. Exclusions, each with a reason:
+    # - Browser tests: @sparticuz/chromium ships a Linux Chromium build;
+    #   a Windows browser matrix needs a different harness, tracked as a
+    #   known gap (docs/COMPATIBILITY.md) rather than faked here.
+    # - Real-Redis: service containers are Linux-only on GitHub runners.
+    # Everything else — lint, build, types, docs consistency, the full
+    # unit/fuzz suite (Sharp/libvips ship Windows binaries), and the
+    # packaged-artifact smoke — runs identically.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test:types
+      - run: npm run docs:check
+      - run: npm test
+      - run: npm run test:pack

@@ -162,7 +162,7 @@ export function defineElement() {
     return !(v === 'false' || v === '0' || v === 'off' || v === 'no');
   };
   class ArchxImage extends HTMLElement {
-    static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope', 'taint-readback', 'taint-url', 'plan-version']; }
+    static get observedAttributes() { return ['src', 'image-id', 'asset-id', 'asset-manifest', 'mode', 'profile', 'renderer', 'preset', 'quality-profile', 'watermark', 'alt', 'fit', 'grid', 'key', 'scrambled', 'lens', 'capture-shield', 'temporal-shield', 'camera-shield', 'temporal-interlace', 'temporal-interlace-engine', 'temporal-interlace-layout', 'temporal-interlace-phases', 'temporal-interlace-cell-size', 'temporal-interlace-fill', 'temporal-interlace-refresh-hz', 'render-loop', 'reload-on-resize', 'on-extract', 'token-endpoint', 'token-method', 'token-transport', 'token-batch', 'fetch-priority', 'proof-of-possession', 'cache-scope', 'taint-readback', 'taint-url', 'plan-version']; }
     connectedCallback() {
       if (elementInstances.has(this)) return;
       this.style.display = this.style.display || 'block';
@@ -207,6 +207,7 @@ export function defineElement() {
       const inst = new ProtectedImage(inner, src, {
         ...presetOptions,
         mode: this.getAttribute('mode') || presetOptions.mode,
+        profile: this.getAttribute('profile') || undefined,
         renderer: this.getAttribute('renderer') || presetOptions.renderer,
         qualityProfile: this.getAttribute('quality-profile') || presetOptions.qualityProfile,
         watermark: this.getAttribute('watermark') || undefined,

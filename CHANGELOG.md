@@ -3,13 +3,83 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status (clarified in 1.27.0).** Version headings below are
+> **Publication status (corrected in 1.28.0).** Version headings below are
 > this repository's development history. The only versions ever published
-> to npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, and `1.27.0`; every other
+> to npm are `0.0.0-stage`, `1.22.0`, and `1.26.0` — an earlier wording of
+> this note claimed 1.27.0 had been published; it had not (publishing is
+> the maintainer's manual step, and it had not run yet). Every other
 > heading (including ones once marked "Unreleased") was a GitHub-only
-> development version whose changes shipped folded into the next published
+> development version whose changes ship folded into the next published
 > release. `npm view @archnemix/image-protection versions` is the source
 > of truth for what is installable.
+
+## [1.28.0] — 2026-11-04
+
+Three canonical profiles — **lite / performance / elite** — on the client
+and the server, a saved research registry, a hardened red-team, Windows
+CI parity, and an automated docs-consistency gate. Display pixels for
+every legacy mode name are unchanged; two profile *names* were
+deliberately re-balanced (migration notes below).
+
+- **Canonical client profiles.** `profile:'lite'|'performance'|'elite'`
+  (unknown values throw), the same names as `Archx.preset(...)` bundles,
+  and `mode:'performance'` / `mode:'elite'` in mode position. Lite =
+  CPU/RAM/speed (2D pipeline, catalog sampling, 16/96 MiB caches,
+  batched mints); performance = balanced (shield pipeline + taint,
+  q90/1.5× sampling, forensic blocks); elite = security first (WebGL
+  black-readback, fortress extras, proof-of-possession *required*,
+  taint-or-promote, 60 Hz temporal interlace). Bundles apply
+  *underneath* explicit options, so any flag still overrides them;
+  `Archx.configure(...)` remains the way to define a house default.
+  `<archx-image profile="…">` works too.
+- **Canonical server profiles.** `withLiteDefaults()` = catalog
+  throughput + compact stores (the exact composition
+  `withPerformanceDefaults()` carried in 1.23–1.27).
+  `withPerformanceDefaults()` re-balanced: catalog sharing economics at
+  quality 90, WebP effort 4 + smart subsample, Lanczos3, standard
+  memory profile. `withEliteDefaults()` = the max-protection
+  composition plus `maxWidthFraction: 0.6`, so Elite previews never
+  ship native-resolution pixels unless the host explicitly widens
+  them. All four older helpers keep working unchanged.
+- **Deliberate renames (action needed only if you used the old CPU-first
+  meaning).** `preset('performance')` and `withPerformanceDefaults()`
+  meant "CPU/RAM-first catalog" in 1.23–1.27; that composition now
+  lives under `lite` / `withLiteDefaults()` with identical values, and
+  `performance` now means balanced. No legacy mode name
+  (`lite`/`shield`/`vault`/`fortress`/`custom`), token claim, pixel, or
+  on-disk format changed.
+- **Research registry.** `docs/PAPERS.md` records 52 sources (papers,
+  standards, primary docs) — name, main point, and the Archx decision
+  each one drives; the round's narrative and measurements are
+  RESEARCH §2.36. Profile first-paint costs measured in real Chromium:
+  lite ≈53 ms, performance ≈53 ms (shared 2D pipeline; they diverge
+  in server payload policy), elite ≈237 ms (software-GL sandbox;
+  read as "GL setup costs real money", not a GPU figure).
+- **Red-team v2 §F (23 → 32 cases).** Cache-deception and route
+  ambiguities from current research: static-extension/`;param`
+  path confusion, duplicate width params, malformed sizing shapes,
+  Range probes, HEAD non-consumption, query-token refusal, encoded
+  traversal/null-byte ids, Unicode-confusable ids, 8 KB
+  request-targets. All held; one case initially mis-specified the
+  contract (redemption-time junk sizing is ignored because width
+  comes from signed claims) and was corrected to assert the real
+  invariant.
+- **Cross-platform parity.** New Windows CI job (lint, build, types,
+  docs gate, full unit/fuzz suite, pack smoke). Browser/Redis suites
+  stay Linux-only with the reason documented (the bundled Chromium
+  is a Linux build; service containers are Linux-only) — a stated
+  gap, not a claimed pass. `.gitattributes` pins LF so Windows
+  checkouts produce byte-identical sources. macOS remains untested
+  (no Mac available) and says so.
+- **Docs-consistency gate.** `npm run docs:check` recomputes the
+  version, test counts, bundle size, gzip size, and SRI hash and
+  fails if README/website/CHANGELOG disagree with the code; it also
+  rejects dangling `npm run` references, third-party website
+  subresources, and affirmative absolute-protection claims. Wired
+  into both CI jobs. It caught three stale numbers the day it landed.
+- Bundle: 151.9 KiB minified / 48.6 KiB gzipped (SRI in
+  `dist/archx.min.js.sri`). Types: `profile` option, `ArchxProfile`,
+  profile mode names, `withLiteDefaults`/`withEliteDefaults`.
 
 ## [1.27.0] — 2026-11-03
 

@@ -12,10 +12,10 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
 No `<img>` is ever created. There is no image URL in your HTML to copy, no file in the Network tab to save, and the picture itself is painted through a sealed, protected viewer that fights back at every step a thief normally takes. People who dig deeper get a **black card**, a **scrambled mosaic**, or a **heavily pixelated thumbnail** — your call. Your original file **never leaves the server**.
 
-- 📦 **150.2 KiB minified / 48.3 KiB gzipped**, zero runtime dependencies (browser)
+- 📦 **151.9 KiB minified / 48.6 KiB gzipped**, zero runtime dependencies (browser)
 - ⚡ Built for **image-heavy pages and catalogs**: canonical responsive widths, batch token minting, memory → persistent-disk → shared derivative reuse, optional precomputed CDN assets, lazy loading, a decode concurrency cap, and bitmap/payload caching. The real-Chromium test paints a 100-image gallery with **2 batch mint requests and 0 single mints**. **Loaded images do not reload** on scroll/visibility/ordinary resize, and static WebGL images draw on demand instead of running a 60 fps GPU loop
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `catalog` = q88/device-pixel sampling for listings, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
-- 🧩 Four preset modes — **lite** (galleries), **shield** (default), **vault** (WebGL), and **fortress** (Vault + anti-hook lock, strike lockouts, strict memory wiping, dynamic capture trace, temporal anti-single-frame shield, and optional pointer lens) — plus `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so you are never locked into a preset
+- 🧩 Three canonical profiles — **lite** (CPU/RAM/speed first), **performance** (balanced), **elite** (security first) — layered over the original pipelines (**lite**, **shield**, **vault**, **fortress**) with `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so a profile is a default you refine, never a lock-in; `Archx.configure(...)` sets your own house default
 - 🌓 Optional **temporal interlace**: assign pixel/checker/strip/block subsets to 2–4 phases so one presented frame is deliberately incomplete. Four 60 Hz-first profiles, GPU-shader or pre-rendered-frame engines, refresh-rate phase optimization, and reduced-motion respect. It is explicit opt-in because two-phase viewing on a 60 Hz monitor still flickers at 30 Hz per subset
 - 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens with versioned signing-key IDs, header-carried payload tokens by default, atomic one-time claims through a local or shared state store, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling
 - 🧬 Attribution fallback: an optional 64-bit perceptual **soft-binding fingerprint** can be registered at ingest and compared with a suspect copy after metadata or a pixel mark has been stripped (evidence, not access control or cryptographic proof)
@@ -272,6 +272,8 @@ const options = withHardenedProductionDefaults(withCatalogThroughputDefaults({
 app.use(createArchxMiddleware(options));
 ```
 
+The three server profiles mirror the client ones: `withLiteDefaults()` (CPU/RAM-first: the catalog composition below plus the compact memory profile), `withPerformanceDefaults()` (balanced: the same sharing economics at quality 90 with full-effort WebP and Lanczos3), and `withEliteDefaults()` (security-first: the hardened/max-protection baseline — sender-constrained one-time tokens, per-token keys, 120-second payloads, per-viewer robust StegoMark when enabled — plus `maxWidthFraction: 0.6` so Elite previews never ship native pixels unless you explicitly widen them). `withCatalogThroughputDefaults()`, `withHardenedProductionDefaults()`, and `withMaxProtectionDefaults()` remain available as the composable building blocks underneath.
+
 `withCatalogThroughputDefaults()` only fills fields you left undefined. It
 selects WebP q88, the canonical width ladder
 `160,240,320,480,640,800,960,1200,1440,1600,1920,2240,2560`, per-image
@@ -509,17 +511,35 @@ Reassembly is pixel-exact — tiles are copied 1:1 at integer coordinates, and t
 
 **Origin-tainted readback.** When the token API is served from a different origin than the page (`api.example.com` serving `www.example.com`), or you set `taintUrl` to any cross-origin pixel, Archx draws the middleware's 1×1 `{basePath}/taint.png` into each 2D display/tile canvas before painting. That flips the canvas's origin-clean flag, so the *browser platform* — not Archx's wrappers — rejects `toDataURL`/`toBlob`/`getImageData`/`captureStream`, including `HTMLCanvasElement.prototype...call(canvas)` bypasses, and the taint propagates through any canvas or `ImageBitmap` an extractor copies the picture into. Display is unaffected (the transparent pixel is painted over). Same-origin deployments cannot taint — a same-origin load is origin-clean by definition — and keep the instance-poisoning layer shown in the table above. Since 1.23 that degraded state is never silent: the client emits an `archx.taint_unavailable` telemetry event (and one console warning per page), `taintFallback:'webgl'` promotes affected instances to the WebGL renderer whose readback is black, and the production audit blocks `taintImage:false` and flags the topology choice. Disable with `taintReadback:'off'` (client) or `taintImage:false` (server).
 
-### Modes
+### Profiles — three defaults, and full control underneath them
 
-| Mode | Renderer / policy | Use it for | Cost per image |
-|---|---|---|---|
-| `lite` | 2D canvas, poisoned read-back, guards | Galleries of 100s, listings, feeds | 1 fetch + 1 decode + 1 draw |
-| `shield` *(default)* | 2D canvas + tile-unscramble, client watermark/forensic marks, integrity/automation monitoring, risk reactions (`splitCanvases` option = one canvas per tile) | Most valuable single images | + 64 `drawImage` tile copies (no per-pixel JS in the image path) |
-| `vault` | WebGL2 shader un-scrambles on the GPU; read-back returns black by platform design; forensic grain | Hero / premium / paid images. Browsers allow ~8–16 GL contexts — Archx budgets 8 and falls back to shield | 1 texture upload + a few presentation frames; static images then idle (`renderLoop:'auto'`) |
-| `fortress` | Vault renderer plus fail-closed integrity policy, strike lockouts, strict memory wiping, local pre-GPU scrambling for plain sources, DevTools guard on, dynamic capture trace, checker + opponent-colour camera shield, and optional trusted-pointer Lens | The small number of images where even a clean screenshot/photo is a serious loss | Vault cost + policy checks; camera/temporal shield deliberately animates. Reserve it for hero/paid content, not grids |
-| `custom` | No preset bundle: choose `renderer:'canvas'|'webgl'` and each flag (`forensic`, `memory`, `lens`, `temporalShield`, `cameraShield`, `temporalInterlace`, `splitCanvases`, guards, quality, extraction, token method/cache scope, policies) yourself. Omitting `mode` while passing `renderer` is also treated as custom | Sites that need a precise mix—e.g. Canvas for compatibility but strict memory and Lens, or WebGL without temporal flicker | Exactly the layers you enable; nothing extra is bundled by a mode name |
+Since 1.28 the product is organized around **three canonical profiles**. Pick one with the `profile` option (or `mode` for the same names); every value in a profile is then just a default underneath your explicit options, so a profile is a starting point you refine — and you can always define your own house default with `Archx.configure(...)` or go fully custom.
 
-Inspectable bundles live in `Archx.presets` / `Archx.preset(name, overrides)`: `gallery`, `catalog`, `editorial`, `commerce`, and `screenshotResistant`. `catalog` is Lite plus q88/device-pixel sampling, canonical width buckets, HTTP-cacheable static/direct fetches, batch minting, lazy loading, decoded-bitmap unloading, and no resize reminting. They are ordinary option objects — spread one and override any key.
+| Profile | Goal | Client (`profile:` / preset) | Server helper | First-paint cost (measured) |
+|---|---|---|---|---|
+| `lite` | **CPU, RAM, and speed first** | 2D pipeline, catalog sampling (q88/1×), smallest caches (16 / 96 MiB), batched mints, static loop, no forensic blocks or GL contexts | `withLiteDefaults()` — catalog throughput + compact stores, effort-2 WebP, per-image keys | ≈53 ms per image |
+| `performance` | **Balanced** — security + speed + RAM + CPU | Shield pipeline with the taint layer, balanced sampling (q90/1.5×), forensic blocks, moderate caches (24 / 128 MiB), batched mints | `withPerformanceDefaults()` — catalog sharing economics at quality 90 with full-effort WebP | ≈53 ms per image |
+| `elite` | **Security first — everything that hardens, on** | WebGL pipeline (black readback), fortress extras (integrity lock, strict memory, local scramble, strikes, DevTools guard), sender-constrained tokens *required*, 60 Hz temporal interlace, dynamic capture trace | `withEliteDefaults()` — hardened baseline + per-token keys + per-viewer robust StegoMark + **`maxWidthFraction: 0.6`**, so previews never ship native-resolution pixels unless you explicitly allow it | ≈237 ms per image |
+
+First-paint figures are construct→`ready` medians over 7 runs in headless Chromium 138 (software GL, which inflates Elite's WebGL setup versus a real GPU), 960×640 JPEG in a 480×320 box with temporal layers held off for an apples-to-apples first paint. Lite and Performance cost the same at first paint because they share the 2D pipeline — they diverge in payload policy (bytes/quality the server ships) and cache budget, which is where image-heavy sites actually pay.
+
+```js
+Archx.load.image(el, { id: 'watch-001' }, { profile: 'lite' });            // CPU/RAM-first grid
+Archx.load.image(el, { id: 'watch-001' }, { profile: 'elite', lens: true }); // security-first hero
+Archx.configure({ profile: 'performance', watermark: '© Studio' });       // your own house default
+```
+
+**Strategies per layer.** Where the same capability has a speed-optimized and a security-optimized implementation, both exist and you choose:
+
+| Layer | Speed / economy strategy | Security strategy |
+|---|---|---|
+| Renderer / readback | `renderer:'canvas'` — no GL contexts; readback via poisoned instance APIs + origin taint | `renderer:'webgl'` — readback black by platform design (`preserveDrawingBuffer:false`); `taintFallback:'webgl'` auto-promotes when taint is unavailable |
+| Payload keys | `scrambleKeyMode:'per-image'` — derivatives cacheable across viewers | `scrambleKeyMode:'per-token'` — unique key material per view, nothing reusable |
+| Derivative sharing | canonical `widthBuckets` + image-scoped marks — transform once, serve many | per-viewer forensic/StegoMark scope — every copy identifies its recipient, at per-view encode cost |
+| Token replay at capacity | `replaySaturation:'evict'` — availability under claim pressure | `replaySaturation:'deny'` — fail closed (the Elite/hardened default) |
+| Encode | WebP effort 2, `quality:88`, AVIF only precomputed | `encrypt:true` + plan v2 always (the floor profiles never trade); `maxWidthCap` / `maxWidthFraction` withhold resolution |
+
+**Modes under the profiles.** The original pipelines remain addressable and unchanged — `lite` (2D, galleries), `shield` (default 2D + tile-unscramble + marks + integrity monitoring), `vault` (WebGL shader unscramble; ~64 `drawImage` copies in 2D, one texture upload in GL), `fortress` (vault + fail-closed integrity, strike lockouts, strict memory wiping, pre-GPU scramble, dynamic trace, camera shield, optional Lens), and `custom` (no bundle at all: pick `renderer` and every flag yourself; omitting `mode` while passing `renderer` is also custom). `mode:'performance'` runs the shield pipeline and `mode:'elite'` runs the fortress bundle with proof-of-possession required, so the profile names work in `mode` position too. `Archx.preset(name, overrides)` exposes the same three profiles plus the legacy specialized bundles (`gallery`, `catalog`, `editorial`, `commerce`, `marketplace`, `maxProtection`, `screenshotResistant`) — all ordinary option objects you can spread and override. Two 1.28 renames to know: the v1.23–1.27 *CPU-first* `preset('performance')` / `withPerformanceDefaults()` composition is now `preset('lite')` / `withLiteDefaults()` (identical values); `performance` now means the balanced profile described above.
 
 ## API
 
@@ -706,7 +726,7 @@ Fortress is intentionally fail-closed: if its integrity audit sees a hooked fetc
 
 Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
-- Browser bundle: **150.2 KiB minified / 48.3 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
+- Browser bundle: **151.9 KiB minified / 48.6 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
 - 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags, using **2 batch mint requests and 0 single mint requests** (`npm run bench:opt`, deliberately non-lazy catalog load: **2.88 s total / 28.8 ms per image** on the 2-vCPU sandbox, ~2.1 MB JS heap for the whole gallery; production lazy mode streams them on scroll and the gallery helper defaults to catalog 1× device-pixel sampling)
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Cold-transform cost is dominated by Sharp decode/resize/encode, not scrambling (the fused pad+scramble pass is ~2 ms at 960 px): the latest `npm run bench:opt` on the 1408×768 demo master (2-vCPU test box) measured quality-first q95 at **~74 ms/120 KiB (640 px)** and **~134 ms/250 KiB (960 px)**, versus catalog q88/effort-2 at **~25 ms/83 KiB** and **~46 ms/172 KiB**—about 2.9× faster and one-third smaller at 960 px. The v1.9 optimization round fused pad+scramble+encode-input into one pass (no intermediate frame copies), skips EXIF autorotate when the master has no orientation, drops the synthesized alpha band before WebP/PNG encoding for opaque masters, and prunes sliding-window limiters in place; interleaved old/new A/B runs on this machine measured cold transforms ~3–10% faster (PNG: −34% time, −11% bytes), peak transform RSS a few MB lower, and warm mint+redeem throughput up from **859 to 915 flows/s** over 6,000 loopback requests — with byte-identical WebP/JPEG output (verified against 21 fixture hashes). Reproduce with `npm run bench:opt -- --out=after.json` before/after a change and `--compare=before.json,after.json`. A separate loopback catalog fixture generated six cold canonical derivatives at p50 **87 ms**, then repeated authorized flows from memory and, after a handler restart, from the persistent disk cache at p50 **2.8 ms** per flow. Those loopback numbers exclude a real authorization database, TLS, network, Redis latency, and browser proof signing; use them as regression signals, not a production capacity claim. Precomputed `archx-build` variants remove cold Sharp work from the request path altogether
@@ -754,7 +774,8 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
 ```bash
 npm run lint        # node --check over every shipped/test source file
-npm test            # 137 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm run docs:check  # version/test-count/bundle-size/SRI agreement across README, website, and code
+npm test            # 139 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,
@@ -787,7 +808,7 @@ npm run test:browser  # 129 checks in real headless Chromium (encapsulation, dec
 npm run test:all
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
 npm run redteam     # 55-case red-team suite against a live hardened server (forgery, replay races,
-npm run redteam:v2  # 23-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
+npm run redteam:v2  # 32-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
                     # surface, attribution abuse (wrong-key lottery, collusion averaging), resource bounds
                     # malleability, claim fuzzing, keyring confusion, IDOR/batch abuse, slow-trickle
                     # bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)
