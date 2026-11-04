@@ -114,8 +114,11 @@ export function installArchxShutdown({
   const onSignal = () => {
     if (shuttingDown) { exit(1); return; }
     shuttingDown = true;
+    // Deliberately ref'd: the timer must keep the loop alive until the
+    // drain completes (finish clears it) or the deadline forces exit.
+    // An unref'd timer could let the process exit before
+    // handler.close() runs whenever the loop happens to empty first.
     const force = setTimeout(() => exit(1), Math.max(100, timeoutMs | 0));
-    force.unref?.();
     const finish = () => { clearTimeout(force); exit(0); };
     try { onShutdown?.(); } catch { /* host hook must not block shutdown */ }
     try {

@@ -21,6 +21,7 @@
     <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
     <nav class="masthead-nav" aria-label="Pages">
       <a href="index.html" aria-current="page">Overview</a>
+      <a href="docs.html">Docs</a>
       <a href="technical.html">Technical</a>
       <a href="limits.html">Threat model</a>
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
@@ -210,7 +211,7 @@ app.use(createArchxMiddleware({
 
 Archx.load.image('#hero-photo', 'aurora-valley', {
   profile: 'elite',     // lite · performance · elite — or custom flags
-  temporalInterlace: { targetFps: 60 },
+  temporalInterlace: { refreshHz: 60 },
 });</pre>
         <p class="fineprint">Three profiles set the defaults — <b>lite</b> spends the least
         CPU and memory, <b>performance</b> balances protection and cost, <b>elite</b> turns
@@ -220,6 +221,30 @@ Archx.load.image('#hero-photo', 'aurora-valley', {
         <span class="mono">node:http</span> all work.</p>
       </div>
     </div>
+
+    <h3 style="margin:34px 0 16px">Documentation, in reading order</h3>
+    <div class="doc-cards">
+      <a class="doc-card" href="docs.html">
+        <h3>Docs — start here</h3>
+        <p>The guided path: install, quick starts, the three profiles, key
+        options, the five server rules, and ownership proof.</p>
+      </a>
+      <a class="doc-card" href="technical.html">
+        <h3>Technical atlas</h3>
+        <p>Twenty-one engineering decisions with the alternatives we
+        rejected — and the measurements that settled them.</p>
+      </a>
+      <a class="doc-card" href="limits.html">
+        <h3>Threat model</h3>
+        <p>Eight attacker classes, what each one walks away with, and the
+        limits no browser tool can cross.</p>
+      </a>
+    </div>
+    <p class="fineprint" style="margin-top:16px">The complete reference — every option, CLI flag, and the
+    deployment runbook — lives in the
+    <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/README.md" rel="noopener">project README</a> and
+    <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/OPERATIONS.md" rel="noopener">operations guide</a>
+    on GitHub.</p>
   </section>
 
   <!-- ============ 06 LICENSE ============ -->

@@ -31,6 +31,11 @@ const versionJs = read('src/client/version.js').match(/VERSION\s*=\s*'([^']+)'/)
 const changelogTop = read('CHANGELOG.md').match(/^## \[([^\]]+)\]/m)?.[1];
 if (pkg.version !== versionJs) fail(`version mismatch: package.json ${pkg.version} vs src/client/version.js ${versionJs}`);
 if (pkg.version !== changelogTop) fail(`version mismatch: package.json ${pkg.version} vs CHANGELOG top entry ${changelogTop}`);
+// The docs page prints the current version in its masthead; any full
+// x.y.z token there must be the current release so it cannot rot.
+for (const m of read('website/docs.html').matchAll(/\bv(\d+\.\d+\.\d+)\b/g)) {
+  if (m[1] !== pkg.version) fail(`website/docs.html prints version v${m[1]}; current release is ${pkg.version}`);
+}
 
 // ---- 2. test counts ----
 const countTop = (rel, re) => (read(rel).match(re) || []).length;
@@ -65,10 +70,11 @@ else {
 const PROSE_EXEMPT = new Set(['docs/RESEARCH.md', 'docs/PAPERS.md']);
 const proseFiles = [
   ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
-  'SECURITY.md', 'website/index.html', 'website/technical.html', 'website/limits.html',
+  'SECURITY.md', 'website/index.html', 'website/docs.html', 'website/technical.html', 'website/limits.html',
 ].filter((rel) => !PROSE_EXEMPT.has(rel) && fs.existsSync(path.join(root, rel)));
 const COUNT_PATTERNS = [
   [/(\d+) browser checks/g, BROWSER_RUNTIME, 'browser checks'],
+  [/(\d+)(?:\/\d+)? (?:real-)?Chromium checks/g, BROWSER_RUNTIME, 'Chromium checks'],
   [/(\d+) unit\/integration tests/g, unitStatic, 'unit tests'],
   [/(\d+)(?:\/\d+)? Node tests/g, unitStatic + fuzzStatic, 'total Node tests'],
   [/\((\d+) unit \+ \d+/g, unitStatic, 'unit tests in breakdown'],
@@ -97,6 +103,13 @@ if (!fs.existsSync(evidencePath)) {
   }
   if (!falseAcc || falseAcc.n !== ev.falsePositives.count || falseAcc.d !== ev.falsePositives.checks) {
     fail(`website false-accusation stat ${falseAcc ? `${falseAcc.n}/${falseAcc.d}` : '(not found)'} != bench evidence FP ${ev.falsePositives.count}/${ev.falsePositives.checks} — re-run the bench or fix the page`);
+  }
+  // The docs page quotes the same figures in prose ("85 of 99", "0 of 369").
+  for (const m of read('website/docs.html').matchAll(/(\d+) of (\d+)/g)) {
+    const pair = `${m[1]}/${m[2]}`;
+    if (pair !== `${ev.robust.found}/${ev.robust.total}` && pair !== `${ev.falsePositives.count}/${ev.falsePositives.checks}`) {
+      fail(`website/docs.html prints an unrecognized "N of M" figure (${m[0]}) — if it is a bench statistic it must match the evidence artifact (${ev.robust.found}/${ev.robust.total}, ${ev.falsePositives.count}/${ev.falsePositives.checks}); otherwise rephrase`);
+    }
   }
 }
 
@@ -127,7 +140,7 @@ for (const rel of docFiles) {
 }
 
 // ---- 5. website: zero third-party subresources ----
-for (const page of ['index.html', 'technical.html', 'limits.html']) {
+for (const page of ['index.html', 'docs.html', 'technical.html', 'limits.html']) {
   const html = read(`website/${page}`);
   for (const m of html.matchAll(/<(?:link|script|img|source|iframe)\b[^>]*(?:src|href)\s*=\s*["']((?:https?:)?\/\/[^"']+)["']/gi)) {
     fail(`website/${page} loads a third-party subresource: ${m[1]}`);
@@ -140,7 +153,7 @@ for (const page of ['index.html', 'technical.html', 'limits.html']) {
 // other people's claims, so they are intentionally out of scope here.
 const BANNED = [/screenshot-proof/i, /un-?copyable/i, /100%\s*secure/i, /guaranteed to prevent/i, /impossible to (?:copy|steal|download)/i];
 const NEGATED = /\b(not|never|no|nothing|nobody|neither|cannot|isn't|aren't|don't|doesn't|without|myth|avoid)\b/i;
-for (const rel of ['README.md', 'docs/IP_HOLDER_GUIDE.md', 'website/index.html', 'website/technical.html', 'website/limits.html']) {
+for (const rel of ['README.md', 'docs/IP_HOLDER_GUIDE.md', 'website/index.html', 'website/docs.html', 'website/technical.html', 'website/limits.html']) {
   const lines = read(rel).split('\n');
   lines.forEach((line, i) => {
     for (const re of BANNED) {
