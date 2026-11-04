@@ -283,10 +283,16 @@ test('v1.27 grid floor: new payloads require grid >= 8, legacy grid-4 payloads s
   assert.equal(auditArchxServerConfig({ secret: TEST_SECRET, imagesDir: os.tmpdir(), allowAnonymous: true, grid: 4 }).ok, false,
     'middleware config rejects grid 4 at startup');
   assert.equal(auditArchxServerConfig({ secret: TEST_SECRET, imagesDir: os.tmpdir(), allowAnonymous: true, grid: 8 }).summary.grid, 8);
+  // (mkdtemp base: a raw path.join(os.tmpdir(), 'literal') here is what
+  // static analyzers flag as insecure temp-file creation downstream.)
+  const neverWrittenBase = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-grid-floor-'));
   await assert.rejects(buildArchxAssets({
-    images: { x: 'unused.png' }, outputDir: path.join(os.tmpdir(), 'archx-grid-floor-never-written'),
+    images: { x: 'unused.png' }, outputDir: path.join(neverWrittenBase, 'out'),
     key: 'unit-key', grid: 4,
   }), /grid must be an integer from 8 to 32 for new payloads/);
+  assert.equal(fs.existsSync(path.join(neverWrittenBase, 'out')), false,
+    'invalid build options must fail before the output directory is created');
+  fs.rmSync(neverWrittenBase, { recursive: true, force: true });
   // A payload built the pre-1.27 way (grid 4, plan v1, via the frozen core
   // plan) must still unscramble: the floor gates creation, not recovery.
   const raw = await sharp(master).ensureAlpha().raw().toBuffer();
