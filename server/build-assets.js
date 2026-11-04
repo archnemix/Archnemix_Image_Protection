@@ -60,8 +60,14 @@ function stableValue(value) {
 
 async function writeJsonAtomic(filePath, value, { mode = 0o600 } = {}) {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  // Sibling of the target (never a shared temp dir), unpredictable name,
+  // and exclusive creation: 'wx' refuses to follow a pre-planted symlink
+  // or clobber an existing file, so the atomic rename can't be raced.
+  // (A same-directory local attacker with write access to the output
+  // directory itself is outside this boundary — output paths are
+  // operator-chosen and must not be world-writable.)
   const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode });
+  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode, flag: 'wx' });
   await fs.promises.rename(tmp, filePath);
 }
 
@@ -163,6 +169,20 @@ export async function buildArchxAssets(options = {}) {
   const outputDir = path.resolve(options.outputDir);
   const manifestPath = path.resolve(options.manifestPath || path.join(outputDir, 'archx-manifest.json'));
   const statePath = path.resolve(options.statePath || path.join(outputDir, '.archx-build-state.json'));
+  // Validate the payload-shaping options BEFORE touching the filesystem:
+  // an invalid build must fail without probing masters or creating the
+  // output directory.
+  const grid = options.grid ?? 8;
+  // Same v1.27 creation floor as the middleware/scramble paths: coarse
+  // grids are keyless-solvable jigsaws. Existing catalogs built with 2-7
+  // still decode in the client; they just cannot be rebuilt that way.
+  if (!Number.isInteger(grid) || grid < 8 || grid > 32) {
+    throw new TypeError('Archx asset build: grid must be an integer from 8 to 32 for new payloads (legacy 2-7 grids remain client-decodable)');
+  }
+  const planVersion = options.planVersion ?? 2; // 128-bit seed; containers carry pv for clients
+  if (planVersion !== 1 && planVersion !== 2) {
+    throw new TypeError('Archx asset build: planVersion must be 1 or 2');
+  }
   const inputs = collectInputs(options);
   for (const masterPath of inputs.values()) {
     if (pathsOverlap(outputDir, path.dirname(masterPath))) {
@@ -175,15 +195,6 @@ export async function buildArchxAssets(options = {}) {
     if (pathsOverlap(outputRealDir, path.dirname(masterPath))) {
       throw new TypeError('Archx asset build: outputDir must not overlap a master directory');
     }
-  }
-
-  const grid = options.grid ?? 8;
-  if (!Number.isInteger(grid) || grid < 2 || grid > 32) {
-    throw new TypeError('Archx asset build: grid must be an integer from 2 to 32');
-  }
-  const planVersion = options.planVersion ?? 2; // 128-bit seed; containers carry pv for clients
-  if (planVersion !== 1 && planVersion !== 2) {
-    throw new TypeError('Archx asset build: planVersion must be 1 or 2');
   }
   const key = options.key ?? '';
   if (typeof key !== 'string' || !key || key.length > 512 || /[\u0000-\u001f\u007f]/.test(key)) {
@@ -337,8 +348,9 @@ export async function buildArchxAssets(options = {}) {
           contentFingerprint: options.contentFingerprint === true,
           processing,
         });
+        // Same exclusive-create atomic-write discipline as writeJsonAtomic.
         const tmp = `${outputPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-        await fs.promises.writeFile(tmp, result.bytes, { mode: 0o644 });
+        await fs.promises.writeFile(tmp, result.bytes, { mode: 0o644, flag: 'wx' });
         await fs.promises.rename(tmp, outputPath);
         record = {
           sourceSha256,

@@ -39,6 +39,7 @@ import {
   embedOwnershipMetadata, createIssuanceLog, verifyIssuanceChain,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
+import { usePlugin, listPlugins, onClientEvent } from '../src/client/events.js';
 import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from '../src/core/bch.js';
 import { bchStegoCodeBits, bchStegoDecode, bchStegoSolveObserved } from '../src/core/stego-code.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -270,6 +271,59 @@ test('scrambleImage: payload looks scrambled, unscrambles back to (near) origina
   // wrong key stays scrambled
   const wrong = await unscrambleImage(Buffer.from(payload), { grid: 8, key: 'WRONG-key', w: header.w, h: header.h });
   assert.ok((await meanAbsDiff(master, wrong, 160, 120)) > 28);
+});
+
+test('v1.27 grid floor: new payloads require grid >= 8, legacy grid-4 payloads still decode', async () => {
+  const master = await syntheticMaster();
+  // Every creation path refuses coarse (keyless-jigsaw-solvable) grids.
+  await assert.rejects(scrambleImage(master, { key: 'unit-key', grid: 4, format: 'png', maxWidth: 320 }),
+    /grid must be an integer from 8 to 32 for new payloads/);
+  await assert.rejects(scrambleImage(master, { key: 'unit-key', grid: 7, format: 'png', maxWidth: 320 }),
+    /grid must be an integer from 8 to 32 for new payloads/);
+  assert.equal(auditArchxServerConfig({ secret: TEST_SECRET, imagesDir: os.tmpdir(), allowAnonymous: true, grid: 4 }).ok, false,
+    'middleware config rejects grid 4 at startup');
+  assert.equal(auditArchxServerConfig({ secret: TEST_SECRET, imagesDir: os.tmpdir(), allowAnonymous: true, grid: 8 }).summary.grid, 8);
+  // (mkdtemp base: a raw path.join(os.tmpdir(), 'literal') here is what
+  // static analyzers flag as insecure temp-file creation downstream.)
+  const neverWrittenBase = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-grid-floor-'));
+  await assert.rejects(buildArchxAssets({
+    images: { x: 'unused.png' }, outputDir: path.join(neverWrittenBase, 'out'),
+    key: 'unit-key', grid: 4,
+  }), /grid must be an integer from 8 to 32 for new payloads/);
+  assert.equal(fs.existsSync(path.join(neverWrittenBase, 'out')), false,
+    'invalid build options must fail before the output directory is created');
+  fs.rmSync(neverWrittenBase, { recursive: true, force: true });
+  // A payload built the pre-1.27 way (grid 4, plan v1, via the frozen core
+  // plan) must still unscramble: the floor gates creation, not recovery.
+  const raw = await sharp(master).ensureAlpha().raw().toBuffer();
+  const legacyScrambled = scramblePixelsPadded(raw, 320, 240, buildScramblePlan(4, 'legacy-key', 1));
+  const legacyPng = await sharp(Buffer.from(legacyScrambled), { raw: { width: 320, height: 240, channels: 4 } }).png().toBuffer();
+  const restored = await unscrambleImage(legacyPng, { grid: 4, key: 'legacy-key', w: 320, h: 240, planVersion: 1 });
+  assert.ok((await meanAbsDiff(master, restored, 160, 120)) < 6, 'legacy grid-4 payload no longer decodes');
+});
+
+test('v1.27: plugin setup() receives a working versioned API in unbundled ESM', () => {
+  // Regression: events.js referenced an unimported VERSION, which the
+  // bundled build accidentally satisfied from shared bundle scope while
+  // src/ ESM consumers got "setup failed" for every setup() plugin.
+  let apiSeen = null;
+  const seen = [];
+  const off = onClientEvent((event) => seen.push(event.type));
+  const handle = usePlugin({
+    name: 'unit-probe',
+    setup(api) { apiSeen = api; },
+    onEvent(event) { seen.push('plugin:' + event.type); },
+  });
+  assert.equal(handle.name, 'unit-probe');
+  assert.equal(typeof apiSeen?.version, 'string');
+  assert.match(apiSeen.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(typeof apiSeen.on, 'function');
+  assert.ok(listPlugins().includes('unit-probe'));
+  assert.ok(seen.includes('archx.plugin_installed'));
+  assert.equal(handle.remove(), true);
+  assert.equal(handle.remove(), false);
+  assert.ok(!listPlugins().includes('unit-probe'));
+  off();
 });
 
 test('encrypted .archx: payload is ciphertext, decrypt+unscramble restores the image', async () => {
@@ -1481,8 +1535,13 @@ test('hardened production defaults and production audit expose unsafe combinatio
     tokenMethods: ['GET', 'POST'],
     steganography: true,
   }, { expectedInstances: 3 });
-  assert.equal(unsafe.ok, true, 'the configuration is internally valid even though it is not production-ready');
+  // v1.27: the production audit's `ok` means ready-to-ship (== `ready`),
+  // not merely "configuration accepted" — gating on `production.ok` used
+  // to ship live blockers. The base validity bit is `configOk`.
+  assert.equal(unsafe.configOk, true, 'the configuration is internally valid even though it is not production-ready');
+  assert.equal(unsafe.ok, false, 'production ok must not pass with live blockers');
   assert.equal(unsafe.ready, false);
+  assert.equal('issues' in unsafe, false, 'production audit reports blockers, not a second issues list');
   assert.ok(unsafe.blockers.some((issue) => /allowQueryTokens/i.test(issue)));
   assert.ok(unsafe.blockers.some((issue) => /proofOfPossession/i.test(issue)));
   assert.ok(unsafe.blockers.some((issue) => /expectedInstances > 1/i.test(issue)));
@@ -1508,6 +1567,8 @@ test('hardened production defaults and production audit expose unsafe combinatio
     stateStore: sharedStore,
   }), { expectedInstances: 3 });
   assert.equal(ready.ready, true, JSON.stringify(ready.blockers));
+  assert.equal(ready.ok, true, 'production ok tracks ready when the baseline is met');
+  assert.equal(ready.configOk, true);
   assert.equal(ready.summary.allowQueryTokens, false);
   assert.equal(ready.summary.stateStore, 'shared-production-test');
 
@@ -3328,11 +3389,11 @@ test('CLI parsers never eat positional paths and honour --flag=value', async (t)
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   execFileSync(process.execPath, [
     path.join(repoRoot, 'server/scramble-cli.js'), input, output,
-    '--key', 'cli-key', '--grid=4', '--encrypt=false',
+    '--key', 'cli-key', '--grid=12', '--encrypt=false',
   ], { cwd: repoRoot, stdio: 'pipe' });
   const packed = fs.readFileSync(output);
   const { header } = decodeContainer(packed);
-  assert.equal(header.grid, 4, '--grid=4 sets the grid');
+  assert.equal(header.grid, 12, '--grid=12 sets the grid');
   assert.equal(header.encrypted, false, '--encrypt=false disables encryption');
   assert.equal(header.pv, 2);
   // --json before the positional must not consume the file path

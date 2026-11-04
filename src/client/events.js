@@ -1,6 +1,7 @@
 /**
  * Sanitized monitoring/plugin event bus. Events never carry tokens, keys, pixels, or raw errors.
  */
+import { VERSION } from './version.js';
 /*
  * Monitoring/plugin extension points.
  *

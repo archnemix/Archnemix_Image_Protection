@@ -422,7 +422,13 @@ function inspectServerConfig(options = {}) {
   checkInt('outputCacheDiskMaxBytes', options.outputCacheDiskMaxBytes, 0, 16 * 1024 * 1024 * 1024 * 1024);
   checkInt('outputCacheDiskMaxEntries', options.outputCacheDiskMaxEntries, 0, 1000000);
   checkInt('outputCacheDiskTtlMs', options.outputCacheDiskTtlMs, 0, 365 * 24 * 3600 * 1000);
-  checkInt('grid', options.grid, 2, 32);
+  // Creation floor (v1.27): tile permutation alone is a jigsaw puzzle, and
+  // keyless edge-matching solvers recover coarse grids (an independent
+  // review recovered 16/16 tiles at grid 4 in ~1 s). New payloads must use
+  // at least 8×8 tiles; clients and unscrambleImage() still DECODE legacy
+  // 2–7 grids so already-built catalogs keep working. Secrecy still
+  // requires encrypt:true — a finer grid is friction, not encryption.
+  checkInt('grid', options.grid, 8, 32);
   checkInt('maxWidthCap', options.maxWidthCap, 64, 8192);
   checkNumber('maxWidthFraction', options.maxWidthFraction, 0.05, 1);
   checkInt('callbackTimeoutMs', options.callbackTimeoutMs ?? options.authorizeTimeoutMs, 100, 60000);
@@ -809,7 +815,11 @@ export function auditArchxServerConfig(options = {}) {
   catch { inspected = { ok: false, issues: ['options could not be inspected safely'], warnings: [], config: null }; }
   const { ok, issues, warnings, config } = inspected;
   return Object.freeze({
+    // `ok` (== `configOk`) only means "the configuration is internally
+    // valid and the middleware will accept it". It is NOT a production
+    // ship gate — gate releases on auditArchxProductionConfig().ready.
     ok,
+    configOk: ok,
     issues: Object.freeze([...issues]),
     warnings: Object.freeze([...warnings]),
     summary: config ? Object.freeze({
@@ -851,6 +861,7 @@ export function auditArchxServerConfig(options = {}) {
       trustedProxyHops: config.trustedProxyHops,
       encrypt: config.encrypt,
       scrambleKeyMode: config.scrambleKeyMode,
+      grid: config.grid,
     }) : null,
   });
 }
@@ -1073,9 +1084,17 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
     if (options.scrambleKeyMode === 'per-token' || options.forensicPerToken === true) recommendations.push('per-token scramble/forensic material defeats cross-viewer derivative reuse; reserve it for high-value views and use shared catalog derivatives for ordinary browsing');
     if (options.encrypt === true) recommendations.push('encrypt derives a per-token AES key, so encrypted derivatives cannot be reused across viewers; reserve it for high-value views when catalog-scale derivative sharing matters');
   }
+  const ready = blockers.length === 0;
   return Object.freeze({
-    ok: base.ok,
-    ready: blockers.length === 0,
+    // Since v1.27, `ok` on the PRODUCTION audit means the same thing as
+    // `ready` (no blockers): previously it mirrored the base audit's
+    // "configuration accepted" bit, so `production.ok === true` could
+    // ship a configuration with live blockers — exactly the field a
+    // hurried release gate would check. The base validity bit remains
+    // available as `configOk`; `ready` stays the documented gate.
+    ok: ready,
+    ready,
+    configOk: base.ok,
     blockers: Object.freeze([...new Set(blockers)]),
     recommendations: Object.freeze(recommendations),
     warnings: base.warnings,

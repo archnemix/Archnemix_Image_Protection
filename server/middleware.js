@@ -626,10 +626,13 @@ export function createArchxMiddleware(options = {}) {
         !cfg.outputCacheDiskMaxEntries || bytes.length > cfg.outputCacheDiskMaxBytes ||
         bytes.length > 256 * 1024 * 1024) return;
     const target = diskOutputCachePath(sharedCacheKey);
+    // Unpredictable sibling name + exclusive create ('wx'): a pre-planted
+    // symlink at that name is refused rather than followed, so the atomic
+    // rename cannot be raced into writing outside the cache directory.
     const tmp = `${target.file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
       await fs.promises.mkdir(target.dir, { recursive: true, mode: 0o700 });
-      await fs.promises.writeFile(tmp, tagCacheBytes(sharedCacheKey, bytes), { mode: 0o600 });
+      await fs.promises.writeFile(tmp, tagCacheBytes(sharedCacheKey, bytes), { mode: 0o600, flag: 'wx' });
       await fs.promises.rename(tmp, target.file);
       derivativeCacheStats.diskWrites++;
       diskWritesSincePrune++;

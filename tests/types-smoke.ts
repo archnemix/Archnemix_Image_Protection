@@ -9,10 +9,11 @@ import Archx, {
 } from '../types/index.js';
 import {
   createArchxMiddleware, withHardenedProductionDefaults,
+  auditArchxProductionConfig, auditArchxServerConfig,
   scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
   validateWatermarkValue, detectStegoFingerprintInWorker, closeStegoDetectWorker,
   signOwnershipClaim, verifyOwnership, ownershipPublicKeyFingerprint,
-  type ArchxDerivativeResult,
+  type ArchxDerivativeResult, type ArchxProductionAudit,
 } from '../types/server.js';
 import { buildArchxAssets } from '../types/build.js';
 import { createRedisStateStore } from '../types/redis.js';
@@ -110,3 +111,51 @@ const claimToken: string = signOwnershipClaim(
 const verificationPromise = verifyOwnership(new Uint8Array(4), { claim: claimToken, detectOptions: { maxTimeMs: 5000 } });
 const keyFingerprint: string = ownershipPublicKeyFingerprint('not-a-real-key');
 void [claimToken, verificationPromise, keyFingerprint];
+
+// v1.27: the documented deployment gate must compile. `production.ready`
+// (not the base audit's config-validity `ok`) is the ship decision.
+const production: ArchxProductionAudit = auditArchxProductionConfig({
+  secret: 'x'.repeat(40),
+  imagesDir: '/srv/masters',
+});
+const shipIt: boolean = production.ready;
+const configValid: boolean = production.configOk;
+const blockers: readonly string[] = production.blockers;
+const recommendations: readonly string[] = production.recommendations;
+if (!shipIt) throw new Error(`Archx production blockers: ${blockers.join('; ')}`);
+void configValid; void recommendations;
+const baseConfigOk: boolean = auditArchxServerConfig({ secret: 'x'.repeat(40), imagesDir: '/srv/masters' }).configOk;
+void baseConfigOk;
+
+// v1.27: lifecycle callbacks take (value, instance), and the bubbling DOM
+// events + plugin surface are typed as the runtime actually dispatches them.
+const wired: ArchxLoadOptions = {
+  onAttempt: (kind, instance) => { void kind.startsWith('extract'); void instance.loaded; },
+  onLoad: (instance) => { void instance.element; },
+  onError: (error, instance) => { void error.message; void instance.destroy; },
+  onClick: (event, _instance) => { void event.clientX; },
+  onEvent: (event, _instance) => { void event.schemaVersion; void event.outcome; },
+};
+void wired;
+el.addEventListener('archx-attempt', (event) => { void event.detail.kind; });
+el.addEventListener('archx-error', (event) => { void event.detail.error.message; });
+el.addEventListener('archx-taint-unavailable', (event) => { void event.detail.promoted; });
+el.addEventListener('archx-integrity', (event) => { void event.detail.issue; });
+el.addEventListener('archx-webgl-budget', (event) => { void event.detail.budget; });
+const pluginHandle = Archx.use({
+  name: 'smoke',
+  setup: (api) => { void api.version; void api.on((event, instance) => { void event.type; void instance; }); },
+  onEvent: (event, _instance) => { void event.at; },
+  teardown: () => {},
+});
+const removed: boolean = pluginHandle.remove();
+void removed;
+const pluginNames: readonly string[] = Archx.plugins();
+void pluginNames;
+Archx.defineElement(); // fixed <archx-image> tag; takes no name argument
+const customEl = document.querySelector('archx-image');
+if (customEl) {
+  const backing: ProtectedImage | null = customEl.inst;
+  void backing;
+  void customEl.ready?.then((instance) => instance.reload());
+}

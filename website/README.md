@@ -1,7 +1,9 @@
 # Archnemix website
 
 The static three-page site for **Archnemix Image Protection**. No build
-step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`):
+step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`,
+and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
+`fonts/` — pages make no third-party subresource requests at all):
 
 - `index.html` — overview: interactive 3D hero (drag-orbit, per-tile trace
   readout, 4×4–16×16 grids), how it works, measured results, honest limits

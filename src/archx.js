@@ -39,6 +39,7 @@
  * Implementation lives in src/client/ (one responsibility per module);
  * this file is the stable public assembly — see docs/ARCHITECTURE.md.
  */
+import { VERSION } from './client/version.js';
 import { ProtectedImage } from './client/viewer.js';
 import {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS, preset,
@@ -55,7 +56,10 @@ import {
 import { onClientEvent, offClientEvent, usePlugin, listPlugins } from './client/events.js';
 import { loadImage, loadGallery, protectAll, preloadAssets, defineElement } from './client/loaders.js';
 
-export const VERSION = '1.26.0'; // must equal package.json version (enforced by a unit test + pack-smoke)
+// Imported from the low-level version module so client internals can
+// share it without an import cycle; must equal package.json's version
+// (enforced by a unit test + pack-smoke).
+export { VERSION };
 
 const Archx = {
   version: VERSION,

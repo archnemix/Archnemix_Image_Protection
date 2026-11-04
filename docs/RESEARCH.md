@@ -839,7 +839,8 @@ Three smaller scale/integrity gaps remained after §2.14:
 Verified against the implementation, the browser never stores a clean,
 whole image: the retained payload bytes and the decoded `ImageBitmap` are
 always the keyed tile-scrambled mosaic (tiles shuffled and per-tile
-mirrored, grid 2–32). Canvas2D display reassembles tiles on a private
+mirrored, grid 2–32 on the decode side; creation is floored at 8–32 since
+v1.27, §2.35). Canvas2D display reassembles tiles on a private
 off-DOM canvas with exact integer 1:1 copies, paints the visible canvas
 once, and wipes the working copy; `splitCanvases` slices the composition
 across separately poisoned tile canvases, so no single canvas holds the
@@ -3538,3 +3539,159 @@ and Sharp `^0.35.5` across README/COMPATIBILITY/website, every
 `package.json`, every documented API name exists in the shipped
 exports, and the defaults the docs state (layout 3, strength 6,
 saturation `evict`) match `server/config.js` / `stego-embed.js`.
+
+## 2.35 Ninth review — contract truth, grid floor, and a docs-vs-code audit (v1.27.0)
+
+An external review filed five P1s (A1–A5), one API-surface gap (B1), and
+packaging/trust findings (A6, A7, A9). Every item was re-verified against
+source and, where measurable, reproduced before any fix:
+
+- **A1 `ready` resolved before first paint — confirmed and measured.**
+  `ProtectedImage.ready` was the `_init()` promise, and the lazy branch
+  of `_init()` returned immediately. A headless-Chromium reproduction
+  (off-screen lazy shield instance) settled `ready` at **2.2 ms with
+  `loaded:false`**; the reviewer's 6 ms/855 ms and 3 ms/112 ms figures
+  are the same defect on their hardware. `ready` is now a dedicated
+  first-paint deferred: it resolves two animation frames after the
+  successful render (the second rAF callback runs after the compositor
+  has presented the frame the render produced), rejects on first-load
+  error, security-gate block, or destroy-before-paint, and carries an
+  internal no-op catch so hosts that never read it see no
+  unhandled-rejection noise. The semantic change is deliberate and
+  documented: a below-fold lazy instance's `ready` now *stays pending*,
+  which is what "after first paint" always promised. Browser
+  regression [8g] pins pending-below-fold, resolve-after-visible-paint
+  (with `archx-load` first), destroy-rejects, and failure-rejects.
+  Four existing browser tests had silently depended on the old
+  always-resolves behavior for intentionally failing loads; they now
+  assert the rejection explicitly — which also added coverage that
+  integrity-locked loads reject rather than hang.
+- **A2/A3 the production gate didn't typecheck, and the field that did
+  was unsafe — confirmed, plus a third mismatch.** Runtime
+  `auditArchxProductionConfig()` returns `ready/blockers/
+  recommendations` (and no `issues`), but the declarations typed it as
+  the base `ArchxConfigAudit` (`ok/issues/...`): the documented gate
+  `production.ready` was a compile error, `production.issues` compiled
+  but was `undefined`, and `production.ok` compiled while mirroring
+  mere config-validity (`true` with live blockers). Fixes: a real
+  `ArchxProductionAudit` type; `configOk` added to both audits naming
+  the validity bit; and — the behavioral change — production `ok` now
+  means the same as `ready`, so the field a hurried gate reaches for
+  can no longer ship blockers. OPERATIONS/README now show the single
+  `if (!production.ready) throw` gate, and type-smoke compiles that
+  exact snippet.
+- **A4 no grid floor — confirmed by the literature and the reviewer's
+  solver run.** Permutation-only tile scrambling *is* a jigsaw puzzle:
+  published ciphertext-only cryptanalysis of permutation-only image
+  ciphers reduces to jigsaw solving (arXiv:1903.11764), and
+  unknown-orientation square solvers are a solved problem class
+  (Moussa/IJACSA "Jigsopu"; Baluja 2012 and successors). The
+  reviewer's keyless recovery of a grid-4 payload (16/16 tiles,
+  MAD 1.30/255, ~1 s) is exactly what that literature predicts.
+  Creation now refuses grid < 8 in all three creation paths
+  (middleware config, `scrambleImage()`, `archx-build`, plus both
+  CLIs); decoding legacy 2–7 payloads is unchanged (client,
+  `unscrambleImage()`, core plan), with a unit test proving a
+  hand-built grid-4/plan-v1 payload still round-trips. Docs state
+  plainly that a finer grid is friction, not secrecy — secrecy is
+  `encrypt:true`, which the production audit already blocks on.
+  `archx-build` also validates payload options before probing masters
+  or creating the output directory (fail-fast, no FS side effects).
+- **A5 README inverted the plan default — confirmed.** README claimed
+  v1 was the default and told operators to "enable" v2; runtime has
+  defaulted to v2 since v1.15 (server) and v1.17 (`buildScramblePlan`).
+  Following the old text on a fleet with pre-1.10 clients was the
+  hazardous direction. README/checklist now say: v2 is the default;
+  pin v1 only temporarily for pre-1.10 cached clients. The one real
+  v1 default left — the client's `planVersion` for *container-less*
+  scrambled sources — is now documented as such in the types.
+- **B1 undocumented DOM events — confirmed, and the audit kept going.**
+  All six dispatched events (`archx-load`, `archx-attempt`,
+  `archx-error`, `archx-taint-unavailable`, `archx-integrity`,
+  `archx-webgl-budget`) are now documented in the README and typed
+  (`ArchxElementEventMap` merged into `HTMLElementEventMap`,
+  `<archx-image>` in `HTMLElementTagNameMap`). The same sweep found
+  and fixed, in the declarations only: lifecycle callbacks typed with
+  the wrong arguments (`onAttempt/onLoad/onError/onClick/onEvent` all
+  receive `(value, instance)` at runtime), `defineElement(name?)`
+  promising a configurable tag the runtime ignores, `usePlugin`
+  returning `void` instead of its `{name, remove()}` handle, the
+  plugin shape documented as `{name, install}` instead of the real
+  `{name?, setup, onEvent, teardown}`, `offClientEvent` returning
+  `void` instead of `boolean`, `reload()` typed `Promise<void>`
+  instead of `Promise<ProtectedImage>`, and `ProtectedImage` missing
+  its public `loaded`/`options` getters. One *runtime* bug fell out:
+  `src/client/events.js` referenced an unimported `VERSION`, which the
+  esbuild bundle accidentally satisfied from shared bundle scope while
+  unbundled-ESM consumers (`src/index.js`) got "plugin setup failed"
+  for every `setup()` plugin. The version string now lives in
+  `src/client/version.js` (imported by both), with a unit regression
+  installing a `setup()` plugin through the source entry point.
+- **A6/A7 changelog history — confirmed.** CHANGELOG began at 1.5.0
+  and several headings read "Unreleased" for versions that were never
+  individually published. 1.0.0–1.4.0 are now backfilled from git
+  history and labelled as reconstructions; a status note records that
+  the only versions ever published to npm are `0.0.0-stage`, `1.22.0`,
+  `1.26.0` (and this release), the rest being GitHub development
+  versions folded into published ones. No publication history was
+  invented.
+- **A9 "no third-party CDNs" vs Google Fonts — confirmed, resolved by
+  self-hosting.** All three website pages loaded Fraunces + IBM Plex
+  Mono from `fonts.googleapis.com`/`fonts.gstatic.com` while
+  `website/README.md` claimed the opposite. The fonts are now local
+  OFL-licensed WOFF2 files (Fontsource builds of the same families:
+  Fraunces Variable latin/latin-ext, normal+italic; IBM Plex Mono
+  latin/latin-ext 400/500) served from `website/fonts/` — no
+  third-party request, no visitor IP at a font CDN, no shared-cache
+  fiction (browsers partition HTTP caches per site anyway).
+
+### Alternatives re-evaluated (and mostly rejected)
+
+- **WebCodecs `ImageDecoder` as the default decode path — rejected
+  for now.** MDN lists it as limited-availability with no
+  Safari/Safari-iOS/WebView support; `createImageBitmap` is Baseline
+  since 2021 and already off-main-thread. Adopting ImageDecoder means
+  owning `VideoFrame` lifecycle and color-conversion behavior for a
+  minority-browser win we have not measured on Archx workloads.
+  Revisit only as an opt-in behind an Archx-run cross-browser
+  benchmark (and Safari shipping it).
+- **AVIF as default derivative format — rejected (status quo).**
+  Bandwidth is 40–56% lower on scrambled tiles in our own numbers,
+  but encode cost is 8–70× WebP; on the request path that is CPU/RAM
+  an attacker can rent by the mint. WebP stays default; AVIF stays
+  the precomputed-catalog opt-in.
+- **Sharp/libvips — kept.** Current Sharp guidance (one chained
+  pipeline per output, sequential reads, pixel/format limits, tuned
+  concurrency/cache, `UV_THREADPOOL_SIZE` for parallel jobs) matches
+  the implementation and OPERATIONS guidance; official comparisons
+  keep libvips far ahead of pure-JS/ImageMagick alternatives.
+- **IntersectionObserver lazy loading — kept.** It remains the
+  platform-blessed mechanism; the docs now state the LCP exception
+  (`lazy:false` + `fetchPriority:'high'` for heroes).
+
+### The one performance change, measured
+
+Lazy `_init()` also performed a synchronous `getBoundingClientRect()`
+"kick" per constructed image. IntersectionObserver already delivers
+an initial callback for every observed target, so the kick bought
+nothing but a forced layout per instance — in a 100-image gallery
+constructor loop, 100 forced layouts. Removed. Same-box
+`optimization-bench` before/after (2-vCPU sandbox, software GL —
+ratios, not absolutes): gallery-100 main-thread task time
+**1.63 s → 0.93 s (−43%)**, total 3079.8 → 2876.4 ms (−6.6%), heap
+unchanged; every server payload size byte-identical across all nine
+derivative rows; vault `ready` median rose 83.8 → 299.6 ms because it
+now honestly includes decode+paint (probe-measured time-to-painted
+moved 306 → 330 ms, within sandbox noise, i.e. the double-rAF
+settlement delays the *promise*, not the paint). Bundle:
+149.4 → 150.2 kB min (48.1 → 48.3 kB gzip) for the ready deferred.
+
+### What did not change
+
+Derivative bytes (proven identical above), stego layouts 1–4,
+scramble plans (v1 still selectable, v2 still default), container
+format, token format and semantics, displayed pixels, and every
+server default except the new grid creation floor and the production
+audit's `ok` meaning. The grid floor and the `ready`/`ok` semantics
+are the round's two intentional breaking edges; both close a
+documented contract that the code previously violated.

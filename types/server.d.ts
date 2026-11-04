@@ -142,6 +142,8 @@ export interface ArchxServerOptions {
   /** Scale bounded-store defaults for small containers ('compact') or normal hosts ('standard', default). */
   memoryProfile?: 'standard' | 'compact';
   proofOfPossession?: 'off' | 'optional' | 'required';
+  /** Scramble tiles per side for NEW payloads: integer 8–32 (default 8).
+   *  Payloads already built with legacy 2–7 grids remain decodable. */
   grid?: number;
   /** 1 = legacy 32-bit plan seed, 2 = 128-bit seed (default since 1.15).
    *  Clients older than v1.10 cannot read `pv:2` payloads. */
@@ -253,9 +255,37 @@ export interface ArchxHandlerStats {
 }
 
 export interface ArchxConfigAudit {
+  /**
+   * True when the configuration is internally valid and the middleware
+   * will accept it. This is NOT a production ship gate — a valid config
+   * can still be far from the hardened baseline. Gate releases on
+   * `auditArchxProductionConfig(...).ready`.
+   */
   ok: boolean;
+  /** Same value as `ok`, named for what it means (configuration valid). */
+  configOk: boolean;
   /** Blocking configuration problems (named `issues` at runtime). */
   issues: readonly string[];
+  warnings: readonly string[];
+  /** Sanitized effective-configuration summary (never contains secrets), or null when invalid. */
+  summary: Readonly<Record<string, unknown>> | null;
+}
+
+export interface ArchxProductionAudit {
+  /**
+   * Since v1.27 this means the same as `ready` (zero blockers). Before
+   * v1.27 it mirrored the base audit's "configuration accepted" bit and
+   * could be true with live blockers — do not backport that reading.
+   */
+  ok: boolean;
+  /** The production ship gate: true only when `blockers` is empty. */
+  ready: boolean;
+  /** Base configuration validity (what `ArchxConfigAudit.ok` reports). */
+  configOk: boolean;
+  /** Everything that must change before this config matches the hardened baseline (includes base `issues`). */
+  blockers: readonly string[];
+  /** Non-blocking hardening/operational advice. */
+  recommendations: readonly string[];
   warnings: readonly string[];
   /** Sanitized effective-configuration summary (never contains secrets), or null when invalid. */
   summary: Readonly<Record<string, unknown>> | null;
@@ -294,6 +324,7 @@ export interface ArchxDerivativeBase {
 }
 
 export interface ArchxScrambleImageOptions {
+  /** Scramble tiles per side for NEW payloads: integer 8–32 (default 8). */
   grid?: number;
   key?: string;
   planVersion?: 1 | 2;
@@ -322,6 +353,8 @@ export function scrambleImage(
   input: Uint8Array | ArrayBuffer,
   options?: ArchxScrambleImageOptions,
 ): Promise<ArchxDerivativeResult>;
+/** Decode a scrambled payload. `grid` here accepts the full historical
+ *  2–32 range so pre-v1.27 payloads remain recoverable. */
 export function unscrambleImage(
   scrambledBytes: Uint8Array | ArrayBuffer,
   options?: { grid?: number; key?: string; w?: number; h?: number; planVersion?: 1 | 2; [key: string]: unknown },
@@ -433,7 +466,7 @@ export function auditArchxServerConfig(options?: ArchxServerOptions): ArchxConfi
 export function auditArchxProductionConfig(
   options?: ArchxServerOptions,
   context?: { expectedInstances?: number },
-): ArchxConfigAudit;
+): ArchxProductionAudit;
 export function withHardenedProductionDefaults(
   options?: ArchxServerOptions,
 ): ArchxServerOptions;

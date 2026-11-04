@@ -5,9 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Archnemix Image Protection — publish the picture, keep the picture</title>
 <meta name="description" content="Open-source image protection for the web: private masters, scrambled one-time derivatives, a canvas viewer that refuses casual theft, and a blind ownership fingerprint that survives screenshots. 0BSD licensed.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,900;1,9..144,500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- Fonts are self-hosted (see @font-face in styles.css, OFL files in
+     ./fonts/): this page makes no third-party requests. -->
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
 </head>
@@ -173,7 +172,7 @@
       <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after crops, resizes, recompression &amp; screenshots (robust fingerprint profile)</span></div>
       <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">false accusations — unmarked images checked against wrong keys never produced a fingerprint</span></div>
       <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">red-team attacks held — plus a second 23-case suite (HTTP ambiguity, prototype pollution, collusion averaging, orientation-damaged leaks): 23/23</span></div>
-      <div class="stat"><span class="stat-n">142<span class="stat-of">+125</span></span><span class="stat-l">Node tests and real-Chromium browser checks, plus fuzzing and a packaged-artifact smoke test</span></div>
+      <div class="stat"><span class="stat-n">144<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
     </div>
     <aside class="honest">
       <h3>The honest limits</h3>

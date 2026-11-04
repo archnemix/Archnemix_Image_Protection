@@ -37,11 +37,72 @@ export interface ArchxTemporalInterlace {
   [key: string]: unknown;
 }
 
+/**
+ * Frozen, sanitized telemetry event delivered to `Archx.on()` listeners,
+ * plugins, and the per-instance `onEvent` option. Never carries tokens,
+ * keys, proofs, source objects, pixels, canvases, or raw errors.
+ */
 export interface ArchxClientEvent {
+  schemaVersion: 1;
+  service: 'archx-client';
   type: string;
-  reason?: string;
-  count?: number;
-  [key: string]: unknown;
+  /** ISO-8601 timestamp. */
+  at: string;
+  mode: string | null;
+  kind: string | null;
+  reason: string | null;
+  outcome: string | null;
+  issues: readonly string[] | null;
+}
+
+/* ---------- bubbling DOM events dispatched on the host element ---------- */
+
+/** `archx-attempt`: an extraction/interaction attempt was detected. */
+export interface ArchxAttemptEventDetail { kind: string; }
+/** `archx-error`: the load failed or was blocked by policy. */
+export interface ArchxErrorEventDetail { error: Error; }
+/** `archx-taint-unavailable`: no cross-origin taint pixel, so a 2D mode is
+ *  relying on instance poisoning alone (or was promoted to WebGL). */
+export interface ArchxTaintUnavailableEventDetail {
+  mode: string;
+  reason: 'no-cross-origin-taint-source' | 'taint-load-failed';
+  promoted: boolean;
+}
+/** `archx-integrity`: a page script rewrote a WebGL readback safeguard. */
+export interface ArchxIntegrityEventDetail {
+  issue: 'preserveDrawingBuffer-rewritten';
+  source: string;
+}
+/** `archx-webgl-budget`: the shared WebGL context budget is exhausted, so
+ *  this instance fell back to the Canvas2D renderer. */
+export interface ArchxWebglBudgetEventDetail { inUse: number; budget: number; }
+
+/** Map of the bubbling CustomEvents a protected host element dispatches.
+ *  (`archx-load` is dispatched with no detail right after the first frame
+ *  is rendered, just before `onLoad` runs; the `ready` promise settles
+ *  after the following paint.) */
+export interface ArchxElementEventMap {
+  'archx-load': CustomEvent<null>;
+  'archx-attempt': CustomEvent<ArchxAttemptEventDetail>;
+  'archx-error': CustomEvent<ArchxErrorEventDetail>;
+  'archx-taint-unavailable': CustomEvent<ArchxTaintUnavailableEventDetail>;
+  'archx-integrity': CustomEvent<ArchxIntegrityEventDetail>;
+  'archx-webgl-budget': CustomEvent<ArchxWebglBudgetEventDetail>;
+}
+
+declare global {
+  interface HTMLElementEventMap extends ArchxElementEventMap {}
+  interface HTMLElementTagNameMap {
+    'archx-image': ArchxImageElement;
+  }
+}
+
+/** The `<archx-image>` custom element registered by `Archx.defineElement()`. */
+export interface ArchxImageElement extends HTMLElement {
+  /** The backing viewer once connected, else null. */
+  inst: ProtectedImage | null;
+  /** Mirrors the backing viewer's first-paint `ready` promise once connected. */
+  ready: Promise<ProtectedImage> | null;
 }
 
 export interface ArchxLoadOptions {
@@ -55,7 +116,9 @@ export interface ArchxLoadOptions {
   shadow?: boolean | 'open' | 'closed';
   grid?: number;
   scrambled?: boolean;
-  /** Scramble plan derivation for container-less sources; `.archx` headers win. */
+  /** Scramble plan derivation for container-less scrambled sources
+   *  (default 1 = legacy 32-bit seed, for header-less payloads only);
+   *  `.archx` container headers carry their own `pv` and win. */
   planVersion?: 1 | 2;
   key?: string;
   aesKey?: string;
@@ -130,26 +193,46 @@ export interface ArchxLoadOptions {
   strikes?: false | { blurAt?: number; lockAt?: number; lockMs?: number };
   debug?: boolean;
   guards?: Record<string, boolean>;
-  onAttempt?: (event: ArchxClientEvent) => void;
+  /** Extraction/interaction attempt hook: `(kind, instance)`. Kinds include
+   *  `contextmenu`, `drag`, `copy`, `longpress`, `extract-*`, `screenshot-key`,
+   *  `integrity:*`, `automation:*`, and `lens-scan`. */
+  onAttempt?: (kind: string, instance: ProtectedImage) => void;
   /**
    * Server step-up challenge hook: when a mint is answered with
    * `x-archx-challenge: required`, return a proof token (e.g. a
    * Turnstile token) and the mint retries once with it.
    */
   onChallenge?: (ctx: { id: string; reason: string }) => Promise<string | null> | string | null;
-  onLoad?: (info: Record<string, unknown>) => void;
-  onError?: (error: Error) => void;
-  onClick?: (event: Event) => void;
-  onEvent?: (event: ArchxClientEvent) => void;
+  /** Called with the instance after the first frame renders (also after each successful reload). */
+  onLoad?: (instance: ProtectedImage) => void;
+  /** Called as `(error, instance)` when a load fails. */
+  onError?: (error: Error, instance: ProtectedImage) => void;
+  /** Genuine-click forwarding: `(event, instance)` (e.g. to open a lightbox). */
+  onClick?: (event: MouseEvent, instance: ProtectedImage) => void;
+  /** Sanitized telemetry for this instance: `(event, instance)`. */
+  onEvent?: (event: ArchxClientEvent, instance: ProtectedImage) => void;
   alt?: string;
   [key: string]: unknown;
 }
 
 export class ProtectedImage {
   constructor(target: Element | string, source?: ArchxSource, options?: ArchxLoadOptions);
+  /**
+   * Resolves with this instance after the first frame has actually been
+   * painted (two animation frames after the render that follows
+   * `archx-load`/`onLoad`). Under the default lazy loading it stays
+   * pending while the host is below the fold (and in background tabs,
+   * where animation frames pause). Rejects when the first load fails,
+   * is blocked by the integrity/automation/lockout policy, or the
+   * instance is destroyed before painting.
+   */
   readonly ready: Promise<ProtectedImage>;
   readonly element: Element;
-  reload(source?: ArchxSource): Promise<void>;
+  /** True once the current source has rendered. */
+  readonly loaded: boolean;
+  /** Sanitized, secret-free view of the effective options. */
+  readonly options: Readonly<Record<string, unknown>>;
+  reload(source?: ArchxSource): Promise<ProtectedImage>;
   destroy(): void;
 }
 
@@ -179,7 +262,9 @@ export type ArchxGalleryItem =
   | ({ src?: string; id?: string; assetId?: string; asset?: unknown; alt?: string; options?: ArchxLoadOptions } & Record<string, unknown>);
 export interface ArchxGalleryResult {
   instances: ProtectedImage[];
-  ready: Promise<Array<PromiseSettledResult<unknown>>>;
+  /** Settles (never rejects) once every instance's `ready` has settled —
+   *  with lazy loading, below-fold items settle as they scroll into view. */
+  ready: Promise<Array<PromiseSettledResult<ProtectedImage>>>;
 }
 
 export interface ArchxIntegrityDetails {
@@ -201,16 +286,32 @@ export function verifyEarlyIntegritySnapshot(snapshot: unknown): {
 };
 export function detectAutomation(): string[];
 
-export function onClientEvent(listener: (event: ArchxClientEvent) => void): () => void;
-export function offClientEvent(listener: (event: ArchxClientEvent) => void): void;
+export type ArchxClientEventListener = (
+  event: ArchxClientEvent,
+  instance: ProtectedImage | null,
+) => void | Promise<void>;
+export function onClientEvent(listener: ArchxClientEventListener): () => void;
+export function offClientEvent(listener: ArchxClientEventListener): boolean;
 
-export interface ArchxPlugin {
-  name: string;
-  install?: (archx: typeof Archx) => void;
-  [key: string]: unknown;
+/** Restricted API handed to a plugin's `setup()` — no instance internals. */
+export interface ArchxPluginApi {
+  on: typeof onClientEvent;
+  off: typeof offClientEvent;
+  version: string;
 }
-export function usePlugin(plugin: ArchxPlugin): void;
-export function listPlugins(): string[];
+export interface ArchxPlugin {
+  name?: string;
+  setup?: (api: ArchxPluginApi) => void;
+  onEvent?: ArchxClientEventListener;
+  teardown?: () => void;
+}
+/** Handle returned by `Archx.use()` / `usePlugin()`. */
+export interface ArchxPluginHandle {
+  readonly name: string;
+  remove(): boolean;
+}
+export function usePlugin(plugin: ArchxPlugin): ArchxPluginHandle;
+export function listPlugins(): readonly string[];
 
 export function preloadAssets(
   assetIds: string[],
@@ -243,7 +344,9 @@ export interface ArchxStatic {
   ): ArchxGalleryResult;
   protectAll(selectorOrNodes?: string | Iterable<Element>, options?: ArchxLoadOptions): ProtectedImage[];
   preloadAssets: typeof preloadAssets;
-  defineElement(name?: string): void;
+  /** Registers the fixed `<archx-image>` custom element (idempotent; the
+   *  tag name is not configurable). Also called automatically on load. */
+  defineElement(): void;
   readonly instanceCount: number;
   clearCaches(): void;
   auditIntegrity: typeof auditIntegrity;
