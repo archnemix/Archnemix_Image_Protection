@@ -1,0 +1,21 @@
+{
+  "generatedBy": "npm run bench:stego:evidence",
+  "packageVersion": "1.28.0",
+  "config": {
+    "strength": 6,
+    "layoutVersion": 3,
+    "key": "(fixed bench key)"
+  },
+  "robust": {
+    "found": 85,
+    "total": 99
+  },
+  "standard": {
+    "found": 63,
+    "total": 99
+  },
+  "falsePositives": {
+    "count": 0,
+    "checks": 369
+  }
+}

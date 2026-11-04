@@ -485,6 +485,53 @@ provenance evidence.
 Expose `handler.stats()` only on an authenticated private operations route.
 It contains operational counts and key IDs, not secret values.
 
+### 5.1 Health, metrics, logging, graceful shutdown (v1.29)
+
+The deployment plumbing ships as opt-in helpers (dependency-free, off
+the request hot path) so the host mounts each piece where its platform
+expects it:
+
+```js
+import { createArchxHealthHandler, formatPrometheusMetrics, installArchxShutdown, createJsonEventLogger } from '@archnemix/image-protection/server';
+
+app.get('/healthz', internalOnly, createArchxHealthHandler(handler)); // 200/503, JSON, counts only
+app.get('/metrics', internalOnly, (req, res) =>
+  res.type('text/plain').send(formatPrometheusMetrics(handler.stats())));
+
+const log = createJsonEventLogger((line) => process.stdout.write(line + '\n'));
+// pass log.onSecurityEvent / log.onDelivery when constructing the middleware
+
+installArchxShutdown({ server, handler }); // SIGTERM/SIGINT → drain, handler.close(), exit
+```
+
+- **Health vs readiness.** The handler answers 200 when the
+  construction-time config audit passed and 503 otherwise; the body
+  carries version, uptime, issue *count*, and queue gauges — never
+  issue text or config values. Keep it on an internal listener; run
+  `auditArchxProductionConfig()` in deployment tests for the detailed,
+  still secret-free, blocker list.
+- **Metrics.** `formatPrometheusMetrics` renders `handler.stats()` as
+  Prometheus text (one-time-token/proof consumption and derivative-
+  cache hit/miss counters; cache sizes, queue depth, and in-flight
+  gauges; an `archx_info` series with version/deployment-mode/store
+  labels). Scrape it like any app metrics route; nothing per-viewer or
+  secret-bearing exists in the output.
+- **Logging.** Events were already structured and metadata-only;
+  `createJsonEventLogger` writes one JSON line per event for your
+  aggregator and, by default, drops raw IPs and viewer ids (keeping
+  the keyed `viewerHash`) so log stores stay privacy-friendlier. It
+  never throws into request handling.
+- **Shutdown.** `installArchxShutdown` closes the HTTP server first
+  (draining in-flight delivery), then `handler.close()` releases
+  caches/state; a second signal or the drain timeout (default
+  10 s) forces exit. Pair it with your platform's termination grace
+  period (e.g. Kubernetes `terminationGracePeriodSeconds` ≥ drain
+  timeout + margin).
+
+What remains deliberately host-owned: durable log/metric storage and
+retention, alerting rules, KMS/HSM secret custody, and any
+certification/SLA posture (see docs/STANDARDS.md — none is claimed).
+
 ## 6. Multi-region and failover expectations
 
 Regional independence is easy to claim and hard to make safe for one-time

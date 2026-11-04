@@ -67,7 +67,10 @@ export function validateImageId(id) {
 
 export function isPathInside(parent, child) {
   const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+  // rel === '..' (child is the immediate parent) slips past an
+  // '..' + sep prefix test (Review #9 BUG-2): reject the bare
+  // parent-reference exactly, not just parent-with-descendant.
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
 }
 
 export function pathsOverlap(a, b) {
@@ -85,14 +88,22 @@ export function parseStrictInt(value) {
 const WATERMARK_FIELDS = new Set(['text', 'color', 'opacity', 'cornerOpacity', 'tile', 'corner', 'angle']);
 
 /** True only for the bounded string/object shapes that may travel in a token. */
+const NO_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+
 export function validateWatermarkValue(value) {
   try {
-    if (typeof value === 'string') return value.length > 0 && value.length <= 512 && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value);
+    if (typeof value === 'string') return value.length > 0 && value.length <= 512 && !NO_CONTROL_CHARS.test(value);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const keys = Object.keys(value);
     if (!keys.length || keys.some((key) => !WATERMARK_FIELDS.has(key))) return false;
-    if (value.text !== undefined && (typeof value.text !== 'string' || !value.text || value.text.length > 512)) return false;
-    if (value.color !== undefined && (typeof value.color !== 'string' || !value.color || value.color.length > 64)) return false;
+    // The object branch must enforce the same control-character rule as
+    // the string branch (Review #9 BUG-1): escapeXml() does not strip
+    // C0 controls, so a NUL/BEL reaching watermarkSvg() makes librsvg
+    // reject the SVG and every derivative fails 415 — after startup
+    // and audits already reported healthy. Reject here, fail at
+    // configuration time like every other invalid watermark shape.
+    if (value.text !== undefined && (typeof value.text !== 'string' || !value.text || value.text.length > 512 || NO_CONTROL_CHARS.test(value.text))) return false;
+    if (value.color !== undefined && (typeof value.color !== 'string' || !value.color || value.color.length > 64 || NO_CONTROL_CHARS.test(value.color))) return false;
     for (const field of ['opacity', 'cornerOpacity']) {
       if (value[field] !== undefined && (typeof value[field] !== 'number' || !Number.isFinite(value[field]) || value[field] < 0 || value[field] > 1)) return false;
     }

@@ -16,7 +16,7 @@ var __privateWrapper = (obj, member, setter, getter) => ({
 });
 
 // src/client/version.js
-var VERSION = "1.28.0";
+var VERSION = "1.29.0";
 
 // src/core/bytes.js
 function asBytes(bytes) {

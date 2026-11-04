@@ -59,9 +59,46 @@ export interface ArchxStateStore {
   [key: string]: unknown;
 }
 
+/**
+ * Image-processing budgets and encoder settings. This interface mirrors
+ * the server's strict allowlist exactly (v1.29): unknown keys are
+ * rejected at startup by the middleware, so they are now also rejected
+ * by tsc instead of silently doing nothing. The same keys may also be
+ * supplied at the top level of the server options.
+ */
 export interface ArchxProcessingOptions {
+  /** Hard input cap in bytes, checked before decode (1024 … 500 MiB). */
+  maxInputBytes?: number;
+  /** Hard input pixel cap (10000 … 268402689). */
+  maxInputPixels?: number;
+  /** Hard input width cap (64 … 65536). */
+  maxInputWidth?: number;
+  /** Hard input height cap (64 … 65536). */
+  maxInputHeight?: number;
+  /** Hard output pixel cap (10000 … 268402689). */
+  maxOutputPixels?: number;
+  /** Per-job Sharp timeout in seconds (1 … 120). */
+  processingTimeoutSec?: number;
+  /** Alias for processingTimeoutSec. */
+  timeoutSec?: number;
+  /** Decodable input formats (default jpeg, png, webp, avif). */
+  allowedInputFormats?: string[];
+  /** Parallel Sharp jobs (1 … 64). */
+  processingConcurrency?: number;
+  /** Alias for processingConcurrency. */
+  maxConcurrentProcessing?: number;
+  /** Bounded wait-queue length for processing jobs (0 … 10000). */
+  processingQueueMax?: number;
+  /** Max milliseconds a job may wait for a processing slot (0 … 120000). */
+  processingQueueTimeoutMs?: number;
+  /** Refuse Sharp loaders for untrusted formats (default true). */
+  blockUntrustedSharpLoaders?: boolean;
   webpEffort?: number;
+  /** Alias for webpEffort. */
+  encoderEffort?: number;
   webpSmartSubsample?: boolean;
+  /** Alias for webpSmartSubsample. */
+  smartSubsample?: boolean;
   avifEffort?: number;
   /** Permit request-path AVIF effort > 2 (otherwise clamped to 2; pre-build offline instead). */
   allowSlowRequestAvif?: boolean;
@@ -71,7 +108,19 @@ export interface ArchxProcessingOptions {
   jpegChromaSubsampling?: '4:2:0' | '4:4:4';
   sharpConcurrency?: number;
   sharpCache?: boolean;
-  [key: string]: unknown;
+}
+
+/**
+ * Delivery quotas. Mirrors the server's strict allowlist (v1.29) so a
+ * typo'd key fails in tsc instead of silently leaving a quota unset.
+ * `null`/absent = that dimension unlimited; `quotas: false` disables all.
+ */
+export interface ArchxQuotas {
+  windowMs?: number;
+  perIp?: number | null;
+  perViewer?: number | null;
+  perIpImage?: number | null;
+  perViewerImage?: number | null;
 }
 
 export interface ArchxForensicOptions {
@@ -202,7 +251,7 @@ export interface ArchxServerOptions {
     header?: string;
     clearanceTtlSec?: number;
   };
-  quotas?: Record<string, unknown> | false;
+  quotas?: ArchxQuotas | false;
   rateLimitPerMinute?: number;
   tokenRateLimitPerMinute?: number;
   rateLimitMaxClients?: number;
@@ -300,6 +349,34 @@ export interface ArchxRequestHandler {
 
 export function createArchxMiddleware(options?: ArchxServerOptions): ArchxRequestHandler;
 
+/* ---------- operations helpers (server/ops.js, v1.29) ---------- */
+
+/** Render handler.stats() as Prometheus text exposition for your scraper route. */
+export function formatPrometheusMetrics(
+  stats: ArchxHandlerStats,
+  options?: { prefix?: string },
+): string;
+/** GET/HEAD health+readiness endpoint: 200 when the startup config audit passes, else 503. Body carries counts only; mount internally. */
+export function createArchxHealthHandler(
+  handler: ArchxRequestHandler,
+): (req: IncomingMessage, res: ServerResponse) => void;
+/** Wire SIGTERM/SIGINT graceful shutdown (drain server, handler.close(), exit). Returns an uninstaller. */
+export function installArchxShutdown(options: {
+  server: { close: (callback: () => void) => void };
+  handler: ArchxRequestHandler;
+  timeoutMs?: number;
+  signals?: string[];
+  onShutdown?: () => void;
+}): () => void;
+/** JSON-lines logger for the onSecurityEvent/onDelivery hooks; drops raw ip/viewerId unless includeRawActor. */
+export function createJsonEventLogger(
+  write: (line: string) => void,
+  options?: { service?: string; includeRawActor?: boolean },
+): Readonly<{
+  onSecurityEvent: (event: unknown) => void;
+  onDelivery: (event: unknown) => void;
+}>;
+
 /* ---------- image-processing entry points (server/scramble-image.js) ----------
  * Re-exported from the /server entry; Sharp loads lazily on first actual
  * image operation, so importing these declarations' module in a token-only
@@ -345,7 +422,7 @@ export interface ArchxScrambleImageOptions {
   steganography?: ArchxStegoOptions & { key?: string };
   stegoLayoutVersion?: 1 | 2 | 3 | 4;
   stegoLegacyCode?: boolean;
-  processing?: ArchxProcessingOptions & Record<string, unknown>;
+  processing?: ArchxProcessingOptions;
   [key: string]: unknown;
 }
 

@@ -48,7 +48,7 @@ npm pack --dry-run
 
 `npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
 and then runs the real-Chromium browser suite. At v1.18.0 the expected
-results are 128/128 Node tests (121 unit + 7 seeded fuzz), a clean
+results are 147/147 Node tests (140 unit + 7 seeded fuzz), a clean
 `tsc --noEmit` type smoke test, 122/122 Chromium checks, and a passing
 packaged-artifact smoke test (`npm run test:pack`). With
 `ARCHX_TEST_REDIS_URL` pointed at a disposable Redis, `npm run

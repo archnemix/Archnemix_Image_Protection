@@ -50,6 +50,7 @@ import { TOKEN_AUDIENCE, TOKEN_SCOPE, deriveStegoFingerprint, deriveStegoKey, no
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
 export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withLiteDefaults, withPerformanceDefaults, withEliteDefaults, withMaxProtectionDefaults } from './config.js';
 export { computeJwkThumbprint, deriveStegoFingerprint, deriveStegoKey, validateTokenClaims } from './tokens.js';
+export { formatPrometheusMetrics, createArchxHealthHandler, installArchxShutdown, createJsonEventLogger } from './ops.js';
 export {
   scrambleImage, unscrambleImage, inspectImageMetadata,
   prepareDerivativeBase, finishDerivative,

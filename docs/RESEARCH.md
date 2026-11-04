@@ -2784,8 +2784,11 @@ already-fixed items. Verified claim-by-claim before editing; verdicts:
 `exports`, and the full test surface are unchanged (128 Node tests,
 122 Chromium checks, pack smoke). `ProtectedImage` and the middleware
 factory remain intentionally cohesive single units. Bundle: 146.2 KiB
-minified / 47.0 KiB gzipped (the README's 137.7/44.5 figures were
-stale and are corrected).
+minified / 47.0 KiB gzipped (the then-current README's 137.7/44.5
+figures were stale and were corrected at the time; historical sizes
+in this log are as-measured at their version — the current bundle
+figures live in the README and are gate-checked by
+`npm run docs:check`).
 
 **Deferred, with rationale.**
 
@@ -3771,3 +3774,91 @@ claim. `npm run docs:check` recomputes version/counts/sizes/SRI and
 fails on any disagreement across README, website, CHANGELOG, and code;
 it found three stale numbers on its first run, which is the argument
 for its existence.
+
+### 2.37 Review #9 (v1.29) — two real bugs, gate gaps, deployment surface, chained-attack measurement
+
+An external re-test arrived with unusual rigor (it also withdrew four
+of its own earlier claims with causes — print blackout works, the
+closed shadow root hides canvases by design, the "accepted
+`__proto__`" was a serialization artifact of the test itself, and
+watermark SVG injection does not exist through `escapeXml`). Every
+item was re-derived from source before any change.
+
+**Bugs (both confirmed, both one-line root causes).**
+(1) `validateWatermarkValue` applied its C0-control regex only to the
+string shape, not to `{text}`/`{color}`. Because `escapeXml` does not
+strip control bytes, librsvg rejected the watermark SVG at delivery:
+startup and both audits said healthy while every redemption 415'd.
+The placeholder-substitution path was separately safe
+(`resolveWatermark` re-validates). Fix: one shared regex at the
+validation boundary, so the failure returns to construction time —
+the library's own fail-closed-at-startup doctrine, previously
+violated by shape variance. Lesson recorded: *validation parity
+across input shapes* is now a named test axis (string, object,
+function, authorize-returned).
+(2) `isPathInside` missed `rel === '..'`: the immediate parent
+passed both guards. All four call sites constrain the child
+(`isFile()`, basename-forcing, entry-root realpath), and
+`pathsOverlap` misuse fell toward refusing to start — unreachable,
+but a containment predicate must be right in isolation. Fixed +
+shape-table tests (including win32 separators).
+
+**Contradictions.** SECURITY.md described layout v2 as current
+(default is v3 since v1.14; BCH v4 since v1.20) — the security-policy
+doc was the stalest file in the repo, which is the worst place for
+it. The website illustration offered grid 4, a size creation refuses
+since v1.27; the product and its own marketing disagreed. Two docs
+carried pre-1.28 test counts because `docs:check` only gated
+README + one website stat — the gate printed "all agree" while two
+files disagreed. All fixed; the grid sentence in COMPATIBILITY now
+distinguishes creation paths from the low-level decode primitive.
+
+**Gate closures.** `docs:check` now (a) pattern-scans test-count
+claims across all current-facing prose (historical logs exempt —
+their numbers were true at their version and falsifying history is
+worse than dating it), and (b) verifies the website's two
+persuasion stats against `docs/evidence/stego-bench.json`, an
+artifact regenerated only by running the bench
+(`npm run bench:stego:evidence`). Fresh full runs this round
+reproduced the printed figures exactly: robust 85/99
+(photo 33/33, graphic 31/33, flat 11/11, text 10/11,
+text-periodic 0/11), standard 63/99, false positives 0/369.
+Note the corpus trap found while reproducing: the 99-case matrix
+needs `demo-masters/gallery/` (generated, gitignored); without it
+the bench silently runs a 66-case subset. The evidence tool fails
+loudly on the wrong case count for exactly this reason.
+
+**Chained-transform measurement.** The reviewer reported 2/6 on
+crop+resize+recompress. Our chained probe (center-crop 70% →
+resize 50% → JPEG q70, robust layout 3, geometry+offset search,
+60 s budget, the 3 photo + 3 graphic bench hosts): **5/6
+recovered** (1.3–6.4 s per success; the miss searched 24 s).
+Single-transform crop rows in the matrix: 22/27 robust. Both
+numbers are corpus- and budget-bound; neither supports a
+fragment-level claim. Commercial sync-template systems detect from
+~10% fragments; StegoMark's lattice needs most of the frame. The
+website label now reads "single transforms" and points at this
+paragraph. Position unchanged: marks are layered evidence under
+authorization, not a studio-grade forensic watermark — the
+review's "web-hardening ✓ / forensic-attribution ✗" split is
+accepted as accurate.
+
+**Deployment surface shipped.** The second assessment's enterprise
+gaps split cleanly: SOC 2/SLA/CVE-backport/KMS are organizational,
+not code, and remain explicitly unclaimed. The code-shaped four now
+ship as `server/ops.js` (health from the construction audit,
+Prometheus exposition of `handler.stats()`, JSONL event logging
+with actor redaction by default, SIGTERM/SIGINT drain via
+`handler.close()`), each host-mounted and unit-tested, typed, and
+mapped in STANDARDS §I + OPERATIONS §5.1. Types also stopped lying
+by omission: `ArchxProcessingOptions` mirrors the server's 25-key
+allowlist and `quotas` its 5-key one — typos are compile errors now,
+proven with `@ts-expect-error` cases (the server already rejected
+unknown keys; only the types pretended otherwise).
+
+**Performance note.** No hot-path change shipped: `bench:opt`
+re-ran clean (gallery-100 ≈38.6 ms/image in this sandbox, heap
++2.1 MB) and no byte-safe win presented itself. The one
+efficiency-relevant fix is BUG-1: doomed watermark configurations
+now die at startup instead of burning a full Sharp pipeline per
+request on derivatives that could never render.

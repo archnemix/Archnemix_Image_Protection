@@ -10,6 +10,8 @@ import Archx, {
 import {
   createArchxMiddleware, withHardenedProductionDefaults,
   withLiteDefaults, withPerformanceDefaults, withEliteDefaults,
+  formatPrometheusMetrics, createArchxHealthHandler, installArchxShutdown, createJsonEventLogger,
+  type ArchxServerOptions,
   auditArchxProductionConfig, auditArchxServerConfig,
   scrambleImage, inspectImageMetadata, configureSharpSecurity, acquireSharpSecurityLease,
   validateWatermarkValue, detectStegoFingerprintInWorker, closeStegoDetectWorker,
@@ -80,12 +82,37 @@ const handler = createArchxMiddleware(withHardenedProductionDefaults({
   format: 'avif',
   steganography: { scope: 'viewer', keyScope: 'viewer', profile: 'robust', layoutVersion: 3, legacyCode: false },
   forensic: { blockSize: 32, delta: 2, signsVersion: 3 },
-  processing: { avifEffort: 2, avifChromaSubsampling: '4:4:4' },
+  processing: {
+    avifEffort: 2, avifChromaSubsampling: '4:4:4',
+    // DoS caps are fully typed since v1.29 (server allowlist mirrored).
+    maxInputBytes: 50 * 1024 * 1024, maxInputPixels: 50_000_000,
+    maxInputWidth: 12000, maxInputHeight: 12000, maxOutputPixels: 16_777_216,
+    processingTimeoutSec: 10, allowedInputFormats: ['jpeg', 'png', 'webp'],
+    processingConcurrency: 4, processingQueueMax: 100, processingQueueTimeoutMs: 5000,
+    blockUntrustedSharpLoaders: true, encoderEffort: 4, smartSubsample: true,
+  },
+  quotas: { windowMs: 3_600_000, perIp: 10_000, perViewer: 2_000, perIpImage: 500, perViewerImage: 100 },
   deploymentMode: 'single-instance',
   bindTokenTo: ['ip', 'ua'],
   authorize: async (_req, _id, { phase }) => phase === 'token',
 }));
 const server = http.createServer((req, res) => { void handler(req, res); });
+
+// Typo'd quota/processing keys must now fail compilation (v1.29):
+const _typoChecks: ArchxServerOptions = {
+  // @ts-expect-error perViewer is the real key; perviewer silently did nothing before v1.29
+  quotas: { perviewer: 500 },
+  // @ts-expect-error maxInputBytes is the real key; maxInputByte silently did nothing before v1.29
+  processing: { maxInputByte: 1024 },
+};
+void _typoChecks;
+
+// Operations helpers (v1.29).
+const _metrics: string = formatPrometheusMetrics(handler.stats());
+const _health = createArchxHealthHandler(handler);
+const _uninstallShutdown = installArchxShutdown({ server, handler, timeoutMs: 5000 });
+const _log = createJsonEventLogger((_line: string) => {}, { service: 'archx' });
+void _metrics; void _health; void _uninstallShutdown; void _log;
 void server;
 const auditOk: boolean = handler.configAudit.ok;
 void auditOk;

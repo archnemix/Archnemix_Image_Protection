@@ -42,9 +42,25 @@ step('npm pack', () => {
   const meta = JSON.parse(out.slice(out.indexOf('[')));
   tarball = path.join(repoRoot, meta[0].filename);
   const names = meta[0].files.map((f) => f.path);
-  for (const required of ['server/detect-worker.js', 'server/middleware.js', 'server/scramble-image.js',
+  for (const required of ['server/detect-worker.js', 'server/middleware.js', 'server/scramble-image.js', 'server/ops.js',
     'server/detect-stego-cli.js', 'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts']) {
     if (!names.includes(required)) throw new Error(`tarball is missing ${required}`);
+  }
+  // Structural guard (v1.29): every relative import in every shipped
+  // server/src module must resolve to another shipped file. The
+  // hand-maintained list above caught omissions one version late
+  // (detect-worker in 1.15-1.17, ops.js pre-1.29); this invariant
+  // catches the class, not the instance.
+  const shipped = new Set(names);
+  for (const name of names.filter((n) => /^(server|src)\/.*\.js$/.test(n))) {
+    const text = fs.readFileSync(path.join(repoRoot, name), 'utf8');
+    for (const m of text.matchAll(/(?:from|import)\s*\(\s*['"](\.[^'"]+)['"]|(?:from|import)\s+['"](\.[^'"]+)['"]/g)) {
+      const spec = m[1] || m[2];
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), spec));
+      if (!shipped.has(resolved)) {
+        throw new Error(`tarball would break: ${name} imports '${spec}' -> ${resolved}, which is not shipped (add it to package.json "files")`);
+      }
+    }
   }
 });
 
@@ -61,7 +77,11 @@ const smoke = `
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import Archx, { VERSION, embedStegoFingerprint, assayStegoCollusion } from '${name}';
-import { createArchxMiddleware, detectStegoFingerprintInWorker, batchDetectStegoInWorker, closeStegoDetectWorker } from '${name}/server';
+import { createArchxMiddleware, detectStegoFingerprintInWorker, batchDetectStegoInWorker, closeStegoDetectWorker, formatPrometheusMetrics, createArchxHealthHandler, installArchxShutdown, createJsonEventLogger } from '${name}/server';
+assert.equal(typeof formatPrometheusMetrics, 'function');
+assert.equal(typeof createArchxHealthHandler, 'function');
+assert.equal(typeof installArchxShutdown, 'function');
+assert.equal(typeof createJsonEventLogger, 'function');
 import {} from '${name}/server/scramble-image';
 import {} from '${name}/build';
 import {} from '${name}/redis';
