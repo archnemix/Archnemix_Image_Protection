@@ -50,6 +50,7 @@ export class ProtectedImage {
   #dutyIndex = 0; #biasSeed = Math.random() * 100; #biasFrames = 0;
   #lastInteractAt = 0; #idleSkip = 0;
   #temporalInterlaceCache = undefined;
+  #readyResolve = null; #readyReject = null; #readySettled = false;
 
   /** Sanitised, secret-free view of the effective options. */
   get options() { return sanitizeOptionsView(this.#options); }
@@ -76,7 +77,20 @@ export class ProtectedImage {
     installGlobalGuards();
     if (this.#options.guards.devtools) ensureDevtoolsWatcher();
 
-    this.ready = this._init();
+    // `ready` is the documented first-paint promise: it resolves only
+    // after the first successful frame has actually been painted (see
+    // #settleReadyAfterPaint), and rejects when the first load fails, is
+    // blocked by the integrity/automation/lockout policy, or the instance
+    // is destroyed before painting. A lazy instance still below the fold
+    // therefore stays pending — that is the contract, not a hang.
+    this.ready = new Promise((resolve, reject) => {
+      this.#readyResolve = resolve;
+      this.#readyReject = reject;
+    });
+    // Hosts may legitimately never look at `ready`; an ignored rejection
+    // must not surface as an unhandledrejection in their console.
+    this.ready.catch(() => {});
+    void this._init().catch((err) => this.#rejectReady(err));
   }
 
   /* ---------------- DOM ---------------- */
@@ -458,14 +472,48 @@ export class ProtectedImage {
     if (this.#options.lazy && 'IntersectionObserver' in window) {
       this.#visibilityObs = getVisibilityObserver(this.#options.rootMargin);
       this.#visibilityObs.observe(this.#host);
-      // _load fires from observer; also kick if already on screen pre-observe.
-      const r = this.#host.getBoundingClientRect();
-      if (r.bottom > 0 && r.top < innerHeight) this._load();
+      // IntersectionObserver always delivers an initial callback for a
+      // newly observed target, so an already-on-screen host loads from
+      // there (through _onVisibility). The previous synchronous
+      // getBoundingClientRect() kick forced one layout per constructed
+      // image — measurable thrash when building large galleries — for no
+      // behavioural gain.
     } else {
       this.#visible = true;
       await this._load();
     }
-    return this;
+  }
+
+  /**
+   * Settle `ready` after the compositor has had its chance to present the
+   * frame _render() just drew: the first rAF callback runs before that
+   * paint, the second runs before the following one — so by the time the
+   * second callback fires, the rendered frame has been presented. (In a
+   * background tab rAF is paused, so `ready` waits for visibility, which
+   * matches "after first paint".)
+   */
+  #settleReadyAfterPaint() {
+    if (this.#readySettled) return;
+    const finish = () => {
+      if (this.#readySettled) return;
+      if (this.#destroyed) {
+        this.#rejectReady(new Error('Archx: instance destroyed before first paint'));
+        return;
+      }
+      this.#readySettled = true;
+      if (this.#readyResolve) this.#readyResolve(this);
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    } else finish();
+  }
+
+  #rejectReady(err) {
+    if (this.#readySettled) return;
+    this.#readySettled = true;
+    if (this.#readyReject) {
+      this.#readyReject(err instanceof Error ? err : new Error(String(err || 'Archx: load failed')));
+    }
   }
 
   /* ---------------- source resolution ---------------- */
@@ -1100,6 +1148,7 @@ export class ProtectedImage {
       this.#loaded = true;
       this.#unloaded = false;
       this.#wrap.classList.remove('loading', 'error');
+      this.#settleReadyAfterPaint();
       return;
     }
     if (!this.#securityGate()) {
@@ -1110,9 +1159,11 @@ export class ProtectedImage {
         outcome: 'blocked',
         issues: this.#integrityIssues,
       }, this);
+      const blocked = new Error('Archx: blocked by integrity/automation/lockout policy');
       this.#host.dispatchEvent(new CustomEvent('archx-error', {
-        detail: { error: new Error('Archx: blocked by integrity/automation/lockout policy') }, bubbles: true,
+        detail: { error: blocked }, bubbles: true,
       }));
+      this.#rejectReady(blocked);
       return;
     }
     this.#loading = true;
@@ -1195,6 +1246,7 @@ export class ProtectedImage {
       this.#host.dispatchEvent(new CustomEvent('archx-load', { bubbles: true }));
       emitClientEvent('archx.loaded', { outcome: 'loaded' }, this);
       try { this.#options.onLoad && this.#options.onLoad(this); } catch {}
+      this.#settleReadyAfterPaint();
     } catch (err) {
       if (this.#destroyed) return;
       this.#wrap.classList.remove('loading');
@@ -1202,6 +1254,7 @@ export class ProtectedImage {
       emitClientEvent('archx.error', { reason: 'load-failed', outcome: 'error' }, this);
       this.#host.dispatchEvent(new CustomEvent('archx-error', { detail: { error: err }, bubbles: true }));
       try { this.#options.onError && this.#options.onError(err, this); } catch {}
+      this.#rejectReady(err);
     } finally {
       this.#loading = false;
     }
@@ -2816,6 +2869,7 @@ export class ProtectedImage {
   }
   destroy() {
     this.#destroyed = true;
+    this.#rejectReady(new Error('Archx: instance destroyed before first paint'));
     instances.delete(this);
     this.#abort.abort();
     this.#stopTemporal2d(true);

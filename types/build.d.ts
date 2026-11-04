@@ -49,8 +49,9 @@ export interface ArchxBuildOptions {
   baseUrl?: string;
   widths?: number[];
   maxWidth?: number;
+  /** Scramble tiles per side for NEW payloads: integer 8–32 (default 8). */
   grid?: number;
-  /** 1 = legacy 32-bit plan seed, 2 = 128-bit seed (needs a pv-aware client). */
+  /** 1 = legacy 32-bit plan seed, 2 = 128-bit seed (default; needs a pv-aware client ≥ v1.10). */
   planVersion?: 1 | 2;
   key: string;
   aesKey?: string | null;

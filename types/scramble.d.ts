@@ -20,7 +20,7 @@ export function sha256SeededPrng(material: string | Uint8Array): () => number;
 export interface ScramblePlan {
   grid: number;
   count: number;
-  /** Plan derivation version (1 = legacy 32-bit seed, 2 = 128-bit seed). */
+  /** Plan derivation version (1 = legacy 32-bit seed, 2 = 128-bit seed; buildScramblePlan defaults to 2). */
   version: 1 | 2;
   /** order[scrambledPos] = originalPos */
   order: number[];

@@ -43,7 +43,7 @@ __export(index_exports, {
   PRESETS: () => PRESETS,
   ProtectedImage: () => ProtectedImage,
   TEMPORAL_INTERLACE_PROFILES: () => TEMPORAL_INTERLACE_PROFILES,
-  VERSION: () => VERSION2,
+  VERSION: () => VERSION,
   applyForensicBlocks: () => applyForensicBlocks,
   assayStegoCollusion: () => assayStegoCollusion,
   assayStegoEmbed: () => assayStegoEmbed,
@@ -100,6 +100,9 @@ __export(index_exports, {
   verifyEarlyIntegritySnapshot: () => verifyEarlyIntegritySnapshot
 });
 module.exports = __toCommonJS(index_exports);
+
+// src/client/version.js
+var VERSION = "1.27.0";
 
 // src/core/bytes.js
 function asBytes(bytes) {
@@ -6647,7 +6650,7 @@ var SHADOW_CSS = `
 
 // src/client/viewer.js
 var taintConsoleWarned = false;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _readyResolve, _readyReject, _readySettled, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, settleReadyAfterPaint_fn, rejectReady_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -6739,6 +6742,9 @@ var ProtectedImage = class {
     __privateAdd(this, _lastInteractAt, 0);
     __privateAdd(this, _idleSkip, 0);
     __privateAdd(this, _temporalInterlaceCache);
+    __privateAdd(this, _readyResolve, null);
+    __privateAdd(this, _readyReject, null);
+    __privateAdd(this, _readySettled, false);
     __privateSet(this, _options, mergeOptions(options));
     __privateSet(this, _source, source);
     const host = $(target);
@@ -6759,7 +6765,13 @@ var ProtectedImage = class {
     instances.add(this);
     installGlobalGuards();
     if (__privateGet(this, _options).guards.devtools) ensureDevtoolsWatcher();
-    this.ready = this._init();
+    this.ready = new Promise((resolve, reject) => {
+      __privateSet(this, _readyResolve, resolve);
+      __privateSet(this, _readyReject, reject);
+    });
+    this.ready.catch(() => {
+    });
+    void this._init().catch((err) => __privateMethod(this, _ProtectedImage_instances, rejectReady_fn).call(this, err));
   }
   /** Sanitised, secret-free view of the effective options. */
   get options() {
@@ -6995,13 +7007,10 @@ var ProtectedImage = class {
     if (__privateGet(this, _options).lazy && "IntersectionObserver" in window) {
       __privateSet(this, _visibilityObs, getVisibilityObserver(__privateGet(this, _options).rootMargin));
       __privateGet(this, _visibilityObs).observe(__privateGet(this, _host));
-      const r = __privateGet(this, _host).getBoundingClientRect();
-      if (r.bottom > 0 && r.top < innerHeight) this._load();
     } else {
       __privateSet(this, _visible, true);
       await this._load();
     }
-    return this;
   }
   async _resolveBytes(force = false) {
     const o = __privateGet(this, _options);
@@ -7447,6 +7456,7 @@ var ProtectedImage = class {
       __privateSet(this, _loaded, true);
       __privateSet(this, _unloaded, false);
       __privateGet(this, _wrap).classList.remove("loading", "error");
+      __privateMethod(this, _ProtectedImage_instances, settleReadyAfterPaint_fn).call(this);
       return;
     }
     if (!__privateMethod(this, _ProtectedImage_instances, securityGate_fn).call(this)) {
@@ -7457,10 +7467,12 @@ var ProtectedImage = class {
         outcome: "blocked",
         issues: __privateGet(this, _integrityIssues)
       }, this);
+      const blocked = new Error("Archx: blocked by integrity/automation/lockout policy");
       __privateGet(this, _host).dispatchEvent(new CustomEvent("archx-error", {
-        detail: { error: new Error("Archx: blocked by integrity/automation/lockout policy") },
+        detail: { error: blocked },
         bubbles: true
       }));
+      __privateMethod(this, _ProtectedImage_instances, rejectReady_fn).call(this, blocked);
       return;
     }
     __privateSet(this, _loading, true);
@@ -7535,6 +7547,7 @@ var ProtectedImage = class {
         __privateGet(this, _options).onLoad && __privateGet(this, _options).onLoad(this);
       } catch {
       }
+      __privateMethod(this, _ProtectedImage_instances, settleReadyAfterPaint_fn).call(this);
     } catch (err) {
       if (__privateGet(this, _destroyed)) return;
       __privateGet(this, _wrap).classList.remove("loading");
@@ -7545,6 +7558,7 @@ var ProtectedImage = class {
         __privateGet(this, _options).onError && __privateGet(this, _options).onError(err, this);
       } catch {
       }
+      __privateMethod(this, _ProtectedImage_instances, rejectReady_fn).call(this, err);
     } finally {
       __privateSet(this, _loading, false);
     }
@@ -8722,6 +8736,7 @@ var ProtectedImage = class {
   }
   destroy() {
     __privateSet(this, _destroyed, true);
+    __privateMethod(this, _ProtectedImage_instances, rejectReady_fn).call(this, new Error("Archx: instance destroyed before first paint"));
     instances.delete(this);
     __privateGet(this, _abort).abort();
     __privateMethod(this, _ProtectedImage_instances, stopTemporal2d_fn).call(this, true);
@@ -8862,6 +8877,9 @@ _biasFrames = new WeakMap();
 _lastInteractAt = new WeakMap();
 _idleSkip = new WeakMap();
 _temporalInterlaceCache = new WeakMap();
+_readyResolve = new WeakMap();
+_readyReject = new WeakMap();
+_readySettled = new WeakMap();
 _ProtectedImage_instances = new WeakSet();
 /** Strike accounting: repeated extraction attempts escalate to lockout. */
 registerStrike_fn = function(kind) {
@@ -8988,6 +9006,36 @@ shouldUpgradeDerivative_fn = function(previousW, previousH) {
   if (policy !== "upscale") return false;
   const factor = Math.max(1, __privateGet(this, _options).resizeUpscaleFactor || 1.75);
   return !!(previousW && size.w > previousW * factor || previousH && size.h > previousH * factor);
+};
+/**
+ * Settle `ready` after the compositor has had its chance to present the
+ * frame _render() just drew: the first rAF callback runs before that
+ * paint, the second runs before the following one — so by the time the
+ * second callback fires, the rendered frame has been presented. (In a
+ * background tab rAF is paused, so `ready` waits for visibility, which
+ * matches "after first paint".)
+ */
+settleReadyAfterPaint_fn = function() {
+  if (__privateGet(this, _readySettled)) return;
+  const finish = () => {
+    if (__privateGet(this, _readySettled)) return;
+    if (__privateGet(this, _destroyed)) {
+      __privateMethod(this, _ProtectedImage_instances, rejectReady_fn).call(this, new Error("Archx: instance destroyed before first paint"));
+      return;
+    }
+    __privateSet(this, _readySettled, true);
+    if (__privateGet(this, _readyResolve)) __privateGet(this, _readyResolve).call(this, this);
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => requestAnimationFrame(finish));
+  } else finish();
+};
+rejectReady_fn = function(err) {
+  if (__privateGet(this, _readySettled)) return;
+  __privateSet(this, _readySettled, true);
+  if (__privateGet(this, _readyReject)) {
+    __privateGet(this, _readyReject).call(this, err instanceof Error ? err : new Error(String(err || "Archx: load failed")));
+  }
 };
 /* ---------------- source resolution ---------------- */
 /**
@@ -9967,9 +10015,8 @@ function defineElement() {
 }
 
 // src/archx.js
-var VERSION2 = "1.26.0";
 var Archx = {
-  version: VERSION2,
+  version: VERSION,
   ProtectedImage,
   presets: PRESETS,
   preset,

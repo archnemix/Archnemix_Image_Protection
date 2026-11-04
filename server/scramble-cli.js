@@ -106,7 +106,7 @@ if (args.assay) {
 if (!input || !output || args.help) {
   console.log(`Usage: archx-protect <input image|folder> <output .archx|folder> [options]
   --key <secret>       scramble key (prefer ARCHX_SCRAMBLE_KEY; argv secrets can leak)
-  --grid <n>           tiles per side (default 8)
+  --grid <n>           tiles per side, 8-32 for new payloads (default 8; legacy 2-7 payloads remain decodable)
   --plan-version <1|2> scramble plan seed strength (1 = legacy, 2 = 128-bit; default 2)
   --max-width <px>     down-scale master to this width first (default 1600)
   --quality <1-100>    WebP/JPEG quality (default 95; use --lossless for exact pixels)

@@ -47,7 +47,7 @@ if (!inputDir || !outputDir || args.help) {
   --base-url <url>        public URL prefix for generated files (default: relative filenames)
   --widths <list>         canonical widths, comma-separated (default responsive ladder)
   --max-width <px>        largest derivative width (default 1920; never enlarges)
-  --grid <n>              scramble tiles per side (default 8)
+  --grid <n>              scramble tiles per side, 8-32 for new payloads (default 8)
   --plan-version <1|2>    scramble plan seed strength (1 = legacy 32-bit, 2 = 128-bit; default 2)
   --quality <1-100>       WebP/JPEG quality (default 88; use --lossless for exact pixels)
   --lossless              lossless WebP/PNG at delivered sizes

@@ -1,7 +1,7 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.26.0",
-  "description": "Archnemix (Archx) \u2014 layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
+  "version": "1.27.0",
+  "description": "Archnemix (Archx) — layered image protection for websites. Display images without ever handing visitors a downloadable file: no <img>, scrambled/encrypted delivery, poisoned canvas read-back, expiring signed URLs, baked-in watermarking.",
   "license": "0BSD",
   "author": "Archnemix",
   "repository": {

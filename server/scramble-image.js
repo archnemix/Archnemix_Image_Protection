@@ -504,7 +504,10 @@ function blendOverlayInPlace(dst, overlayEntry) {
  */
 function validateScrambleOpts(opts) {
   const grid = opts.grid ?? 8;
-  if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
+  // Creation floor (v1.27): coarse tile grids are keyless-solvable jigsaw
+  // puzzles, so NEW payloads require >= 8x8 tiles. Decoding legacy 2-7
+  // grids stays supported (unscrambleImage below and the browser client).
+  if (!Number.isInteger(grid) || grid < 8 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 8 to 32 for new payloads (legacy 2-7 grids remain decodable via unscrambleImage/client)');
   const planVersion = opts.planVersion ?? 2; // 128-bit seed; v1 (32-bit) stays available explicitly
   if (planVersion !== 1 && planVersion !== 2) {
     throw new TypeError('Archx image processing: planVersion must be 1 or 2');
@@ -830,6 +833,8 @@ export async function scrambleImage(input, opts = {}) {
 
 /** Reverse a plain (unencrypted, container-less) scrambled image. Test/ops helper. */
 export async function unscrambleImage(scrambledBytes, { grid = 8, key = '', w, h, planVersion = 2, ...processingOpts } = {}) {
+  // Decode path: the full historical 2-32 range stays valid so payloads
+  // built before the v1.27 creation floor remain recoverable.
   if (!Number.isInteger(grid) || grid < 2 || grid > 32) throw new TypeError('Archx image processing: grid must be an integer from 2 to 32');
   if (planVersion !== 1 && planVersion !== 2) throw new TypeError('Archx image processing: planVersion must be 1 or 2');
   if (typeof key !== 'string') throw new TypeError('Archx image processing: key must be a string');

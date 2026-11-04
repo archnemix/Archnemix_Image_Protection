@@ -46,8 +46,15 @@ const audit = auditArchxServerConfig(options);
 const production = auditArchxProductionConfig(options, {
   expectedInstances: Number(process.env.ARCHX_EXPECTED_INSTANCES || 1),
 });
-// Gate the release on audit.ok and production.ready.
-// Neither audit summary contains a secret value.
+// Gate the release on production.ready — and only on production.ready.
+// audit.ok (== audit.configOk == production.configOk) merely proves the
+// configuration is internally valid; a valid configuration can still carry
+// live production blockers. (On the production audit itself, `ok` has meant
+// the same as `ready` since v1.27.) Neither audit summary contains a secret.
+if (!production.ready) {
+  throw new Error(`Archx production blockers:\n- ${production.blockers.join('\n- ')}`);
+}
+void audit; // keep for diagnostics: audit.issues/warnings are inside blockers
 ```
 
 `auditArchxServerConfig()` answers whether the middleware accepts the

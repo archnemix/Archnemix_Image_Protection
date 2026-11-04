@@ -811,7 +811,7 @@ try {
       new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="9999" height="9999"></svg>'], { type: 'image/svg+xml' }),
       { lazy: false },
     );
-    await bad.ready;
+    const badReady = await bad.ready.then(() => 'resolved', () => 'rejected');
     const badLoaded = bad.loaded;
     bad.destroy(); badHost.remove();
 
@@ -822,6 +822,7 @@ try {
       duplicateError,
       shadowError,
       badLoaded,
+      badReady,
       optionsStillShield: shield.options.mode,
       contextMenuStillGuarded: shield.options.guards.contextMenu,
       keyStillRedacted: shield.options.key || null,
@@ -833,7 +834,8 @@ try {
     /already hosts a live protected image/.test(v15Client.duplicateError), v15Client.duplicateError);
   check('an unavailable requested shadow root fails closed instead of falling back to light DOM',
     /unable to attach the requested shadow root/.test(v15Client.shadowError), v15Client.shadowError);
-  check('unsupported SVG payload is rejected before browser image decode', v15Client.badLoaded === false);
+  check('unsupported SVG payload is rejected before browser image decode (ready rejects)',
+    v15Client.badLoaded === false && v15Client.badReady === 'rejected', JSON.stringify(v15Client));
   check('public options view is a deep clone; mutating it cannot weaken live guards',
     v15Client.optionsStillShield === 'shield' && v15Client.contextMenuStillGuarded === true);
   check('browser payload requests use clean URLs with no bearer token in Resource Timing names',
@@ -871,10 +873,11 @@ try {
     document.body.appendChild(host);
     const inst = window.Archx.load.image(host, { id: 'gallery-005' },
       { mode: 'fortress', debug: true, lazy: false, automation: 'monitor' });
-    await inst.ready;
+    const readyOutcome = await inst.ready.then(() => 'resolved', () => 'rejected');
     await new Promise((r) => setTimeout(r, 150));
     const dbg = inst._debug();
     const out = {
+      readyOutcome,
       loaded: inst.loaded,
       issues: dbg?.integrityIssues || [],
       attempts: window.__attempts.slice(),
@@ -885,8 +888,8 @@ try {
     return out;
   });
   check('hooked fetch is detected by the integrity audit', integrity.auditNow.includes('fetch'), JSON.stringify(integrity.auditNow));
-  check('fortress integrity policy fails closed (image does not load) under API hooking',
-    integrity.loaded === false && integrity.issues.includes('fetch') && integrity.attempts.some((a) => a.startsWith('integrity')),
+  check('fortress integrity policy fails closed (image does not load, ready rejects) under API hooking',
+    integrity.loaded === false && integrity.readyOutcome === 'rejected' && integrity.issues.includes('fetch') && integrity.attempts.some((a) => a.startsWith('integrity')),
     JSON.stringify(integrity));
   const integrityRestored = await page.evaluate(() => window.Archx.auditIntegrity());
   check('integrity audit is clean again after restoring the native fetch', integrityRestored.length === 0, JSON.stringify(integrityRestored));
@@ -1006,9 +1009,10 @@ try {
     const fortress = window.Archx.load.image(fortressHost, { id: 'gallery-006' }, {
       mode: 'fortress', debug: true, lazy: false, automation: 'monitor',
     });
-    await fortress.ready;
+    const fortressReady = await fortress.ready.then(() => 'resolved', () => 'rejected');
     await new Promise((r) => setTimeout(r, 120));
     const fortressResult = {
+      ready: fortressReady,
       loaded: fortress.loaded,
       issues: fortress._debug()?.integrityIssues || [],
     };
@@ -1035,9 +1039,9 @@ try {
     const invalid = window.Archx.load.image(invalidHost, { id: 'gallery-008' }, {
       mode: 'shield', integrity: 'bogus', debug: true, lazy: false, automation: 'monitor',
     });
-    await invalid.ready;
+    const invalidReady = await invalid.ready.then(() => 'resolved', () => 'rejected');
     await new Promise((r) => setTimeout(r, 120));
-    const invalidResult = { loaded: invalid.loaded };
+    const invalidResult = { loaded: invalid.loaded, ready: invalidReady };
     invalid.destroy(); invalidHost.remove();
 
     const serializedEvents = JSON.stringify(events);
@@ -1062,7 +1066,7 @@ try {
       webglIntegrity.details.issues.some((name) => name.endsWith('.drawElements')),
     JSON.stringify(webglIntegrity.details.issues));
   check('fortress fails closed under patched WebGL draw calls',
-    webglIntegrity.fortress.loaded === false &&
+    webglIntegrity.fortress.loaded === false && webglIntegrity.fortress.ready === 'rejected' &&
       webglIntegrity.fortress.issues.some((name) => name.includes('draw')),
     JSON.stringify(webglIntegrity.fortress));
   check('vault monitor policy reports but continues under patched WebGL draw calls',
@@ -1070,7 +1074,7 @@ try {
       webglIntegrity.vault.issues.some((name) => name.includes('draw')),
     JSON.stringify(webglIntegrity.vault));
   check('invalid integrity mode fails closed instead of becoming monitor-only',
-    webglIntegrity.invalid.loaded === false &&
+    webglIntegrity.invalid.loaded === false && webglIntegrity.invalid.ready === 'rejected' &&
       webglIntegrity.attemptKinds.some((kind) => kind.includes('invalid-mode')),
     JSON.stringify(webglIntegrity.attemptKinds));
   check('global/plugin monitoring receives only sanitized event fields',
@@ -1108,16 +1112,19 @@ try {
     const inst = window.Archx.load.image(host, { id: 'gallery-009' },
       { mode: 'vault', debug: true, lazy: false, automation: 'monitor' });
     await inst.ready;
-    const framesBefore = inst._debug()?.glFrames ?? 0;
+    // `ready` settles after first paint (v1.27), so initial GL frames are
+    // already counted here; measure the instance's total rendered frames,
+    // not a post-ready delta (the pre-1.27 ready resolved before loading,
+    // which is why the old delta happened to see those first frames).
     const deadline = Date.now() + 3000;
-    while (Date.now() < deadline && ((inst._debug()?.glFrames ?? 0) - framesBefore) <= 2) {
+    while (Date.now() < deadline && (inst._debug()?.glFrames ?? 0) < 2) {
       await new Promise((r) => setTimeout(r, 50));
     }
     const dbg = inst._debug();
     const out = {
       loaded: inst.loaded,
       uniformCalls,
-      glDelta: (dbg?.glFrames ?? 0) - framesBefore,
+      glFrames: dbg?.glFrames ?? 0,
       stolenOffDom: stolen.filter((c) => !c.attached),
       audit: window.Archx.auditIntegrityDetails().issues,
     };
@@ -1129,7 +1136,7 @@ try {
   check('post-load uniform1f hook observes zero Archx uniform writes (C1)',
     postLoadHooks.uniformCalls === 0, JSON.stringify(postLoadHooks));
   check('vault temporal rendering continues under the uniform hook',
-    postLoadHooks.loaded === true && postLoadHooks.glDelta >= 2, JSON.stringify(postLoadHooks));
+    postLoadHooks.loaded === true && postLoadHooks.glFrames >= 2, JSON.stringify(postLoadHooks));
   check('post-load restore() hook never receives an off-DOM (uncropped) canvas (C2)',
     postLoadHooks.stolenOffDom.length === 0, JSON.stringify(postLoadHooks.stolenOffDom));
   check('integrity audit now names uniform1f and 2D restore hooks',
@@ -1221,9 +1228,10 @@ try {
     const fortress = window.Archx.load.image(fortressHost, { id: 'gallery-009' }, {
       mode: 'fortress', debug: true, lazy: false, automation: 'monitor',
     });
-    await fortress.ready;
+    const fortressReady = await fortress.ready.then(() => 'resolved', () => 'rejected');
     await new Promise((r) => setTimeout(r, 180));
     const fortressResult = {
+      ready: fortressReady,
       loaded: fortress.loaded,
       issues: fortress._debug()?.integrityIssues || [],
       capture: forCanvas(fortress._debug()?.canvas),
@@ -1253,7 +1261,7 @@ try {
   await hookPage.close();
   check('pre-load drawArrays hook is Captured as non-native and fortress gives it no non-black frame',
     preloadHook.details.capturedNonNative.some((name) => name.endsWith('.drawArrays')) &&
-      preloadHook.fortress.loaded === false &&
+      preloadHook.fortress.loaded === false && preloadHook.fortress.ready === 'rejected' &&
       preloadHook.fortress.issues.some((name) => name.endsWith('.drawArrays')) &&
       preloadHook.fortress.capture.nonBlackPixels === 0,
     JSON.stringify({ preloadHook, hookPageErrors }));
@@ -1853,6 +1861,69 @@ try {
   check('<archx-image image-id temporal-shield="false"> loads', v14.elementReady1 === true);
   check('changing image-id hot-reloads the element source', v14.elementReloadKeptReady === true);
   check('changing watermark re-mounts the element (new ready promise)', v14.elementRemountNewReady === true && v14.elementReady2 === true);
+
+  console.log('\n[8g] v1.27 ready contract — first paint, not first microtask');
+  const readyContract = await page.evaluate(async () => {
+    const out = {};
+    const spacer = document.createElement('div');
+    spacer.style.height = '2400px';
+    document.body.appendChild(spacer);
+    const mkBelowFold = () => {
+      const host = document.createElement('div');
+      host.style.cssText = 'width:320px;height:200px';
+      document.body.appendChild(host);
+      return host;
+    };
+    // Default lazy loading: ready must NOT settle while below the fold.
+    const host = mkBelowFold();
+    let loadEventBeforeReady = false;
+    host.addEventListener('archx-load', () => { loadEventBeforeReady = true; });
+    const inst = window.Archx.load.image(host, '/demo/public-unprotected/aurora-valley.jpg', {
+      mode: 'shield', debug: true, rootMargin: '0px',
+    });
+    let settled = false;
+    void inst.ready.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    out.pendingBelowFold = !settled && !inst.loaded && !loadEventBeforeReady;
+    host.scrollIntoView();
+    const painted = await Promise.race([
+      inst.ready.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 10000)),
+    ]);
+    out.resolvesAfterVisiblePaint = painted === true && inst.loaded === true &&
+      loadEventBeforeReady === true && inst._debug().loadedOnce === true &&
+      inst._debug().canvas.width > 0;
+    inst.destroy();
+    host.remove();
+    // Destroy before first paint rejects (and never hangs).
+    const doomedHost = mkBelowFold();
+    const doomed = window.Archx.load.image(doomedHost, '/demo/public-unprotected/aurora-valley.jpg', {
+      mode: 'shield', debug: true, rootMargin: '0px',
+    });
+    doomed.destroy();
+    out.destroyRejects = await doomed.ready.then(() => 'resolved', (err) => String(err?.message || err));
+    doomedHost.remove();
+    // A failed first load rejects ready and fires archx-error.
+    const failHost = mkBelowFold();
+    let errorDetail = null;
+    failHost.addEventListener('archx-error', (event) => { errorDetail = String(event.detail?.error?.message || ''); });
+    const failing = window.Archx.load.image(failHost,
+      new Blob(['this is not an image payload'], { type: 'application/octet-stream' }),
+      { mode: 'shield', debug: true, lazy: false });
+    out.failureRejects = await failing.ready.then(() => 'resolved', () => 'rejected');
+    out.errorEventDetail = errorDetail;
+    failing.destroy();
+    failHost.remove();
+    spacer.remove();
+    window.scrollTo(0, 0);
+    return out;
+  });
+  check('lazy ready stays pending below the fold (no premature settle)', readyContract.pendingBelowFold === true, JSON.stringify(readyContract));
+  check('ready resolves only after visible first paint (archx-load first)', readyContract.resolvesAfterVisiblePaint === true, JSON.stringify(readyContract));
+  check('destroy before first paint rejects ready', /destroyed before first paint/.test(readyContract.destroyRejects), readyContract.destroyRejects);
+  check('failed first load rejects ready + fires archx-error with detail.error',
+    readyContract.failureRejects === 'rejected' && typeof readyContract.errorEventDetail === 'string' && readyContract.errorEventDetail.length > 0,
+    JSON.stringify(readyContract));
 
   console.log('\n[9] Performance — 100-image protected gallery');
   scaleTraffic.batchMints = 0;

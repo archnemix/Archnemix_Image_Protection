@@ -3,6 +3,90 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
+> **Publication status (clarified in 1.27.0).** Version headings below are
+> this repository's development history. The only versions ever published
+> to npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, and `1.27.0`; every other
+> heading (including ones once marked "Unreleased") was a GitHub-only
+> development version whose changes shipped folded into the next published
+> release. `npm view @archnemix/image-protection versions` is the source
+> of truth for what is installable.
+
+## [1.27.0] — 2026-11-03
+
+Contract-truth release (`docs/RESEARCH.md` §2.35), responding to an
+external review whose items were each re-verified or reproduced first.
+Derivative bytes, stego layouts 1–4, scramble plans, the container and
+token formats, displayed pixels, and server defaults are unchanged except
+for the two deliberate breaking edges below (grid creation floor;
+`ready`/production-`ok` semantics now match what the docs always said).
+
+### Fixed
+
+- **`ProtectedImage.ready` now means first paint.** It previously
+  resolved as soon as initialization returned — under default lazy
+  loading, ~2 ms after construction with nothing rendered (measured).
+  It now resolves two animation frames after the first successful
+  render, stays pending while a lazy instance is below the fold, and
+  rejects on first-load failure, integrity/automation/lockout block, or
+  destroy-before-paint. Browser regression [8g] pins all four cases.
+- **Plugin `setup()` works from the source ESM entry.** `events.js`
+  referenced an unimported `VERSION` that the bundle accidentally
+  supplied from shared scope; unbundled consumers got "setup failed"
+  for every `setup()` plugin. The version string now lives in
+  `src/client/version.js`.
+- README no longer inverts the scramble-plan default (v2 has been the
+  default since 1.15/1.17) or advises "enabling" it over pre-1.10
+  clients; the production checklist now explains the temporary v1 pin.
+
+### Changed (breaking, deliberate)
+
+- **New payloads require `grid` 8–32.** All creation paths (middleware
+  config, `scrambleImage()`, `archx-build`, both CLIs) refuse coarser
+  grids: permutation-only scrambling is a jigsaw puzzle, and keyless
+  solvers recover coarse grids (independently reproduced at grid 4).
+  Decoding legacy 2–7 payloads is unchanged everywhere.
+- **`auditArchxProductionConfig().ok` now equals `.ready`.** It
+  previously mirrored mere configuration validity, so a release gated
+  on `production.ok` shipped live blockers. The validity bit is
+  available as `configOk` on both audits (the base audit's `ok` keeps
+  its "configuration accepted" meaning). Gate releases on
+  `production.ready`.
+- `archx-build` validates payload options before probing masters or
+  creating the output directory.
+
+### Types & docs
+
+- New `ArchxProductionAudit` declaration: `auditArchxProductionConfig`
+  no longer returns the base audit type, so `production.ready` /
+  `blockers` / `recommendations` compile and the non-existent
+  production `issues` no longer does. The deployment gate in
+  `docs/OPERATIONS.md` now compiles as written (type-smoke proves it).
+- The six bubbling DOM events (`archx-load`, `archx-attempt`,
+  `archx-error`, `archx-taint-unavailable`, `archx-integrity`,
+  `archx-webgl-budget`) are documented in the README and typed
+  (`ArchxElementEventMap`, `<archx-image>` element type). Lifecycle
+  callback signatures now match the runtime `(value, instance)` calls;
+  `defineElement()` no longer promises a configurable tag name;
+  `usePlugin()` returns its `{ name, remove() }` handle; plugin,
+  telemetry-listener, `reload()`, and `ProtectedImage` surface types
+  corrected to the shipped behavior.
+- CHANGELOG backfills 1.0.0–1.4.0 (reconstructed from git history and
+  labelled as such) and states npm publication status plainly (above).
+- Website fonts are self-hosted (OFL WOFF2, `website/fonts/`); the
+  Google Fonts requests that contradicted the site README's
+  "no third-party CDNs" claim are gone.
+
+### Performance
+
+- Removed the synchronous `getBoundingClientRect()` kick from lazy
+  initialization (IntersectionObserver's initial callback already
+  covers on-screen hosts): same-box 100-image gallery main-thread task
+  time 1.63 s → 0.93 s (−43%), total −6.6%, heap unchanged, every
+  benchmarked derivative payload byte-identical. `ready` medians now
+  honestly include decode+paint; probe-measured time-to-painted is
+  unchanged within noise. Bundle 149.4 → 150.2 kB min (48.1 → 48.3 kB
+  gzip).
+
 ## [1.26.0] — 2026-11-02
 
 Stego-detect performance round (`docs/RESEARCH.md` §2.34): the
@@ -63,7 +147,7 @@ survival bench (robust 85/99, unchanged).
   magnetic cursor was also removed, restoring the plain OS
   cursor). The website is not part of the npm package payload.
 
-## [1.25.0] — 2026-11-01
+## [1.25.0] — 2026-11-01 (GitHub-only; shipped in npm 1.26.0)
 
 Orientation-tolerant leak recognition, red-team v2 section F, and a
 scroll-driven 3D motion layer for the website (`docs/RESEARCH.md`
@@ -102,7 +186,7 @@ perceptual fingerprint bit format, and token semantics are unchanged.
   registered fingerprints issued by every earlier version keep
   working unchanged.
 
-## [1.24.0] — 2026-11-01
+## [1.24.0] — 2026-11-01 (GitHub-only; shipped in npm 1.26.0)
 
 Red-team suite v2, a measured token-path optimization, one CORS
 tightening, and an interactive website pipeline walkthrough
@@ -147,7 +231,7 @@ scramble plans, pHash bits, and token semantics are unchanged.
   pre-existing wide-table overflow on the overview and limits pages
   at phone widths, masthead crowding, stage-tag sizing.
 
-## [1.23.0] — 2026-11-01
+## [1.23.0] — 2026-11-01 (GitHub-only; shipped in npm 1.26.0)
 
 Independent-audit response (`docs/RESEARCH.md` §2.31). Stego layouts
 1-4, scramble plans, pHash bits, and token semantics are unchanged;
@@ -266,7 +350,7 @@ byte-identical (135 hash cases + golden freeze + payload sizes).
   wrong one), and a MAC timing-oracle measurement
   (1.02 vs 1.01 ms medians — no signal at HTTP granularity).
 
-## [1.21.0] — 2026-10-31
+## [1.21.0] — 2026-10-31 (GitHub-only; shipped in npm 1.22.0)
 
 Final completion round (`docs/RESEARCH.md` §2.29): permissive
 relicensing, a red-team attack suite, measured everywhere.
@@ -325,7 +409,7 @@ relicensing, a red-team attack suite, measured everywhere.
   the real payload does, measured-numbers page copy, no build step
   and no third-party JavaScript (Three.js vendored).
 
-## [1.20.0] — 2026-10-31
+## [1.20.0] — 2026-10-31 (GitHub-only; shipped in npm 1.22.0)
 
 Critique response (`docs/RESEARCH.md` §2.28): a measured answer to
 the four post-release concerns about StegoMark recovery, the
@@ -380,7 +464,7 @@ byte-frozen layouts 1–3 (golden-hash regression test).
   The library floor (≥20.9, zero runtime deps) vs browser-suite
   floor (≥22.12) split is documented in README/REVIEW_GUIDE.
 
-## [1.19.0] — 2026-10-30
+## [1.19.0] — 2026-10-30 (GitHub-only; shipped in npm 1.22.0)
 
 Eighth-review response + modularity (`docs/RESEARCH.md` §2.27): ownership
 trust hardening, fail-closed width fractions, mixed-TTL replay
@@ -462,7 +546,7 @@ responsibility-based module split with unchanged public paths.
   patch; the Tardos bound keeps blind collusion-proof decoding out of
   reach of the 96-bit channel, so the assay framing stands.
 
-## [1.18.0]
+## [1.18.0] — 2026-10-29 (GitHub-only; shipped in npm 1.22.0)
 
 Seventh-review response + ownership claims (`docs/RESEARCH.md` §2.26):
 packaged-artifact proof, explicit replay-saturation and preview
@@ -523,7 +607,7 @@ metadata with layered rescan, and a measured benchmark round.
   "default", saturation "fail closed", obsolete test counts.
 
 
-## [1.17.0] — Unreleased
+## [1.17.0] — 2026-10-29 (GitHub-only; shipped in npm 1.22.0)
 
 Sixth-review response (`docs/RESEARCH.md` §2.25): client dispatch
 capture, variant-scope v2, watermark opt-out claims, detector
@@ -588,7 +672,7 @@ guardrails.
   `Reflect.apply` sabotaged.
 - DevTools polling idles while the document is hidden.
 
-## [1.16.0] — Unreleased
+## [1.16.0] — 2026-10-29 (GitHub-only; shipped in npm 1.22.0)
 
 StegoMark forensic-envelope release (`docs/RESEARCH.md` §2.24). The
 §2.20 "sync-template mark v2" item was re-measured before redesigning
@@ -630,7 +714,7 @@ already-issued mark gains the new envelope; nothing needs re-embedding.**
   sync-template mark version; see §2.24).
 - Tests: 99 Node (+1 comprehensive detector-envelope test).
 
-## [1.15.0] — Unreleased
+## [1.15.0] — 2026-10-28 (GitHub-only; shipped in npm 1.22.0)
 
 Fifth external adversarial-review response (claim-by-claim verification
 in `docs/RESEARCH.md` §2.23). Repository integration note: six of the
@@ -691,7 +775,7 @@ below was reproduced locally before it was changed.
   recovery + worker, CLI parsing) and 118 Chromium checks (+4
   post-load hook resistance).
 
-## [1.14.0] — Unreleased
+## [1.14.0] — 2026-10-28 (GitHub-only; shipped in npm 1.22.0)
 
 Fourth external adversarial-review response (claim-by-claim verification
 in `docs/RESEARCH.md` §2.22). Thirteen problems, seven server
@@ -788,7 +872,7 @@ and one was rejected with evidence.
   `{imageId}` alias, marketplace preset, `canvas2d` alias, element
   boolean/reload semantics), fuzz + type suites in `npm run verify`.
 
-## [1.13.0] — Unreleased
+## [1.13.0] — 2026-10-28 (GitHub-only; shipped in npm 1.22.0)
 
 Third external adversarial-review response (claim-by-claim verification
 in `docs/RESEARCH.md` §2.21). Seven bug groups were raised against
@@ -861,7 +945,7 @@ one documented as a knob).
 - 84 Node tests (4 new), 108 Chromium checks, fuzz + type suites in
   `npm run verify`.
 
-## [1.12.0] — Unreleased
+## [1.12.0] — 2026-10-28 (GitHub-only; shipped in npm 1.22.0)
 
 Second external adversarial-review response (claim-by-claim verification in
 `docs/RESEARCH.md` §2.20). Eight file-level findings were raised against
@@ -982,7 +1066,7 @@ not silently dropped.
 - Client bundle: 133.9 KiB minified / 43.3 KiB gzipped (+10.6/+3.2 KiB
   vs 1.11 — inline SHA-256/HMAC, canary, lens ledger, duty bias).
 
-## [1.11.0] — Unreleased
+## [1.11.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 External adversarial-review response (full verification matrix in
 `docs/RESEARCH.md` §2.19). The review's real server bugs are fixed; its
@@ -1076,7 +1160,7 @@ documented as measured, named residual risk.
   keys cached by JWK thumbprint (bounded). Bench vs v1.10: payloads and
   timings within noise; AES-GCM adds ≈0.5 ms per 960 px derivative.
 
-## [1.10.0] — Unreleased
+## [1.10.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 Industry-standard hardening round: `docs/STANDARDS.md` now maps every control
 to the external standard it answers (OWASP API Top 10 2023, RFC 9111, NIST
@@ -1154,7 +1238,7 @@ shows payloads unchanged with all timings within noise.
   use the 128-bit plan (free, ephemeral). Bench vs v1.9: identical
   payloads, timings within noise, bundle +1.1 kB (+0.4 kB gzip).
 
-## [1.9.0] — Unreleased
+## [1.9.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 Measured optimization round: every change below was benchmarked before and
 after on the same 2-vCPU machine (`npm run bench:opt`, interleaved A/B
@@ -1203,7 +1287,7 @@ smaller with identical decoded pixels.
 - 48 Node tests (new fused-scramble equality proof) and 104 Chromium
   checks.
 
-## [1.8.0] — Unreleased
+## [1.8.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 Scattered-memory display hardening: browser-enforced readback denial and
 fail-safe cache/body handling, with measurement proof that display remains
@@ -1256,7 +1340,7 @@ pixel-exact.
   tainted-canvas `SecurityError` assertions, WebGL API shadowing, and
   pixel-exact display verification.
 
-## [1.7.0] — Unreleased
+## [1.7.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 ### Added
 
@@ -1298,7 +1382,7 @@ pixel-exact.
   `Cache-Control: public, max-age=31536000, immutable` (the documented CDN
   policy); manifests and all other files still revalidate.
 
-## [1.6.0] — Unreleased
+## [1.6.0] — 2026-10-27 (GitHub-only; shipped in npm 1.22.0)
 
 ### Added
 
@@ -1345,7 +1429,7 @@ paints 100 images using two batch mint requests and no single mints. These
 are local regression measurements, not a substitute for staging capacity
 tests with the host authorization database, state store, TLS, and CDN.
 
-## [1.5.0] — Unreleased
+## [1.5.0] — 2026-10-26 (GitHub-only; shipped in npm 1.22.0)
 
 ### Added
 
@@ -1431,3 +1515,70 @@ must keep masters outside public roots and enforce `authorize()` at both
 token minting and redemption. Displayed pixels can still be captured by an
 authorized recipient, operating system, browser-privileged tool, or camera;
 see `SECURITY.md` and `docs/RESEARCH.md` for the full model.
+
+## [1.4.0] — 2026-10-25 (reconstructed in 1.27.0)
+
+Production-hardening round (commit `6a793a4`; see `docs/RESEARCH.md`
+§2.11). *Entry reconstructed from git history in 1.27.0 — 1.0–1.4 predate
+this changelog and were never published to npm.*
+
+- `createArchxMiddleware()` became a strict configuration boundary
+  (validated options, fail-closed startup) instead of a bag of settings.
+- Object-level `authorize()` re-checked at mint and redemption; the token
+  became a strict versioned claim set rather than loose signed JSON.
+- One-time use claimed atomically after signature/claim/binding checks.
+- Rate limiting gained memory bounds as well as request bounds; path
+  safety moved to indexed identity instead of string concatenation.
+- Sharp/libvips given an untrusted-input budget (source bytes, pixels,
+  dimensions, formats, timeouts) with controlled failures.
+- Screen-photography analysis added to the threat model.
+
+## [1.3.0] — 2026-10-25 (reconstructed in 1.27.0)
+
+Quality, StegoMark, custom flags, showcase (commit `f24866a`).
+
+- Blind StegoMark fingerprints with `archx-protect` / `archx-detect` CLIs
+  ("prove a leaked copy is yours" by rescanning it).
+- Mode-free custom configuration: `renderer` plus individual protection
+  flags without choosing a preset bundle.
+- Temporal/capture controls and an improved no-reload lifecycle (scroll
+  and resize repaint without re-minting).
+- All-modes luxury-watch showcase page (least-to-most-secure progression).
+
+## [1.2.0] — 2026-10-25 (reconstructed in 1.27.0)
+
+Rendered-quality preservation (commit `8d730db`; RESEARCH §2.8–2.9).
+
+- Delivery quality raised to q95 with a lossless option; token sizing
+  made cover-aware so protected rendering stopped looking "slurry".
+- DPR-3 rendering with native/oversampled tile reassembly and
+  footprint-aware WebGL sampling.
+- Dynamic Fortress capture trace; broader screenshot-signal reactions.
+- Screenshot privilege levels (page JS, extension, OS, camera) documented
+  honestly — what can and cannot be "stopped".
+
+## [1.1.0] — 2026-10-25 (reconstructed in 1.27.0)
+
+Determined-extraction hardening (commit `5709a89`; RESEARCH §2.7).
+
+- Fortress mode and the Lens (sharp disc at the pointer, pixelated rest).
+- Sealed instance internals, captured-native integrity checks, strict
+  memory handling, and strike lockouts for repeated extraction attempts.
+- Entitled one-time, browser-bound tokens; server-baked visible and
+  forensic marks.
+
+## [1.0.0] — 2026-10-25 (reconstructed in 1.27.0)
+
+Initial build (commit `e2e4ac1`).
+
+- Browser library: `Archx.load.image` / `Archx.load.gallery` and the
+  `<archx-image>` element. No `<img>` is ever created — closed shadow
+  DOM, `fetch` + `createImageBitmap` pipeline, poisoned canvas read-back
+  (black / low-res / scrambled decoys), keyed tile un-scrambling, baked
+  and forensic watermarking, WebGL vault mode with black-by-design
+  read-back, lazy/concurrency-capped galleries.
+- Server middleware: HMAC-signed expiring delivery, down-scaled +
+  8×8-tile-scrambled + optionally AES-GCM-encrypted `.archx`
+  containers, masters never served; offline pre-scramble CLI.
+- Demo with a live attack simulator and a 100-image gallery; research
+  and threat-model docs; unit + real-browser test suites.
