@@ -29,6 +29,7 @@ import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
   auditArchxServerConfig, auditArchxProductionConfig, withHardenedProductionDefaults,
   withCatalogThroughputDefaults, withPerformanceDefaults, withMaxProtectionDefaults,
+  withLiteDefaults, withEliteDefaults,
   canonicalDerivativeWidth, DEFAULT_WIDTH_BUCKETS,
   validateTokenClaims, validateImageId,
   normalizeAuthorizationResult, validateWatermarkValue, computeJwkThumbprint,
@@ -40,6 +41,7 @@ import {
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
 import { usePlugin, listPlugins, onClientEvent } from '../src/client/events.js';
+import { mergeOptions, preset as clientPreset } from '../src/client/options.js';
 import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from '../src/core/bch.js';
 import { bchStegoCodeBits, bchStegoDecode, bchStegoSolveObserved } from '../src/core/stego-code.js';
 import * as archxServerModule from '../server/middleware.js';
@@ -324,6 +326,79 @@ test('v1.27: plugin setup() receives a working versioned API in unbundled ESM', 
   assert.equal(handle.remove(), false);
   assert.ok(!listPlugins().includes('unit-probe'));
   off();
+});
+
+test('profiles: lite/performance/elite map onto pipelines, bundles lose to explicit flags, legacy names unchanged', () => {
+  // Profile bundles (the `profile` option).
+  const lite = mergeOptions({ profile: 'lite' });
+  assert.equal(lite.mode, 'lite');
+  assert.equal(lite.profile, 'lite');
+  assert.equal(lite.qualityProfile, 'catalog');
+  assert.equal(lite.requestQuality, 88);
+  assert.equal(lite.forensic, false, 'lite keeps the historical forensic-off default');
+  const perf = mergeOptions({ profile: 'performance' });
+  assert.equal(perf.mode, 'shield');
+  assert.equal(perf.requestedMode, 'performance');
+  assert.equal(perf.requestQuality, 90);
+  assert.equal(perf.sourceOversample, 1.5);
+  const elite = mergeOptions({ profile: 'elite' });
+  assert.equal(elite.mode, 'vault');
+  assert.equal(elite.requestedMode, 'elite');
+  assert.equal(elite.proofOfPossession, 'required');
+  assert.equal(elite.taintFallback, 'webgl');
+  assert.equal(elite.integrity, 'lock');
+  assert.equal(elite.memory, 'strict');
+  assert.deepEqual(elite.captureShield, { dynamicTrace: true, temporalPattern: true },
+    'the bundle object must survive fortress fill-ins');
+  // Explicit options always beat the bundle.
+  const customised = mergeOptions({ profile: 'elite', proofOfPossession: 'off', qualityProfile: 'catalog', forensic: false });
+  assert.equal(customised.proofOfPossession, 'off');
+  assert.equal(customised.qualityProfile, 'catalog');
+  assert.equal(customised.forensic, false);
+  // mode:'elite' / mode:'performance' names.
+  const eliteMode = mergeOptions({ mode: 'elite' });
+  assert.equal(eliteMode.mode, 'vault');
+  assert.equal(eliteMode.requestedMode, 'elite');
+  assert.equal(eliteMode.proofOfPossession, 'required');
+  const perfMode = mergeOptions({ mode: 'performance' });
+  assert.equal(perfMode.mode, 'shield');
+  assert.equal(perfMode.requestedMode, 'performance');
+  // Legacy names are untouched: fortress does NOT silently gain PoP-required.
+  const fortress = mergeOptions({ mode: 'fortress' });
+  assert.equal(fortress.mode, 'vault');
+  assert.equal(fortress.requestedMode, 'fortress');
+  assert.equal(fortress.proofOfPossession, 'auto');
+  // Unknown profiles fail loudly instead of silently downgrading.
+  assert.throws(() => mergeOptions({ profile: 'mega' }), TypeError);
+  // Presets expose the same three names.
+  assert.equal(clientPreset('lite').mode, 'lite');
+  assert.equal(clientPreset('performance').mode, 'performance');
+  assert.equal(clientPreset('elite').mode, 'elite');
+  assert.equal(clientPreset('maxProtection').mode, 'vault', 'legacy preset unchanged');
+});
+
+test('server profiles: lite is CPU/RAM-first, performance balanced, elite security-first, host fields win', () => {
+  const lite = withLiteDefaults({ secret: 'x'.repeat(40), imagesDir: '/tmp' });
+  assert.equal(lite.memoryProfile, 'compact');
+  assert.equal(lite.quality, 88);
+  assert.equal(lite.processing.webpEffort, 2);
+  assert.equal(lite.scrambleKeyMode, 'per-image');
+  assert.equal(lite.encrypt, true, 'security floor is not a speed trade');
+  const perf = withPerformanceDefaults({ secret: 'x'.repeat(40), imagesDir: '/tmp' });
+  assert.equal(perf.memoryProfile, undefined, 'balanced profile uses the standard memory profile');
+  assert.equal(perf.quality, 90);
+  assert.equal(perf.processing.webpEffort, 4);
+  assert.equal(perf.processing.resizeKernel, 'lanczos3');
+  assert.equal(perf.encrypt, true);
+  const elite = withEliteDefaults({ secret: 'x'.repeat(40), imagesDir: '/tmp' });
+  assert.equal(elite.maxWidthFraction, 0.6, 'elite never previews native pixels by default');
+  assert.equal(elite.proofOfPossession, 'required');
+  assert.equal(elite.scrambleKeyMode, 'per-token');
+  assert.equal(withEliteDefaults({ maxWidthFraction: 1 }).maxWidthFraction, 1, 'host override wins');
+  assert.equal(withPerformanceDefaults({ quality: 80 }).quality, 80);
+  assert.equal(withLiteDefaults({ steganography: true }).steganography.profile, 'standard');
+  assert.equal(withEliteDefaults({ steganography: true }).steganography.profile, 'robust');
+  assert.equal(withEliteDefaults({ steganography: true }).steganography.scope, 'viewer');
 });
 
 test('encrypted .archx: payload is ciphertext, decrypt+unscramble restores the image', async () => {
@@ -1820,16 +1895,25 @@ test('catalog scale helpers canonicalize widths and expose throughput trade-offs
   }
 });
 
-test('v1.23 profiles and taint audit: performance keeps the security floor, max-protection is audit-ready, taint degradation is a blocker', () => {
+test('server profiles and taint audit: lite/performance keep the security floor, max-protection is audit-ready, taint degradation is a blocker', () => {
   const base = {
     secret: 'v123-profiles-secret-for-unit-tests-32x',
     imagesDir: '/tmp/archx-v123-images',
     authorize: async () => true,
   };
+  // 1.28: the v1.23 CPU-first composition lives in withLiteDefaults;
+  // withPerformanceDefaults is the balanced composition. Both keep the
+  // encrypt + plan-v2 floor — profiles move budgets, never the floor.
+  const lite = withLiteDefaults({ ...base, steganography: true });
+  assert.equal(lite.encrypt, true);
+  assert.equal(lite.scramblePlanVersion, 2);
+  assert.equal(lite.memoryProfile, 'compact');
+  assert.deepEqual(lite.steganography, { perToken: false, scope: 'image', profile: 'standard' });
   const perf = withPerformanceDefaults({ ...base, steganography: true });
   assert.equal(perf.encrypt, true);
   assert.equal(perf.scramblePlanVersion, 2);
-  assert.equal(perf.memoryProfile, 'compact');
+  assert.equal(perf.memoryProfile, undefined, 'balanced profile keeps the standard memory profile');
+  assert.equal(perf.quality, 90);
   assert.deepEqual(perf.steganography, { perToken: false, scope: 'image', profile: 'standard' });
   const throughput = withCatalogThroughputDefaults(base);
   assert.equal(throughput.encrypt, true, 'D5: throughput preset must keep encrypt');
@@ -1848,8 +1932,10 @@ test('v1.23 profiles and taint audit: performance keeps the security floor, max-
   assert.ok(noTaint.blockers.some((b) => /taintImage endpoint/.test(b)),
     'D1: disabling the taint endpoint blocks production readiness');
 
-  assert.equal(PRESETS.performance.mode, 'shield');
+  assert.equal(PRESETS.performance.mode, 'performance', '1.28: balanced profile name (runs the shield pipeline)');
   assert.equal(PRESETS.performance.renderer, 'canvas');
+  assert.equal(PRESETS.lite.mode, 'lite');
+  assert.equal(PRESETS.elite.mode, 'elite');
   assert.equal(PRESETS.maxProtection.mode, 'vault');
   assert.equal(PRESETS.maxProtection.renderer, 'webgl');
   assert.equal(PRESETS.maxProtection.taintFallback, 'webgl');

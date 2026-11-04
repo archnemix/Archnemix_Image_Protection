@@ -12,7 +12,13 @@ export * from './scramble.js';
 export const VERSION: string;
 export const DEFAULT_SOURCE_WIDTH_BUCKETS: readonly number[];
 
-export type ArchxMode = 'lite' | 'shield' | 'vault' | 'fortress' | 'custom';
+export type ArchxMode =
+  | 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
+  /** 1.28 profile-modes: 'performance' = balanced shield pipeline; 'elite' = fortress bundle + proof-of-possession required. */
+  | 'performance' | 'elite';
+
+/** The three canonical profile bundles (1.28). Applied UNDER explicit options via the `profile` option or Archx.preset(). */
+export type ArchxProfile = 'lite' | 'performance' | 'elite';
 
 export type ArchxSource =
   | string
@@ -107,6 +113,8 @@ export interface ArchxImageElement extends HTMLElement {
 
 export interface ArchxLoadOptions {
   mode?: ArchxMode;
+  /** 1.28: canonical profile bundle applied under explicit options; unknown values throw. */
+  profile?: ArchxProfile | null;
   renderer?: 'auto' | 'webgl' | 'canvas' | 'canvas2d';
   preset?: string;
   fit?: 'cover' | 'contain' | 'fill' | 'none';

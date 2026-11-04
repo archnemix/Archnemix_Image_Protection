@@ -9,7 +9,8 @@ export const DEFAULT_SOURCE_WIDTH_BUCKETS = Object.freeze([
 ]);
 
 export const DEFAULTS = {
-  mode: 'shield',               // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom'
+  mode: 'shield',               // 'lite' | 'shield' | 'vault' | 'fortress' | 'custom' | 'performance' (=shield pipeline) | 'elite' (=fortress + PoP required)
+  profile: null,                // 1.28: null | 'lite' | 'performance' | 'elite' — applies the canonical bundle UNDER explicit options (explicit keys win); unknown values throw
   renderer: 'auto',             // 'auto' | 'canvas' | 'webgl' — direct renderer flag (lets custom setups skip preset modes)
   fit: 'cover',                 // 'cover' | 'contain' | 'fill'
   lazy: true,
@@ -117,6 +118,37 @@ export function mergeOptions(opts = {}) {
   if (opts.guards) {
     for (const [k, v] of Object.entries(opts.guards)) if (v !== undefined) merged.guards[k] = v;
   }
+  // 1.28 canonical profiles: lite (CPU/RAM/speed first), performance
+  // (balanced security + speed), elite (security first). A profile is a
+  // bundle applied UNDER explicit options: it only fills keys the caller
+  // did not set, so it is a default a deployment refines — never a
+  // lock-in. Users can always build their own default with
+  // Archx.configure() or mode:'custom' + explicit flags.
+  if (clean.profile !== undefined && clean.profile !== null) {
+    const bundleName = String(clean.profile).toLowerCase();
+    if (!['lite', 'performance', 'elite'].includes(bundleName)) {
+      throw new TypeError(`Archx: unknown profile "${clean.profile}" (known: lite, performance, elite). For a fully custom setup use mode:'custom' with explicit flags.`);
+    }
+    const bundle = structuredCloneSafe(PRESETS[bundleName]);
+    for (const [k, v] of Object.entries(bundle)) {
+      if (k === 'guards') continue;
+      if (clean[k] === undefined) {
+        merged[k] = v;
+        // Count as caller-set so later fill-ins (e.g. the fortress
+        // block's captureShield default) cannot overwrite the bundle.
+        clean[k] = v;
+      }
+    }
+    if (bundle.guards) {
+      for (const [k, v] of Object.entries(bundle.guards)) {
+        if (!opts.guards || opts.guards[k] === undefined) merged.guards[k] = v;
+      }
+    }
+    merged.profile = bundleName;
+    // Treat the bundle's quality shorthand as caller-set so its
+    // oversample/dprCap shortcuts engage below; explicit values win.
+    if (clean.qualityProfile === undefined && bundle.qualityProfile !== undefined) clean.qualityProfile = bundle.qualityProfile;
+  }
   // Quality profiles are shortcuts, not black boxes: every value below can
   // still be overridden directly (sourceOversample / dprCap / requestQuality).
   const qualityProfiles = {
@@ -161,9 +193,26 @@ export function mergeOptions(opts = {}) {
   // Preserve that default, but let an explicit `forensic: true` flag win.
   if (merged.mode === 'lite' && clean.forensic === undefined) merged.forensic = false;
 
+  // 1.28 profile-mode names, layered on the legacy pipelines so existing
+  // deployments' names keep their exact 1.x meaning and pixels:
+  // 'performance' runs the balanced shield pipeline; 'elite' runs the
+  // fortress bundle below plus sender-constrained delivery required and
+  // WebGL fallback when the taint layer is unavailable.
+  if (merged.mode === 'performance') {
+    merged.requestedMode = 'performance';
+    merged.mode = 'shield';
+  } else if (merged.mode === 'elite') {
+    merged.requestedMode = 'elite';
+    merged.mode = 'fortress';
+    if (clean.proofOfPossession === undefined) merged.proofOfPossession = 'required';
+    if (clean.taintFallback === undefined) merged.taintFallback = 'webgl';
+  } else if (merged.mode === 'fortress') {
+    merged.requestedMode = 'fortress';
+  }
+
   // Fortress: maximum-paranoia preset (explicit options still win).
   if (merged.mode === 'fortress') {
-    merged.requestedMode = 'fortress';
+    if (!merged.requestedMode) merged.requestedMode = 'fortress';
     merged.mode = 'vault';
     if (clean.onExtract === undefined) merged.onExtract = 'black';
     if (clean.integrity === undefined) merged.integrity = 'lock';
@@ -244,26 +293,53 @@ export const PRESETS = Object.freeze({
     reloadOnResize: 'upscale', forensic: true,
     captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
   }),
-  performance: Object.freeze({
-    // CPU/RAM-first profile (v1.23): every protection layer stays on,
-    // budgets shrink. 2D canvas (no GL contexts to budget), catalog
-    // sampling, batched mints, bounded bitmap cache, static loop.
-    // Server counterpart: withPerformanceDefaults().
-    mode: 'shield', renderer: 'canvas', qualityProfile: 'catalog', sourceOversample: 1,
+  // === The three canonical profiles (v1.28) ===
+  // lite: CPU/RAM/speed first. The 2D pipeline, catalog sampling,
+  // smallest caches, batched mints, static loop — every layer that costs
+  // nothing stays on (guards, taint, closed shadow DOM); the paid
+  // extras (GL, forensic blocks, temporal) stay off.
+  // Server counterpart: withLiteDefaults().
+  lite: Object.freeze({
+    mode: 'lite', renderer: 'canvas', qualityProfile: 'catalog', sourceOversample: 1,
     dprCap: 2, lazy: true, unloadOnExit: true, cacheBitmap: true, cachePayload: true,
     renderLoop: 'static', reloadOnResize: 'never', tokenBatch: true,
     tokenBatchDelayMs: 20, tokenBatchMaxDelayMs: 150,
     sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS, networkAware: true,
+    httpCache: 'default', assetHttpCache: 'default',
     bitmapCacheMaxEntries: 16, bitmapCacheMaxBytes: 96 * 1024 * 1024,
+    taintFallback: 'warn',
+    guards: Object.freeze({ blurOnBlur: false }),
+  }),
+  // performance: the balanced default (rebalanced in v1.28; the v1.23
+  // CPU-first composition moved to 'lite'). Shield pipeline with the
+  // taint layer, balanced sampling, forensic blocks, moderate caches,
+  // batched mints. Server counterpart: withPerformanceDefaults().
+  performance: Object.freeze({
+    mode: 'performance', renderer: 'canvas', qualityProfile: 'balanced',
+    sourceOversample: 1.5, dprCap: 2.5, lazy: true, cacheBitmap: true,
+    cachePayload: true, renderLoop: 'static', reloadOnResize: 'upscale',
+    tokenBatch: true, tokenBatchDelayMs: 20, tokenBatchMaxDelayMs: 150,
+    sourceWidthBuckets: DEFAULT_SOURCE_WIDTH_BUCKETS, networkAware: true,
+    bitmapCacheMaxEntries: 24, bitmapCacheMaxBytes: 128 * 1024 * 1024,
     taintFallback: 'warn', forensic: true,
     guards: Object.freeze({ blurOnBlur: false }),
   }),
+  // elite: security first — everything that can harden, on. WebGL
+  // pipeline (black readback), fortress extras (integrity lock, strict
+  // memory, local scramble, strikes, devtools guard), sender-constrained
+  // tokens required, 60 Hz temporal interlace, dynamic trace. Budgets
+  // are spent on protection, not removed.
+  // Server counterpart: withEliteDefaults().
+  elite: Object.freeze({
+    mode: 'elite', renderer: 'webgl', qualityProfile: 'original', onExtract: 'black',
+    taintFallback: 'webgl', proofOfPossession: 'required', forensic: true,
+    temporalInterlace: 'balanced60',
+    captureShield: Object.freeze({ dynamicTrace: true, temporalPattern: true }),
+    cacheBitmap: true, cachePayload: true, renderLoop: 'auto', reloadOnResize: 'upscale',
+  }),
   maxProtection: Object.freeze({
-    // Protection + content-identification first (v1.23, the
-    // state-of-the-art profile): WebGL renderer (black readback),
-    // taint-or-promote, sender-constrained tokens required, 60 Hz
-    // temporal interlace, dynamic trace, forensic blocks. Still
-    // budget-bounded — budgets are spent on protection, not removed.
+    // Legacy (v1.23) alias, kept working unchanged: vault + WebGL +
+    // PoP required + temporal, without the fortress extras elite adds.
     // Server counterpart: withMaxProtectionDefaults().
     mode: 'vault', renderer: 'webgl', qualityProfile: 'original', onExtract: 'black',
     taintFallback: 'webgl', proofOfPossession: 'required', forensic: true,

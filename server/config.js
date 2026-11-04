@@ -986,24 +986,79 @@ export function withCatalogThroughputDefaults(options = {}) {
 }
 
 /**
- * Performance profile (v1.23): CPU/RAM-first composition for image-heavy
- * catalogs. Every protection layer remains available; what changes is
- * where the budgets sit — shared canonical derivatives, bounded caches,
- * compact memory profile, and (via withCatalogThroughputDefaults) the
- * unchanged security floor of encrypt:true + scramblePlanVersion:2.
- * StegoMark enabled as `true` uses the shared per-image standard
- * profile so marked derivatives stay reusable across viewers.
- * Client counterpart: Archx.preset('performance').
+ * Lite profile (v1.28 canonical): CPU/RAM/speed first. This is the
+ * composition `withPerformanceDefaults` carried in v1.23–1.27, renamed
+ * to match the three-profile model: catalog throughput (canonical
+ * widths, shared derivatives, faster WebP, per-image keys), compact
+ * memory profile, and — when StegoMark is enabled as `true` — the
+ * shared per-image standard profile so marked derivatives stay
+ * reusable across viewers. The security floor is untouched
+ * (encrypt:true + scramblePlanVersion:2 via the catalog composition);
+ * host-supplied fields still win everywhere.
+ * Client counterpart: profile:'lite' / Archx.preset('lite').
  */
-export function withPerformanceDefaults(options = {}) {
+export function withLiteDefaults(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
-    throw new TypeError('Archx performance defaults: options must be an object');
+    throw new TypeError('Archx lite defaults: options must be an object');
   }
   const out = withCatalogThroughputDefaults({ memoryProfile: 'compact', ...options });
   if (options.steganography === true) {
     out.steganography = { perToken: false, scope: 'image', profile: 'standard' };
   }
   return out;
+}
+
+/**
+ * Performance profile (rebalanced in v1.28): the balanced default —
+ * security + speed + RAM + CPU. It keeps the catalog composition's
+ * sharing economics (canonical widths, per-image keys, batch mints,
+ * image-scoped marks) but spends a little more per derivative where
+ * buyers feel it: quality 90, full-effort WebP (effort 4, smart
+ * subsample), lanczos3 resize, and the standard (non-compact) memory
+ * profile. Everything remains host-overridable.
+ *
+ * Migration: in v1.23–1.27 this helper was the CPU/RAM-first
+ * composition; that exact composition now lives in withLiteDefaults().
+ * Client counterpart: profile:'performance' / Archx.preset('performance').
+ */
+export function withPerformanceDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx performance defaults: options must be an object');
+  }
+  const processing = isPlainObject(options.processing) ? options.processing : {};
+  const out = withCatalogThroughputDefaults({
+    quality: 90,
+    ...options,
+    processing: {
+      webpEffort: 4,
+      webpSmartSubsample: true,
+      resizeKernel: 'lanczos3',
+      ...processing,
+    },
+  });
+  if (options.steganography === true) {
+    out.steganography = { perToken: false, scope: 'image', profile: 'standard' };
+  }
+  return out;
+}
+
+/**
+ * Elite profile (v1.28 canonical): security first — everything that can
+ * harden, on. The max-protection composition (hardened baseline:
+ * sender-constrained one-time tokens, per-token keys, strict replay
+ * saturation, encrypted 120-second payloads, abuse deny, per-viewer
+ * robust StegoMark when enabled) plus a `maxWidthFraction` of 0.6 so
+ * previews never ship native-resolution pixels unless the host
+ * explicitly says otherwise. Budgets stay bounded by design; they are
+ * spent on protection and attribution depth rather than throughput.
+ * Host fields win: pass `maxWidthFraction: 1` only with eyes open.
+ * Client counterpart: profile:'elite' / Archx.preset('elite').
+ */
+export function withEliteDefaults(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('Archx elite defaults: options must be an object');
+  }
+  return withMaxProtectionDefaults({ maxWidthFraction: 0.6, ...options });
 }
 
 /**

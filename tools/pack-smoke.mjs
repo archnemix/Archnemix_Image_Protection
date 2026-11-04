@@ -24,7 +24,16 @@ const step = (name, fn) => {
   try { fn(); console.log(`  ok  ${name}`); }
   catch (err) { failures.push(`${name}: ${err.message}`); console.log(`FAIL  ${name}: ${err.message}`); }
 };
-const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+// Windows: npm/npx are .cmd shims, which execFile cannot spawn without a
+// shell (and Node ≥ 20 refuses .cmd spawns without shell:true entirely).
+// Routing just those two through the shell keeps the tool identical on
+// Linux/macOS and runnable on Windows — the v1.28 CI parity gate caught
+// this on its first run.
+const IS_WIN = process.platform === 'win32';
+const needsShell = (cmd) => IS_WIN && (cmd === 'npm' || cmd === 'npx');
+const run = (cmd, args, opts = {}) => execFileSync(cmd, args, {
+  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: needsShell(cmd), ...opts,
+});
 
 console.log(`pack-smoke workspace: ${work}`);
 let tarball;
@@ -84,7 +93,7 @@ step('ESM/CJS/subpath imports + worker detect from artifact', () => {
 
 step('CLI bins run from artifact', () => {
   for (const bin of ['archx-detect', 'archx-protect', 'archx-build']) {
-    const r = spawnSync('npx', [bin, '--help'], { cwd: appDir, encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync('npx', [bin, '--help'], { cwd: appDir, encoding: 'utf8', timeout: 60_000, shell: IS_WIN });
     const text = `${r.stdout || ''}${r.stderr || ''}`;
     if (!/archx/i.test(text)) throw new Error(`${bin} --help produced no recognizable output (exit ${r.status})`);
   }
@@ -98,7 +107,9 @@ step('SRI matches shipped bundle', () => {
 });
 
 step('TypeScript imports type-check against artifact', () => {
-  const tsc = path.join(repoRoot, 'node_modules/.bin/tsc');
+  // node_modules/.bin/tsc is a POSIX shell shim (tsc.cmd on Windows);
+  // running the compiler's JS entry with this same Node works everywhere.
+  const tsc = path.join(repoRoot, 'node_modules/typescript/bin/tsc');
   if (!fs.existsSync(tsc)) throw new Error('repo tsc not available');
   fs.writeFileSync(path.join(appDir, 'smoke.ts'), `
 import Archx, { assayStegoCollusion } from '${name}';
@@ -106,7 +117,7 @@ import { createArchxMiddleware, batchDetectStegoInWorker } from '${name}/server'
 const v: string = Archx ? 'x' : 'y';
 void v; void assayStegoCollusion; void createArchxMiddleware; void batchDetectStegoInWorker;
 `);
-  run(tsc, ['--noEmit', '--strict', '--skipLibCheck', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'smoke.ts'], { cwd: appDir, timeout: 120_000 });
+  run(process.execPath, [tsc, '--noEmit', '--strict', '--skipLibCheck', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'smoke.ts'], { cwd: appDir, timeout: 120_000 });
 });
 
 if (tarball && fs.existsSync(tarball)) fs.rmSync(tarball);

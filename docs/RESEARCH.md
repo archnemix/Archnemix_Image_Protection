@@ -3695,3 +3695,79 @@ server default except the new grid creation floor and the production
 audit's `ok` meaning. The grid floor and the `ready`/`ok` semantics
 are the round's two intentional breaking edges; both close a
 documented contract that the code previously violated.
+
+### 2.36 v1.28 — three canonical profiles, paper-backed choices, modern-attack red team, Windows parity
+
+**Mandate.** Collapse the discoverable defaults to three named profiles —
+`lite` (CPU/RAM/speed), `performance` (balanced), `elite`
+(security-first) — while keeping full custom control; ground the
+choices in named research; harden testing like an attacking team would;
+make Linux **and** Windows first-class in CI; and make doc
+contradictions mechanically impossible to ship.
+
+**Research.** `docs/PAPERS.md` is the new registry: 52 entries across
+scramble cryptanalysis (Jolfaei et al. TIFS 2016; Chengqing Li et al. 2016;
+ETC jigsaw attacks arXiv:2305.04543/2207.08109), watermark removal
+(Zhao et al. NeurIPS 2024; Ni et al. arXiv:2510.05978; Mareen et al. ICSPCS
+2024), token/API abuse (RFC 9449 DPoP; OWASP API Top 10 2023; Kettle
+2019/2025 desync work; Gil 2017 + Berto et al. 2024 + Doyhenard 2024 cache
+deception line), formats/platform (Sharp/libvips docs; AVIF-vs-WebP
+2025/2026 measurements; MDN `createImageBitmap`/`ImageDecoder` status),
+fingerprinting (Yang et al. USENIX Security 2025 CertPHasH; C2PA
+limitations), and process (ASVS, SP 800-38D, CodeQL). Each entry records
+name, main point, and the Archx decision it drives. Decisions this
+round: profiles are **budget placements over existing, paper-defensible
+layers**, not new primitives — scramble≠secrecy (AES floor untouched in
+all three), marks=evidence (elite spends on per-viewer identification,
+not on "AI-proof" claims), WebP stays the request-path default (AVIF
+encode is 1–2 s/image class), `createImageBitmap` stays the decode
+default (`ImageDecoder` still preview-only on Safari), and the same
+capability exposes a speed strategy and a security strategy per layer
+(canvas vs WebGL readback, per-image vs per-token keys, shared vs
+per-viewer marks, evict vs deny replay saturation, effort-2 vs
+full-effort encodes).
+
+**Measured.** Profile first paint (construct→`ready`, 7-run medians,
+headless Chromium 138, software GL, 960×640 JPEG in a 480×320 box,
+temporal held off for comparability): lite 52.9 ms, performance
+52.9 ms, elite 236.5 ms. JS-heap deltas were below `performance.memory`
+granularity after destroy/GC and are reported as unmeasurable rather
+than estimated. Read: lite/performance diverge in **server payload
+policy** (q88 catalog vs q90 balanced, cache budgets), elite pays real
+GL setup per image (budget 8 contexts) — exactly why elite is for
+heroes, not grids.
+
+**Compatibility choices.** Legacy mode names keep bit-exact behavior —
+`fortress` did not silently gain PoP-required; only the *new* names
+(`profile`, `mode:'elite'`) carry it. Two renames were deliberate and
+are called out as breaking-in-meaning: the 1.23 CPU-first
+`performance` composition moved to `lite`/`withLiteDefaults()`
+(identical values), and `performance` now means balanced. Elite's new
+server default `maxWidthFraction: 0.6` applies only to
+`withEliteDefaults()` adopters; `withMaxProtectionDefaults()` output is
+unchanged.
+
+**Red team.** v2 grew a §F from the 2024–2025 cache/desync literature
+(static-extension deception, path params, duplicate widths, Range,
+HEAD non-consumption, query-token refusal, encoded traversal,
+Unicode-confusable ids, 8 KB targets): 32/32 held. One initial
+case asserted rejection of malformed `bw` at redemption; the code
+correctly ignores redemption-time sizing (width is claim-bound), so the
+case now asserts the true invariant (mint rejects; envelope
+immutable) — recorded here because mis-specified tests are how suites
+learn to lie.
+
+**Platforms.** Windows joined CI (lint/build/types/docs-gate/unit+fuzz/
+pack) and caught a real bug on its first run: everything passed except
+the pack smoke, which spawned `npm`/`npx` `.cmd` shims without a shell
+(Node refuses that on Windows) and executed the POSIX `.bin/tsc` shim;
+fixed by shelling only where Windows requires it and running tsc via
+its JS entry — the canonical "works on my OS" class, now gated forever.
+Excluded with reasons, not silence: browser suite (bundled
+Chromium is a Linux build) and real-Redis (service containers are
+Linux-only). `.gitattributes` forces LF so byte-compared fixtures mean
+the same thing after a Windows checkout. macOS: still no Mac, still no
+claim. `npm run docs:check` recomputes version/counts/sizes/SRI and
+fails on any disagreement across README, website, CHANGELOG, and code;
+it found three stale numbers on its first run, which is the argument
+for its existence.
