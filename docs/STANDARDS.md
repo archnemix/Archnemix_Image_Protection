@@ -93,6 +93,16 @@ called out as a gap with its disposition.
 | Accessibility | Met (basic) — `alt` drives `role="img"`/`aria-label`, canvas is `aria-hidden`, `prefers-reduced-motion` disables flicker features by default; see COMPATIBILITY.md |
 | Compatibility honesty | Met — COMPATIBILITY.md lists tested vs untested surfaces and per-feature fallbacks |
 
+## I. Operability (v1.29)
+
+| Control | Status / evidence |
+|---|---|
+| Health/readiness endpoint | Met (opt-in) — `createArchxHealthHandler(handler)` returns 200/503 from the construction-time audit, counts only, `no-store`; host mounts it internally |
+| Metrics export | Met (opt-in) — `formatPrometheusMetrics(handler.stats())` emits Prometheus text (token/proof consumption counters, derivative-cache counters, queue/cache gauges, info labels); no secrets or per-viewer series |
+| Structured logging | Met (opt-in) — `createJsonEventLogger` writes JSON lines from the already-structured, metadata-only security/delivery events; raw IP/viewer id dropped by default |
+| Graceful shutdown | Met (opt-in) — `installArchxShutdown({server, handler})` drains HTTP, releases Archx state via `handler.close()`, forced exit on timeout/second signal |
+| Durable log storage, alerting, KMS/HSM custody, SLA/certifications | Host-owned / **not claimed** (see non-goals) |
+
 ## Explicit non-goals (so nobody has to guess)
 
 - **Not DRM** and not screenshot prevention: no web technology can veto

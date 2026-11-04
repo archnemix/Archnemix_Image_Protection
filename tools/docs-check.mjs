@@ -57,6 +57,49 @@ else {
   if (Number(stat[2]) !== BROWSER_RUNTIME) fail(`website browser-check stat ${stat[2]} != ${BROWSER_RUNTIME}`);
 }
 
+// ---- 2b. test-count claims anywhere in current-facing prose (G-1) ----
+// v1.28's gate only checked README + the website stat; REVIEW_GUIDE and
+// COMPATIBILITY then carried stale counts while the gate printed "all
+// agree". Historical logs (RESEARCH.md, CHANGELOG.md, PAPERS.md) are
+// exempt by design — their numbers are true at their version.
+const PROSE_EXEMPT = new Set(['docs/RESEARCH.md', 'docs/PAPERS.md']);
+const proseFiles = [
+  ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
+  'SECURITY.md', 'website/index.html', 'website/technical.html', 'website/limits.html',
+].filter((rel) => !PROSE_EXEMPT.has(rel) && fs.existsSync(path.join(root, rel)));
+const COUNT_PATTERNS = [
+  [/(\d+) browser checks/g, BROWSER_RUNTIME, 'browser checks'],
+  [/(\d+) unit\/integration tests/g, unitStatic, 'unit tests'],
+  [/(\d+)(?:\/\d+)? Node tests/g, unitStatic + fuzzStatic, 'total Node tests'],
+  [/\((\d+) unit \+ \d+/g, unitStatic, 'unit tests in breakdown'],
+  [/\(\d+ unit \+ (\d+) (?:seeded )?fuzz/g, fuzzStatic, 'fuzz tests in breakdown'],
+];
+for (const rel of proseFiles) {
+  const text = read(rel);
+  for (const [re, expected, label] of COUNT_PATTERNS) {
+    for (const m of text.matchAll(re)) {
+      if (Number(m[1]) !== expected) fail(`${rel} prints ${m[1]} for ${label}; the suites currently define ${expected}`);
+    }
+  }
+}
+
+// ---- 2c. website bench stats vs the recorded evidence artifact (G-2) ----
+const evidencePath = path.join(root, 'docs/evidence/stego-bench.json');
+if (!fs.existsSync(evidencePath)) {
+  fail('docs/evidence/stego-bench.json missing — run: npm run demo:images && npm run bench:stego:evidence');
+} else {
+  const ev = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+  const slashStats = [...siteIndex.matchAll(/(\d+)<span class="stat-of">\/(\d+)<\/span>/g)]
+    .map((m) => ({ n: Number(m[1]), d: Number(m[2]) }));
+  const [recovery, falseAcc] = slashStats;
+  if (!recovery || recovery.n !== ev.robust.found || recovery.d !== ev.robust.total) {
+    fail(`website re-identification stat ${recovery ? `${recovery.n}/${recovery.d}` : '(not found)'} != bench evidence robust ${ev.robust.found}/${ev.robust.total} — re-run the bench or fix the page`);
+  }
+  if (!falseAcc || falseAcc.n !== ev.falsePositives.count || falseAcc.d !== ev.falsePositives.checks) {
+    fail(`website false-accusation stat ${falseAcc ? `${falseAcc.n}/${falseAcc.d}` : '(not found)'} != bench evidence FP ${ev.falsePositives.count}/${ev.falsePositives.checks} — re-run the bench or fix the page`);
+  }
+}
+
 // ---- 3. bundle size + SRI vs the real dist build ----
 const distPath = path.join(root, 'dist', 'archx.min.js');
 if (!fs.existsSync(distPath)) {

@@ -13,6 +13,69 @@ here. The project follows semantic versioning once a version is released.
 > release. `npm view @archnemix/image-protection versions` is the source
 > of truth for what is installable.
 
+## [1.29.0] — 2026-11-04
+
+Review #9 remediation: two real bugs fixed, five doc contradictions
+closed, four coverage gaps gated, and the deployment-operations
+surface (health/metrics/logging/shutdown) shipped. No pixels, token
+claims, or on-disk formats change.
+
+- **BUG-1 (medium): watermark objects skipped the control-character
+  check.** `validateWatermarkValue` rejected C0 control bytes in the
+  string form but not in `{ text }` / `{ color }` — so a NUL/BEL from
+  a copy-paste or DB field passed startup and both audits, then made
+  librsvg reject every watermark SVG: total delivery outage (415s)
+  with every health surface reporting fine. Both branches now share
+  one rule; the middleware refuses the deployment at construction.
+  (The `{buyer}`-placeholder path already re-validated after
+  substitution and was safe.)
+- **BUG-2 (low): `isPathInside` returned true for the immediate
+  parent** (`path.relative` yields exactly `'..'`, which has no
+  `'..' + sep` prefix). No shipped call site was reachable — all
+  constrain the child first, and `pathsOverlap` failures fell toward
+  refusing to start — but the predicate is now correct for every
+  shape, with regression tests including Windows-shaped paths.
+- **Operations helpers** (`server/ops.js`, all opt-in, zero
+  dependencies, off the hot path): `createArchxHealthHandler` —
+  200/503 readiness from the construction-time audit (counts only);
+  `formatPrometheusMetrics` — Prometheus text from
+  `handler.stats()` (consumption/cache counters, queue gauges, info
+  labels); `createJsonEventLogger` — JSON-lines security/delivery
+  logs with raw IPs/viewer ids dropped by default;
+  `installArchxShutdown` — SIGTERM/SIGINT drain → `handler.close()`
+  → exit. OPERATIONS §5.1 documents mount patterns; STANDARDS §I
+  maps the controls. Durable storage, alerting, KMS custody, and
+  certifications remain host-owned and unclaimed.
+- **Types now mirror the server allowlists.** `ArchxProcessingOptions`
+  carries all 25 processing keys (including every DoS cap) with no
+  index signature, and `quotas` is the exact five-key `ArchxQuotas` —
+  a typo like `perviewer` or `maxInputByte` now fails in `tsc`
+  instead of silently doing nothing (the server already rejected
+  unknown keys at startup; types now say so). Proven with
+  `@ts-expect-error` assertions in the type smoke.
+- **Contradictions closed.** SECURITY.md described stego layout v2
+  as current (two generations stale; default is v3 since 1.14, BCH
+  v4 opt-in since 1.20) — corrected. The landing-page illustration
+  offered a 4×4 grid the product refuses to create — now 8/16/32
+  with the reason printed. COMPATIBILITY/REVIEW_GUIDE test counts
+  updated (129 browser; 147 = 140 unit + 7 fuzz). COMPATIBILITY's
+  "all creation paths" grid wording now scopes the claim and
+  explains why low-level `buildScramblePlan()` still accepts 2–7
+  (legacy decode). A RESEARCH size citation is explicitly dated.
+- **Gate gaps closed.** `docs:check` now scans test-count claims in
+  all current-facing prose (docs, SECURITY.md, website HTML;
+  historical logs exempt) and verifies the website's two bench
+  stats against a committed evidence artifact
+  (`docs/evidence/stego-bench.json`, regenerated via
+  `npm run bench:stego:evidence`). Fresh bench this round:
+  robust 85/99, standard 63/99, false positives 0/369 — reproduced
+  exactly. A harsher chained measurement (crop 70% → resize 50% →
+  JPEG q70) recovered 5/6 on this corpus with a 60 s forensic
+  budget; the website label now says "single transforms" for
+  precision. Chained/geometric survival remains the known weak
+  axis versus commercial sync-template systems — unchanged,
+  documented, not claimed away.
+
 ## [1.28.0] — 2026-11-04
 
 Three canonical profiles — **lite / performance / elite** — on the client

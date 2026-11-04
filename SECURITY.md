@@ -111,12 +111,18 @@ pre-1.12 codeword: gates for it are deliberately tighter, the CLI
 warns, and it must be corroborated before attribution — or the mark
 re-issued under v2. Detectors older than v1.12 cannot read v2 marks
 and may report spurious repaired decodes against them; upgrade
-detection tooling before relying on new marks. Since v1.13 the cell
-layout itself is seeded at 128 bits (`layoutVersion: 2`, dual-read
-with the vintage reported as `layoutVersion`), so the same
-detectors-first rule applies to layout v2 marks; embed with
-`layoutVersion: 1` only where an unupgraded detector must read new
-marks, and prefer re-issuance.
+detection tooling before relying on new marks. The cell layout is
+versioned the same way: v1.13 introduced the 128-bit-seeded
+`layoutVersion: 2`; **since v1.14, embeds default to the
+SHA-256-seeded `layoutVersion: 3`**, and v1.20 added the opt-in
+error-correcting `layoutVersion: 4` (BCH). Detectors dual-read older
+layouts and report the vintage as `layoutVersion`; a detector older
+than the layout cannot read it. The operators' rule is unchanged —
+upgrade detection tooling first, embed with an older
+`layoutVersion` only where an unupgraded detector must read new
+marks, and prefer re-issuance. (This paragraph was two layout
+generations stale until v1.29; the code and `docs/COMPATIBILITY.md`
+were already correct — `layoutVersion: 3` is the default.)
 
 Two deliberate, configurable trade-offs deserve explicit operator
 choices rather than defaults discovered by accident:

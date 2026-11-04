@@ -61,9 +61,9 @@
       <div class="stage-tools">
         <span class="tools-label">Grid</span>
         <span class="seg" id="gridSeg" role="group" aria-label="Tile grid size">
-          <button type="button" data-g="4">4×4</button>
           <button type="button" data-g="8" class="is-active">8×8</button>
           <button type="button" data-g="16">16×16</button>
+          <button type="button" data-g="32">32×32</button>
         </span>
         <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
         <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>
@@ -71,7 +71,9 @@
       <p class="fineprint"><strong>No live demo on this static website:</strong> the hero is an explanatory
       illustration only. There is no Archx server here to authorize a viewer, mint and spend a token,
       keep a master private, or build a Sharp derivative — that server is the main protection boundary.
-      The real end-to-end demo is run locally from the GitHub repository.</p>
+      The real end-to-end demo is run locally from the GitHub repository. The grid choices above
+      (8–32) are the same range the product permits for new payloads: coarser grids are refused
+      at creation because tile-edge jigsaw solvers reassemble them without any key.</p>
     </figure>
 
     <div class="install-row">
@@ -169,10 +171,10 @@
     suites shipped in the repository. Run them yourself:
     <span class="mono">npm run bench:stego</span>, <span class="mono">npm run redteam</span>.</p>
     <div class="stats">
-      <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after crops, resizes, recompression &amp; screenshots (robust fingerprint profile)</span></div>
+      <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after a crop, resize, recompression or screenshot (single transforms &mdash; chained attacks do worse, measured in the research notes)</span></div>
       <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">false accusations — unmarked images checked against wrong keys never produced a fingerprint</span></div>
       <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">red-team attacks held — plus a second 32-case suite (HTTP ambiguity, prototype pollution, collusion averaging, orientation-damaged leaks, cache-deception shapes): 32/32</span></div>
-      <div class="stat"><span class="stat-n">146<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
+      <div class="stat"><span class="stat-n">147<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
     </div>
     <aside class="honest">
       <h3>The honest limits</h3>

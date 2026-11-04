@@ -294,6 +294,13 @@ quality/format, baked marks, and encoder settings), not a viewer ID by
 default; that is what lets one authorized catalog derivative be generated
 once and reused safely by later authorized viewers. Monitor
 `handler.stats().derivativeCache` on a private operations route.
+Since 1.29 the standard deployment pieces ship as helpers:
+`createArchxHealthHandler(handler)` (200/503 readiness from the startup
+audit), `formatPrometheusMetrics(handler.stats())` (Prometheus text for
+your scraper), `createJsonEventLogger(write)` (JSON-lines
+security/delivery logs, raw IPs/viewer ids dropped by default), and
+`installArchxShutdown({ server, handler })` (SIGTERM/SIGINT drain →
+`handler.close()` → exit). See OPERATIONS §5.1 for mount patterns.
 
 Galleries also no longer need one mint HTTP request per thumbnail. The
 middleware exposes `POST {basePath}/tokens`; every batch item still runs ID
@@ -775,7 +782,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 ```bash
 npm run lint        # node --check over every shipped/test source file
 npm run docs:check  # version/test-count/bundle-size/SRI agreement across README, website, and code
-npm test            # 139 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 140 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,

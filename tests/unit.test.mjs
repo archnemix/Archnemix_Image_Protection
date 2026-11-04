@@ -45,6 +45,8 @@ import { mergeOptions, preset as clientPreset } from '../src/client/options.js';
 import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from '../src/core/bch.js';
 import { bchStegoCodeBits, bchStegoDecode, bchStegoSolveObserved } from '../src/core/stego-code.js';
 import * as archxServerModule from '../server/middleware.js';
+import { isPathInside, pathsOverlap } from '../server/config.js';
+import { formatPrometheusMetrics, createArchxHealthHandler, installArchxShutdown, createJsonEventLogger } from '../server/ops.js';
 
 function signTokenForTest(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -375,6 +377,84 @@ test('profiles: lite/performance/elite map onto pipelines, bundles lose to expli
   assert.equal(clientPreset('performance').mode, 'performance');
   assert.equal(clientPreset('elite').mode, 'elite');
   assert.equal(clientPreset('maxProtection').mode, 'vault', 'legacy preset unchanged');
+});
+
+test('ops helpers: Prometheus metrics, health endpoint, graceful shutdown, JSONL event logger', async () => {
+  // Metrics rendering: gauges vs counters, snake_case, info labels, no NaN.
+  const text = formatPrometheusMetrics({
+    images: 7, deploymentMode: 'middleware', stateStore: 'redis', stateStoreShared: true,
+    consumedTokens: 41, consumedProofs: 9, processingActive: 2, processingQueued: 0,
+    sharedCacheBytes: 2048,
+    derivativeCache: { memoryHits: 100, diskHits: 5, sharedHits: 2, misses: 11, coalesced: 3, diskWrites: 6, sharedWrites: 1, diskEntries: 4, diskBytes: 99, diskPrunes: 1, diskErrors: 0 },
+  });
+  assert.match(text, /archx_info\{version="1\.2\d\.\d+"/);
+  assert.match(text, /# TYPE archx_consumed_tokens counter\narchx_consumed_tokens 41/);
+  assert.match(text, /# TYPE archx_processing_active gauge\narchx_processing_active 2/);
+  assert.match(text, /archx_derivative_cache_memory_hits 100/);
+  assert.ok(!/NaN|Infinity|undefined/.test(text), 'metrics never emit non-finite values');
+  assert.throws(() => formatPrometheusMetrics(null), TypeError);
+
+  // Health endpoint: ready/misconfigured states, HEAD, 405, no-store.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-ops-health-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: 'ops-health-secret-with-32-plus-chars!', imagesDir: dir, authorize: async () => true,
+  });
+  const health = createArchxHealthHandler(handler);
+  const srv = http.createServer((req, res) => health(req, res));
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const ok = await fetch(`${base}/healthz`);
+  const okBody = await ok.json();
+  assert.equal(ok.status, 200);
+  assert.equal(okBody.ready, true);
+  assert.equal(okBody.configIssues, 0);
+  assert.equal(ok.headers.get('cache-control'), 'no-store');
+  const head = await fetch(`${base}/healthz`, { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+  const post = await fetch(`${base}/healthz`, { method: 'POST' });
+  assert.equal(post.status, 405);
+  await new Promise((r) => srv.close(r));
+  handler.close();
+  // A handler whose construction-time audit failed cannot exist (the
+  // factory throws), but a health handler refuses non-handlers loudly.
+  assert.throws(() => createArchxHealthHandler({}), TypeError);
+
+  // Graceful shutdown: first signal drains + closes + exits 0; the
+  // uninstaller detaches listeners. Driven via injected emitter/exit.
+  const events = [];
+  const emitter = new (await import('node:events')).EventEmitter();
+  const fakeServer = { close: (cb) => { events.push('server-close'); cb(); } };
+  const fakeHandler = { close: () => events.push('handler-close') };
+  const uninstall = installArchxShutdown({
+    server: fakeServer, handler: fakeHandler, emitter,
+    exit: (code) => events.push(`exit-${code}`), timeoutMs: 50,
+  });
+  emitter.emit('SIGTERM');
+  assert.deepEqual(events, ['server-close', 'handler-close', 'exit-0']);
+  uninstall();
+  emitter.emit('SIGTERM');
+  assert.equal(events.length, 3, 'uninstalled shutdown no longer reacts');
+
+  // JSONL logger: structured, redacted, never throws on hostile events.
+  const lines = [];
+  const log = createJsonEventLogger((l) => lines.push(l));
+  log.onSecurityEvent({
+    type: 'archx.token_rejected', ip: '203.0.113.7', viewerId: 'buyer-9',
+    actor: { ip: '203.0.113.7', viewerHash: 'vh-abc' }, reason: 'bad-signature',
+  });
+  const parsed = JSON.parse(lines[0]);
+  assert.equal(parsed.kind, 'security');
+  assert.equal(parsed.level, 'warn');
+  assert.ok(!lines[0].includes('203.0.113.7'), 'raw IP never reaches the log by default');
+  assert.ok(!lines[0].includes('buyer-9'), 'raw viewerId never reaches the log by default');
+  assert.equal(parsed.actor.viewerHash, 'vh-abc');
+  const hostile = { type: 'x' };
+  hostile.self = hostile;
+  log.onDelivery(hostile);
+  assert.equal(JSON.parse(lines[1]).kind, 'delivery', 'circular events degrade safely');
+  assert.throws(() => createJsonEventLogger('nope'), TypeError);
 });
 
 test('server profiles: lite is CPU/RAM-first, performance balanced, elite security-first, host fields win', () => {
@@ -1026,6 +1106,35 @@ test('v1.5 strict configuration rejects typos, weak-secret bypasses, and ambiguo
   assert.equal(validateWatermarkValue({ text: '© Studio', opacity: 0.2, tile: false }), true);
   assert.equal(validateWatermarkValue({ text: 'x'.repeat(513) }), false);
   assert.equal(validateWatermarkValue({ angle: '0);evil' }), false);
+  // Review #9 BUG-1: the object branch once skipped the control-character
+  // rule the string branch enforces, so a NUL/BEL in {text}/{color}
+  // passed startup + audits and then failed every delivery with 415
+  // (librsvg rejects the raw control byte in the watermark SVG). Both
+  // shapes must now be rejected at the same boundary.
+  assert.equal(validateWatermarkValue('a\u0000b'), false, 'string form: NUL rejected');
+  assert.equal(validateWatermarkValue({ text: 'a\u0000b' }), false, 'object text: NUL rejected');
+  assert.equal(validateWatermarkValue({ text: 'a\u0007b' }), false, 'object text: BEL rejected');
+  assert.equal(validateWatermarkValue({ text: 'ok', color: '#fff\u0000' }), false, 'object color: NUL rejected');
+  assert.equal(validateWatermarkValue({ text: 'ok', corner: false }), true, 'demo shape stays valid');
+  assert.equal(validateWatermarkValue({ text: 'tab\tnewline\nallowed' }), true, 'tab/newline are not C0-blocked');
+  assert.throws(() => createArchxMiddleware({
+    secret: 'review9-watermark-secret-32chars', imagesDir: '/tmp/masters',
+    authorize: async () => true, serverWatermark: { text: 'bad\u0000' },
+  }), /serverWatermark/, 'middleware refuses the deployment at construction, not at first redemption');
+
+  // Review #9 BUG-2: isPathInside once returned true when the "child"
+  // was the immediate parent (path.relative yields exactly '..', which
+  // has no '..' + sep prefix). No shipped call site was reachable, but
+  // the predicate itself is now correct for every shape.
+  const P = process.platform === 'win32' ? 'C:\\a\\b' : '/a/b';
+  const join = (...xs) => xs.join(process.platform === 'win32' ? '\\' : '/');
+  assert.equal(isPathInside(P, join(P, 'c')), true, 'direct child');
+  assert.equal(isPathInside(P, P), true, 'same directory');
+  assert.equal(isPathInside(P, join(P, '..')), false, 'immediate parent is NOT inside');
+  assert.equal(isPathInside(join(P, 'c'), P), false, 'parent is NOT inside child');
+  assert.equal(isPathInside(P, `${P}c`), false, 'sibling with shared prefix');
+  assert.equal(pathsOverlap(P, join(P, 'c')), true, 'nested paths overlap');
+  assert.equal(pathsOverlap(P, `${P}c`), false, 'prefix siblings do not overlap');
 
   const now = 1_800_000_000_000;
   const valid = {
