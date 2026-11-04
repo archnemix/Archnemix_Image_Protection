@@ -60,8 +60,14 @@ function stableValue(value) {
 
 async function writeJsonAtomic(filePath, value, { mode = 0o600 } = {}) {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  // Sibling of the target (never a shared temp dir), unpredictable name,
+  // and exclusive creation: 'wx' refuses to follow a pre-planted symlink
+  // or clobber an existing file, so the atomic rename can't be raced.
+  // (A same-directory local attacker with write access to the output
+  // directory itself is outside this boundary — output paths are
+  // operator-chosen and must not be world-writable.)
   const tmp = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode });
+  await fs.promises.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode, flag: 'wx' });
   await fs.promises.rename(tmp, filePath);
 }
 
@@ -342,8 +348,9 @@ export async function buildArchxAssets(options = {}) {
           contentFingerprint: options.contentFingerprint === true,
           processing,
         });
+        // Same exclusive-create atomic-write discipline as writeJsonAtomic.
         const tmp = `${outputPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-        await fs.promises.writeFile(tmp, result.bytes, { mode: 0o644 });
+        await fs.promises.writeFile(tmp, result.bytes, { mode: 0o644, flag: 'wx' });
         await fs.promises.rename(tmp, outputPath);
         record = {
           sourceSha256,
