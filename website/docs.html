@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs — Archnemix Image Protection</title>
+<meta name="description" content="Readable documentation for Archnemix Image Protection: install, quick starts, the lite/performance/elite profiles, key options, server rules, ownership proof, and honest limits.">
+<!-- Fonts are self-hosted (see @font-face in styles.css): this page makes
+     no third-party requests. -->
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html" aria-label="Archnemix home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <span>Archnemix</span>
+    </a>
+    <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
+    <nav class="masthead-nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="technical.html">Technical</a>
+      <a href="limits.html">Threat model</a>
+      <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero hero-doc">
+    <p class="kicker">Documentation · v1.29.0</p>
+    <h1>Use it, <em>step by step.</em></h1>
+    <p class="lede">
+      Everything you need to protect images with Archnemix — install, a
+      five-minute quick start, the three profiles, the options that matter,
+      the server rules that keep masters private, and an honest account of
+      what the tool cannot do. The full reference manual lives on
+      <a href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub</a>;
+      this page is the guided path through it.
+    </p>
+  </section>
+
+  <div class="tech-layout doc-layout">
+
+    <nav class="tech-index" aria-label="On this page">
+      <h2>On this page</h2>
+      <ol>
+        <li class="idx-group">Get started</li>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#quick-browser">Quick start: browser only</a></li>
+        <li><a href="#quick-server">Quick start: with the server</a></li>
+        <li class="idx-group">Everyday use</li>
+        <li><a href="#profiles">Profiles: lite · performance · elite</a></li>
+        <li><a href="#options">Key options</a></li>
+        <li><a href="#galleries">Galleries &amp; many images</a></li>
+        <li class="idx-group">Server</li>
+        <li><a href="#server-rules">The five server rules</a></li>
+        <li><a href="#server-ops">Health checks &amp; metrics</a></li>
+        <li class="idx-group">Ownership &amp; limits</li>
+        <li><a href="#ownership">Ownership proof</a></li>
+        <li><a href="#limits">Honest limits</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="#further">Further reading</a></li>
+      </ol>
+      <p class="doc-index-note">Looking for the complete option list, CLI
+      flags, or deployment runbook? The
+      <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/README.md" rel="noopener">project README</a>
+      and <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/OPERATIONS.md" rel="noopener">operations guide</a>
+      on GitHub are the full reference.</p>
+    </nav>
+
+    <article class="doc">
+
+      <h2 id="install">Install</h2>
+      <p>Archnemix is one npm package. The browser runtime has no
+      dependencies; the optional Node server uses Sharp for image
+      processing.</p>
+      <pre class="code mono">npm install @archnemix/image-protection</pre>
+      <p>Package entry points, so you import only what you run:</p>
+      <div class="table-wrap"><table class="layers">
+        <thead><tr><th scope="col">Import</th><th scope="col">What it is</th></tr></thead>
+        <tbody>
+          <tr><td><code>@archnemix/image-protection</code></td><td>The browser viewer and loader (<code>Archx.load.image(&hellip;)</code>).</td></tr>
+          <tr><td><code>&hellip;/server</code></td><td>The Node middleware that authorizes viewers and serves one-time derivatives.</td></tr>
+          <tr><td><code>&hellip;/scramble</code></td><td>The environment-agnostic scramble/encrypt engine used by both sides.</td></tr>
+          <tr><td><code>&hellip;/redis</code></td><td>Shared state-store adapter for multi-instance deployments.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Prefer no bundler? The package ships a prebuilt browser bundle at
+      <code>dist/archx.min.js</code> that you can serve with an SRI pin —
+      the exact integrity hash is printed in the project README so a CDN
+      can never silently swap the code.</p>
+
+      <h2 id="quick-browser">Quick start: browser only</h2>
+      <p>Static sites and public previews can scramble at build time and
+      unscramble in the visitor&rsquo;s browser — no server component
+      required. This stops casual saving and bulk tools; the
+      display-resolution derivative itself is public by design, so keep
+      licensed/private masters on the server path below.</p>
+      <pre class="code mono">import Archx from '@archnemix/image-protection';
+
+// One image
+Archx.load.image('#hero-photo', '/protected/aurora.archx', {
+  profile: 'performance',
+});
+
+// A whole gallery (lazy: loads as each image scrolls into view)
+Archx.load.gallery('.gallery-item', { profile: 'performance' });</pre>
+      <p>Create the <code>.archx</code> payloads ahead of time with the CLI:</p>
+      <pre class="code mono">npx archx-protect photo.jpg photo.archx --grid 16
+# or a full folder of responsive derivatives + manifest:
+npx archx-build ./masters ./protected</pre>
+      <div class="callout">
+        <p><strong>Honest note:</strong> there is no live demo on this site.
+        A static page cannot authorize viewers or keep masters private, so
+        the interactive scenes here are labelled illustrations. To see the
+        real protected viewer, run the demo from the repository
+        (<code>npm run demo</code>).</p>
+      </div>
+
+      <h2 id="quick-server">Quick start: with the server</h2>
+      <p>The server is where the real boundary lives: masters stay outside
+      your public folder, your own code decides who may see what, and each
+      delivery is a short-lived, one-time token.</p>
+      <pre class="code mono">import express from 'express';
+import { createArchxMiddleware } from '@archnemix/image-protection/server';
+
+const app = express();
+app.use(createArchxMiddleware({
+  imagesDir: '/private/masters',        // outside public/, always
+  secret: process.env.ARCHX_SECRET,     // 32+ random chars
+  authorize: async (req, image) =&gt;
+    req.user ? { maxWidth: 1600 } : false,   // deny by default
+}));</pre>
+      <pre class="code mono">// In the page: reference the image by id, not by file URL.
+Archx.load.image('#hero-photo', 'aurora-valley', {
+  profile: 'elite',
+});</pre>
+      <p>The browser asks the middleware for a token, <code>authorize</code>
+      runs (your session/licence logic), and the picture is delivered once,
+      at display resolution, as scrambled tiles that only the guarded
+      viewer reassembles. Denied or replayed requests get nothing.</p>
+
+      <h2 id="profiles">Profiles: lite · performance · elite</h2>
+      <p>Three canonical profiles set sensible defaults in one word. Any
+      individual option you set afterwards still wins — a profile only
+      fills in what you did not specify.</p>
+      <div class="table-wrap"><table class="layers">
+        <thead><tr><th scope="col">Profile</th><th scope="col">Optimizes for</th><th scope="col">Typical use</th></tr></thead>
+        <tbody>
+          <tr><td><code>lite</code></td><td>Least CPU, memory and bytes. Canvas renderer, smaller cache, forensic marking off.</td><td>Catalogues, thumbnails, low-end phones, thousands of images per page.</td></tr>
+          <tr><td><code>performance</code></td><td>The balance: strong protection without starving the device. Forensic marking on.</td><td>Most galleries, shops and portfolios. Start here.</td></tr>
+          <tr><td><code>elite</code></td><td>Maximum hardening: WebGL vault, proof-of-possession required, 60&nbsp;Hz temporal interlace, dynamic shields.</td><td>Paid previews, unreleased work, high-value originals.</td></tr>
+        </tbody>
+      </table></div>
+      <p>On the server, the matching helpers
+      (<code>withLiteDefaults</code>, <code>withPerformanceDefaults</code>,
+      <code>withEliteDefaults</code>) converge on the same three profiles.
+      Older mode names (<code>catalog</code>, <code>vault</code>,
+      <code>fortress</code>&hellip;) keep working, and fully custom flag
+      combinations always remain available — profiles are defaults, not
+      cages. You can also set your own page-wide defaults once:</p>
+      <pre class="code mono">Archx.config({ profile: 'performance', watermark: '@your-studio' });</pre>
+
+      <h2 id="options">Key options</h2>
+      <p>The options you will actually reach for. The complete list (80+
+      client options, all documented) is in the
+      <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/README.md" rel="noopener">README&rsquo;s option reference</a>.</p>
+      <div class="table-wrap"><table class="layers">
+        <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>profile</code></td><td>—</td><td><code>'lite' | 'performance' | 'elite'</code> — fills unset options from the profile above.</td></tr>
+          <tr><td><code>lazy</code></td><td><code>true</code></td><td>Load only when scrolled near the viewport (tune with <code>rootMargin</code>).</td></tr>
+          <tr><td><code>tokenEndpoint</code></td><td><code>'/archx/token'</code></td><td>Where the viewer mints its one-time delivery token.</td></tr>
+          <tr><td><code>watermark</code></td><td><code>''</code></td><td>Visible watermark text (or an object for position/opacity).</td></tr>
+          <tr><td><code>forensic</code></td><td><code>true</code></td><td>Invisible per-viewer forensic marking layer (the lite profile turns it off).</td></tr>
+          <tr><td><code>temporalInterlace</code></td><td><code>null</code></td><td>Splits the picture across alternating 60&nbsp;Hz frames so captures hold only a subset + fill. Elite sets it on.</td></tr>
+          <tr><td><code>proofOfPossession</code></td><td><code>'auto'</code></td><td>Binds the token to a non-extractable browser key so a copied URL cannot be redeemed elsewhere.</td></tr>
+          <tr><td><code>guards</code></td><td>all on</td><td>Right-click, drag, save-shortcut, print and screenshot-signal guards — each independently toggleable.</td></tr>
+          <tr><td><code>onAttempt</code></td><td>—</td><td>Callback/DOM events when copy attempts are detected, for your own logging.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Every option is validated: an unknown or malformed value fails
+      loudly at load time instead of silently weakening protection.</p>
+
+      <h2 id="galleries">Galleries &amp; many images</h2>
+      <p>Archnemix is built for image-heavy pages. Images load lazily as
+      they approach the viewport, tokens for visible images are minted in
+      one batch request, decoded bitmaps live in a bounded LRU cache, and
+      off-screen images can unload to give memory back. A page can carry
+      hundreds of protected images without hundreds of token round-trips:</p>
+      <pre class="code mono">const gallery = Archx.load.gallery('.photo', { profile: 'lite' });
+await gallery.ready;   // resolves when visible images have first-painted</pre>
+      <p>On the server, identical derivative requests coalesce (one Sharp
+      job serves concurrent viewers), processed derivatives are reused
+      from a bounded cache, and <code>handler.stats()</code> shows hit
+      rates so you can size things with data.</p>
+
+      <h2 id="server-rules">The five server rules</h2>
+      <p>Most real-world failures of tools like this are deployment
+      failures. These five rules are enforced or checked by the library —
+      follow them and the system does what the overview promises:</p>
+      <ol class="doc-list">
+        <li><strong>Masters outside the public root.</strong> If the
+        original file is web-addressable, nothing else matters.
+        <code>imagesDir</code> must not be inside your static folder.</li>
+        <li><strong><code>authorize</code> is mandatory and deny-by-default.</strong>
+        Leaving it out refuses every request rather than allowing all —
+        a missing callback can never silently open your catalog.</li>
+        <li><strong>Use a real secret.</strong> 32+ random characters from
+        an environment variable or secret manager; the startup audit flags
+        weak, shared, or well-known values.</li>
+        <li><strong>Cap the resolution.</strong>
+        <code>maxWidthFraction &lt; 1</code> makes &ldquo;preview only&rdquo;
+        a server-enforced property, not a client suggestion.</li>
+        <li><strong>Run the production audit in CI.</strong>
+        <code>auditArchxProductionConfig(options)</code> returns blockers
+        (public masters, query-string tokens, single-instance state behind
+        a load balancer&hellip;) — treat them as release failures.</li>
+      </ol>
+
+      <h2 id="server-ops">Health checks &amp; metrics</h2>
+      <p>Small operational helpers ship with the server surface, so the
+      middleware behaves like a good citizen in a real deployment:</p>
+      <pre class="code mono">import {
+  createArchxMiddleware,
+  createArchxHealthHandler,   // GET-able readiness probe (counts only, no secrets)
+  formatPrometheusMetrics,    // handler.stats() as Prometheus text
+  createJsonEventLogger,      // structured security-event log (PII hashed by default)
+  installArchxShutdown,       // drain + close on SIGTERM/SIGINT
+} from '@archnemix/image-protection/server';
+
+const handler = createArchxMiddleware(options);
+app.get('/healthz', createArchxHealthHandler(handler));</pre>
+      <p>The full deployment runbook — CDN rules, multi-instance Redis
+      state, key rotation, load testing — is
+      <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/OPERATIONS.md" rel="noopener">OPERATIONS.md</a> on GitHub.</p>
+
+      <h2 id="ownership">Ownership proof</h2>
+      <p>If a protected picture leaks anyway, three independent layers can
+      point back to you — and to the specific copy it came from:</p>
+      <ul class="doc-list">
+        <li><strong>Visible watermark</strong> — baked into delivered
+        pixels, per-buyer text supported (<code>{buyer}</code> placeholders).</li>
+        <li><strong>StegoMark</strong> — an invisible, blind-detectable
+        fingerprint carrying an owner/order id. On the project&rsquo;s
+        99-case survival bench (single transforms: resize, JPEG, crop,
+        screenshot simulation&hellip;) the robust profile recovered the mark
+        in <strong>85 of 99</strong> cases with <strong>0 of 369</strong>
+        false positives on clean images.</li>
+        <li><strong>Perceptual fingerprint</strong> — a content hash that
+        recognizes the picture itself even if every mark is stripped, for
+        lookup against your own registry.</li>
+      </ul>
+      <pre class="code mono"># Later, given a suspect file found in the wild:
+npx archx-detect suspect.jpg --expect "order-12345"</pre>
+      <p>Honest grading: these are <em>attribution evidence</em>, ranked
+      from strongest (exact StegoMark decode) to weakest (approximate
+      perceptual match, corroborate before accusing anyone). Modern
+      AI regeneration can remove invisible marks — ours included; the
+      <a href="limits.html">threat-model page</a> says exactly where each
+      layer holds and where it does not.</p>
+
+      <h2 id="limits">Honest limits</h2>
+      <div class="callout">
+        <p><strong>No tool can show a picture and make it uncopyable.</strong>
+        Anything rendered on a screen can be photographed off the screen.
+        Archnemix removes the <em>easy</em> paths (right-click save,
+        view-source, bulk downloaders, hotlinking, replayed URLs), degrades
+        what extraction tools recover (scrambled tiles, decoys, capped
+        resolution, partial temporal frames), and marks what slips through
+        so leaks are attributable. It is layered friction plus evidence —
+        not DRM, and it never claims to be.</p>
+      </div>
+      <p>The full attacker-by-attacker account, including the cases where
+      you should choose a different tool entirely (video DRM, C2PA
+      provenance signing, neural watermarking services), is on the
+      <a href="limits.html">threat-model page</a>.</p>
+
+      <h2 id="faq">FAQ</h2>
+      <h3>Will this stop screenshots?</h3>
+      <p>No — nothing delivered to a browser can. Archnemix detects some
+      capture signals, can blackout on print/screenshot heuristics, and the
+      60&nbsp;Hz temporal interlace means a single-frame capture holds only
+      part of the picture at full sharpness. A camera pointed at the
+      screen always works; plan for attribution (marks + registry), not
+      prevention.</p>
+      <h3>Is the scrambled delivery encryption?</h3>
+      <p>Scrambling is obfuscation with a 128-bit-seeded permutation —
+      research shows permutation-only schemes fall to chosen-plaintext
+      attacks, so we never call it secrecy. The actual boundary is server
+      authorization + one-time tokens; AES-GCM payload encryption is
+      available as an additional wire/obfuscation layer whose key, by
+      necessity, reaches the authorized browser.</p>
+      <h3>How much does it cost in performance?</h3>
+      <p>The lite profile exists precisely for this: canvas rendering, no
+      forensic layer, a small bitmap cache, and lazy loading keep per-image
+      cost close to a plain optimized <code>&lt;img&gt;</code> pipeline.
+      The elite profile spends more (WebGL, proof keys, interlace) — pick
+      per image, per page, or per user tier.</p>
+      <h3>Which browsers?</h3>
+      <p>Current Chrome, Edge, Firefox and Safari. WebGL paths degrade to
+      Canvas&nbsp;2D automatically. The project&rsquo;s browser suite runs
+      in Chromium; Safari/WebKit and macOS are honestly listed as
+      less-tested in the compatibility notes.</p>
+      <h3>License?</h3>
+      <p>BSD Zero Clause (0BSD): use, copy, modify, ship commercially —
+      no attribution required, no permission to ask.</p>
+
+      <h2 id="further">Further reading</h2>
+      <div class="table-wrap"><table class="layers">
+        <thead><tr><th scope="col">Document</th><th scope="col">What&rsquo;s inside</th></tr></thead>
+        <tbody>
+          <tr><td><a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/README.md" rel="noopener">README</a></td><td>The complete manual: every option, the full API, CLI reference.</td></tr>
+          <tr><td><a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/OPERATIONS.md" rel="noopener">OPERATIONS</a></td><td>Deployment runbook: CDN, Redis multi-instance, key rotation, load tests.</td></tr>
+          <tr><td><a href="technical.html">Technical atlas</a> (this site)</td><td>Why every engineering decision was made, with the rejected alternatives.</td></tr>
+          <tr><td><a href="limits.html">Threat model</a> (this site)</td><td>Attacker-by-attacker: what holds, what degrades, what fails.</td></tr>
+          <tr><td><a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/RESEARCH.md" rel="noopener">RESEARCH</a> + <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/PAPERS.md" rel="noopener">PAPERS</a></td><td>The evidence log and the 52 sources behind the design choices.</td></tr>
+          <tr><td><a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/CHANGELOG.md" rel="noopener">CHANGELOG</a></td><td>What each release actually changed — including the mistakes.</td></tr>
+        </tbody>
+      </table></div>
+
+      <nav class="docnav" aria-label="Continue">
+        <a href="index.html">&larr; Overview</a>
+        <a href="technical.html">Technical atlas &rarr;</a>
+      </nav>
+
+    </article>
+  </div>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <span class="wordmark wordmark-small">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      Archnemix
+    </span>
+    <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · <a href="index.html">overview</a> · <a href="technical.html">why it is built this way</a> · <a href="limits.html">threat model</a></p>
+  </div>
+</footer>
+
+<script>
+// Scroll-spy for the docs index: highlight the section being read.
+// Progressive enhancement only — the page is complete without it.
+(function () {
+  var links = {};
+  document.querySelectorAll('.tech-index a[href^="#"]').forEach(function (a) {
+    links[a.getAttribute('href').slice(1)] = a;
+  });
+  var sections = Object.keys(links)
+    .map(function (id) { return document.getElementById(id); })
+    .filter(Boolean);
+  if (!sections.length || !('IntersectionObserver' in window)) return;
+  var current = null;
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting) {
+        if (current) current.classList.remove('is-current');
+        current = links[entry.target.id];
+        if (current) current.classList.add('is-current');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(function (s) { observer.observe(s); });
+})();
+</script>
+</body>
+</html>

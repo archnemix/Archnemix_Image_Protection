@@ -3699,7 +3699,7 @@ audit's `ok` meaning. The grid floor and the `ready`/`ok` semantics
 are the round's two intentional breaking edges; both close a
 documented contract that the code previously violated.
 
-### 2.36 v1.28 — three canonical profiles, paper-backed choices, modern-attack red team, Windows parity
+## 2.36 v1.28 — three canonical profiles, paper-backed choices, modern-attack red team, Windows parity
 
 **Mandate.** Collapse the discoverable defaults to three named profiles —
 `lite` (CPU/RAM/speed), `performance` (balanced), `elite`
@@ -3775,7 +3775,7 @@ fails on any disagreement across README, website, CHANGELOG, and code;
 it found three stale numbers on its first run, which is the argument
 for its existence.
 
-### 2.37 Review #9 (v1.29) — two real bugs, gate gaps, deployment surface, chained-attack measurement
+## 2.37 Review #9 (v1.29) — two real bugs, gate gaps, deployment surface, chained-attack measurement
 
 An external re-test arrived with unusual rigor (it also withdrew four
 of its own earlier claims with causes — print blackout works, the

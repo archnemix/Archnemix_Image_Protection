@@ -1,13 +1,19 @@
 # Archnemix website
 
-The static three-page site for **Archnemix Image Protection**. No build
+The static four-page site for **Archnemix Image Protection**. No build
 step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`,
 and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
 `fonts/` — pages make no third-party subresource requests at all):
 
 - `index.html` — overview: interactive 3D hero (drag-orbit, per-tile trace
-  readout, 4×4–16×16 grids), how it works, measured results, honest limits
-  (readable with no JavaScript at all)
+  readout, 8×8–32×32 grids — the same range the product permits), how it
+  works, measured results, honest limits (readable with no JavaScript at
+  all)
+- `docs.html` — the documentation page: install, quick starts, the three
+  profiles, key options, server rules, ownership proof, FAQ. Written for
+  reading (sticky on-this-page index with scroll-spy, 70ch measure) and
+  fully usable with JavaScript disabled; it teaches the guided path and
+  links to the complete reference on GitHub
 - `technical.html` + `technical.js` — the decision atlas: 21 engineering
   decisions (problem / chosen / alternatives rejected / pros / cons /
   evidence), searchable and tag-filtered, with an animated mode/options
@@ -32,10 +38,9 @@ npx serve website        # or: python3 -m http.server -d website 8080
 ## Host it
 
 Drop the `website/` folder on any static host (GitHub Pages, Netlify,
-Cloudflare Pages, an S3 bucket…). The only external request is Google
-Fonts (with system-serif fallbacks); if it is blocked, the page stays
-fully readable, and if WebGL is unavailable the hero degrades to a text
-explanation.
+Cloudflare Pages, an S3 bucket…). There are no external requests to
+worry about — fonts and Three.js are self-hosted — and if WebGL is
+unavailable the hero degrades to a text explanation.
 
 The hero's tiles scramble the same way the real Archx payload does — a
 seeded 8×8 permutation with per-tile mirrors — but it remains an

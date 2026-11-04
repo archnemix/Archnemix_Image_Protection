@@ -54,8 +54,9 @@ step('npm pack', () => {
   const shipped = new Set(names);
   for (const name of names.filter((n) => /^(server|src)\/.*\.js$/.test(n))) {
     const text = fs.readFileSync(path.join(repoRoot, name), 'utf8');
-    for (const m of text.matchAll(/(?:from|import)\s*\(\s*['"](\.[^'"]+)['"]|(?:from|import)\s+['"](\.[^'"]+)['"]/g)) {
-      const spec = m[1] || m[2];
+    for (const m of text.matchAll(/(?:from|import)\s*\(\s*['"](\.[^'"]+)['"]|(?:from|import)\s+['"](\.[^'"]+)['"]|new URL\(\s*['"](\.[^'"]+)['"]\s*,\s*import\.meta\.url\s*\)/g)) {
+      const spec = m[1] || m[2] || m[3];
+      if (!spec) continue;
       const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), spec));
       if (!shipped.has(resolved)) {
         throw new Error(`tarball would break: ${name} imports '${spec}' -> ${resolved}, which is not shipped (add it to package.json "files")`);

@@ -18,6 +18,7 @@ surface`) pins `types/*.d.ts` to the real export surface.
 | `sniff.js` | Image/container byte sniffing, dimension extraction |
 | `container.js` | `.archx` container encode/decode (header + AES-GCM payload) |
 | `forensic.js` | Forensic block-sign marks and scoring |
+| `bch.js` | BCH(188,64) error-correcting code math for stego layout 4 |
 | `stego-code.js` | StegoMark codeword layout, syndromes, tag math |
 | `pixels.js` | Luma planes, integral images, rotate/mirror/downscale primitives |
 | `stego-embed.js` | StegoMark embedding |
@@ -36,7 +37,8 @@ identity, so scratch reuse there is a correctness bug (found in v1.19).
 |---|---|
 | `native.js` | Captured platform natives + tamper-resistant dispatch |
 | `integrity.js` | Native/extension/automation audits and reports |
-| `options.js` | `DEFAULTS`, presets, global config, page session ids |
+| `version.js` | Single `VERSION` source of truth (imported by modules that must not depend on the bundle entry) |
+| `options.js` | `DEFAULTS`, profiles/presets, global config, page session ids |
 | `registry.js` | Live instance set + host→instance weak map |
 | `events.js` | Sanitized plugin event bus |
 | `temporal.js` | Temporal interlace profiles + renderer |
@@ -71,6 +73,7 @@ resolved at call time, not module-eval time).
 | `redis-state-store.js` | Shared state store for multi-instance deployments |
 | `detect-worker.js` | `worker_threads` entry for off-thread detection |
 | `node-crypto.js` | Injects Node's `createHmac` into the core's sync-crypto slot |
+| `ops.js` | Deployment helpers: health/readiness handler, Prometheus metrics, JSONL event logger, graceful shutdown |
 | `build-assets.js` (+ CLI) | Offline signed asset manifests |
 | `scramble-cli.js`, `detect-stego-cli.js` | `archx-protect` / `archx-detect` |
 | `demo-server.js` | Local demo only — never a production template |
@@ -82,7 +85,7 @@ tests keep one import path.
 
 ## Deliberately not split further
 
-`ProtectedImage` (`src/client/viewer.js`, ~2.8k lines) and the middleware
+`ProtectedImage` (`src/client/viewer.js`, ~2.9k lines) and the middleware
 factory (`server/middleware.js`, ~2.5k lines) are single cohesive
 units — one class, one closure — whose internals share lifecycle state
 by design. Splitting them further would trade that cohesion for

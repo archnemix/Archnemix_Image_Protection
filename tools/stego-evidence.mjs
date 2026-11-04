@@ -59,6 +59,15 @@ if (!evidence.robust.total || evidence.falsePositives.checks == null) {
   console.error('evidence extraction failed: bench JSON shape unexpected (was demo:images run first?)');
   process.exit(1);
 }
+// The full corpus has five kinds; without demo-masters/gallery the
+// bench silently runs a subset (66 of 99) whose numbers must never
+// become the recorded baseline.
+const kinds = new Set((matrix.cases || []).map((c) => c.kind));
+const missing = ['photo', 'graphic', 'flat', 'text', 'text-periodic'].filter((k) => !kinds.has(k));
+if (missing.length) {
+  console.error(`evidence refused: bench corpus is incomplete (missing kinds: ${missing.join(', ')}) — run npm run demo:images, then re-run the bench`);
+  process.exit(1);
+}
 fs.mkdirSync(path.join(root, 'docs/evidence'), { recursive: true });
 const out = path.join(root, 'docs/evidence/stego-bench.json');
 fs.writeFileSync(out, JSON.stringify(evidence, null, 2) + '\n');
