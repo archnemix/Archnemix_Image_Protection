@@ -264,8 +264,10 @@ Normal rotation:
    never values).
 3. Change `activeSecretId` to the new key on every instance. A mixed fleet
    is safe during this step because all instances can verify both IDs.
-4. Wait at least the configured `ttlSec` plus clock-skew/retry allowance. A
-   conservative minimum is `ttlSec + 300` seconds. Static investigations may
+4. Wait at least the longest effective token lifetime (the server `ttlSec`
+   default or any per-authorization `ttlSec`, whichever is greater) plus the
+   clock-skew/retry allowance. A conservative minimum is that maximum + 300
+   seconds. Static investigations may
    need an old StegoMark detector secret for much longer; retain it offline
    in the evidence vault even after removing it from serving nodes.
 5. Remove the old key from every serving keyring and redeploy/restart.
@@ -452,9 +454,13 @@ Suggested starting alerts (tune to real traffic):
 ### StegoMark registry, delivery telemetry, and provenance
 
 Return stable `buyerId`, `orderId`, `deliveryId`, and, when useful,
-`traceId` from `authorize()`. Archx turns those values into a signed trace
-hash, uses them for `{buyer}`/`{order}`/`{delivery}`/`{trace}` visible-mark
-text and trace-derived StegoMark subjects, and rechecks them at redemption.
+`traceId` from `authorize()`. Viewer IDs are accepted up to 512 JavaScript
+`String.length` code units; each trace ID is accepted up to 256 code units.
+Archx validates and HMAC-binds
+the full values using an unambiguous field encoding, uses them for
+`{buyer}`/`{order}`/`{delivery}`/`{trace}` visible-mark text and trace-derived
+StegoMark subjects, and rechecks the complete trace context at redemption;
+removing or changing a previously supplied field denies delivery.
 Persist the complete `onStegoIssue` record before considering issuance
 successful. With `stegoRegistryFailure:'deny'` (the default and production
 expectation), a failed or timed-out registry write returns `503`, spends the
@@ -511,9 +517,9 @@ installArchxShutdown({ server, handler }); // SIGTERM/SIGINT → drain, handler.
   `auditArchxProductionConfig()` in deployment tests for the detailed,
   still secret-free, blocker list.
 - **Metrics.** `formatPrometheusMetrics` renders `handler.stats()` as
-  Prometheus text (one-time-token/proof consumption and derivative-
-  cache hit/miss counters; cache sizes, queue depth, and in-flight
-  gauges; an `archx_info` series with version/deployment-mode/store
+  Prometheus text (live one-time-token/proof occupancy gauges and
+  derivative-cache hit/miss counters; cache sizes, queue depth, and
+  in-flight gauges; an `archx_info` series with version/deployment-mode/store
   labels). Scrape it like any app metrics route; nothing per-viewer or
   secret-bearing exists in the output.
 - **Logging.** Events were already structured and metadata-only;

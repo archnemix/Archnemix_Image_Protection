@@ -388,7 +388,8 @@ test('ops helpers: Prometheus metrics, health endpoint, graceful shutdown, JSONL
     derivativeCache: { memoryHits: 100, diskHits: 5, sharedHits: 2, misses: 11, coalesced: 3, diskWrites: 6, sharedWrites: 1, diskEntries: 4, diskBytes: 99, diskPrunes: 1, diskErrors: 0 },
   });
   assert.match(text, /archx_info\{version="1\.2\d\.\d+"/);
-  assert.match(text, /# TYPE archx_consumed_tokens counter\narchx_consumed_tokens 41/);
+  assert.match(text, /# TYPE archx_consumed_tokens gauge\narchx_consumed_tokens 41/);
+  assert.match(text, /# TYPE archx_consumed_proofs gauge\narchx_consumed_proofs 9/);
   assert.match(text, /# TYPE archx_processing_active gauge\narchx_processing_active 2/);
   assert.match(text, /archx_derivative_cache_memory_hits 100/);
   assert.ok(!/NaN|Infinity|undefined/.test(text), 'metrics never emit non-finite values');
@@ -1644,6 +1645,8 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
     'removing the old key completes retirement after the rollover window');
   assert.equal(rotatedHandler.configAudit.summary.activeSecretId, '2026-02');
   assert.equal(rotatedHandler.configAudit.summary.signingKeyCount, 2);
+  assert.equal(rotatedHandler.stats().signingKeyCount, 2, 'live stats report the normalized keyring count');
+  assert.equal(oldHandler.stats().signingKeyCount, 1, 'single-secret stats report one key');
   assert.equal(JSON.stringify(rotatedHandler.configAudit).includes(oldSecret), false);
   assert.equal(JSON.stringify(rotatedHandler.configAudit).includes(newSecret), false);
 });
@@ -1762,6 +1765,46 @@ test('hardened production defaults and production audit expose unsafe combinatio
   assert.equal(traced.buyerId, '42');
   assert.equal(traced.orderId, 'ORDER-42');
   assert.equal(normalizeAuthorizationResult({ viewerId: 'v', orderId: { id: 1 } }), null);
+});
+
+test('authorization bindings use complete viewer/trace values and redeem every allowed TTL', async (t) => {
+  let entitlement = { viewerId: 'viewer-default' };
+  const { base } = await startArchxFixture(t, {
+    authorize: async () => entitlement,
+  });
+
+  // Viewer IDs are accepted up to 512 characters; every accepted character
+  // must participate in the binding (including characters after offset 256).
+  entitlement = { viewerId: 'x'.repeat(256) + '-alice' };
+  const viewerToken = await (await postToken(base + '/archx/token/cat?w=160')).json();
+  entitlement = { viewerId: 'x'.repeat(256) + '-bob' };
+  assert.equal((await redeemToken(base, viewerToken)).status, 403,
+    'different accepted viewer IDs sharing the first 256 characters must not collide');
+
+  // Removing trace fields at re-authorization is a context change, not a
+  // reason to skip the trace check.
+  entitlement = { viewerId: 'trace-viewer', buyerId: 'buyer', orderId: 'order' };
+  const traceToken = await (await postToken(base + '/archx/token/cat?w=160')).json();
+  entitlement = { viewerId: 'trace-viewer' };
+  assert.equal((await redeemToken(base, traceToken)).status, 403,
+    'dropping a minted trace subject must invalidate the token');
+
+  // Delimiter-containing accepted IDs must have an unambiguous encoding.
+  entitlement = { viewerId: 'same-viewer', buyerId: 'a:b', orderId: 'c' };
+  const colonA = await (await postToken(base + '/archx/token/cat?w=160')).json();
+  entitlement = { viewerId: 'same-viewer', buyerId: 'a', orderId: 'b:c' };
+  const colonB = await (await postToken(base + '/archx/token/cat?w=160')).json();
+  assert.notEqual(tokenPayloadForTest(colonA.token).th, tokenPayloadForTest(colonB.token).th,
+    'different field boundaries must produce different trace hashes');
+
+  // Per-authorize ttlSec is documented/validated up to 900 seconds; the
+  // redemption claim validator must accept that same supported value.
+  entitlement = { viewerId: 'long-ttl-viewer', ttlSec: 900 };
+  const longToken = await (await postToken(base + '/archx/token/cat?w=160')).json();
+  const longClaims = tokenPayloadForTest(longToken.token);
+  assert.equal(longClaims.exp - longClaims.iat, 900_000);
+  assert.equal((await redeemToken(base, longToken)).status, 200,
+    'a valid authorization TTL of 900 seconds must redeem under the default server TTL');
 });
 
 test('buyer/order authorization drives signed caps, robust Stego registry, provenance, and key-free delivery hooks', async (t) => {

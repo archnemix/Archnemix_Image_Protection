@@ -109,7 +109,10 @@ Archx.load.image('#hero-photo', '/protected/aurora.archx', {
 });
 
 // A whole gallery (lazy: loads as each image scrolls into view)
-Archx.load.gallery('.gallery-item', { profile: 'performance' });</pre>
+Archx.load.gallery('#gallery', [
+  '/protected/photo-a.archx',
+  '/protected/photo-b.archx',
+], { profile: 'performance' });</pre>
       <p>Create the <code>.archx</code> payloads ahead of time with the CLI:</p>
       <pre class="code mono">npx archx-protect photo.jpg photo.archx --grid 16
 # or a full folder of responsive derivatives + manifest:
@@ -136,8 +139,9 @@ app.use(createArchxMiddleware({
   authorize: async (req, image) =&gt;
     req.user ? { maxWidth: 1600 } : false,   // deny by default
 }));</pre>
-      <pre class="code mono">// In the page: reference the image by id, not by file URL.
-Archx.load.image('#hero-photo', 'aurora-valley', {
+      <pre class="code mono">// In the page: use the protected server endpoint and an image id.
+Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
+  tokenEndpoint: '/archx/token/',
   profile: 'elite',
 });</pre>
       <p>The browser asks the middleware for a token, <code>authorize</code>
@@ -175,7 +179,7 @@ Archx.load.image('#hero-photo', 'aurora-valley', {
         <tbody>
           <tr><td><code>profile</code></td><td>—</td><td><code>'lite' | 'performance' | 'elite'</code> — fills unset options from the profile above.</td></tr>
           <tr><td><code>lazy</code></td><td><code>true</code></td><td>Load only when scrolled near the viewport (tune with <code>rootMargin</code>).</td></tr>
-          <tr><td><code>tokenEndpoint</code></td><td><code>'/archx/token'</code></td><td>Where the viewer mints its one-time delivery token.</td></tr>
+          <tr><td><code>tokenEndpoint</code></td><td><code>null</code></td><td>Required for <code>{ id }</code> sources; set it to your middleware route (for example, <code>'/archx/token/'</code>) so the viewer can mint a one-time delivery token.</td></tr>
           <tr><td><code>watermark</code></td><td><code>''</code></td><td>Visible watermark text (or an object for position/opacity).</td></tr>
           <tr><td><code>forensic</code></td><td><code>true</code></td><td>Invisible per-viewer forensic marking layer (the lite profile turns it off).</td></tr>
           <tr><td><code>temporalInterlace</code></td><td><code>null</code></td><td>Splits the picture across alternating 60&nbsp;Hz frames so captures hold only a subset + fill. Elite sets it on.</td></tr>
@@ -193,8 +197,10 @@ Archx.load.image('#hero-photo', 'aurora-valley', {
       one batch request, decoded bitmaps live in a bounded LRU cache, and
       off-screen images can unload to give memory back. A page can carry
       hundreds of protected images without hundreds of token round-trips:</p>
-      <pre class="code mono">const gallery = Archx.load.gallery('.photo', { profile: 'lite' });
-await gallery.ready;   // resolves when visible images have first-painted</pre>
+      <pre class="code mono">const gallery = Archx.load.gallery('#gallery', [
+  { id: 'photo-1' }, { id: 'photo-2' },
+], { tokenEndpoint: '/archx/token/', profile: 'lite' });
+await gallery.ready;   // allSettled: each item can succeed or fail independently</pre>
       <p>On the server, identical derivative requests coalesce (one Sharp
       job serves concurrent viewers), processed derivatives are reused
       from a bounded cache, and <code>handler.stats()</code> shows hit

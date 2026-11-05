@@ -18,8 +18,11 @@ here. The project follows semantic versioning once a version is released.
 
 Review #9 remediation: two real bugs fixed, five doc contradictions
 closed, four coverage gaps gated, and the deployment-operations
-surface (health/metrics/logging/shutdown) shipped. No pixels, token
-claims, or on-disk formats change.
+surface (health/metrics/logging/shutdown) shipped. No pixels or on-disk
+formats change. Trace-bound token hashes now use canonical field encoding;
+when upgrading, allow still-live tokens with explicit trace fields to expire
+before expecting them to redeem (and re-mint tokens whose viewer ID exceeds
+the former 256-character binding boundary).
 
 - **BUG-1 (medium): watermark objects skipped the control-character
   check.** `validateWatermarkValue` rejected C0 control bytes in the

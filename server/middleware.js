@@ -931,7 +931,7 @@ export function createArchxMiddleware(options = {}) {
 
   function authorizationViewerId(auth) {
     if (!auth || typeof auth !== 'object') return '';
-    try { return String(auth.viewerId || '').slice(0, 256); } catch { return ''; }
+    try { return String(auth.viewerId || ''); } catch { return ''; }
   }
 
   function authorizationTrace(auth, viewerId = '', keySecret = secret) {
@@ -941,12 +941,22 @@ export function createArchxMiddleware(options = {}) {
       deliveryId: auth?.deliveryId ? String(auth.deliveryId).slice(0, 256) : null,
       traceId: auth?.traceId ? String(auth.traceId).slice(0, 256) : null,
     };
+    // Preserve the legacy readable subject for server-side callbacks, but
+    // never use its delimiter-joined form as the cryptographic input: accepted
+    // IDs may contain ':'. A fixed-order JSON array is unambiguous.
     const subject = trace.traceId || [trace.buyerId, trace.orderId, trace.deliveryId, viewerId]
       .filter(Boolean).join(':');
+    const hasTraceFields = Object.values(trace).some((value) => value != null);
+    // Keep the historical single-viewer hash when there are no explicit
+    // trace fields; that avoids invalidating ordinary viewer-bound tokens.
+    // Once any trace field exists, bind the complete tuple unambiguously.
+    const encodedSubject = hasTraceFields
+      ? JSON.stringify([trace.traceId, trace.buyerId, trace.orderId, trace.deliveryId, viewerId])
+      : viewerId;
     return Object.freeze({
       ...trace,
       subject,
-      hash: subject ? hmacShort('trace', subject, 20, keySecret) : '',
+      hash: encodedSubject ? hmacShort('trace', encodedSubject, 20, keySecret) : '',
     });
   }
 
@@ -2039,7 +2049,7 @@ export function createArchxMiddleware(options = {}) {
           typeof tokenValues[0] !== 'string' || tokenValues[0].length < 16 || tokenValues[0].length > 8192;
         const payload = verifyToken(shapeBad ? '' : tokenValues[0], signingKeys);
         const issuingSecret = secretForToken(payload);
-        if (!issuingSecret || !validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: ttlMs })) {
+        if (!issuingSecret || !validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: Math.max(ttlMs, 900_000) })) {
           return deny(req, res, 403, 'invalid or expired token',
             { id, phase, reason: shapeBad ? 'token-count' : 'token-claims' });
         }
@@ -2077,9 +2087,7 @@ export function createArchxMiddleware(options = {}) {
           }
         }
         const currentTrace = authorizationTrace(entitlement, currentViewerId, issuingSecret);
-        const currentHasTraceFields = ['buyerId', 'orderId', 'deliveryId', 'traceId']
-          .some((field) => entitlement[field] != null);
-        if (payload.th && currentHasTraceFields &&
+        if (payload.th &&
             (!currentTrace.hash || !safeEqual(payload.th, currentTrace.hash))) {
           return deny(req, res, 403, 'invalid or expired token', { id, phase, reason: 'trace-binding' });
         }
@@ -2514,7 +2522,7 @@ export function createArchxMiddleware(options = {}) {
       stateStore: storeStats.kind || stateStore.kind || (ownsStateStore ? 'memory' : 'custom'),
       stateStoreShared: !ownsStateStore,
       activeSecretId,
-      signingKeyCount: signingKeys.size,
+      signingKeyCount: Object.keys(signingKeys).length,
       rateLimitClients: statNumber(storeStats.rateLimitClients),
       quotaClients: statNumber(storeStats.quotaClients),
       consumedTokens: statNumber(storeStats.consumedTokens),
