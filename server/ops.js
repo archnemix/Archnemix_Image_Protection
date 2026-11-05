@@ -19,7 +19,6 @@ const escLabel = (v) => String(v ?? '').replace(/\\|"/g, (c) => `\\${c}`).replac
 // stats() fields that accumulate monotonically and are therefore
 // Prometheus counters; everything else numeric is a gauge.
 const COUNTER_KEYS = new Set([
-  'consumedTokens', 'consumedProofs',
   'memoryHits', 'diskHits', 'sharedHits', 'misses', 'coalesced',
   'diskWrites', 'sharedWrites', 'diskPrunes', 'diskErrors',
 ]);

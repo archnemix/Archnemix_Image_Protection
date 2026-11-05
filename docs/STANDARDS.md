@@ -98,7 +98,7 @@ called out as a gap with its disposition.
 | Control | Status / evidence |
 |---|---|
 | Health/readiness endpoint | Met (opt-in) — `createArchxHealthHandler(handler)` returns 200/503 from the construction-time audit, counts only, `no-store`; host mounts it internally |
-| Metrics export | Met (opt-in) — `formatPrometheusMetrics(handler.stats())` emits Prometheus text (token/proof consumption counters, derivative-cache counters, queue/cache gauges, info labels); no secrets or per-viewer series |
+| Metrics export | Met (opt-in) — `formatPrometheusMetrics(handler.stats())` emits Prometheus text (live token/proof occupancy gauges, derivative-cache counters, queue/cache gauges, info labels); no secrets or per-viewer series |
 | Structured logging | Met (opt-in) — `createJsonEventLogger` writes JSON lines from the already-structured, metadata-only security/delivery events; raw IP/viewer id dropped by default |
 | Graceful shutdown | Met (opt-in) — `installArchxShutdown({server, handler})` drains HTTP, releases Archx state via `handler.close()`, forced exit on timeout/second signal |
 | Durable log storage, alerting, KMS/HSM custody, SLA/certifications | Host-owned / **not claimed** (see non-goals) |
