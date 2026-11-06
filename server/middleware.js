@@ -1317,7 +1317,15 @@ export function createArchxMiddleware(options = {}) {
         // no derivative is ever produced.)
         throw new MintDenied(503, 'service unavailable', { id, phase: 'token', viewerId, reason: 'fraction-dims-unavailable' });
       }
-      if (dims?.width) widthCap = Math.max(64, Math.min(widthCap, Math.floor(dims.width * cfg.maxWidthFraction)));
+      if (dims?.width) {
+        const fractionWidth = Math.floor(dims.width * cfg.maxWidthFraction);
+        if (fractionWidth < 64) {
+          throw new MintDenied(403, 'forbidden', {
+            id, phase: 'token', viewerId, reason: 'fraction-below-min-width',
+          });
+        }
+        widthCap = Math.min(widthCap, fractionWidth);
+      }
     }
     const rawRequested = paramValue('w') || paramValue('bw') || '1200';
     let requestedW = parseStrictInt(rawRequested);
@@ -1386,15 +1394,27 @@ export function createArchxMiddleware(options = {}) {
     // the browser's q=… request is honoured only when you opt in.
     const clientQuality = allowClientQuality ? paramValue('q') : null;
     const rawQuality = entitlement.quality ?? clientQuality ?? quality;
-    let deliveryLossless = entitlement.lossless ?? (lossless || rawQuality === 'lossless');
-    let deliveryQuality = deliveryLossless
+    const rawFormat = entitlement.format ?? format;
+    if (!['webp', 'png', 'jpeg', 'avif'].includes(rawFormat)) {
+      throw new MintDenied(403, 'forbidden', { id, phase: 'token', viewerId, reason: 'invalid-entitlement-format' });
+    }
+    const deliveryFormat = rawFormat;
+    const requestedLossless = entitlement.lossless ?? (lossless || rawQuality === 'lossless');
+    if (deliveryFormat === 'jpeg' && requestedLossless) {
+      throw new MintDenied(403, 'forbidden', {
+        id, phase: 'token', viewerId, reason: 'incompatible-format-lossless-policy',
+      });
+    }
+    // PNG is intrinsically lossless; quality settings do not turn it into a
+    // lossy format. Bind that actual behavior, along with the exact format,
+    // into the token so redemption cannot silently change output policy.
+    const deliveryLossless = deliveryFormat === 'png' || requestedLossless;
+    const deliveryQuality = deliveryLossless
       ? 'lossless'
       : Math.max(1, Math.min(100, Math.round(Number(rawQuality) || 95)));
-    const rawFormat = entitlement.format || format;
-    const deliveryFormat = ['webp', 'png', 'jpeg', 'avif'].includes(rawFormat) ? rawFormat : 'webp';
     tokenPayload.q = deliveryQuality;
+    tokenPayload.fmt = deliveryFormat;
     if (deliveryLossless) tokenPayload.ls = 1;
-    if (deliveryFormat !== format) tokenPayload.fmt = deliveryFormat;
 
     // StegoMark issuance: derive (but do not expose) the fingerprint that
     // will be baked into this view's pixels, and let the host persist the
@@ -2152,15 +2172,46 @@ export function createArchxMiddleware(options = {}) {
             // into the outer mapper (BUSY/TIMEOUT -> 503).
             throw err;
           }
-          if (dims?.width) effectiveWidth = Math.max(64, Math.min(effectiveWidth, Math.floor(dims.width * cfg.maxWidthFraction)));
+          if (dims?.width) {
+            const fractionWidth = Math.floor(dims.width * cfg.maxWidthFraction);
+            if (fractionWidth < 64) {
+              return deny(req, res, 403, 'forbidden', {
+                id, phase, viewerId: currentViewerId, reason: 'fraction-below-min-width',
+              });
+            }
+            effectiveWidth = Math.min(effectiveWidth, fractionWidth);
+          }
+        }
+        // v2 tokens minted by current releases always sign fmt. For older
+        // tokens that omitted it, retain the historical server-format
+        // fallback until their short expiry, but never let a current
+        // authorize() result replace an explicitly signed format.
+        const effectiveFormat = ['webp', 'png', 'jpeg', 'avif'].includes(payload.fmt) ? payload.fmt : format;
+        if (entitlement.format != null) {
+          if (!['webp', 'png', 'jpeg', 'avif'].includes(entitlement.format)) {
+            return deny(req, res, 403, 'forbidden', { id, phase, viewerId: currentViewerId, reason: 'invalid-entitlement-format' });
+          }
+          if (entitlement.format !== effectiveFormat) {
+            return deny(req, res, 403, 'forbidden', { id, phase, viewerId: currentViewerId, reason: 'format-entitlement-mismatch' });
+          }
         }
         let effectiveQuality = payload.q ?? quality;
-        let effectiveLossless = payload.ls === 1 || effectiveQuality === 'lossless' || lossless;
-        if (entitlement.lossless === false && effectiveLossless) {
+        // Derive losslessness from the signed delivery policy, not this
+        // replica's global default. PNG is intrinsically lossless; JPEG is
+        // intrinsically lossy. This prevents config skew or a format change
+        // from widening a token that was minted for lossy delivery.
+        if (effectiveFormat === 'jpeg' && (payload.ls === 1 || effectiveQuality === 'lossless')) {
+          return deny(req, res, 403, 'forbidden', {
+            id, phase, viewerId: currentViewerId, reason: 'incompatible-format-lossless-policy',
+          });
+        }
+        let effectiveLossless = effectiveFormat === 'png' ||
+          (effectiveFormat !== 'jpeg' && (payload.ls === 1 || effectiveQuality === 'lossless'));
+        if (entitlement.lossless === false && effectiveLossless && effectiveFormat !== 'png') {
           effectiveLossless = false;
           effectiveQuality = quality === 'lossless' ? 95 : quality;
         }
-        if (entitlement.quality != null && entitlement.quality !== 'lossless') {
+        if (entitlement.quality != null && entitlement.quality !== 'lossless' && effectiveFormat !== 'png') {
           const currentQuality = Number(entitlement.quality);
           if (!Number.isFinite(currentQuality) || currentQuality < 1 || currentQuality > 100) {
             return deny(req, res, 403, 'forbidden', { id, phase, viewerId: currentViewerId, reason: 'invalid-entitlement-quality' });
@@ -2168,13 +2219,6 @@ export function createArchxMiddleware(options = {}) {
           const signedQuality = effectiveLossless ? 100 : Number(effectiveQuality) || 95;
           effectiveQuality = Math.min(signedQuality, Math.round(currentQuality));
           effectiveLossless = false;
-        }
-        let effectiveFormat = ['webp', 'png', 'jpeg', 'avif'].includes(payload.fmt) ? payload.fmt : format;
-        if (entitlement.format != null) {
-          if (!['webp', 'png', 'jpeg', 'avif'].includes(entitlement.format)) {
-            return deny(req, res, 403, 'forbidden', { id, phase, viewerId: currentViewerId, reason: 'invalid-entitlement-format' });
-          }
-          effectiveFormat = entitlement.format;
         }
 
         const forensicSeed = computeForensicSeed(id, payload, issuingSecret);

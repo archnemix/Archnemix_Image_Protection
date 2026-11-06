@@ -65,7 +65,7 @@
           <li>1-bit re-binarization destroys the mark (a measured dead end for survival at acceptable quality).</li>
           <li>Layout-4 marks under 0.7-scale photo crops can exhaust the shipped bench's 20 s auto-detection budget (pin the layout or raise the budget — pinned searches recover them).</li>
           <li>Robust-profile distortion is ≈28.6 dB PSNR class: visible to pixel-peepers, chosen knowingly (D-12).</li>
-          <li><code>maxWidthFraction</code> defaults to <code>1</code>; an entitled viewer may receive native-width pixels when other caps permit. Set it below <code>1</code> for preview-only delivery.</li>
+          <li><code>maxWidthFraction</code> defaults to <code>1</code>; an entitled viewer may receive native-width pixels when other caps permit. Set it below <code>1</code> for preview-only delivery; if the fraction would cap below 64 px, delivery is denied rather than rounded up.</li>
           <li>Transplanted marked regions carry their pixels’ mark with them — attribution must be corroborated with issuance records, as the guide describes.</li>
         </ul>
       </div>

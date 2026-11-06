@@ -3,15 +3,31 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status (checked before the 1.30.0 publication).** The versions
-> confirmed on npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, `1.28.0`, and
-> `1.29.0`; this branch prepares `1.30.0` for publication after merge.
-> Historically, other version headings were GitHub-only development versions
-> folded into a later npm release. In particular, 1.27.0's changes shipped
-> folded into 1.28.0 (an earlier wording claimed 1.27.0 itself had been
-> published before the maintainer's manual publish step ran — it had not).
-> `npm view @archnemix/image-protection versions` is the source of truth for
-> what is installable.
+> **Publication status (checked before the 1.30.1 publication).** The versions
+> confirmed on npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, `1.28.0`,
+> `1.29.0`, and `1.30.0`; this branch prepares `1.30.1` for publication after
+> merge. Historically, other version headings were GitHub-only development
+> versions folded into a later npm release. In particular, 1.27.0's changes
+> shipped folded into 1.28.0 (an earlier wording claimed 1.27.0 itself had
+> been published before the maintainer's manual publish step ran — it had
+> not). `npm view @archnemix/image-protection versions` is the source of truth
+> for what is installable.
+
+## [1.30.1] — 2026-11-06
+
+Targeted server-policy, resource-control, and shared-cache correctness fixes.
+
+- Enforce `maxWidthFraction` without rounding a sub-64 px limit upward; deny
+  mint or redemption when the fraction cannot be honored at the supported
+  minimum width.
+- Pin the output format in every new token, deny redemption after a format
+  entitlement changes, derive losslessness from signed format/policy, and
+  reject incompatible JPEG-plus-lossless requests.
+- Transfer semaphore permits directly to queued work so arrivals cannot use
+  a scheduling gap to exceed configured processing concurrency.
+- Always armor shared Redis cache values as ASCII base64 for byte-identical
+  reads across client versions; allow for the approximately 33% storage and
+  bandwidth overhead.
 
 ## [1.30.0] — 2026-11-06
 
