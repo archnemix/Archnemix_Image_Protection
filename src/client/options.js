@@ -123,7 +123,7 @@ export function mergeOptions(opts = {}) {
   // bundle applied UNDER explicit options: it only fills keys the caller
   // did not set, so it is a default a deployment refines — never a
   // lock-in. Users can always build their own default with
-  // Archx.configure() or mode:'custom' + explicit flags.
+  // Archx.config() or mode:'custom' + explicit flags.
   if (clean.profile !== undefined && clean.profile !== null) {
     const bundleName = String(clean.profile).toLowerCase();
     if (!['lite', 'performance', 'elite'].includes(bundleName)) {

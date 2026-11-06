@@ -285,7 +285,7 @@ async function startStage() {
     }
     tag.textContent = on ? 'On the wire — the payload' : 'Your visitor’s view';
     caption.innerHTML = on
-      ? 'Tiles permuted and mirrored under a 128-bit-seeded plan (optionally AES-256-GCM sealed). This — at display resolution only — is all a scraper, proxy or DevTools session ever downloads.'
+      ? 'Tiles permuted and mirrored under a 128-bit-seeded plan (optionally AES-256-GCM sealed). In server mode, the authorized derivative is all that leaves; its width follows host policy and may reach native size unless maxWidthFraction is set below 1. This scene illustrates scrambling, not authorization.'
       : 'Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.';
     btnView.classList.toggle('is-active', !on);
     btnWire.classList.toggle('is-active', on);

@@ -99,7 +99,8 @@ map onto this library's design.
 The design goal follows directly: **A1–A11, A13, A16–A20, A24 and A29–A33
 should yield nothing clean or reusable outside the authorized page/session;
 A12/A14/A15/A21–A23/A25–A27/A31 must be pushed toward at most a
-server-authorized, screen-resolution, visibly/forensically marked copy whose
+server-authorized, visibly/forensically marked derivative whose width may
+reach native resolution unless `maxWidthFraction` is set below 1, and whose
 production is slow, noisy, rate-limited, revocable, and attributable; A28
 should leave the owner StegoMark and/or soft-binding evidence rather than
 screenshots and assertions.**
@@ -2084,12 +2085,12 @@ watermark blend, worker queue/timeout/batch exercised end-to-end.
 
 | Adversary | Goal | Archx outcome |
 |---|---|---|
-| Casual visitor | save a picture they like | Finds no save path at all (A1/A2 dead-end) |
+| Casual visitor | save a picture they like | Finds no ordinary save path (A1/A2 dead-end); privileged capture and reconstruction remain possible |
 | Bookmarklet/extension user | strip a page/gallery in one click | DOM has no images; canvas grabs return decoys |
-| Scraper bot operator (incl. AI training crawlers and stealth browsers) | harvest a whole catalogue | No URLs in HTML; needs JS, POST, authorization and a fresh signed token per image; bounded rate/quota/distinct-image controls make sweeps slow and visible; payloads are mosaics/ciphertext. Client fingerprint signals are not trusted because coherent stealth stacks can spoof them |
+| Scraper bot operator (incl. AI training crawlers and stealth browsers) | harvest a whole catalogue | No URLs in HTML; needs JS, POST, and a fresh signed token per image. Protected deployments require authorization; explicit anonymous mode is harvestable within active limits. Bounded rate/quota/distinct-image controls make sweeps slower and visible; payloads are scrambled mosaics, optionally AES ciphertext. Client fingerprint signals are not trusted because coherent stealth stacks can spoof them |
 | Script/extension injector | hook web APIs or grab viewer internals wholesale | Captured natives bypass later hooks; audits can fail closed in Fortress; no host expando/public registry/debug handle exposes canvases, bitmaps, or keys |
-| Token thief | replay/share a captured delivery URL or token, or inflate its derivative size | Strict v2 claims + short expiry + synchronous proof/nonce claims; redemption reauthorization and viewer/session checks; optional IP/User-Agent friction; DPoP-style proof makes a copied token unusable without the page's non-extractable private key; current entitlement can only tighten signed width/quality/format |
-| Skilled fan / pirate | extract one specific premium image | Must reverse the scramble + capture session keys from their own browser; even perfect reconstruction is capped at the authorized derivative and can retain server-baked visible/forensic marks. Fortress adds strict memory lifetime and probing lockouts |
+| Token thief | replay/share a captured delivery URL or token, or inflate its derivative size | Strict v2 claims + short expiry + proof/nonce claims (replay is denied while spend records are retained; evict-on-saturation can reopen a narrow window); redemption reauthorization and viewer/session checks; optional IP/User-Agent friction; when proof-of-possession is enabled, a copied token is unusable without the page's non-extractable private key; current entitlement can only tighten signed width/quality/format |
+| Skilled fan / pirate | extract one specific premium image | Can capture the displayed view or reconstruct the scrambled payload using keys available to their authorized browser; the server-authorized derivative may reach native width unless fraction-capped, and can retain server-baked visible/forensic marks. Fortress adds memory/probing friction |
 | Insider / paying customer | leak content they can legitimately view | Screenshot/camera remain possible, but the delivered pixels can carry viewer-specific visible + forensic + blind StegoMark IDs; Lens prevents one screenshot from containing the whole sharp image, and the registry can identify the issued view when the mark survives and is geometrically recovered |
 | Screenshot-extension / DevTools user | capture the visible tab with browser privileges | Page JS cannot veto the capture; source/DOM still expose no file or signed URL, Vault read-back is black, and Fortress visible pixels are Lens/patterned-temporal-degraded + dynamically traced |
 | Cross-device photographer | keep the site open on one device and photograph it with another | Undetectable in principle; quality is limited by the entitled derivative and screen/camera losses, with server marks, dynamic trace, checker/band opponent-colour effects, and Lens reducing resale value; StegoMark phone-photo recovery is unproven without external rectification |
@@ -2154,7 +2155,7 @@ error — see the README checklist).
 8. **Entitlements are signed policy, not presentation hints.** Width — and
    now delivery quality/format — is part of the security boundary. The
    middleware accepts a browser's desired width/quality only as a request,
-   clamps width by global and per-viewer `maxWidth`, lets `authorize()` set
+   clamps width by global `maxWidthCap`, per-viewer `maxWidth`, and `maxWidthFraction` where configured, lets `authorize()` set
    `quality`/`lossless`/`format`, and signs the resulting derivative policy.
    One-time/browser-bound tokens are optional because they increase token
    churn and can interact with retries, mobile IP changes, and shared

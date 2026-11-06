@@ -6,7 +6,10 @@
  *   demo-masters/            ← masters live here, OUTSIDE every static route.
  *                              GET /demo-masters/... returns 404. The only way
  *                              pixels leave this folder is through /archx/*
- *                              (signed header token + down-scale + tile-scramble).
+ *                              (signed header token + entitled resize + tile-scramble).
+ *                              This public demo leaves maxWidthFraction at 1,
+ *                              so native-width pixels may be delivered under
+ *                              the 1920 px cap; production should set a stricter policy.
  *   demo/public-unprotected/ ← intentionally naked copies for comparison.
  *   demo/, src/, dist/       ← normal static assets (code is not secret).
  */
@@ -61,8 +64,8 @@ const archx = createArchxMiddleware({
   // Production hosts persist onStegoIssue fingerprints in their own database.
   // The demo deliberately exposes no HTTP registry/debug endpoint for them.
   // Determined-attacker hardening (all on for the demo):
-  oneTimeTokens: true,                    // a captured signed token cannot be replayed
-  bindTokenTo: { userAgent: true },       // …and only works in the browser that asked for it
+  oneTimeTokens: true,                    // bounded one-time claim store; size its replay window
+  bindTokenTo: { userAgent: true },       // friction: binds to UA, not browser identity
   // Baked in BEFORE scrambling: even a perfectly un-shuffled stolen payload
   // remains watermarked. Gallery thumbs are spared the visible mark.
   serverWatermark: ({ id }) => (id.startsWith('gallery-')

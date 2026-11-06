@@ -109,7 +109,7 @@
 
     <article class="card">
       <div class="card-head"><h3>1 — Lite mode</h3><span class="badge mid">LIGHT</span></div>
-      <p class="desc">Fast protected viewer for galleries and listings. No normal image element is exposed; extraction returns a low-resolution decoy in this example.</p>
+      <p class="desc">Fast viewer for galleries and listings. No normal image element is exposed and read-back returns a low-resolution decoy, but this showcase&rsquo;s source JPG remains public and directly fetchable.</p>
       <div class="media"><div id="liteImg" class="archx-host"></div></div>
       <details><summary>View code</summary><pre>Archx.load.image('#liteImg', './luxury-watch.jpg', {
   mode: 'lite',
@@ -173,13 +173,14 @@
         <strong>Vault</strong> moves rendering to WebGL. <strong>Fortress</strong> assumes someone may screenshot or photograph the screen and makes one full sharp frame harder to obtain. <strong>Custom</strong> lets you choose only the layers you want.
       </p>
       <details open><summary>Production warning</summary>
-        <pre>For a real website, do NOT leave luxury-watch.jpg publicly downloadable
-beside the page. Keep masters outside the web root and use either:
+        <pre>This showcase uses a public JPG directly, only for visual comparison.
+For restricted/private images, keep masters outside every public root and use:
 
-1) Archx token server  → browser asks for { id: 'luxury-watch' }
-2) Pre-scrambled files  → browser loads luxury-watch.archx + key
+1) Archx token server → authorize each view and enforce the width policy.
 
-This showcase uses the JPG directly only to make the visual comparison easy.</pre>
+Pre-scrambled .archx files + their browser-visible key are public by design;
+use those for public previews/obfuscation, not as access control. Set
+maxWidthFraction &lt; 1 when preview-only pixels are required.</pre>
       </details>
       <div style="padding:0 18px 18px;display:flex;gap:10px;flex-wrap:wrap">
         <button class="secondary" type="button" onclick="location.reload()">Reload page</button>
@@ -336,7 +337,7 @@ This showcase uses the JPG directly only to make the visual comparison easy.</pr
     <ul class="log" id="eventLog"></ul>
   </section>
 
-  <footer>Archnemix showcase · The normal JPG is intentionally vulnerable for comparison. Protected modes cannot make screenshots physically impossible; they prevent easy file extraction and make captures lower-value and traceable.</footer>
+  <footer>Archnemix showcase · The source JPG is intentionally public, so this page is a viewer/read-back demonstration—not a private-image deployment. A real setup must keep masters off public routes and enforce authorization/width policy. No protected mode can prevent screenshots; capture layers only add friction or evidence.</footer>
 </div>
 
 <script>

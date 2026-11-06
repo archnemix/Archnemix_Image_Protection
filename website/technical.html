@@ -125,7 +125,7 @@
         <span class="flow-caption-kicker" id="flowZone">SERVER · PRIVATE</span>
         <h4 id="flowStageTitle">1 · The master goes in — and stays there</h4>
         <p id="flowStageText">The original is indexed by image ID in a masters directory outside every
-        public root. Startup refuses an overlapping public/private layout. There is no route that returns
+        public root declared to Archx. Startup refuses overlap with declared roots; undeclared host mounts remain the operator&rsquo;s responsibility. No Archx route returns
         this file.</p>
       </div>
 
@@ -144,16 +144,16 @@
       </div>
 
       <ol class="flow-steps" id="flowSteps">
-        <li><button type="button" class="flow-step is-current" data-step="0" aria-current="step"><span class="flow-step-no">01</span><span><strong>The master goes in</strong><small data-flow-step-text>Indexed by ID outside the public root; the middleware is the only reader and there is no master URL.</small></span></button></li>
+        <li><button type="button" class="flow-step is-current" data-step="0" aria-current="step"><span class="flow-step-no">01</span><span><strong>The master goes in</strong><small data-flow-step-text>Indexed by ID outside public roots declared to Archx; undeclared host mounts remain the operator&rsquo;s responsibility.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="1"><span class="flow-step-no">02</span><span><strong>The browser asks first</strong><small data-flow-step-text>The loader measures the display box, DPR and oversampling, then requests a token for that ID and size. No pixels move yet.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="2"><span class="flow-step-no">03</span><span><strong>The server decides and signs</strong><small data-flow-step-text>Host authorization, rate/quotas and entitlement caps run before an HMAC token, scramble key, grid and expiry are returned.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="3"><span class="flow-step-no">04</span><span><strong>The token is redeemed</strong><small data-flow-step-text>The payload request verifies the token and proof, re-runs authorization, checks bindings, then spends the one-time claim.</small></span></button></li>
-        <li><button type="button" class="flow-step" data-step="4"><span class="flow-step-no">05</span><span><strong>Sharp builds only the entitled derivative</strong><small data-flow-step-text>Input is sniffed and budget-checked, decoded, orientation-baked when needed, and resized to the authorized display geometry.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="4"><span class="flow-step-no">05</span><span><strong>Sharp builds only the entitled derivative</strong><small data-flow-step-text>Input is sniffed and budget-checked, decoded, orientation-baked when needed, and resized to the signed, authorized width; the default fraction of 1 can allow native-width pixels.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="5"><span class="flow-step-no">06</span><span><strong>Server marks are baked in</strong><small data-flow-step-text>Optional visible watermark, server forensic blocks and StegoMark are applied to derivative pixels before scrambling.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="6"><span class="flow-step-no">07</span><span><strong>Tiles are scrambled and packaged</strong><small data-flow-step-text>Keyed padding, an 8×8 default tile permutation with mirrors, image encoding, .archx wrapping and optional AES-256-GCM.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="7"><span class="flow-step-no">08</span><span><strong>The browser opens the payload</strong><small data-flow-step-text>Bounded fetch, strict container and dimension checks, optional AES-GCM decrypt, then decode of a still-scrambled bitmap.</small></span></button></li>
         <li><button type="button" class="flow-step" data-step="8"><span class="flow-step-no">09</span><span><strong>The selected viewer renders it</strong><small data-flow-step-text>Shield assembles tiles in a private Canvas 2D working canvas and paints the guarded display canvas.</small></span></button></li>
-        <li><button type="button" class="flow-step" data-step="9"><span class="flow-step-no">10</span><span><strong>What can come out</strong><small data-flow-step-text>The visitor sees the entitled derivative. Network capture gets protected payload bytes; readback is poisoned or black; a screenshot remains possible but is resolution-capped and may carry marks.</small></span></button></li>
+        <li><button type="button" class="flow-step" data-step="9"><span class="flow-step-no">10</span><span><strong>What can come out</strong><small data-flow-step-text>The visitor sees the entitled derivative. Network capture gets protected payload bytes; readback is poisoned or black; a screenshot remains possible and is bounded by server width policy; native-width pixels are possible unless the host sets a fraction below 1.</small></span></button></li>
       </ol>
 
       <p class="w-note"><strong>Scope:</strong> this chart follows token delivery. Precomputed
@@ -210,14 +210,14 @@
 
       <article class="decision" id="d-masters" data-tags="security">
         <div class="decision-head"><span class="decision-no">D-01</span>
-          <div><h3 class="decision-title">Masters live outside the public root — and startup refuses otherwise</h3>
+          <div><h3 class="decision-title">Masters stay outside declared public roots; overlap checks fail closed</h3>
           <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Fail-closed</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">The original file is never web-addressable; the middleware is the only reader, and it will not boot over a public masters folder.</p>
+        <p class="decision-lede">The original file should not be web-addressable; the middleware is the intended reader, and it refuses overlap with public roots declared in its configuration.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>Most “protected” galleries still host the original at a guessable URL. One directory listing, backup file, or misconfigured static route hands over the master — every other layer is then decoration.</p></div>
-            <div><h4>We chose</h4><p>Originals sit in a directory the web server never serves. The middleware resolves real paths, rejects symlinks that escape, and <em>throws at startup</em> if a masters directory overlaps any declared public directory. The preflight audit mirrors the same rule (a v1.21 red-team find: the audit once said “ok” where startup refused).</p></div>
+            <div><h4>We chose</h4><p>Originals should sit in a directory the web server never serves. The middleware resolves real paths, rejects symlinks that escape, and <em>throws at startup</em> if a masters directory overlaps any public directory declared to Archx; undeclared host mounts remain the operator&rsquo;s responsibility. The preflight audit mirrors the same rule (a v1.21 red-team find: the audit once said “ok” where startup refused).</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Signed URLs to public files</strong> — the file is still fetchable by anyone who obtains or guesses the URL class; revocation is per-URL theatre.</li><li><strong>Obscure filenames</strong> — secrecy by entropy of a path leaks via logs, referrers, and screenshots.</li></ul></div>
             <div><h4>Pros</h4><ul><li>Whole classes of static-file bugs become irrelevant.</li><li>One auditable read path for every byte that leaves.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Requires a server component (or the offline asset builder) — pure static hosting of originals is out.</li><li>Deployments must think about filesystem layout once.</li></ul></div>
@@ -228,17 +228,17 @@
 
       <article class="decision" id="d-derivatives" data-tags="security quality">
         <div class="decision-head"><span class="decision-no">D-02</span>
-          <div><h3 class="decision-title">Only display-resolution derivatives ever leave</h3>
+          <div><h3 class="decision-title">Entitled derivative width is capped; preview-only needs an explicit policy</h3>
           <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Quality</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">The server downsizes to the entitled display width before anything is scrambled or sent. The print-resolution file cannot be reconstructed from what was never transmitted.</p>
+        <p class="decision-lede">The server resizes to the signed, entitled width before anything is scrambled or sent. That width is not inherently the browser&rsquo;s physical display size: <code>maxWidthFraction</code> defaults to 1, so an entitled viewer can receive native-width pixels when the other caps permit.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>If full-resolution pixels reach the browser “for fast zoom”, extraction gets full resolution too. Client-side downscaling is a polite request, not a boundary.</p></div>
-            <div><h4>We chose</h4><p>Your <span class="mono">authorize</span> callback grants a maximum width per viewer; the server renders exactly that (optionally snapped to canonical width buckets for cache efficiency) and the token binds the width. Smuggling a bigger <span class="mono">w</span> at redeem time changes nothing.</p></div>
+            <div><h4>We chose</h4><p>The global <span class="mono">maxWidthCap</span> and optional <span class="mono">authorize</span> maximum constrain each viewer&rsquo;s requested width; <span class="mono">maxWidthFraction &lt; 1</span> additionally caps it relative to the master. The server renders the resulting signed width (optionally snapped to canonical buckets), and the token binds that width. Smuggling a bigger <span class="mono">w</span> at redeem time changes nothing.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Full-res + CSS scaling</strong> — the extracted copy is print-ready.</li><li><strong>Deep-zoom tile streaming (IIIF-style)</strong> — excellent pattern, documented as the escalation path, but a much larger surface; deferred deliberately.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Even a perfect payload reconstruction caps at screen quality.</li><li>Smaller payloads; two-stage derivative caching keeps it cheap.</li></ul></div>
-            <div><h4>Cons / costs</h4><ul><li>No infinite pinch-zoom into print detail (the viewer offers a lens within the derivative).</li><li>Width policy is a real product decision the host must make.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>With <span class="mono">maxWidthFraction &lt; 1</span>, even a perfect reconstruction stays below native width.</li><li>Smaller payloads; two-stage derivative caching keeps it cheap.</li></ul></div>
+            <div><h4>Cons / costs</h4><ul><li>No infinite pinch-zoom into print detail (the viewer offers a lens within the derivative).</li><li>Preview-only width policy is a real product decision the host must make; the default fraction of 1 allows native-width pixels when other caps permit.</li></ul></div>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>Entitlement-escalation attacks (mint/redeem width smuggling, absurd widths) held in the red-team suite; derivative width is asserted from the container header in tests.</p></div>
         </div>
@@ -249,12 +249,12 @@
           <div><h3 class="decision-title">Scramble is obfuscation; AES-256-GCM is the secrecy — labelled as such</h3>
           <div class="decision-tags"><span class="chip static">Security</span><span class="chip static">Honesty</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">Tile permutation makes payloads useless to capture tools; it is never sold as encryption. When secrecy matters, the payload is additionally sealed with AES-256-GCM.</p>
+        <p class="decision-lede">Tile permutation makes captured payloads harder for casual tools to inspect; it is not encryption and can be reconstructed. When wire confidentiality matters, the payload can also be sealed with AES-256-GCM.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>Vendors routinely call pixel shuffling “encryption”. A permutation can be attacked with jigsaw solvers and known-plaintext edges; overselling it leaves buyers with a false threat model.</p></div>
-            <div><h4>We chose</h4><p>Two separately-named layers: a key-seeded tile permutation + mirrors (obfuscation, defeats casual tooling and network capture), and optional AES-256-GCM over the encoded derivative (actual confidentiality, WebCrypto/Node crypto). Docs state plainly which is which.</p></div>
-            <div><h4>Alternatives rejected</h4><ul><li><strong>Scramble-only marketed as encryption</strong> — dishonest and weaker against solvers.</li><li><strong>Encryption-only</strong> — loses the “confetti” property for decrypted-in-page captures and screenshot tooling that hooks image decoders.</li></ul></div>
+            <div><h4>We chose</h4><p>Two separately-named layers: a key-seeded tile permutation + mirrors (obfuscation that adds friction to casual tools and raw network inspection), and optional AES-256-GCM over the encoded derivative (authenticated wire confidentiality against parties without the key; the authorized browser receives that key). Docs state plainly which is which.</p></div>
+            <div><h4>Alternatives rejected</h4><ul><li><strong>Scramble-only marketed as encryption</strong> — dishonest and weaker against solvers.</li><li><strong>Encryption-only</strong> — protects the wire, but an authorized browser still receives clear pixels; it does not stop in-page extraction or screenshots.</li></ul></div>
             <div><h4>Pros</h4><ul><li>Each layer is evaluated against the right attacker.</li><li>Operators can trade CPU for secrecy explicitly.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Two mechanisms to configure and explain.</li><li>AES path needs key handling in the client loader.</li></ul></div>
           </div>
@@ -273,7 +273,7 @@
             <div><h4>The problem</h4><p>With a 32-bit seed, an attacker who captures one scrambled payload can enumerate every seed, unscramble, and score the results — recovering the permutation without the key. Measured: feasible on a laptop.</p></div>
             <div><h4>We chose</h4><p>New payloads default to plan v2 (128-bit state, warm-up rounds). v1 remains byte-for-byte for decoding legacy assets; no public entry point emits it unless explicitly requested. Try the real algorithm:</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Silently change v1 derivation</strong> — orphans every previously built asset.</li><li><strong>Bigger grid instead of bigger seed</strong> — permutation size was never the weak point; seed entropy was.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Seed brute-force moves from hours to infeasible.</li><li>Zero migration for existing assets.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Removes the direct 32-bit seed-enumeration weakness; v2 remains deterministic obfuscation, not cryptographic confidentiality.</li><li>Zero migration for existing assets.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Two derivations to maintain and test forever (accepted: formats are forever).</li></ul></div>
           </div>
           <div class="widget" id="w-plan">
@@ -320,13 +320,13 @@
           <div><h3 class="decision-title">One-time HMAC tokens with an allowlisted claim set — not a JWT library</h3>
           <div class="decision-tags"><span class="chip static">Security</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">A token is <span class="mono">base64url(claims).base64url(HMAC-SHA256)</span>: eight-ish claims, every one validated (audience, scope, image, width, iat/exp window, nonce), spent exactly once, canonical encodings only.</p>
+        <p class="decision-lede">A token is <span class="mono">base64url(claims).base64url(HMAC-SHA256)</span>: eight-ish claims, every one validated (audience, scope, image, width, iat/exp window, nonce), normally spent once while the claim record is retained; the evict-on-saturation policy can reopen a narrow replay window under sustained pressure (D-07), canonical encodings only.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>General JWT stacks bring algorithm negotiation, remote key fetching, and claim liberalism — the exact surface behind “alg:none”, kid-confusion, and claim-smuggling bugs. This system needs one narrow thing: “viewer V may fetch image I at width W, once, soon.”</p></div>
             <div><h4>We chose</h4><p>A fixed HMAC construction, a frozen claim allowlist (unknown keys refuse), strict types, TTL and clock-skew windows, and a one-time claim store keyed canonically. v1.21 added canonical-encoding rejection after the red team showed base64url slack bits let four strings carry one MAC. Single-secret verification authenticates before parsing.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Off-the-shelf JWT</strong> — larger parser/alg surface for zero needed features.</li><li><strong>Opaque session ids only</strong> — loses stateless width/image binding and forces a lookup per request.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Tiny, auditable verifier; timing-safe compare; replay dies at the claim store.</li><li>Key rotation via keyring <span class="mono">kid</span> without alg games.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Tiny, auditable verifier; timing-safe compare; replay is denied while the spend record is retained; under pressure, evict mode can reopen a narrow window, while strict mode refuses new redemptions.</li><li>Key rotation via keyring <span class="mono">kid</span> without alg games.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Not interoperable with JWT tooling (by design).</li><li>We own the verifier’s correctness — hence the fuzz battery.</li></ul></div>
           </div>
           <div class="widget" id="w-token">
@@ -340,7 +340,7 @@
             <label style="display:grid;gap:5px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--ink-soft)">Claims (JSON — edit me, then re-mint)
               <textarea id="tokClaims" spellcheck="false"></textarea></label>
             <p class="w-out" id="tokOut">Press “Mint token”. Runs 100% locally with WebCrypto; the example secret never leaves this page and no Archx server is contacted.</p>
-            <p class="w-note">Verification mirrors the server’s single-secret path: canonical-encoding check → HMAC compare → claim validation. The padding variant has a <em>valid</em> MAC but a non-canonical string — watch it fail anyway.</p>
+            <p class="w-note">The local widget checks canonical encoding, HMAC, and core v2 claims (using the default 1920 px width cap); optional-claim value checks are simplified, so this is a teaching model rather than the server validator. The padding variant has a <em>valid</em> MAC but a non-canonical string — watch it fail anyway.</p>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>Red-team sections B + H: corrupted/tampered/wrong-secret/cross-image/replayed/expired/fuzzed-claim/kid-confused tokens all refused; a failed forgery does not burn the genuine claim; 16-way race admits exactly one redemption.</p></div>
         </div>
@@ -425,7 +425,7 @@
             <div><h4>The problem</h4><p>An <span class="mono">&lt;img src&gt;</span> is a public handle: save-as, drag-out, DevTools “open in new tab”, extension harvesters. Blocking context menus stops none of those and annoys paying users.</p></div>
             <div><h4>We chose</h4><p>Canvas2D/WebGL presentation of reassembled tiles; origin-tainted or black readback for <span class="mono">toDataURL</span>/<span class="mono">captureStream</span> paths where the platform allows; decoy responses for known extraction probes; print paths degraded. Every guard is an individual flag so sites choose their own friction.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Right-click blockers as the headline</strong> — theatre (see Overview §01).</li><li><strong>EME/DRM</strong> — real output protection exists there, but licensing, per-browser CDM deals, and no support for still-image workflows put it outside an open-source JS library. Named honestly as the “choose something else” path.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Casual and bulk tooling gets nothing addressable; extraction cost rises sharply.</li><li>Pixel-exact 1:1 display is preserved (MAD 0 in browser tests).</li></ul></div>
+            <div><h4>Pros</h4><ul><li>There is no direct image-file handle; authenticated scraping still depends on the host’s mint policy and quotas.</li><li>Pixel-exact 1:1 display is preserved (MAD 0 in browser tests).</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Screenshots by privileged tooling still work — degraded and attributable, never “prevented”.</li><li>Canvas breaks some a11y/save workflows; hosts keep alt-text duties (documented).</li></ul></div>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>122-check real-Chromium suite: encapsulation, decoy readback, black WebGL readback, replay, guards. RESEARCH §2.x viewer work.</p></div>
@@ -593,7 +593,7 @@
             <div><h4>The problem</h4><p>“Just use a Map” is how a token endpoint becomes a memory-exhaustion service. Slow-trickle bodies pin handlers; 2,000-item batches pin CPUs; distinct-ID floods pin trackers.</p></div>
             <div><h4>We chose</h4><p>Capacity-capped structures with interval cleanup (no per-request scans), /64+/48 IPv6 limiter tiers (rotation-resistant), deadline-bounded body reads, batch item caps, slow-callback timeouts, and a distinct-image scrape quota with deny/challenge actions.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Rely on the host framework’s limits</strong> — varies by deployment; the library must be safe behind a bare <span class="mono">node:http</span> server (our demo is one).</li><li><strong>Per-IP only rate keys</strong> — IPv6 rotation walks straight through (measured; hence tiers).</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Worst-case memory/connections are arithmetic, not vibes.</li><li>Scrapers hit quotas, not your origin budget.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Worst-case memory/connections are arithmetic, not vibes.</li><li>Quotas bound collection and origin work; tune them to the deployment and use shared state when scaling.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>More knobs; multi-instance deployments should use the Redis store for shared truth (shipped, contract-tested against real Redis in CI).</li></ul></div>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>Red-team E + H: mint flood 429s, slow-trickle cut at deadline, 4th distinct image 429, 40-way concurrency bounded. Load test ships in-repo.</p></div>
