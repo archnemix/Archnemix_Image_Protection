@@ -188,8 +188,13 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
           <tr><td><code>onAttempt</code></td><td>—</td><td>Callback/DOM events when copy attempts are detected, for your own logging.</td></tr>
         </tbody>
       </table></div>
-      <p>Every option is validated: an unknown or malformed value fails
-      loudly at load time instead of silently weakening protection.</p>
+      <p>Client options are not a strict unknown-key allowlist: unsupported
+      keys may appear in the returned config or instance-options view without
+      enabling a corresponding Archx feature. Some invalid enum values
+      normalize to a fallback instead of throwing; unknown profile names do
+      throw. Double-check option spelling and verify the behavior you intend.
+      Server middleware configuration is stricter and rejects unknown option
+      keys at startup.</p>
 
       <h2 id="galleries">Galleries &amp; many images</h2>
       <p>Archnemix is built for image-heavy pages. Images load lazily as
@@ -211,12 +216,16 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
       failures. These five rules are enforced or checked by the library —
       follow them and the system does what the overview promises:</p>
       <ol class="doc-list">
-        <li><strong>Masters outside the public root.</strong> If the
+        <li><strong>Masters outside every public root.</strong> If the
         original file is web-addressable, nothing else matters.
-        <code>imagesDir</code> must not be inside your static folder.</li>
-        <li><strong><code>authorize</code> is mandatory and deny-by-default.</strong>
-        Leaving it out refuses every request rather than allowing all —
-        a missing callback can never silently open your catalog.</li>
+        <code>imagesDir</code> must not be inside a static mount. Declare
+        each public root with <code>publicDir</code>/<code>publicDirs</code>
+        so Archx can check for overlap; undeclared host mounts remain your
+        responsibility.</li>
+        <li><strong><code>authorize</code> is required unless public access is explicit.</strong>
+        Omitting both <code>authorize</code> and
+        <code>allowAnonymous:true</code> fails at startup. The latter is an
+        intentional public-catalog exception, not a safe default.</li>
         <li><strong>Use a real secret.</strong> 32+ random characters from
         an environment variable or secret manager; the startup audit flags
         weak, shared, or well-known values.</li>
