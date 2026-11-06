@@ -102,7 +102,7 @@ __export(index_exports, {
 module.exports = __toCommonJS(index_exports);
 
 // src/client/version.js
-var VERSION = "1.30.0";
+var VERSION = "1.30.1";
 
 // src/core/bytes.js
 function asBytes(bytes) {

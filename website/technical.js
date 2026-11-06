@@ -720,7 +720,7 @@ if (document.getElementById('w-survival')) {
         short: pop
           ? 'The payload request carries the token and a signature from the matching private proof key; checks pass, then the one-time claim is spent.'
           : 'The payload request carries the token; signature, expiry, bindings and a second authorization run before the one-time claim is spent.',
-        body: `The viewer fetches the clean payload URL with the token${pop ? ' and a fresh proof signature bound to that token, method and target' : ''}. The server verifies canonical encoding, HMAC and expiry${pop ? ', verifies the proof' : ''}, re-runs authorize for the image phase, checks viewer/trace bindings, and only then atomically spends the one-time claim. A current entitlement may tighten the signed width, quality or format — never widen it.`,
+        body: `The viewer fetches the clean payload URL with the token${pop ? ' and a fresh proof signature bound to that token, method and target' : ''}. The server verifies canonical encoding, HMAC and expiry${pop ? ', verifies the proof' : ''}, re-runs authorize for the image phase, checks viewer/trace bindings, and only then atomically spends the one-time claim. A current entitlement may tighten signed width or quality, but the exact output format is pinned in the token; a format mismatch is denied and requires a newly minted token. No current policy can widen signed claims.`,
       },
       {
         zone: 'SERVER · SHARP DERIVATIVE',

@@ -896,6 +896,36 @@ test('bounded security stores expire/evict and processing semaphore fails predic
   assert.equal(await first, 'done');
 });
 
+test('AsyncSemaphore transfers permits before waking queued work', async () => {
+  const semaphore = new AsyncSemaphore({ maxConcurrent: 1, maxQueue: 2, queueTimeoutMs: 0 });
+  let releaseFirst, releaseSecond, releaseThird;
+  let secondStarted = false, thirdStarted = false;
+  const first = semaphore.run(() => new Promise((resolve) => { releaseFirst = resolve; }));
+  const second = semaphore.run(() => new Promise((resolve) => {
+    secondStarted = true;
+    releaseSecond = resolve;
+  }));
+  releaseFirst('first');
+  // Queue this arrival after the first operation's completion reaction but
+  // before its already-waiting second caller resumes from the semaphore.
+  const third = Promise.resolve().then(() => semaphore.run(() => new Promise((resolve) => {
+    thirdStarted = true;
+    releaseThird = resolve;
+  })));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(semaphore.active, 1, 'a permit is never momentarily free during direct handoff');
+  assert.equal(secondStarted, true, 'the FIFO waiter receives the transferred permit');
+  assert.equal(thirdStarted, false, 'a later arrival cannot overtake and exceed the limit');
+  assert.equal(semaphore.queued, 1);
+  releaseSecond('second');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(semaphore.active, 1);
+  assert.equal(thirdStarted, true);
+  releaseThird('third');
+  assert.deepEqual(await Promise.all([first, second, third]), ['first', 'second', 'third']);
+  assert.equal(semaphore.active, 0);
+});
+
 test('hardened HTTP edge cases: malformed requests, race-safe replay, redemption reauthorization', async (t) => {
   let allowed = true;
   let viewerId = 'alice';
@@ -3093,7 +3123,7 @@ test('IPv6 /48 aggregate ceiling binds across rotating /64s', async (t) => {
   assert.equal((await mint('2001:db8:9999:1::1')).status, 200, 'a different /48 is unaffected');
 });
 
-test('Redis store uses raw Buffers when the client supports returnBuffers', async () => {
+test('Redis store uses ASCII armor with node-redis returnBuffers clients', async () => {
   const store = new Map();
   const client = {
     options: {},
@@ -3113,8 +3143,45 @@ test('Redis store uses raw Buffers when the client supports returnBuffers', asyn
   const binary = Buffer.from(Array.from({ length: 300 }, (_, i) => (i * 7) % 256));
   await redis.setCache('raw1', binary, { ttlMs: 1000 });
   const stored = [...store.values()][0];
-  assert.ok(Buffer.isBuffer(stored) && stored.equals(binary), 'stored raw, no base64 armor');
+  const storedText = Buffer.isBuffer(stored) ? stored.toString('utf8') : stored;
+  assert.equal(typeof storedText, 'string');
+  assert.ok(storedText.startsWith('b64:'), 'all clients store the same ASCII-armored cache representation');
   assert.deepEqual(await redis.getCache('raw1'), binary);
+});
+
+test('Redis cache bytes survive ioredis/node-redis mixed-client reads and writes', async () => {
+  const redisDb = new Map();
+  const ioRedisClient = {
+    defineCommand() {},
+    async getBuffer(key) {
+      const value = redisDb.get(key);
+      return value == null ? null : (Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(String(value)));
+    },
+    async set(key, value) { redisDb.set(key, Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(String(value))); return 'OK'; },
+    async eval() { throw new Error('not used'); },
+  };
+  const nodeRedisClient = {
+    isReady: true,
+    commandOptions(options) { return { options }; },
+    async get(arg1, arg2) {
+      const key = arg2 ?? arg1;
+      const value = redisDb.get(key);
+      if (value == null) return null;
+      // Model clients that round-trip invalid binary as replacement glyphs;
+      // ASCII base64 entries are unaffected by this UTF-8 conversion.
+      const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+      return arg1?.options?.returnBuffers ? Buffer.from(text) : text;
+    },
+    async set(key, value) { redisDb.set(key, Buffer.from(String(value))); return 'OK'; },
+    async eval() { throw new Error('not used'); },
+  };
+  const ioRedis = createRedisStateStore({ client: ioRedisClient, prefix: 'mixed-clients' });
+  const nodeRedis = createRedisStateStore({ client: nodeRedisClient, prefix: 'mixed-clients' });
+  const binary = Buffer.from([0x00, 0xff, 0x80, 0xfe, 0x41, 0x42, 0x00]);
+  await ioRedis.setCache('from-io', binary);
+  assert.deepEqual(await nodeRedis.getCache('from-io'), binary, 'node-redis reads ioredis-written cache bytes exactly');
+  await nodeRedis.setCache('from-node', binary);
+  assert.deepEqual(await ioRedis.getCache('from-node'), binary, 'ioredis reads node-redis-written cache bytes exactly');
 });
 
 test('prepare+finish is byte-identical to scrambleImage, and finish never mutates a shared base', async () => {
@@ -4301,6 +4368,67 @@ test('v1.19 maxWidthFraction fails closed: invalid values rejected, fraction cap
   assert.equal(redeemed.status, 200);
   const container = decodeContainer(new Uint8Array(await redeemed.arrayBuffer()));
   assert.ok(container.header.w <= 320, `fraction 0.5 of a 640px master caps delivery at 320 (got ${container.header.w})`);
+});
+
+test('fraction width policy rejects values below the supported minimum at mint and redemption', async (t) => {
+  for (const [width, fraction] of [[60, 0.6], [100, 0.6], [1000, 0.05]]) {
+    const fixture = await startArchxFixture(t, {
+      authorize: async () => ({ viewerId: 'fraction-min' }),
+      maxWidthFraction: fraction,
+      widthBuckets: [],
+    }, { cat: [width, 80] });
+    const mint = await postToken(`${fixture.base}/archx/token/cat?w=${width}`);
+    assert.equal(mint.status, 403, `${width}px at fraction ${fraction} has no supported-width delivery`);
+  }
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-frac-redemption-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(1000, 600));
+  const secret = 'fraction-redemption-secret-for-tests-32';
+  const issuer = createArchxMiddleware({
+    secret, imagesDir: dir, authorize: async () => ({ viewerId: 'fraction-redemption' }),
+    maxWidthFraction: 1, widthBuckets: [],
+  });
+  const issuerServer = http.createServer((req, res) => issuer(req, res));
+  await new Promise((resolve) => issuerServer.listen(0, '127.0.0.1', resolve));
+  const issuerBase = `http://127.0.0.1:${issuerServer.address().port}`;
+  const tokenResponse = await (await postToken(`${issuerBase}/archx/token/cat?w=1000`)).json();
+  const redeemer = createArchxMiddleware({
+    secret, imagesDir: dir, authorize: async () => ({ viewerId: 'fraction-redemption' }),
+    maxWidthFraction: 0.05, widthBuckets: [],
+  });
+  const redeemerServer = http.createServer((req, res) => redeemer(req, res));
+  await new Promise((resolve) => redeemerServer.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    issuer.close(); redeemer.close();
+    await Promise.all([
+      new Promise((resolve) => issuerServer.close(resolve)),
+      new Promise((resolve) => redeemerServer.close(resolve)),
+    ]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const result = await redeemToken(`http://127.0.0.1:${redeemerServer.address().port}`, tokenResponse);
+  assert.equal(result.status, 403, 'a stricter replica rejects a token when the cap is below 64px');
+});
+
+test('redemption cannot replace the signed format with a lossless one', async (t) => {
+  const { base } = await startArchxFixture(t, {
+    authorize: async (_req, _id, { phase }) => ({
+      viewerId: 'format-bound', quality: 10, lossless: false,
+      format: phase === 'token' ? 'webp' : 'png',
+    }),
+    widthBuckets: [],
+  }, { cat: [320, 240] });
+  const minted = await (await postToken(`${base}/archx/token/cat?w=320`)).json();
+  assert.equal(tokenPayloadForTest(minted.token).fmt, 'webp', 'format is explicit in the signed token');
+  const redeemed = await redeemToken(base, minted);
+  assert.equal(redeemed.status, 403, 'a changed entitlement cannot widen signed lossy WebP into PNG');
+
+  const jpegFixture = await startArchxFixture(t, {
+    authorize: async () => ({ viewerId: 'jpeg-policy', format: 'jpeg', lossless: true }),
+    widthBuckets: [],
+  }, { cat: [320, 240] });
+  const incompatible = await postToken(`${jpegFixture.base}/archx/token/cat?w=320`);
+  assert.equal(incompatible.status, 403, 'JPEG cannot truthfully satisfy a lossless request');
 });
 
 test('v1.19 step-up challenge gates single AND batch mints; a passed proof clears the subject', async (t) => {

@@ -201,10 +201,7 @@ cross-key transactions and can work with Cluster:
   expired members, determine whether the member already exists, add/update
   it, trim oldest members above `maxMembers`, refresh `PEXPIRE`, and return
   `{ distinct, isNew }`.
-- `getCache`/`setCache`: binary `GET` and `SET ... PX ttlMs`. Consider a
-  separate cache cluster/database so large derivative values cannot evict
-  short-lived replay claims. Scrambled/encrypted derivatives are still
-  access-controlled data; encrypt transport and restrict network access.
+- `getCache`/`setCache`: shared cache values are stored as ASCII `b64:`-prefixed base64, then decoded back to the original bytes. This avoids binary GET differences between ioredis and node-redis versions at the cost of about 33% extra cache storage/bandwidth. Consider a separate cache cluster/database so large derivative values cannot evict short-lived replay claims. Scrambled/encrypted derivatives are still access-controlled data; encrypt transport and restrict network access.
 
 The shipped adapter signature is
 `createRedisStateStore({ client, prefix, clientFlavor, closeClient })`.

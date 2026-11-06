@@ -221,6 +221,7 @@ export class AsyncSemaphore {
   get queued() { return Math.max(0, this.#queue.length - this.#queueHead); }
 
   async run(fn) {
+    let permitTransferred = false;
     if (this.#active >= this.maxConcurrent) {
       if (this.queued >= this.maxQueue) {
         const err = new Error('image processing busy');
@@ -228,7 +229,11 @@ export class AsyncSemaphore {
         throw err;
       }
       await new Promise((resolve, reject) => {
-        const waiter = { resolve, reject, timer: null };
+        const waiter = {
+          reject,
+          resolve: () => { permitTransferred = true; resolve(); },
+          timer: null,
+        };
         if (this.queueTimeoutMs > 0) {
           waiter.timer = setTimeout(() => {
             const i = this.#queue.indexOf(waiter);
@@ -242,10 +247,11 @@ export class AsyncSemaphore {
         this.#queue.push(waiter);
       });
     }
-    this.#active++;
+    // A resumed waiter may already own a permit handed directly from the
+    // operation leaving below. Do not increment active a second time.
+    if (!permitTransferred) this.#active++;
     try { return await fn(); }
     finally {
-      this.#active--;
       const next = this.#queueHead < this.#queue.length ? this.#queue[this.#queueHead++] : null;
       if (this.#queueHead >= this.#queue.length) { this.#queue.length = 0; this.#queueHead = 0; }
       else if (this.#queueHead > 1024 && this.#queueHead * 2 >= this.#queue.length) {
@@ -253,7 +259,11 @@ export class AsyncSemaphore {
       }
       if (next) {
         if (next.timer) clearTimeout(next.timer);
+        // Transfer the current permit before resolving the waiter. This
+        // closes the microtask gap in which a new caller could over-admit.
         next.resolve();
+      } else {
+        this.#active--;
       }
     }
   }
