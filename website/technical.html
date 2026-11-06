@@ -398,11 +398,11 @@
           <div><h3 class="decision-title">Deny-by-default authorization; the audit must never bless what startup refuses</h3>
           <div class="decision-tags"><span class="chip static">Security</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">No <span class="mono">authorize</span> callback and no explicit anonymous mode ⇒ the constructor throws. Throwing authorizers deny. Misspelled options throw. Weak secrets throw.</p>
+        <p class="decision-lede">On the server, no <span class="mono">authorize</span> callback and no explicit <span class="mono">allowAnonymous:true</span> mode ⇒ the constructor throws. Throwing authorizers deny. Unknown server-option keys throw. Weak secrets throw.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>The most dangerous default in access-control code is the permissive one reached by omission: a forgotten callback, a typo’d option, an exception path that falls through to “serve”.</p></div>
-            <div><h4>We chose</h4><p>Fail-closed everywhere: missing authorization config is a startup error; authorize results are normalized strictly (garbage shapes ⇒ deny or clamp, never widen); unknown option keys are rejected so <span class="mono">allowdOrigins</span> can’t silently no-op; the config audit mirrors every startup refusal we know how to check statically.</p></div>
+            <div><h4>We chose</h4><p>Fail-closed server configuration: missing both authorization and an explicit anonymous mode is a startup error; authorize results are normalized strictly (garbage shapes ⇒ deny or clamp, never widen); unknown server-option keys are rejected so <span class="mono">allowdOrigins</span> can’t silently no-op; the config audit mirrors every startup refusal it can check statically.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Permissive demo default</strong> — demos become production; the incident writes itself.</li><li><strong>Warnings instead of throws</strong> — nobody reads warnings at 2 a.m. during a deploy.</li></ul></div>
             <div><h4>Pros</h4><ul><li>Misconfiguration fails loudly at boot, in CI, before traffic.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>First-run friction: you must write one authorize function (examples provided).</li></ul></div>
