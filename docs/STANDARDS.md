@@ -11,11 +11,11 @@ called out as a gap with its disposition.
 
 | Risk | Requirement | Status / evidence |
 |---|---|---|
-| API1 Broken Object Level Authorization | Authorization checked per image ID on mint **and** redemption | Met — `authorize()` runs at both phases; deny-by-default (missing `authorize` fails startup in production modes) |
-| API2 Broken Authentication | Short-lived, signed, sender-constrained tokens | Met — HMAC-SHA256 v2 claims (audience/scope/expiry/one-time nonce), RFC 7638 key thumbprint + RFC 9449-style proof of possession, `timingSafeEqual` verification |
+| API1 Broken Object Level Authorization | Authorization checked per image ID on mint **and** redemption | Met for protected deployments — `authorize()` runs at both phases; missing `authorize` fails startup unless the operator explicitly enables anonymous delivery. |
+| API2 Broken Authentication | Short-lived signed tokens; sender constraints where required | Met mechanism — HMAC-SHA256 v2 claims (audience/scope/expiry/one-time nonce), optional RFC 7638 key thumbprint + RFC 9449-style proof of possession, `timingSafeEqual` verification; the operator selects whether proof is optional or required. |
 | API3 Broken Object Property Level Authorization | Clients cannot widen width/quality/format beyond entitlement; no mass assignment | Met — signed claims are ceilings; request params strictly validated; token claims use a field allowlist |
 | API4 Unrestricted Resource Consumption | Rate/concurrency/size/time budgets everywhere | Met — separate token/image rate windows, quotas, bounded stores, Sharp pixel/byte/time budgets, processing semaphore + queue timeout, batch body byte cap **and read deadline** |
-| API5 Broken Function Level Authorization | No unauthenticated privileged functions | Met — no admin/debug endpoints exist; the only public route is the constant `taint.png` pixel |
+| API5 Broken Function Level Authorization | No unauthenticated privileged functions | Met — no admin/debug endpoints exist; `taint.png` is intentionally public. Image routes require authorization unless the operator explicitly enables `allowAnonymous:true`. |
 | API6 Sensitive Business Flows | Bulk-view/scraping friction | Met — distinct-image abuse detection, per-viewer/image quotas, one-time tokens, batch still per-item authorized |
 | API7 SSRF | Server must not fetch attacker URLs | Met — masters are local files only; IDs are allowlisted and realpath-contained; Sharp string-path inputs are rejected |
 | API8 Security Misconfiguration | Secure defaults + startup validation | Met — strict unknown-option rejection, production config audit, hardened presets, generic errors |
@@ -26,7 +26,7 @@ called out as a gap with its disposition.
 
 | Control | Status / evidence |
 |---|---|
-| Masters never web-accessible; derivative-only delivery | Met — contained masters dir, overlap rejected at startup |
+| Masters kept out of web roots; derivative-only delivery | Met with operator configuration — contained masters dir and overlap rejected for roots declared to Archx; the host must declare every public root and prevent undeclared mounts. |
 | Cache safety (RFC 9111) | Met — dynamic responses `private, no-store` + CDN/surrogate controls + credential-sensitive `Vary`; only content-hashed static variants and the constant taint pixel are immutable (taint pixel also carries ETag/304) |
 | Security headers | Met — `nosniff`, `Referrer-Policy: no-referrer`, CORP, sandboxed CSP on payloads, exact-origin CORS only (no `*` with credentials) |
 | Fetch Metadata / CSRF friction | Met — POST + `X-Archx-Request` header required by default; same-site token gating option |

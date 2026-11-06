@@ -25,7 +25,7 @@ and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
   errors/erasures recovery map, and the measured watermark-survival chart
 - `limits.html` + `limits.js` — threat model: eight-attacker interactive
   matrix, measured edges, and when to choose DRM/C2PA/neural instead
-- `styles.css` — warm-paper editorial theme (shared by all three pages)
+- `styles.css` — warm-paper editorial theme (shared by all four pages)
 - `main.js` — the 3D tile-scramble hero (procedural painted-valley
   texture, pointer lift field, raycast tile tracing, drag orbit)
 

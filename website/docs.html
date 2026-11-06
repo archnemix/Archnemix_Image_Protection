@@ -32,7 +32,7 @@
 <main id="top">
 
   <section class="hero hero-doc">
-    <p class="kicker">Documentation · v1.29.0</p>
+    <p class="kicker">Documentation · v1.30.0</p>
     <h1>Use it, <em>step by step.</em></h1>
     <p class="lede">
       Everything you need to protect images with Archnemix — install, a
@@ -96,27 +96,34 @@
       can never silently swap the code.</p>
 
       <h2 id="quick-browser">Quick start: browser only</h2>
-      <p>Static sites and public previews can scramble at build time and
-      unscramble in the visitor&rsquo;s browser — no server component
-      required. This stops casual saving and bulk tools; the
-      display-resolution derivative itself is public by design, so keep
-      licensed/private masters on the server path below.</p>
+      <p>Static sites and public previews can scramble assets at build time and
+      unscramble them in the visitor&rsquo;s browser — no server component
+      required. This adds friction to casual saving, but it does not stop a
+      determined scraper or make the asset private: the derivative and the
+      browser-visible key are public by design. Keep licensed/private masters
+      on the server path below.</p>
       <pre class="code mono">import Archx from '@archnemix/image-protection';
 
 // One image
 Archx.load.image('#hero-photo', '/protected/aurora.archx', {
   profile: 'performance',
+  key: window.__ARCHX_STATIC_KEY__,
 });
 
 // A whole gallery (lazy: loads as each image scrolls into view)
 Archx.load.gallery('#gallery', [
   '/protected/photo-a.archx',
   '/protected/photo-b.archx',
-], { profile: 'performance' });</pre>
-      <p>Create the <code>.archx</code> payloads ahead of time with the CLI:</p>
-      <pre class="code mono">npx archx-protect photo.jpg photo.archx --grid 16
+], { profile: 'performance', key: window.__ARCHX_STATIC_KEY__ });</pre>
+      <p>Create the <code>.archx</code> payloads ahead of time with the CLI,
+      using the same key in the browser example above:</p>
+      <pre class="code mono">export ARCHX_SCRAMBLE_KEY='&lt;random key&gt;'
+npx archx-protect photo.jpg photo.archx --grid 16
 # or a full folder of responsive derivatives + manifest:
 npx archx-build ./masters ./protected</pre>
+      <p class="fineprint">Inject that key into <code>window.__ARCHX_STATIC_KEY__</code>
+      for the browser. Anyone who can view the page can obtain it, so static
+      scrambling is obfuscation for public previews, not access control.</p>
       <div class="callout">
         <p><strong>Honest note:</strong> there is no live demo on this site.
         A static page cannot authorize viewers or keep masters private, so
@@ -135,6 +142,8 @@ import { createArchxMiddleware } from '@archnemix/image-protection/server';
 const app = express();
 app.use(createArchxMiddleware({
   imagesDir: '/private/masters',        // outside public/, always
+  publicDirs: ['/var/www/public'],      // declare every static root to check overlap
+  maxWidthFraction: 0.6,                 // preview-only cap vs. the master's width
   secret: process.env.ARCHX_SECRET,     // 32+ random chars
   authorize: async (req, image) =&gt;
     req.user ? { maxWidth: 1600 } : false,   // deny by default
@@ -145,9 +154,13 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
   profile: 'elite',
 });</pre>
       <p>The browser asks the middleware for a token, <code>authorize</code>
-      runs (your session/licence logic), and the picture is delivered once,
-      at display resolution, as scrambled tiles that only the guarded
-      viewer reassembles. Denied or replayed requests get nothing.</p>
+      runs (your session/licence logic), and the authorized derivative is
+      delivered once as scrambled tiles that the guarded viewer reassembles.
+      The server does not guarantee preview-only pixels by default:
+      <code>maxWidthFraction</code> defaults to <code>1</code>, so native-width
+      pixels may be delivered when other caps allow. Set it below <code>1</code>
+      (for example, <code>0.6</code>) when an asset class must never reach its
+      master&rsquo;s native width. Denied requests get nothing; replay is denied while the one-time spend record is retained.</p>
 
       <h2 id="profiles">Profiles: lite · performance · elite</h2>
       <p>Three canonical profiles set sensible defaults in one word. Any
@@ -216,12 +229,12 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
       failures. These five rules are enforced or checked by the library —
       follow them and the system does what the overview promises:</p>
       <ol class="doc-list">
-        <li><strong>Masters outside every public root.</strong> If the
+        <li><strong>Keep masters outside every public root.</strong> If the
         original file is web-addressable, nothing else matters.
         <code>imagesDir</code> must not be inside a static mount. Declare
         each public root with <code>publicDir</code>/<code>publicDirs</code>
-        so Archx can check for overlap; undeclared host mounts remain your
-        responsibility.</li>
+        so Archx can check for overlap; startup cannot detect undeclared host
+        mounts, which remain your responsibility.</li>
         <li><strong><code>authorize</code> is required unless public access is explicit.</strong>
         Omitting both <code>authorize</code> and
         <code>allowAnonymous:true</code> fails at startup. The latter is an
@@ -229,9 +242,12 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
         <li><strong>Use a real secret.</strong> 32+ random characters from
         an environment variable or secret manager; the startup audit flags
         weak, shared, or well-known values.</li>
-        <li><strong>Cap the resolution.</strong>
-        <code>maxWidthFraction &lt; 1</code> makes &ldquo;preview only&rdquo;
-        a server-enforced property, not a client suggestion.</li>
+        <li><strong>Cap the resolution.</strong> The default
+        <code>maxWidthFraction</code> is <code>1</code>, so an entitled viewer
+        may receive native-width pixels when other caps permit. Set it
+        below <code>1</code> (for example, <code>0.6</code>) to make
+        &ldquo;preview only&rdquo; a server-enforced property, not a client
+        suggestion.</li>
         <li><strong>Run the production audit in CI.</strong>
         <code>auditArchxProductionConfig(options)</code> returns blockers
         (public masters, query-string tokens, single-instance state behind
@@ -284,11 +300,12 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
       <div class="callout">
         <p><strong>No tool can show a picture and make it uncopyable.</strong>
         Anything rendered on a screen can be photographed off the screen.
-        Archnemix removes the <em>easy</em> paths (right-click save,
-        view-source, bulk downloaders, hotlinking, replayed URLs), degrades
-        what extraction tools recover (scrambled tiles, decoys, capped
-        resolution, partial temporal frames), and marks what slips through
-        so leaks are attributable. It is layered friction plus evidence —
+        Archnemix removes direct-file paths (right-click save, view-source,
+        hotlinking to an image URL), makes replay harder with one-time claims,
+        and can throttle bulk requests. It degrades some extraction paths
+        (scrambled tiles, decoys, configured width caps, partial temporal
+        frames) and marks what slips through for possible attribution. It is
+        layered friction plus evidence —
         not DRM, and it never claims to be.</p>
       </div>
       <p>The full attacker-by-attacker account, including the cases where

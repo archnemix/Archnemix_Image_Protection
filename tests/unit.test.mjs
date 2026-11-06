@@ -387,7 +387,7 @@ test('ops helpers: Prometheus metrics, health endpoint, graceful shutdown, JSONL
     sharedCacheBytes: 2048,
     derivativeCache: { memoryHits: 100, diskHits: 5, sharedHits: 2, misses: 11, coalesced: 3, diskWrites: 6, sharedWrites: 1, diskEntries: 4, diskBytes: 99, diskPrunes: 1, diskErrors: 0 },
   });
-  assert.match(text, /archx_info\{version="1\.2\d\.\d+"/);
+  assert.match(text, /archx_info\{version="1\.\d+\.\d+"/);
   assert.match(text, /# TYPE archx_consumed_tokens gauge\narchx_consumed_tokens 41/);
   assert.match(text, /# TYPE archx_consumed_proofs gauge\narchx_consumed_proofs 9/);
   assert.match(text, /# TYPE archx_processing_active gauge\narchx_processing_active 2/);

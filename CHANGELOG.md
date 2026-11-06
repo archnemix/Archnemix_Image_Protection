@@ -3,16 +3,29 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status (updated after the 1.28.0 publish).** Version
-> headings below are this repository's development history. The versions
-> published to npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, and `1.28.0`;
-> 1.27.0's changes shipped folded into the 1.28.0 publish (an earlier
-> wording of this note claimed 1.27.0 itself had been published before
-> the maintainer's manual publish step ran — it had not). Every other
-> heading (including ones once marked "Unreleased") was a GitHub-only
-> development version whose changes ship folded into the next published
-> release. `npm view @archnemix/image-protection versions` is the source
-> of truth for what is installable.
+> **Publication status (checked before the 1.30.0 publication).** The versions
+> confirmed on npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, `1.28.0`, and
+> `1.29.0`; this branch prepares `1.30.0` for publication after merge.
+> Historically, other version headings were GitHub-only development versions
+> folded into a later npm release. In particular, 1.27.0's changes shipped
+> folded into 1.28.0 (an earlier wording claimed 1.27.0 itself had been
+> published before the maintainer's manual publish step ran — it had not).
+> `npm view @archnemix/image-protection versions` is the source of truth for
+> what is installable.
+
+## [1.30.0] — 2026-11-06
+
+Documentation and website accuracy release. No runtime protection behavior
+or image formats changed.
+
+- Corrected API examples, release/publication wording, and the website's
+  static quick-start and demo disclosures.
+- Clarified the default native-width possibility, anonymous/public delivery,
+  optional proof-of-possession, replay-state saturation, and the limits of
+  scrambling, encryption, screenshot defenses, and attribution evidence.
+- Clarified that public `archx-build` manifests expose the browser keys and
+  variants, that prepared widths and marks depend on build options, and that
+  static catalogs do not provide per-view authorization or token controls.
 
 ## [1.29.0] — 2026-11-04
 
@@ -97,7 +110,7 @@ deliberately re-balanced (migration notes below).
   black-readback, fortress extras, proof-of-possession *required*,
   taint-or-promote, 60 Hz temporal interlace). Bundles apply
   *underneath* explicit options, so any flag still overrides them;
-  `Archx.configure(...)` remains the way to define a house default.
+  `Archx.config(...)` remains the way to define a house default.
   `<archx-image profile="…">` works too.
 - **Canonical server profiles.** `withLiteDefaults()` = catalog
   throughput + compact stores (the exact composition
@@ -1706,8 +1719,8 @@ Determined-extraction hardening (commit `5709a89`; RESEARCH §2.7).
 - Fortress mode and the Lens (sharp disc at the pointer, pixelated rest).
 - Sealed instance internals, captured-native integrity checks, strict
   memory handling, and strike lockouts for repeated extraction attempts.
-- Entitled one-time, browser-bound tokens; server-baked visible and
-  forensic marks.
+- Entitled one-time tokens with proof-key sender constraints when
+  proof-of-possession is enabled; server-baked visible and forensic marks.
 
 ## [1.0.0] — 2026-10-25 (reconstructed in 1.27.0)
 

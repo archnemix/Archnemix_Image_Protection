@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Archnemix Image Protection — live demo &amp; attack simulator</title>
-<meta name="description" content="Display images on your website without handing visitors a downloadable file. Try to steal these images — then see what you actually get.">
+<meta name="description" content="Keep original image files off public routes and deliver protected derivatives. Try the demo attacks — then see what each path actually exposes.">
 <style>
   :root {
     --bg:#070a12; --panel:#0d1220; --panel2:#11182b; --line:#212b45;
@@ -91,11 +91,12 @@
   <h1>Show your images.<br><em>Don't give them away.</em></h1>
   <p class="lede">One line replaces <code>&lt;img&gt;</code> with a protected viewer: no image URL in the page,
   no right-click save, scrambled &amp; expiring delivery, poisoned canvas extraction, baked-in watermarking.
-  Thieves who dig deeper get a black card, a mosaic, or a pixelated thumbnail — never your file.</p>
+  Read-back probes get a black card, a mosaic, or a pixelated thumbnail. The original file is not served by the demo route; its authorized derivative may still contain native-width pixels.</p>
   <div class="cta-row">
     <a class="btn primary" href="#arena">🎯 Try to steal the images below</a>
     <a class="btn" href="#code">See the 3-line integration</a>
   </div>
+  <div class="panel honest" role="note"><strong>Demo scope, not a production access policy.</strong> This server explicitly uses <code>allowAnonymous:true</code>, so anyone who knows an image ID can request it; quotas and one-time delivery add friction, not authorization. The demo also leaves <code>maxWidthFraction</code> at its default of <code>1</code>, so native-width pixels may be delivered when the cap permits. Production deployments need a real <code>authorize</code> callback and a fraction below 1 when preview-only pixels are required.</div>
   <pre class="hero-code"><code>import Archx from '@archnemix/image-protection';
 
 Archx.config({ tokenEndpoint: '/archx/token/' });
@@ -154,7 +155,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
         <div class="body">
           <span class="tag good">✓ ARCHX · SHIELD</span>
           <h3>Shield mode + signed scrambled delivery</h3>
-          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, browser-bound</b> 120-second signed token sent in a header against a clean URL. The watermark, forensic mark and blind <b>StegoMark ownership fingerprint</b> are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked and testable later with <code>archx-detect</code>. Once loaded, this card never reloads on scroll/resize.</p>
+          <p>No <code>&lt;img&gt;</code>, no URL in the DOM (closed shadow root, sealed internals), 8×8 tile-scrambled payload behind a <b>one-time, User-Agent-bound (friction only)</b> 120-second signed token sent in a header against a clean URL. The watermark, forensic mark and blind <b>StegoMark ownership fingerprint</b> are baked in <b>on the server, before scrambling</b> — even a perfectly un-shuffled stolen payload stays marked and testable later with <code>archx-detect</code>. Once loaded, this card never reloads on scroll/resize.</p>
           <div class="try">👉 Right-click, drag, inspect. Then run Attack ② below to see the decoy an extractor receives.</div>
         </div>
       </article>
@@ -218,7 +219,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
   <!-- ============================================================ -->
   <section id="how">
     <h2>🧱 How each theft route is closed</h2>
-    <p class="sub">Defence in depth — every layer is cheap, and an attacker must defeat <i>all</i> of them to get even a screen-resolution, watermarked copy.</p>
+    <p class="sub">Defence in depth adds friction and marks the delivered derivative; its width is set by server policy and may reach native width unless a stricter fraction is configured.</p>
     <div class="panel scrollx">
       <table>
         <thead><tr><th>Attack</th><th>Archx defence</th><th>What the thief gets</th></tr></thead>
@@ -227,19 +228,19 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
           <tr><td>Drag to desktop / new tab</td><td><code>dragstart</code> blocked, <code>-webkit-user-drag:none</code></td><td>Nothing</td></tr>
           <tr><td>DevTools → Elements</td><td>Closed shadow DOM; source URL held in JS closures/private fields, never in attributes</td><td>An empty-looking custom element</td></tr>
           <tr><td>DevTools → Network (Img)</td><td>Bytes arrive via <code>fetch()</code> as <code>application/octet-stream</code> .archx containers — not classified as images</td><td>An opaque <code>data.bin</code></td></tr>
-          <tr><td>Open/reuse the clean image URL or token</td><td>The URL alone carries no bearer token. HMAC-signed header tokens expire in ~120s, are bound to one image id, can be <b>one-time-use</b> and <b>bound to the requesting IP/User-Agent/proof key</b>; your backend entitlement caps the resolution regardless of what the client asks for</td><td><code>403 invalid or expired token</code></td></tr>
-          <tr><td>Guess the master path</td><td>Masters live outside every static route; only the signer endpoint can read them, and it never returns them</td><td><code>404</code></td></tr>
-          <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top). Watermark + block forensic mark are applied <b>before</b> scrambling</td><td>A meaningless mosaic / ciphertext. Even with the stolen session key + a rewritten un-shuffler: a downscaled, server-watermarked copy</td></tr>
+          <tr><td>Open/reuse the clean image URL or token</td><td>The URL alone carries no bearer token. HMAC-signed header tokens expire in ~120s, are bound to one image id, and this demo uses one-time claims plus User-Agent binding (friction, not strong browser binding); production authorization and width policy determine what a viewer may receive</td><td><code>403 invalid or expired token</code></td></tr>
+          <tr><td>Guess the master path</td><td>Masters live outside every static route; the demo endpoint is the only reader and returns a marked derivative, not the original file</td><td><code>404</code></td></tr>
+          <tr><td>Decode the captured payload</td><td>Pixels are split into an 8×8 grid, shuffled &amp; mirrored with a secret key (optional AES-GCM on top). Watermark + block forensic mark are applied <b>before</b> scrambling</td><td>A scrambled payload. This demo request asks for 900 px; the default fraction may allow native-width pixels on a new mint. Production must set a stricter fraction when required.</td></tr>
           <tr><td>Hook browser APIs (userscript/extension patches <code>fetch</code>/<code>drawImage</code>/<code>createImageBitmap</code>)</td><td>Native references captured at library load and used internally; integrity audit detects replaced/non-native APIs — Fortress fails closed. All internals are <code>#private</code>: no <code>element.__archx</code>, no public instance registry, no debug hook in production</td><td>Hooks installed after load are bypassed; pre-installed naive hooks are detected &amp; reported/locked</td></tr>
           <tr><td>Repeated extraction probing</td><td>Strike policy: escalating attempts blur, then black-lock the image for a cooldown (configurable, on in Fortress)</td><td>A black box + an attempt trail in your logs</td></tr>
           <tr><td><code>canvas.toDataURL()</code> / <code>toBlob()</code> / <code>getImageData()</code></td><td>Read-back APIs on Archx canvases are poisoned per-instance</td><td>Black card, 72-pixel potato, or scrambled mosaic (your choice)</td></tr>
-          <tr><td>Prototype bypass (expert)</td><td>Vault mode: WebGL with <code>preserveDrawingBuffer:false</code> — the browser itself returns black. In Shield, the backing store only ever holds the display-size, watermarked copy</td><td>Vault: black. Shield: screen-size watermarked copy at best</td></tr>
-          <tr><td>Bulk scrapers / AI crawlers</td><td>No URLs in HTML, JS+token required per image, rate-limited signer</td><td>An empty harvest</td></tr>
+          <tr><td>Prototype bypass (expert)</td><td>Vault mode: WebGL with <code>preserveDrawingBuffer:false</code> — the browser itself returns black. In Shield, the backing store contains the displayed, watermarked derivative; this demo may deliver native-width source pixels unless the host caps them</td><td>Vault: black. Shield: the displayed, watermarked derivative at best</td></tr>
+          <tr><td>Bulk scrapers / AI crawlers</td><td>No image URLs in HTML; token API required. This demo allows anonymous minting for known IDs, so production authorization and quotas—not the client viewer—must limit harvesting</td><td>Public demo IDs can be harvested within active request limits; production policy must restrict access</td></tr>
           <tr><td>Print → PDF</td><td><code>@media print</code> blackout + beforeprint reaction</td><td>Black boxes</td></tr>
-          <tr><td>Windows/macOS/Linux screenshot or snipping tool</td><td><i>Cannot be blocked by a web page</i>: the OS compositor is outside browser control. Archx reacts to the signals that do reach the page — PrintScreen / snipping shortcuts, focus loss, page freeze — with blur/blackout and caps everything at the authorized display derivative</td><td>At best a marked screen-res copy; often a blurred/black frame if the signal arrives first</td></tr>
+          <tr><td>Windows/macOS/Linux screenshot or snipping tool</td><td><i>Cannot be blocked by a web page</i>: the OS compositor is outside browser control. Archx reacts to the signals that do reach the page — PrintScreen / snipping shortcuts, focus loss, page freeze — with blur/blackout and caps delivery according to server policy, which may allow native width</td><td>At best a marked screen-res copy; often a blurred/black frame if the signal arrives first</td></tr>
           <tr><td>Chrome/other screenshot extension, DevTools “Capture screenshot”, CDP capture</td><td>These run with browser privileges above page JS and cannot be enumerated or vetoed by the website. Fortress therefore assumes capture will happen and renders Lens mush + a drifting session/time trace; Vault canvas read-back itself remains black</td><td>A degraded, attributable visible-tab capture — not the file or master</td></tr>
           <tr><td>View Page Source / inspect HTML</td><td>Source contains code and endpoint names, not masters, signed image URLs, or server secrets. Protected pixels still require JS, authorization, and a fresh entitled token</td><td>No downloadable image URL to copy</td></tr>
-          <tr><td>Photograph the screen with a phone/second device</td><td><i>Physically unstoppable and undetectable from the displayed device.</i> The answer is value reduction: server-authorized resolution, baked visible/forensic marks, Fortress Lens, and a dynamic trace that changes while the camera is framing/stitching</td><td>A camera copy with screen/moiré loss, Lens mush outside one disc, and session attribution</td></tr>
+          <tr><td>Photograph the screen with a phone/second device</td><td><i>Physically unstoppable and undetectable from the displayed device.</i> The answer is value reduction: server-authorized resolution (which may be native width unless capped), baked visible/forensic marks, Fortress Lens, and a dynamic trace that changes while the camera is framing/stitching</td><td>A camera copy with screen/moiré loss, Lens mush outside one disc, and session attribution</td></tr>
           <tr><td>Screenshot a Fortress/Lens image; sweep &amp; stitch patches</td><td>Only the disc under a <i>trusted</i> pointer is sharp — the rest is pixelated in the shader/canvas itself. Synthetic (script-fired) pointer events are ignored; rapid whole-image sweeps are tracked as a stitching attempt</td><td>Mush + one small sharp circle per capture; stitching needs many real-input captures and still carries marks</td></tr>
           <tr><td>One PrintScreen / extension frame of a temporal-shield image</td><td>Two complementary noisy frames alternate at refresh rate; human temporal integration averages them, a single captured frame keeps the noise. Screen <i>recording</i> or averaging many captures can undo this, so it is layered with Lens/trace/marks</td><td>One noisy half-frame, not the clean still</td></tr>
           <tr><td>One presented frame of a temporal-interlace image</td><td>Only one pixel/checker/strip/block subset is sharp in that phase; inactive cells carry a low-detail fill by default. The 60 Hz profiles use two phases, drawn either by a GPU fragment shader or by alternating pre-rendered phase canvases</td><td>One spatially incomplete frame. Capturing every phase, recording video, or an integrating camera exposure can recombine it</td></tr>
@@ -253,9 +254,8 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
     <div class="panel honest">
       <h3 style="margin-top:0">⚠ The honest limit (every vendor should tell you this)</h3>
       <p style="color:#e5d9bd;margin:0">If pixels reach a screen, a determined person can photograph the screen — no JavaScript can stop that;
-      only DRM video pipelines (Widevine + HDCP) black out screenshots, and they don't exist for still images on the web.
-      What Archx <i>does</i> guarantee: your <b>original file is never sent</b>, one-click &amp; bulk theft stop working,
-      automated scrapers get nothing, and anything that <i>does</i> leak is capped at display resolution and carries your watermark + a per-session forensic trace.
+      some DRM/OS-protected video paths can request capture restrictions, but they do not apply to arbitrary still images in a web page.
+      What server mode can guarantee is narrower: the <b>original file and its metadata are not returned</b>, and delivered pixels follow configured entitlement and width caps. In this demo, public anonymous access is intentional and the default width fraction may permit native-width pixels; production authorization, quotas and an explicit preview cap are operator responsibilities.
       That is the difference between “right-click, done” and “hours of reverse-engineering for a watermarked thumbnail”.</p>
     </div>
   </section>
@@ -299,7 +299,9 @@ import { createArchxMiddleware } from '@archnemix/image-protection/server';
 app.use(createArchxMiddleware({
   secret: process.env.ARCHX_SECRET,
   imagesDir: './masters',            // keep OUTSIDE your static/public folder
+  publicDirs: ['./public'],          // declare every static root for overlap checks
   ttlSec: 120, grid: 8,
+  maxWidthFraction: 0.6,            // set below 1 for preview-only pixels
   steganography: { perToken: true, strength: 6 },
   onStegoIssue: ({ id, viewerId, fingerprint }) =&gt; db.saveFingerprint({ id, viewerId, fingerprint }),
   authorize: async (req, id) =&gt; ({ viewerId: req.user.id, maxWidth: 1600, quality: 'lossless' }),
@@ -307,7 +309,7 @@ app.use(createArchxMiddleware({
   </section>
 
   <footer>
-    Archnemix Image Protection · MIT · Masters used in this demo live in <code>demo-masters/</code> and are never web-accessible —
+    Archnemix Image Protection · 0BSD · Masters used in this demo live in <code>demo-masters/</code> and are never web-accessible —
     try <code>/demo-masters/aurora-valley.jpg</code>. The “unprotected” card intentionally uses a sacrificial public copy.
   </footer>
 </div>
@@ -466,8 +468,8 @@ async function attackNetwork() {
     const rebuilt = document.createElement('canvas');
     rebuilt.width = header.w; rebuilt.height = header.h;
     rebuilt.getContext('2d').drawImage(padded, 0, 0, header.w, header.h, 0, 0, header.w, header.h);
-    loot(rebuilt.toDataURL('image/png'), '⚠ DETERMINED-ATTACKER ceiling: after stealing the session key AND re-implementing the un-shuffle, this downscaled copy is the best obtainable — and the SERVER-baked watermark (applied before scrambling) is still on it. The master never existed here.');
-    log('   Verdict: bulk ripping is dead; even full reverse-engineering tops out at a marked web-size copy.', 'good');
+    loot(rebuilt.toDataURL('image/png'), '⚠ DETERMINED-ATTACKER ceiling: for this 900px token, after stealing the session key AND re-implementing the un-shuffle, the reconstructed copy retains the SERVER-baked watermark. A fresh anonymous mint may request a larger width up to the server cap; the original file itself is never returned.');
+    log('   Verdict: this token is one-time and its width is claim-bound; the public demo API still allows new anonymous mints for known IDs, unlike a production authorize policy.', 'good');
   } catch (e) {
     log('   Offline rebuild attempt failed: ' + e.message, 'good');
   }

@@ -6,13 +6,16 @@ not legal advice.
 
 ## The short version
 
-Archx makes casual downloading and bulk copying much harder. It does not
-make a displayed picture impossible to copy.
+With real authorization and quotas, Archx makes casual downloading and bulk
+collection harder. It does not make a displayed picture impossible to copy;
+public anonymous access can still be harvested within its active limits.
 
-With the recommended server setup, your website never sends the original
-master file to a visitor. It sends a limited-size viewing copy through a
-temporary permission check. That viewing copy can carry visible and hidden
-marks that help you investigate a leak later.
+With a properly configured server setup, your website does not send the
+original master file to a visitor. It sends an authorized derivative through a
+temporary permission check. Width is an operator policy: the default
+`maxWidthFraction` is 1, so native-width pixels may be delivered when other
+caps permit. Set it below 1 for preview-only delivery. The derivative can
+carry visible and hidden marks that help investigate a leak later.
 
 A determined person can still screenshot or photograph what is on their
 screen. Archx reduces the value and convenience of that copy and improves
@@ -23,22 +26,24 @@ your evidence; it cannot repeal the "analog hole."
 - **Ordinary right-click saving:** the protected viewer does not present the
   valuable image as a normal downloadable image file.
 - **Pulling the picture out of the page with tools:** the picture does not
-  travel to, or sit in, the visitor's browser as a whole image. It arrives
-  as a shuffled jigsaw of tiles that the viewer reassembles only in order
-  to display it, and the usual "copy the picture out of the page" tricks
-  return a decoy, a black card, or are refused by the browser itself — yet
-  on screen it looks exactly like the viewing copy you approved.
+  arrive over the network as a normal image file. The protected payload is
+  scrambled tiles, which the viewer decodes and reassembles in browser memory
+  to display the authorized derivative. Known read-back APIs may return a
+  decoy or black card, or be refused by browser origin checks; privileged
+  capture and screenshots remain possible.
 - **Guessing the original file address:** masters stay outside the public
   website folder and the protected route only returns an approved viewing
   derivative.
 - **Sharing a temporary viewing link:** links/tokens expire quickly, can be
   one-time, and can require the same browser proof key that requested them.
 - **Asking for a larger file than the account allows:** your server sets the
-  maximum width/quality for each viewer. The browser cannot simply request
-  the master size.
-- **Bulk scraping:** sign-in/entitlement checks, rate limits, per-viewer and
-  per-image quotas, and unusual-download alerts make mass collection slower
-  and more visible.
+  maximum width/quality for each viewer. If the configured caps reach the
+  master dimensions, native-width pixels may be delivered; set
+  `maxWidthFraction` below 1 when preview-only delivery is required.
+- **Bulk scraping:** in protected deployments, sign-in/entitlement checks,
+  rate limits, per-viewer and per-image quotas, and unusual-download alerts
+  make mass collection slower and more visible. Explicit anonymous access
+  can still be harvested within the configured limits.
 - **Anonymous reposting:** visible watermarks, forensic marks, and optional
   StegoMark fingerprints can connect a suspect copy to an image, viewer,
   buyer, order, or campaign if you save the issuance records. The stronger
@@ -105,9 +110,12 @@ your evidence; it cannot repeal the "analog hole."
   highest-quality, individually traced views for product-detail or paid
   pages. This keeps ordinary browsing fast while preserving stronger
   evidence where a leak matters most.
-- If the catalog is private, the list of prepared files and their keys must
-  be protected too. A public prepared catalog is appropriate only when you
-  are comfortable that anyone can obtain those capped, marked derivatives.
+- If the catalog is private, protect the manifest and asset URLs: the manifest
+  contains the browser scramble key (and the AES key if encryption is enabled).
+  A public prepared catalog has no per-view authorization or token controls;
+  anyone who can read its manifest and variants can reconstruct every prepared
+  size. Do not assume those files are capped below native width or marked—
+  widths and visible/forensic marks depend on the build options.
 - Ask your developer to "seal" the prepared catalog: Archx can check a
   fingerprint of the catalog list and of every prepared file before showing
   it, so a hosting mistake or substituted file is rejected instead of
@@ -188,9 +196,10 @@ depends on them); old ownership PUBLIC keys stay published forever.
 
 A fair customer-facing claim is:
 
-> "We deliver only limited-size, marked viewing copies through expiring,
-> account-checked requests. This blocks ordinary downloading and makes bulk
-> misuse slower, more visible, and easier to trace. No web technology can
+> "We deliver authorized, marked viewing copies under our configured width
+> policy; preview-only delivery uses a server-enforced cap below the master
+> width. Expiring, authorized requests block ordinary file-link downloading
+> and make bulk misuse slower and more visible. No web technology can
 > prevent every screenshot or photograph of a screen, so licensing terms,
 > monitoring, and enforcement remain part of the protection."
 

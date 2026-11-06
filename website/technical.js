@@ -274,7 +274,7 @@ if (planCanvas) {
 }
 
 /* ------------------------------------------------------------------ */
-/* W2 — token explorer (mirror of the server's single-secret path)    */
+/* W2 — token explorer (local HMAC/core-claim teaching model)         */
 /* ------------------------------------------------------------------ */
 const b64url = (bytes) => {
   let bin = '';
@@ -290,9 +290,10 @@ const CLAIM_NOTES = {
   v: 'token format version', kid: 'signing key id (rotation)', aud: 'audience: only the image service',
   scope: 'what the token may do', id: 'image id — bound, cannot be swapped', w: 'entitled width (px)',
   iat: 'issued-at (ms)', exp: 'expiry (ms)', n: 'nonce — the one-time claim key',
-  jkt: 'proof-key thumbprint (sender constraining)',
+  jkt: '43-character proof-key thumbprint shape (not proof verification)',
 };
 let currentToken = '';
+const TOKEN_FIELDS = new Set(['v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm', 'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'nwm', 'b', 'jkt']);
 async function tokenMint() {
   const out = document.getElementById('tokOut');
   const secret = document.getElementById('tokSecret')?.value ?? '';
@@ -337,14 +338,21 @@ async function tokenVerify(token, label) {
     return;
   }
   const problems = [];
+  const now = Date.now();
+  for (const field of Object.keys(claims)) if (!TOKEN_FIELDS.has(field)) problems.push(`unknown claim ${field} (server refuses)`);
+  if (claims.v !== 2) problems.push(`v must be 2, got ${JSON.stringify(claims.v)}`);
   if (claims.aud !== 'archx:image') problems.push(`aud must be archx:image, got ${claims.aud}`);
   if (claims.scope !== 'image:view') problems.push(`scope must be image:view, got ${claims.scope}`);
-  if (!Number.isFinite(claims.exp) || Date.now() > claims.exp) problems.push('expired (or exp malformed)');
-  if (!Number.isInteger(claims.w) || claims.w < 1) problems.push(`w must be a positive integer, got ${JSON.stringify(claims.w)}`);
-  if (typeof claims.n !== 'string' || !claims.n) problems.push('nonce n is required (one-time claim)');
-  const annotated = Object.entries(claims).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}${CLAIM_NOTES[k] ? `  — ${CLAIM_NOTES[k]}` : '  — (unknown claim: server refuses)'}`).join('\n');
+  if (claims.kid !== undefined && (typeof claims.kid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(claims.kid))) problems.push('kid must be a valid 1–64 character key id');
+  if (typeof claims.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(claims.id)) problems.push('id must be a valid image id');
+  if (!Number.isSafeInteger(claims.w) || claims.w < 64 || claims.w > 1920) problems.push(`w must be an integer from 64 to 1920, got ${JSON.stringify(claims.w)}`);
+  if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp) || claims.iat > now + 300000 || claims.exp <= claims.iat || claims.exp - claims.iat > 1200000) problems.push('iat/exp must be safe integers in the permitted time window');
+  if (!Number.isSafeInteger(claims.exp) || claims.exp <= now) problems.push('expired (or exp malformed)');
+  if (typeof claims.n !== 'string' || !/^[A-Za-z0-9_-]{8,86}$/.test(claims.n)) problems.push('nonce n must be an 8–86 character base64url string');
+  if (claims.jkt !== undefined && (typeof claims.jkt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(claims.jkt))) problems.push('jkt must be a 43-character base64url thumbprint');
+  const annotated = Object.entries(claims).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}${CLAIM_NOTES[k] ? `  — ${CLAIM_NOTES[k]}` : TOKEN_FIELDS.has(k) ? '  — (allowlisted optional claim; value checks simplified)' : '  — (unknown claim: server refuses)'}`).join('\n');
   out.textContent = lines.join('\n') + `\nclaims:\n${annotated}\n\n` +
-    (problems.length ? `✗ REJECTED — MAC valid, claims invalid:\n  · ${problems.join('\n  · ')}` : '✓ ACCEPTED — canonical, signature valid, claims valid. Redeeming would now burn nonce n forever.');
+    (problems.length ? `✗ REJECTED — MAC valid, claims invalid:\n  · ${problems.join('\n  · ')}` : '✓ ACCEPTED BY THIS WIDGET — canonical HMAC and core v2 claims valid (optional-claim checks are simplified). Redeeming spends nonce n for its live one-time-token window.');
 }
 const tokClaimsEl = document.getElementById('tokClaims');
 if (tokClaimsEl) {
@@ -352,7 +360,7 @@ if (tokClaimsEl) {
   tokClaimsEl.value = JSON.stringify({
     v: 2, kid: 'primary', aud: 'archx:image', scope: 'image:view',
     id: 'aurora-valley', w: 240, iat: now, exp: now + 120000,
-    n: 'demoNonce123456', jkt: 'present-only-with-proof-key-43-chars-xxxxxxx',
+    n: 'demoNonce123456', jkt: 'Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   }, null, 1);
   document.getElementById('tokMint')?.addEventListener('click', tokenMint);
   document.getElementById('tokTamper')?.addEventListener('click', async () => {
@@ -687,8 +695,8 @@ if (document.getElementById('w-survival')) {
       {
         zone: 'SERVER · PRIVATE',
         title: 'The master goes in — and stays there',
-        short: 'Indexed by ID outside the public root; the middleware is the only reader and there is no master URL.',
-        body: 'The original is indexed by image ID in a masters directory outside every public root. Startup refuses an overlapping public/private layout, paths and symlinks are contained, and no route returns this file.',
+        short: 'Indexed by ID outside public roots declared to Archx; undeclared host mounts remain the operator’s responsibility.',
+        body: 'The original is indexed by image ID in a masters directory outside every public root declared to Archx. Startup rejects overlap with declared roots and contains paths/symlinks; undeclared host mounts remain the operator’s responsibility, and no Archx route returns the original file.',
       },
       {
         zone: 'BROWSER → SERVER · TOKEN REQUEST',
@@ -718,7 +726,7 @@ if (document.getElementById('w-survival')) {
         zone: 'SERVER · SHARP DERIVATIVE',
         title: 'Sharp builds only the entitled derivative',
         short: 'Cold path shown: bytes are sniffed and budget-checked, decoded, orientation-baked when needed, and resized. Validated cache hits can skip repeated work.',
-        body: 'The middleware resolves the indexed master and, on the cold path shown here, Sharp validates and decodes it under byte, pixel and time budgets, bakes EXIF orientation when present, and resizes to exactly the entitled display geometry. The clean derivative base stays server-side; the master and any print-resolution pixels never enter the response.',
+        body: 'The middleware resolves the indexed master and, on the cold path shown here, Sharp validates and decodes it under byte, pixel and time budgets, bakes EXIF orientation when present, and resizes to the signed, entitled width. That is not inherently the physical display size: maxWidthFraction defaults to 1, so native-width pixels can be delivered when other caps permit. The clean derivative base stays server-side; the master file and its metadata never enter the response.',
       },
       {
         zone: 'SERVER · OPTIONAL MARKS',
@@ -736,7 +744,7 @@ if (document.getElementById('w-survival')) {
         short: enc
           ? 'Keyed padding and the 8×8 plan-v2 tile permutation are encoded, wrapped as .archx, then sealed with AES-256-GCM.'
           : 'Keyed padding and the 8×8 plan-v2 tile permutation are encoded and wrapped as .archx. Scramble alone is obfuscation, not encryption.',
-        body: `A fused pass writes keyed padding and mirrored, permuted tiles; the result is image-encoded (WebP by default) and wrapped in the .archx container with its dimensions, grid and mark flags. ${enc ? 'Because encrypt is on in this illustration, the encoded payload is then sealed with AES-256-GCM.' : 'Because encrypt is off here, network secrecy rests on HTTPS plus tile obfuscation — capture still gets confetti, not a usable image.'} Either way, page source contains no master URL.`,
+        body: `A fused pass writes keyed padding and mirrored, permuted tiles; the result is image-encoded (WebP by default) and wrapped in the .archx container with its dimensions, grid and mark flags. ${enc ? 'Because encrypt is on in this illustration, the encoded payload is then sealed with AES-256-GCM.' : 'Because encrypt is off here, network confidentiality rests on HTTPS; tile obfuscation adds no secrecy, and a captured payload can be reconstructed with enough work.'} Either way, page source contains no master URL.`,
       },
       {
         zone: 'BROWSER · OPEN PAYLOAD',
@@ -759,8 +767,8 @@ if (document.getElementById('w-survival')) {
       {
         zone: 'OUTPUT · WHAT CAN COME OUT',
         title: 'What can come out',
-        short: `The visitor sees the entitled derivative. Network capture gets ${enc ? 'encrypted scrambled' : 'scrambled'} bytes; programmatic readback gets the ${flowState.extract} result; screenshots remain possible at display grade.`,
-        body: `The legitimate visitor sees the authorized display-resolution derivative. Network tools and page source get ${enc ? 'AES-sealed scrambled' : 'scrambled'} payload bytes and no master. Programmatic readback follows the selected renderer and onExtract branch. A screenshot, OS capture or camera still sees what was displayed — resolution-capped${marks.length || clientForensicOn() ? ' and carrying the enabled marks for later corroborated rescanning' : ''}${flowState.mode === 'fortress' ? ', with Fortress temporal/capture friction raising effort but not preventing capture' : ''}.`,
+        short: `The visitor sees the entitled derivative. Network capture gets ${enc ? 'encrypted scrambled' : 'scrambled'} bytes; programmatic readback gets the ${flowState.extract} result; screenshots remain possible at the server-authorized width, which may be native width.`,
+        body: `The legitimate visitor sees the authorized derivative; its width is bound by server policy and may reach native width unless maxWidthFraction is below 1. Network tools and page source get ${enc ? 'AES-sealed scrambled' : 'scrambled'} payload bytes and no master. Programmatic readback follows the selected renderer and onExtract branch. A screenshot, OS capture or camera still sees what was displayed — bounded by configured server width caps (which may allow native width)${marks.length || clientForensicOn() ? ' and carrying the enabled marks for later corroborated rescanning' : ''}${flowState.mode === 'fortress' ? ', with Fortress temporal/capture friction raising effort but not preventing capture' : ''}.`,
       },
     ];
   }
@@ -1140,7 +1148,7 @@ if (document.getElementById('w-survival')) {
         fctx.beginPath(); fctx.moveTo(540, 152); fctx.lineTo(564, 180); fctx.moveTo(564, 152); fctx.lineTo(540, 180); fctx.stroke();
       }
       flowEmpty(648, 98, 268, 168, ['NO PIXELS YET', 'no master URL']);
-      flowText('The file people want is never web-addressable.', 42, 356, '600 16px Georgia, serif');
+      flowText('Keep the master outside every public web root.', 42, 356, '600 16px Georgia, serif');
     } else if (s === 1) {
       flowText('MASTER STAYS PUT', 42, 88, '700 12px ui-monospace, monospace', '#b13a22');
       drawFlowImage(cleanArt, 42, 102, 204, 128, { alpha: 0.72 });
@@ -1195,7 +1203,7 @@ if (document.getElementById('w-survival')) {
     } else if (s === 4) {
       /* Sharp works in place: the master is scanned inside its own dashed
          bounds, then the frame contracts to the entitled derivative size. */
-      flowText(t < 0.5 ? 'MASTER · SNIFF + DECODE SCAN' : 'ENTITLED DERIVATIVE · DISPLAY GEOMETRY ONLY', 105, 88, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText(t < 0.5 ? 'MASTER · SNIFF + DECODE SCAN' : 'ENTITLED DERIVATIVE · WIDTH POLICY', 105, 88, '700 12px ui-monospace, monospace', '#b13a22');
       if (fctx) {
         fctx.save(); fctx.setLineDash([6, 5]); fctx.strokeStyle = '#8a8170'; fctx.lineWidth = 1.2;
         fctx.strokeRect(105.5, 102.5, 299, 187); fctx.restore();
@@ -1209,7 +1217,7 @@ if (document.getElementById('w-survival')) {
       bx += flowBadge('sniff + budgets', bx, 324, t > 0.18);
       bx += flowBadge('decode + orient', bx, 324, t > 0.44);
       flowBadge('resize to entitlement', bx, 324, t > 0.7);
-      flowText('Only display geometry is built. Cache hits may skip this cold path.', 38, 366, '600 15px Georgia, serif');
+      flowText('Only the signed, entitled width is built; preview-only needs a fraction cap.', 38, 366, '600 15px Georgia, serif');
       flowEmpty(676, 102, 224, 140, ['WAITING', 'response not started']);
     } else if (s === 5) {
       flowText('DERIVATIVE PIXELS · SERVER COPY', 94, 78, '700 12px ui-monospace, monospace', '#b13a22');
@@ -1331,7 +1339,7 @@ if (document.getElementById('w-survival')) {
       });
       flowText('SCREENSHOT', 798, 254, '700 11px ui-monospace, monospace', '#b13a22');
       drawFlowImage(markedArt, 798, 264, 120, 88, { client, temporal, alpha: ease(phase(t, 0.72, 0.94)) });
-      flowText('Display is viewable; extraction is capped, poisoned, or attributable.', 52, 360, '600 15px Georgia, serif');
+      flowText('Read-back may be poisoned; screenshots still capture the displayed derivative.', 52, 360, '600 15px Georgia, serif');
     }
   }
 
