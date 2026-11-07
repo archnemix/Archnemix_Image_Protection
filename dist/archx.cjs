@@ -10155,4 +10155,3 @@ var archx_default = Archx;
 
 // src/index.js
 var index_default = archx_default;
-//# sourceMappingURL=archx.cjs.map

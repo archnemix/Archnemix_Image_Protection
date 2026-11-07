@@ -19,6 +19,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { DEFAULTS, PRESETS } from '../src/client/options.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -72,6 +73,42 @@ const proseFiles = [
   ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
   'SECURITY.md', 'website/index.html', 'website/docs.html', 'website/technical.html', 'website/limits.html',
 ].filter((rel) => !PROSE_EXEMPT.has(rel) && fs.existsSync(path.join(root, rel)));
+// Keep documented option literals inside the implementation's accepted
+// enum. This catches plausible prose drift such as `deny` for a runtime
+// setting that actually accepts only `strict` and `evict`.
+const replayEnum = read('server/config.js').match(/replaySaturation must be '([^']+)' or '([^']+)'/);
+if (!replayEnum) {
+  fail('server/config.js replaySaturation validation enum was not found; update the docs consistency check');
+} else {
+  const replaySaturationValues = new Set([replayEnum[1], replayEnum[2]]);
+  const replayMentions = new Set();
+  for (const rel of ['README.md', ...proseFiles]) {
+    for (const m of read(rel).matchAll(/replaySaturation\s*:\s*['"]([^'"]+)['"]/g)) {
+      replayMentions.add(m[1]);
+      if (!replaySaturationValues.has(m[1])) {
+        fail(`${rel} documents replaySaturation:${m[1]} but the accepted values are '${replayEnum[1]}' and '${replayEnum[2]}'`);
+      }
+    }
+  }
+  for (const value of replaySaturationValues) {
+    if (!replayMentions.has(value)) fail(`current-facing docs do not show replaySaturation:'${value}' accepted by server/config.js`);
+  }
+}
+for (const api of ['onClientEvent', 'offClientEvent', 'usePlugin', 'listPlugins', 'assayStegoEmbed', 'applyForensicBlocks']) {
+  if (!readme.includes(api)) fail(`README does not document public export ${api}`);
+}
+const interlacePresets = Object.keys(PRESETS).filter((name) => PRESETS[name].temporalInterlace != null).sort();
+if (DEFAULTS.temporalInterlace !== null) fail('client default temporalInterlace changed; update the README and website default descriptions');
+if (interlacePresets.join(',') !== 'elite,maxProtection') {
+  fail(`temporalInterlace preset defaults changed (${interlacePresets.join(', ') || 'none'}); update current-facing docs and the docs consistency gate`);
+}
+if (!readme.includes('off by default for individual images') ||
+    !readme.includes('`elite` and `maxProtection` presets opt into `balanced60`')) {
+  fail('README temporalInterlace default/preset wording does not match DEFAULTS and PRESETS in src/client/options.js');
+}
+if (!read('website/docs.html').includes('Elite sets it on.')) {
+  fail('website/docs.html must describe the elite temporalInterlace preset default');
+}
 const COUNT_PATTERNS = [
   [/(\d+) browser checks/g, BROWSER_RUNTIME, 'browser checks'],
   [/(\d+)(?:\/\d+)? (?:real-)?Chromium checks/g, BROWSER_RUNTIME, 'Chromium checks'],

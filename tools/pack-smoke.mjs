@@ -42,9 +42,28 @@ step('npm pack', () => {
   const meta = JSON.parse(out.slice(out.indexOf('[')));
   tarball = path.join(repoRoot, meta[0].filename);
   const names = meta[0].files.map((f) => f.path);
+  if (names.some((name) => name.endsWith('.map'))) {
+    throw new Error('npm artifact contains large source maps; rebuild with external maps and exclude them from "files"');
+  }
+  for (const name of names.filter((file) => /^dist\/.*\.js$/.test(file))) {
+    if (fs.readFileSync(path.join(repoRoot, name), 'utf8').includes('sourceMappingURL=')) {
+      throw new Error(`${name} links to a source map that is intentionally absent from the npm artifact`);
+    }
+  }
   for (const required of ['server/detect-worker.js', 'server/middleware.js', 'server/scramble-image.js', 'server/ops.js',
-    'server/detect-stego-cli.js', 'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts']) {
+    'server/detect-stego-cli.js', 'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts',
+    'docs/OPERATIONS.md', 'docs/PAPERS.md', 'examples/archx-showcase.html']) {
     if (!names.includes(required)) throw new Error(`tarball is missing ${required}`);
+  }
+  // README-relative links are part of the installed package documentation,
+  // not just checkout-only navigation: catch future docs/files allowlist drift.
+  for (const match of fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8').matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    const target = match[1].split(/[?#]/)[0];
+    if (!target || target.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
+    const normalized = path.posix.normalize(target.replace(/^\.\//, ''));
+    if (!names.includes(normalized) && !names.some((name) => name.startsWith(`${normalized.replace(/\/$/, '')}/`))) {
+      throw new Error(`README links to '${target}', which is not shipped in the npm artifact`);
+    }
   }
   // Structural guard (v1.29): every relative import in every shipped
   // server/src module must resolve to another shipped file. The

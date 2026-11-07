@@ -30,6 +30,27 @@ export type ArchxAuthorize = (
   context: ArchxAuthorizeContext,
 ) => boolean | ArchxAuthorizeResult | Promise<boolean | ArchxAuthorizeResult>;
 
+/**
+ * Optional ordinary-image endpoint for verified search crawlers. The verifier
+ * must authenticate crawler identity from a trusted signal (for example,
+ * verified source IP data); a User-Agent check alone is not verification.
+ * Unverified requests receive no image. Output is always resized and visibly
+ * watermarked, and is never shared-cacheable.
+ */
+export interface ArchxSeoCrawlerOptions {
+  verify: (req: IncomingMessage, id: string) => boolean | Promise<boolean>;
+  /** Visible site/owner label included in the server-baked PREVIEW ONLY mark. */
+  watermark: string;
+  /** Maximum preview width, hard-capped at 640 pixels (default 320). */
+  maxWidth?: number;
+  /** Maximum fraction of the master's width (0.05–0.9; default 0.5). */
+  maxWidthFraction?: number;
+  /** Lossy output quality, hard-capped at 75 (default 55). */
+  quality?: number;
+  /** Standard-image output format (default webp). */
+  format?: 'webp' | 'jpeg';
+}
+
 export interface ArchxSecurityEvent {
   type: string;
   reason?: string;
@@ -178,6 +199,8 @@ export interface ArchxServerOptions {
   requireSameSiteTokenRequests?: boolean;
   requireTokenRequestHeader?: boolean;
   allowedOrigins?: string[];
+  /** Disabled unless explicitly configured; adds GET/HEAD {basePath}/seo/:id. */
+  seoCrawler?: ArchxSeoCrawlerOptions | false;
   allowQueryTokens?: boolean;
   bindTokenTo?:
     | {

@@ -48,7 +48,7 @@ load balancer is outside the supported security model. The bundled
 secure, monitor, and integration-test its Redis/Valkey client and deployment.
 Rotate signing keys with the versioned keyring described in
 `docs/OPERATIONS.md`, verify that the CDN bypasses shared caching for
-token/payload routes, and treat a state-store outage as a fail-closed `503`
+token/payload routes and the optional SEO-preview route when enabled, and treat a state-store outage as a fail-closed `503`
 rather than weakening replay controls.
 
 Derivative caches and precomputed assets do not change that boundary. A

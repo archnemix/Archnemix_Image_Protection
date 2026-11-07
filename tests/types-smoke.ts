@@ -69,6 +69,18 @@ const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key:
 void marked;
 
 // --- server ---
+const seoOptions: ArchxServerOptions = {
+  seoCrawler: {
+    verify: async (req, id) => Boolean(req.socket.remoteAddress && id),
+    watermark: '© Studio',
+    maxWidth: 320,
+    maxWidthFraction: 0.5,
+    quality: 55,
+    format: 'webp',
+  },
+};
+void seoOptions;
+
 // Profile helpers (v1.28) accept and return server options.
 const liteOptions = withLiteDefaults({ secret: 's', imagesDir: '/srv/masters' });
 const balancedOptions = withPerformanceDefaults({ secret: 's', imagesDir: '/srv/masters' });
