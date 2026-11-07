@@ -231,7 +231,7 @@ function inspectServerConfig(options = {}) {
     'allowedInputFormats', 'allowedOrigins', 'authorize', 'authorizeTimeoutMs',
     'basePath', 'batchTokenMaxBytes', 'batchTokenMaxItems', 'bindTokenTo',
     'blockUntrustedSharpLoaders', 'cacheMasters',
-    'callbackTimeoutMs', 'challenge', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken',
+    'callbackTimeoutMs', 'challenge', 'deploymentMode', 'encrypt', 'forensic', 'forensicPerToken', 'seoCrawler',
     'forensicScope', 'format', 'grid',
     'allowSlowRequestAvif', 'images', 'imagesDir', 'imagesDirs', 'lossless', 'masterCacheMaxBytes',
     'maxConcurrentProcessing', 'maxInputBytes', 'maxInputHeight', 'maxInputPixels',
@@ -635,6 +635,33 @@ function inspectServerConfig(options = {}) {
     fail("abuseDetection.action 'challenge' requires challenge.verify (e.g. a Turnstile siteverify or WebAuthn assertion check)");
   }
 
+  let seoCrawler = null;
+  if (options.seoCrawler !== undefined && options.seoCrawler !== false && options.seoCrawler !== null) {
+    const seo = options.seoCrawler;
+    if (!isPlainObject(seo)) {
+      fail('seoCrawler must be false or an object');
+    } else {
+      checkUnknownKeys('seoCrawler', seo, new Set(['verify', 'watermark', 'maxWidth', 'maxWidthFraction', 'quality', 'format']));
+      if (typeof seo.verify !== 'function') fail('seoCrawler.verify must be a trusted crawler-verification function');
+      if (typeof seo.watermark !== 'string' || !seo.watermark.trim() || seo.watermark.length > 80 || /[\u0000-\u001f\u007f]/.test(seo.watermark)) {
+        fail('seoCrawler.watermark must be a non-empty string of at most 80 characters without control characters');
+      }
+      const maxWidth = seo.maxWidth ?? 320;
+      if (!Number.isInteger(maxWidth) || maxWidth < 64 || maxWidth > 640) fail('seoCrawler.maxWidth must be an integer from 64 to 640');
+      const maxWidthFraction = seo.maxWidthFraction ?? 0.5;
+      if (typeof maxWidthFraction !== 'number' || !Number.isFinite(maxWidthFraction) || maxWidthFraction < 0.05 || maxWidthFraction > 0.9) {
+        fail('seoCrawler.maxWidthFraction must be from 0.05 to 0.9');
+      }
+      const quality = seo.quality ?? 55;
+      if (!Number.isInteger(quality) || quality < 1 || quality > 75) fail('seoCrawler.quality must be an integer from 1 to 75');
+      const format = seo.format ?? 'webp';
+      if (!['webp', 'jpeg'].includes(format)) fail("seoCrawler.format must be 'webp' or 'jpeg'");
+      if (typeof seo.verify === 'function' && typeof seo.watermark === 'string' && seo.watermark.trim()) {
+        seoCrawler = Object.freeze({ verify: seo.verify, watermark: seo.watermark.trim(), maxWidth, maxWidthFraction, quality, format });
+      }
+    }
+  }
+
   const availableParallelism = typeof os.availableParallelism === 'function' ? os.availableParallelism() : (os.cpus()?.length || 2);
   const config = Object.freeze({
     secret,
@@ -646,6 +673,7 @@ function inspectServerConfig(options = {}) {
     sharedCacheTtlMs: options.sharedCacheTtlMs ?? 3600000,
     authorize,
     allowAnonymous,
+    seoCrawler,
     basePath: String(basePathRaw).replace(/\/$/, '') || '/archx',
     ttlMs: (options.ttlSec ?? 120) * 1000,
     grid: options.grid ?? 8,
@@ -796,6 +824,7 @@ function inspectServerConfig(options = {}) {
   if (config.abuseDetection.action === 'event') warn("abuseDetection.action is 'event': suspicious distinct-image access is recorded through onSecurityEvent but is not blocked by Archx unless the host acts on it or selects action:'deny'/'challenge'");
   if (options.steganography && !options.onStegoIssue) warn('StegoMark is enabled without onStegoIssue: fingerprints will not be registered to a viewer/order, sharply limiting leak tracing');
   if (options.encrypt === true) warn('encrypt is enabled: the AES and scramble keys in the mint response are necessarily visible to the authorized browser/page and are not secrets from that viewer');
+  if (seoCrawler) warn('seoCrawler is enabled: its public /seo/:id route depends on seoCrawler.verify performing trusted crawler verification (never User-Agent alone); output is capped, low-resolution, visibly watermarked, and not shared-cacheable');
   if (options.allowClientQuality) warn('allowClientQuality lets browsers request quality up to the server entitlement; keep authorize() caps strict');
   if (config.oneTimeTokens === false) warn('oneTimeTokens is disabled: signed tokens can be replayed until expiry');
   if (!config.widthBuckets?.length) warn('widthBuckets is not configured: every viewport/DPR combination can create a distinct derivative and fragment the output cache; image-heavy sites should use canonical widths');
@@ -836,6 +865,7 @@ export function auditArchxServerConfig(options = {}) {
     summary: config ? Object.freeze({
       basePath: config.basePath,
       authorization: config.authorize ? 'authorize-callback' : 'explicit-anonymous',
+      seoCrawlerEnabled: !!config.seoCrawler,
       deploymentMode: config.deploymentMode,
       stateStore: config.stateStore ? (config.stateStore.kind || 'custom') : 'memory',
       activeSecretId: config.activeSecretId,

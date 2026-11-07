@@ -12,12 +12,12 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
 No `<img>` is ever created. There is no image URL in your HTML to copy, no file in the Network tab to save, and the picture itself is painted through a sealed, protected viewer that fights back at every step a thief normally takes. People who dig deeper get a **black card**, a **scrambled mosaic**, or a **heavily pixelated thumbnail** — your call. Your original file **never leaves the server**.
 
-- 📦 **151.9 KiB minified / 48.6 KiB gzipped**, zero runtime dependencies (browser)
+- 📦 **151.8 KiB minified / 48.5 KiB gzipped**, zero runtime dependencies (browser)
 - ⚡ Built for **image-heavy pages and catalogs**: canonical responsive widths, batch token minting, memory → persistent-disk → shared derivative reuse, optional precomputed CDN assets, lazy loading, a decode concurrency cap, and bitmap/payload caching. The real-Chromium test paints a 100-image gallery with **2 batch mint requests and 0 single mints**. **Loaded images do not reload** on scroll/visibility/ordinary resize, and static WebGL images draw on demand instead of running a 60 fps GPU loop
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `catalog` = q88/device-pixel sampling for listings, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
 - 🧩 Three canonical profiles — **lite** (CPU/RAM/speed first), **performance** (balanced), **elite** (security first) — layered over the original pipelines (**lite**, **shield**, **vault**, **fortress**) with `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so a profile is a default you refine, never a lock-in; `Archx.config(...)` sets your own house default
-- 🌓 Optional **temporal interlace**: assign pixel/checker/strip/block subsets to 2–4 phases so one presented frame is deliberately incomplete. Four 60 Hz-first profiles, GPU-shader or pre-rendered-frame engines, refresh-rate phase optimization, and reduced-motion respect. It is explicit opt-in because two-phase viewing on a 60 Hz monitor still flickers at 30 Hz per subset
-- 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens with versioned signing-key IDs, header-carried payload tokens by default, atomic one-time claims through a local or shared state store, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling
+- 🌓 Optional **temporal interlace**: assign pixel/checker/strip/block subsets to 2–4 phases so one presented frame is deliberately incomplete. Four balanced 60 Hz-first profiles plus the more aggressive `fortress60` profile, GPU-shader or pre-rendered-frame engines, refresh-rate phase optimization, and reduced-motion respect. It is off by default for individual images; the `elite` and `maxProtection` presets opt into `balanced60` (set `temporalInterlace:false` to opt out). Two-phase viewing on a 60 Hz monitor still updates each subset at 30 Hz, so test comfort carefully
+- 🔐 Optional server: **deny-by-default authorization at both token issuance and redemption**, POST-minted HMAC v2 tokens with versioned signing-key IDs, header-carried payload tokens by default, atomic one-time claims through a local or shared state store, optional DPoP-style sender-constrained redemption with a non-extractable page key, optional IP/User-Agent/session binding, entitlement-capped resolution **and quality/format**, bounded rate/quota/abuse/processing controls, tile-scrambled / AES-GCM-obfuscated delivery, and visible/forensic/**blind steganographic StegoMark** fingerprints baked in **before** scrambling; an opt-in verified-crawler route can separately serve strictly capped, visibly watermarked ordinary-image previews
 - 🧬 Attribution fallback: an optional 64-bit perceptual **soft-binding fingerprint** can be registered at ingest and compared with a suspect copy after metadata or a pixel mark has been stripped (evidence, not access control or cryptographic proof)
 - 🕵️ Hardened internals: private fields, no public instance registry or host expando, secret-redacted option views, captured native APIs, and hooked-API / automation policies
 
@@ -29,7 +29,11 @@ No `<img>` is ever created. There is no image URL in your HTML to copy, no file 
 
 ## Try to steal it (live demo)
 
+These commands are **repository demo/development scripts**, not part of the published npm package. From a source checkout (the package quick start below does not require cloning the repository):
+
 ```bash
+git clone https://github.com/archnemix/Archnemix_Image_Protection.git
+cd Archnemix_Image_Protection
 npm ci
 npm run demo:images   # generates the 100-image demo gallery
 npm run build
@@ -77,8 +81,11 @@ Archx.protectAll('img[data-protect]');
 
 TypeScript works without `@types` extras — declarations ship with the package
 for `@archnemix/image-protection`, `/server`, `/build`, `/redis`, and
-`/scramble`. The industry-standards mapping lives in
-[docs/STANDARDS.md](docs/STANDARDS.md).
+`/scramble`. The npm artifact omits the three large generated source maps to
+keep installs lean; the runtime source modules are still shipped. In a source
+checkout, `npm run build:debug` emits linked maps for local debugging, while
+the default build is pack-safe and does not leave missing map links. The
+industry-standards mapping lives in [docs/STANDARDS.md](docs/STANDARDS.md).
 
 ### 3 · Declarative web component
 
@@ -178,6 +185,27 @@ app.use(createArchxMiddleware(withHardenedProductionDefaults({
 Run `auditArchxProductionConfig(finalOptions, { expectedInstances })` in deployment tests. Unlike the basic validity audit, it returns production `blockers` for anonymous entitlement mode, query bearer tokens, non-required proof of possession, reusable tokens, GET minting, missing request/site gates, a memory store in a multi-instance topology, and StegoMark without a registry. `withHardenedProductionDefaults()` fills only fields you left undefined; it cannot choose your quotas, authorization policy, shared store, or supported-client proof policy.
 
 > **Fail-closed startup:** v1.5 throws during `createArchxMiddleware()` if the secret is missing/short/known-demo, no supported masters are indexed, origins/processing values are invalid, masters overlap declared `publicDir`/`publicDirs`, both `authorize` and explicit `allowAnonymous:true` are absent, or an unknown/misspelled top-level or nested security option is present. There is no weak-secret test bypass. Use `auditArchxServerConfig(options)` for a non-throwing, secret-free preflight report. Server-side Sharp work requires **Node ≥20.9.0** and **Sharp ^0.35.5** (a peer dependency — the browser bundle itself has zero runtime dependencies). Running this repo's *browser test suite* additionally needs Node ≥22.12 for its Puppeteer tooling; that is a dev-only requirement, CI encodes it (browser tests run on Node 22, library/unit tests on 20 and 22), and installing on Node 20 prints a harmless `EBADENGINE` warning for the unused dev tool.
+
+#### Verified-crawler SEO previews (opt-in)
+
+The protected `/i/:id` route remains token-gated and returns Archx containers. If you explicitly configure `seoCrawler`, a separate `GET`/`HEAD {basePath}/seo/:id` route can return an ordinary WebP or JPEG **only after your trusted verifier returns `true`**. The verifier is required: do not accept `User-Agent` strings alone. Use your edge/provider's authenticated crawler-IP service, or validate the crawler's source IP against its published ranges/reverse-and-forward DNS using the correctly normalized client IP; trust forwarded headers only behind configured trusted proxies. Archx does not provide a built-in bot identity database.
+
+```js
+seoCrawler: {
+  // Host-owned verification. This example intentionally delegates to a
+  // trusted provider/IP verifier; it must not merely inspect User-Agent.
+  verify: async (req, id) => verifyCrawlerFromTrustedSourceIp(req),
+  watermark: '© Studio',
+  maxWidth: 320,             // hard maximum 640 px
+  maxWidthFraction: 0.5,     // also never more than half the master width
+  quality: 55,               // hard maximum 75
+  format: 'webp',
+},
+```
+
+This route is disabled by default (`seoCrawler` omitted, or `false`). The output is always resized under both the configured and global width policies, uses a visibly tiled **PREVIEW ONLY** watermark with your label, contains no Archx token/key/container, and is sent with private `no-store` headers. A preview whose permitted width would be below 64 px is denied rather than enlarged. Verification errors/timeouts fail closed with 503; unverified requests get a non-disclosing 404. The callback runs under `callbackTimeoutMs` and should be bounded/cache its own trusted verification data. The standard image route does not fall back to this endpoint and is otherwise unchanged.
+
+To make the preview discoverable, your page renderer must include the `/seo/:id` image URL in the crawler-visible HTML for content the verified crawler is allowed to see (for example, an `<img src="/archx/seo/aurora-valley" alt="...">` element). Keep the human-facing protected viewer as the normal experience; use the same trusted bot verification in page rendering, and ensure the crawler receives semantically equivalent page content rather than unrelated text or a deceptive alternate page.
 
 #### Upgrading older server code to the v1.5 defaults
 
@@ -490,7 +518,7 @@ the layers corroborate each other.
 | Reach into library objects/DOM for canvases, URLs, or keys | Instance state uses JavaScript `#private` fields; host/element lookup uses module-private `WeakMap`s (no `__archx`/`_inst` expando), there is no public instance registry, option/config views redact keys, and `_debug()` is inert unless that instance was explicitly created with `debug:true` | No supported handle to internal canvases, payloads, bitmaps, or secrets |
 | Monkey-patch `fetch`, `createImageBitmap`, canvas, or WebGL APIs around the viewer | Sensitive native functions are captured at module load and used internally; `auditIntegrity()` reports replacements/non-native implementations. Fortress defaults to **fail closed** when hooks are detected; other modes can monitor or lock | The cheap userscript/extension hook is bypassed or causes a lock instead of silently recording clean pixels |
 | Expert move: `HTMLCanvasElement.prototype.toDataURL.call(canvas)` | **Vault/Fortress** render in WebGL with `preserveDrawingBuffer:false` — the browser clears the buffer after compositing, so even the prototype call returns black. On 2D canvases, **origin tainting** makes the browser throw `SecurityError` for prototype calls too (below); only same-origin 2D relies on instance poisoning alone, and its backing store still only ever contains the display-size, watermarked derivative | Vault/Fortress: black · Tainted 2D: `SecurityError` · Same-origin 2D: the displayed canvas pixels at best |
-| Bulk scrapers & AI crawlers | No URLs in HTML, POST + authorization + a fresh token per view, separate bounded token/image rate windows, per-IP/viewer/image quotas, distinct-image scraping alerts/denial, exact-origin and same-site token gating, bounded caches/nonce stores, and automation tripwires | With authenticated authorization and quotas, a limited harvest; public anonymous policies can still be harvested within their active limits |
+| Bulk scrapers & AI crawlers | No URLs in HTML, POST + authorization + a fresh token per view, separate bounded token/image rate windows plus an isolated SEO-preview window when enabled, per-IP/viewer/image quotas, distinct-image scraping alerts/denial, exact-origin and same-site token gating, bounded caches/nonce stores, and automation tripwires | With authenticated authorization and quotas, a limited harvest; public anonymous policies can still be harvested within their active limits |
 | Stealth browser / raw CDP / coherent fingerprint spoofing | Modern stealth stacks can imitate a real browser, pierce shadow trees, and capture composited frames. Archx therefore treats client automation signals as telemetry only; the durable controls remain authenticated `authorize()`, per-viewer quotas/abuse detection, derivative caps, proof-bound one-time delivery, marks, and monitoring | It can obtain only derivatives that the authenticated session is entitled to view, at a rate/pattern your server can throttle or revoke |
 | Web-cache deception through a CDN/shared cache | Token and payload responses send `Cache-Control: private, no-store`, `CDN-Cache-Control: private, no-store`, `Surrogate-Control: no-store`, and credential/token/proof-sensitive `Vary` fields. Your CDN must still be tested: a rule that overrides origin `no-store` can defeat these headers | Compliant caches do not retain or replay another viewer's derivative |
 | Inspect decoded image memory after display | Fortress defaults to strict memory handling: decoded bitmaps are released promptly, CPU-side working canvases are wiped after GPU upload, plain client-only sources can be locally scrambled before upload, and strict mode bypasses the shared bitmap cache | Far less clean decoded material left hanging around (not a defense against a fully compromised browser/process) |
@@ -543,7 +571,7 @@ Archx.config({ profile: 'performance', watermark: '© Studio' });       // your 
 | Renderer / readback | `renderer:'canvas'` — no GL contexts; readback via poisoned instance APIs + origin taint | `renderer:'webgl'` — readback black by platform design (`preserveDrawingBuffer:false`); `taintFallback:'webgl'` auto-promotes when taint is unavailable |
 | Payload keys | `scrambleKeyMode:'per-image'` — derivatives cacheable across viewers | `scrambleKeyMode:'per-token'` — unique key material per view, nothing reusable |
 | Derivative sharing | canonical `widthBuckets` + image-scoped marks — transform once, serve many | per-viewer forensic/StegoMark scope — every copy identifies its recipient, at per-view encode cost |
-| Token replay at capacity | `replaySaturation:'evict'` — availability under claim pressure | `replaySaturation:'deny'` — fail closed (the Elite/hardened default) |
+| Token replay at capacity | `replaySaturation:'evict'` — availability under claim pressure | `replaySaturation:'strict'` — fail closed (the Elite/hardened default) |
 | Encode | WebP effort 2, `quality:88`, AVIF only precomputed | `encrypt:true` + plan v2 always (the floor profiles never trade); `maxWidthCap` / `maxWidthFraction` withhold resolution |
 
 **Modes under the profiles.** The original pipelines remain addressable and unchanged — `lite` (2D, galleries), `shield` (default 2D + tile-unscramble + marks + integrity monitoring), `vault` (WebGL shader unscramble; ~64 `drawImage` copies in 2D, one texture upload in GL), `fortress` (vault + fail-closed integrity, strike lockouts, strict memory wiping, pre-GPU scramble, dynamic trace, camera shield, optional Lens), and `custom` (no bundle at all: pick `renderer` and every flag yourself; omitting `mode` while passing `renderer` is also custom). `mode:'performance'` runs the shield pipeline and `mode:'elite'` runs the fortress bundle with proof-of-possession required, so the profile names work in `mode` position too. `Archx.preset(name, overrides)` exposes the same three profiles plus the legacy specialized bundles (`gallery`, `catalog`, `editorial`, `commerce`, `marketplace`, `maxProtection`, `screenshotResistant`) — all ordinary option objects you can spread and override. Two 1.28 renames to know: the v1.23–1.27 *CPU-first* `preset('performance')` / `withPerformanceDefaults()` composition is now `preset('lite')` / `withLiteDefaults()` (identical values); `performance` now means the balanced profile described above.
@@ -693,7 +721,7 @@ Important limits and safety defaults:
 - `refreshHz` is a **planning target**, not a hardware measurement: browsers do not give page JS a portable, trustworthy physical-refresh API. With `optimizeRefresh:true`, Archx uses `floor(refreshHz / minPhaseHz)` to cap requested phases. The default `60 / 30` therefore clamps 3–4 phases to 2; at a correctly configured 120 Hz target, 4 phases are allowed. The actual cadence is still the browser's `requestAnimationFrame`/compositor cadence.
 - Two-phase interlace on a real 60 Hz monitor updates each subset at 30 Hz. The default `fill:'lowres'` preserves local average colour to reduce brightness modulation, but it does **not** make a flicker pattern universally comfortable or safe. `fill:'black'` is the literal missing-subset version and is the harshest; partial active-pixel gain can also clip highlights. Keep `respectReducedMotion:true`, test with photosensitive users/content in mind, and avoid enabling interlace across a whole gallery.
 - Interlace is not a screenshot veto. Screenshots from different phases, screen recordings, compositor frame extraction, and some phone-camera exposures can recombine the subsets. Long exposures may integrate a nearly complete image; short/rolling-shutter exposures may show bands. Use it with server-side authorization, resolution caps, Lens, watermarks, and attribution—not as the only layer.
-- It can be combined with `temporalShield`/`cameraShield` complementary noise. Fortress does not turn literal interlace on by default, and enabling `temporalInterlace` suppresses Fortress's automatic generic `temporalShield` unless you also set that shield explicitly (`temporalInterlace:false` leaves the Fortress shield alone).
+- It can be combined with `temporalShield`/`cameraShield` complementary noise. The bare `mode:'fortress'` pipeline does not itself enable literal interlace (the `elite` and `maxProtection` presets do); enabling `temporalInterlace` suppresses Fortress's automatic generic `temporalShield` unless you also set that shield explicitly (`temporalInterlace:false` leaves the Fortress shield alone).
 - Shader interlace is applied before the client watermark texture, so the watermark remains present in each phase. Canvas frames are built from the already-composited frame, so baked overlays remain phase-partitioned with the image. With Lens, the sharp disc is sampled from the current phase rather than bypassing interlace.
 
 The normalized settings are inspectable before use with `Archx.normalizeTemporalInterlace(value)` (also exported as `normalizeTemporalInterlace` alongside `TEMPORAL_INTERLACE_PROFILES`). The web component accepts `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, and `temporal-interlace-refresh-hz` attributes.
@@ -729,6 +757,34 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
   - Sharp masters are treated as untrusted: byte-only inputs, pre-decode format/dimension sniffing cross-checked against Sharp metadata, byte/pixel/width/height/output budgets, detected-format and scoped libvips-loader allowlists (per-instance leases released on `handler.close()`, intersected with any permanent `configureSharpSecurity()` policy), rejection of multi-page and >4-channel inputs, `failOn:'warning'`, native timeouts, metadata-stripping output, and a bounded processing semaphore. Corrupt/oversized inputs become controlled 413/415/503 responses rather than stack leaks.
   - Marked `.archx` headers carry `wm:1`, `fx:1`, and/or `sg:1` flags so your pipeline can verify what was embedded without exposing seed/text/fingerprint derivation in the payload.
 
+### Named utility exports
+
+The package root re-exports these helpers as named exports; the environment-agnostic image primitives are also available from `@archnemix/image-protection/scramble`.
+
+```js
+import {
+  onClientEvent, offClientEvent, usePlugin, listPlugins,
+  assayStegoEmbed, applyForensicBlocks,
+} from '@archnemix/image-protection';
+
+const listener = (event) => analytics.track(event);
+const stop = onClientEvent(listener);
+// Later: stop() unsubscribes; offClientEvent(listener) also returns a boolean.
+
+const plugin = usePlugin({
+  name: 'telemetry',
+  setup({ on, off, version }) { /* restricted registration API; no instances */ },
+  onEvent(event, instance) { /* event is sanitized; do not forward instance */ },
+  teardown() {},
+});
+plugin.remove(); // true once; false if already removed
+listPlugins();   // frozen array of installed names
+```
+
+`onClientEvent(listener)` returns an unsubscribe function; `offClientEvent(listener)` directly removes a previously registered listener and reports whether it was present. `usePlugin()` returns a `{ name, remove() }` handle and replaces an installed plugin with the same name after running its prior `teardown`. Its `setup` receives only `{ on, off, version }`; `onEvent` receives the sanitized event and the `ProtectedImage` instance. Events omit tokens, keys, pixels, source objects, and raw errors, but callers should forward only the event—not the instance—to analytics.
+
+`assayStegoEmbed(rgba, width, height, options?)` runs the actual StegoMark embedder on a copy. Options include `key`, `profile`, `strength`, `gridX`, `gridY`, `layoutVersion`, and `verify`; the result reports `{ profile, strength, layoutVersion, grid, psnr, maxChannelDelta, smoothFraction, binaryFraction, contentClass, verifiedAtStrength, recommendedStrength, warnings }`. `verify:true` searches higher strengths until a fresh mark self-detects. Use it as an ingest/pre-flight measurement on your own images; it is not a recovery guarantee. `applyForensicBlocks(rgba, width, height, seed, options?)` applies the keyed block-luminance pattern and returns the RGBA array; options are `{ blockSize, delta, signsVersion }`. It mutates a passed `Uint8Array`/`Uint8ClampedArray`, so copy first if the source must remain unchanged. These pixel helpers do not replace server authorization or establish legal attribution by themselves.
+
 ### CSP and browser-mode trade-offs
 
 A typical same-origin deployment needs the Archx script/module source allowed by `script-src`, token/payload endpoints allowed by `connect-src`, image decoding/blob workers as required by your build, and `worker-src blob:` only if your chosen browser path/config uses blob workers. Archx does not require third-party script origins. For shadow-DOM viewers, modern browsers use a constructable `CSSStyleSheet`, avoiding a dynamically inserted `<style>` element. Older browsers and `shadow:'none'` fall back to an injected `<style>` element, so a policy such as `style-src 'self'` with no unsafe-inline exception may block viewer styling there; host `width`/`height`/`aspectRatio` options also assign inline element styles. Test the exact policy in every supported browser rather than assuming the strictest style policy works unchanged.
@@ -739,7 +795,7 @@ Fortress is intentionally fail-closed: if its integrity audit sees a hooked fetc
 
 Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
-- Browser bundle: **151.9 KiB minified / 48.6 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
+- Browser bundle: **151.8 KiB minified / 48.5 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
 - 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags, using **2 batch mint requests and 0 single mint requests** (`npm run bench:opt`, deliberately non-lazy catalog load: **2.88 s total / 28.8 ms per image** on the 2-vCPU sandbox, ~2.1 MB JS heap for the whole gallery; production lazy mode streams them on scroll and the gallery helper defaults to catalog 1× device-pixel sampling)
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Cold-transform cost is dominated by Sharp decode/resize/encode, not scrambling (the fused pad+scramble pass is ~2 ms at 960 px): a recorded `npm run bench:opt` on the 1408×768 demo master (2-vCPU test box) measured quality-first q95 at **~74 ms/120 KiB (640 px)** and **~134 ms/250 KiB (960 px)**, versus catalog q88/effort-2 at **~25 ms/83 KiB** and **~46 ms/172 KiB**—about 2.9× faster and one-third smaller at 960 px. The v1.9 optimization round fused pad+scramble+encode-input into one pass (no intermediate frame copies), skips EXIF autorotate when the master has no orientation, drops the synthesized alpha band before WebP/PNG encoding for opaque masters, and prunes sliding-window limiters in place; interleaved old/new A/B runs on this machine measured cold transforms ~3–10% faster (PNG: −34% time, −11% bytes), peak transform RSS a few MB lower, and warm mint+redeem throughput up from **859 to 915 flows/s** over 6,000 loopback requests — with byte-identical WebP/JPEG output (verified against 21 fixture hashes). Reproduce with `npm run bench:opt -- --out=after.json` before/after a change and `--compare=before.json,after.json`. A separate loopback catalog fixture generated six cold canonical derivatives at p50 **87 ms**, then repeated authorized flows from memory and, after a handler restart, from the persistent disk cache at p50 **2.8 ms** per flow. Those loopback numbers exclude a real authorization database, TLS, network, Redis latency, and browser proof signing; use them as regression signals, not a production capacity claim. Precomputed `archx-build` variants remove cold Sharp work from the request path altogether
@@ -770,9 +826,9 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 - [ ] Rotate signing keys through the `secrets` keyring + `activeSecretId`, keep the previous key only through the token rollover window, and persist StegoMark `keyId` + `profile` values for later investigations
 - [ ] HTTPS everywhere (tokens/keys ride along), short `ttlSec` (60–180 s), POST token minting, `oneTimeTokens:true`, and object-level `authorize(req,id,{phase})` tests for horizontal/vertical access (another user's image, revoked user, downgraded plan, changed buyer/order/delivery identity, tampered width/quality request)
 - [ ] Keep the default `allowQueryTokens:false` and pair server `proofOfPossession:'required'` with client `proofOfPossession:'required'` once every supported client implements the proof protocol; remember that abuseDetection `action:'event'` records only and does not block
-- [ ] Verify every CDN/WAF/reverse-proxy rule honors origin `private,no-store`/`CDN-Cache-Control`/`Surrogate-Control`; bypass shared caching for `{basePath}/token/*`, the exact batch route `{basePath}/tokens`, and `{basePath}/i/*`, and never add a cache rule based only on a static-looking URL
+- [ ] Verify every CDN/WAF/reverse-proxy rule honors origin `private,no-store`/`CDN-Cache-Control`/`Surrogate-Control`; bypass shared caching for `{basePath}/token/*`, the exact batch route `{basePath}/tokens`, and `{basePath}/i/*` (plus `{basePath}/seo/*` when SEO previews are enabled), and never add a cache rule based only on a static-looking URL
 - [ ] Exact `allowedOrigins` only; treat Origin/Referer/User-Agent/IP as signals. Enable session binding where a stable viewer ID exists; use IP binding cautiously for mobile/VPN users. Set `trustProxy:true` only with the exact `trustedProxyHops` count behind proxies that strip/set `X-Forwarded-For`; otherwise the socket IP remains authoritative
-- [ ] Tune token/image rate limits, per-viewer/IP/image quotas, distinct-image abuse alerting, `onSecurityEvent`, bounded cache/store sizes, and Sharp bytes/pixels/dimensions/formats/timeout/concurrency to your catalog and CPU budget. For browsing catalogs, enable canonical `widthBuckets`, a persistent non-public `outputCacheDir` and/or shared derivative cache, image-scoped marks, and alert on derivative-cache hit ratio, disk errors/prunes, and Sharp queue saturation
+- [ ] Tune token/image rate limits and, when enabled, the isolated SEO-preview rate limit (using the configured general rate ceiling), plus per-viewer/IP/image quotas, distinct-image abuse alerting, `onSecurityEvent`, bounded cache/store sizes, and Sharp bytes/pixels/dimensions/formats/timeout/concurrency to your catalog and CPU budget. For browsing catalogs, enable canonical `widthBuckets`, a persistent non-public `outputCacheDir` and/or shared derivative cache, image-scoped marks, and alert on derivative-cache hit ratio, disk errors/prunes, and Sharp queue saturation
 - [ ] If you use `archx-build`, keep masters and `.archx-build-state.json` out of the deployment, give versioned public variants immutable caching only when the catalog is intentionally public, authorize/sign or short-cache the key-bearing manifest according to the catalog's privacy model, and pin it in the browser with `assetManifestIntegrity` (rotating the pin with each manifest deploy) while keeping `assetIntegrity` at `'auto'` or `'require'`
 - [ ] Negative-test the deployed routes: direct master path, traversal/double-encoding/malformed `%`, extra path segments, wrong method, duplicate/oversized tokens, sizing abuse, replay race, revoked session, corrupt/oversized master, and quota exhaustion
 - [ ] Server-side watermark + forensic marking on for valuable derivatives; client `{session}` watermarks alone do not survive offline payload reconstruction
@@ -788,7 +844,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 ```bash
 npm run lint        # node --check over every shipped/test source file
 npm run docs:check  # version/test-count/bundle-size/SRI agreement across README, website, and code
-npm test            # 145 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 149 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,

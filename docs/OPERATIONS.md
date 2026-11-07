@@ -23,7 +23,7 @@ State that must agree across instances:
 
 - one-time token nonce claims;
 - one-time proof-of-possession proof IDs;
-- token/image rate-limit windows;
+- token/image rate-limit windows and a separate SEO-preview window when that optional route is enabled;
 - viewer/IP/image quotas;
 - distinct-image scraping detection.
 
@@ -292,15 +292,35 @@ signing secret, access token, scramble key, or AES key.
 The origin sends private/no-store cache controls, CDN/surrogate controls,
 `Vary`, `nosniff`, and related headers for token and payload responses. A CDN
 rule must not override those controls. Protected token and payload routes
-should bypass shared caching entirely.
+should bypass shared caching entirely. If the opt-in `seoCrawler` route is
+configured, `{basePath}/seo/*` also sends `private, no-store`; bypass shared
+caching there too, even though the process may reuse a bounded in-memory
+watermarked derivative after re-running crawler verification on each request. SEO
+requests use a separate rate-limit namespace with the configured general
+`rateLimitPerMinute` ceiling, so preview traffic cannot consume the protected
+`/i/:id` route's rate budget.
+
+The SEO route is not the protected `/i/:id` route: `GET`/`HEAD /seo/:id`
+serves an ordinary WebP/JPEG only after the host's `seoCrawler.verify(req,id)`
+returns exactly `true`. The callback must authenticate the crawler from a
+trusted signal such as verified source-IP data; `User-Agent` matching alone
+is spoofable and is not sufficient. Forwarded client IP headers are trusted
+only when requests can arrive exclusively from the configured proxy and the
+proxy overwrites those headers. A false result is a non-disclosing 404; a
+callback error/timeout is fail-closed. The image is capped to at most 640 px,
+no more than the configured fraction of the master width, lossy quality at
+most 75, and a server-baked visible `PREVIEW ONLY` watermark. Do not map
+`/seo/*` back to master files or allow a CDN image optimizer to replace the
+response.
 
 ### CloudFront reference behavior
 
-Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, and `/archx/i/*` (adjust `basePath`):
+Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, `/archx/i/*`, and (only when enabled) `/archx/seo/*` (adjust `basePath`):
 
 - Viewer protocol: redirect HTTP to HTTPS or HTTPS only.
 - Allowed methods: token behavior must allow the configured token methods
-  and `OPTIONS`; image behavior allows `GET` and `OPTIONS`.
+  and `OPTIONS`; image behavior allows `GET` and `OPTIONS`; the optional SEO
+  behavior allows `GET` and `HEAD` only.
 - Cache policy: `Managed-CachingDisabled`.
 - Origin request policy: forward only what your `authorize()` needs, plus
   `X-Archx-Request`, `X-Archx-Proof-Key`, `X-Archx-Token`, `X-Archx-Proof`,
@@ -317,10 +337,10 @@ Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, an
 
 ### Cloudflare reference rule
 
-Create a Cache Rule for the token and payload paths:
+Create a Cache Rule for the token and payload paths (and the SEO path when enabled):
 
 - Expression based on URI path, for example:
-  `(starts_with(http.request.uri.path, "/archx/token/")) or (http.request.uri.path eq "/archx/tokens") or (starts_with(http.request.uri.path, "/archx/i/"))`
+  `(starts_with(http.request.uri.path, "/archx/token/")) or (http.request.uri.path eq "/archx/tokens") or (starts_with(http.request.uri.path, "/archx/i/")) or (starts_with(http.request.uri.path, "/archx/seo/"))`
 - Cache eligibility: **Bypass cache**.
 - Do not apply "Cache Everything", APO, Cache Reserve, Polish, Mirage, image
   resizing, or a Worker cache to these paths.

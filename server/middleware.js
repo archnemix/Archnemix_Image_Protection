@@ -8,6 +8,8 @@
  *   POST {basePath}/token/:id?w=1200 -> { url, cleanUrl, token, key, aesKey?, grid, exp }
  *   GET  {basePath}/i/:id + X-Archx-Token -> application/octet-stream (.archx)
  *        (`?t=` is accepted only with explicit legacy `allowQueryTokens:true`)
+ *   GET  {basePath}/seo/:id -> low-resolution watermarked WebP/JPEG only when
+ *        the opt-in host-supplied seoCrawler.verify callback returns true
  *
  * Secure defaults are deny-by-default: startup fails unless the host supplies
  * an `authorize(req, id, { phase })` callback or explicitly sets
@@ -66,6 +68,24 @@ export {
   loadOwnershipPrivateKey, loadOwnershipPublicKey,
 };
 export { createIssuanceLog, verifyIssuanceChain } from './issuance-log.js';
+
+function createSeoWatermarkSvg(width, height, label) {
+  const escape = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const text = escape(`PREVIEW ONLY · ${label}`);
+  const fontSize = Math.max(12, Math.round(Math.min(width, height) / 8));
+  const tileWidth = Math.max(120, fontSize * 6);
+  const tileHeight = Math.max(56, fontSize * 3);
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<defs><pattern id="p" width="${tileWidth}" height="${tileHeight}" patternUnits="userSpaceOnUse" patternTransform="rotate(-28)">` +
+    `<text x="8" y="${Math.ceil(tileHeight * 0.68)}" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="900" letter-spacing="1.5" fill="#fff" fill-opacity=".72" stroke="#111" stroke-opacity=".8" stroke-width="2.5" paint-order="stroke">${text}</text>` +
+    `</pattern></defs><rect width="100%" height="100%" fill="url(#p)"/>` +
+    `<rect x="2" y="2" width="${Math.max(1, width - 4)}" height="${Math.max(1, height - 4)}" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="${Math.max(2, Math.round(fontSize / 7))}"/>` +
+    `<rect x="0" y="0" width="${width}" height="${Math.max(22, fontSize + 12)}" fill="#111" fill-opacity=".65"/>` +
+    `<text x="8" y="${Math.max(18, fontSize + 2)}" font-family="Arial,sans-serif" font-size="${Math.max(12, Math.round(fontSize * .72))}" font-weight="900" fill="#fff" stroke="#111" stroke-width="1.5" paint-order="stroke">${text}</text></svg>`,
+  );
+}
 
 export function createArchxMiddleware(options = {}) {
   const cfg = normalizeServerConfig(options);
@@ -891,7 +911,7 @@ export function createArchxMiddleware(options = {}) {
       }),
       request: Object.freeze({
         method: req?.method ? String(req.method).toUpperCase() : null,
-        route: phase ? `${basePath}/${phase === 'token' ? 'token' : 'i'}/:id` : null,
+        route: phase ? `${basePath}/${phase === 'token' ? 'token' : phase === 'seo' ? 'seo' : 'i'}/:id` : null,
       }),
       reason: details.reason || null,
     });
@@ -1773,14 +1793,14 @@ export function createArchxMiddleware(options = {}) {
       if (!isBatchTokens && parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
       const kind = isBatchTokens ? 'tokens' : parts[0];
       const rawId = isBatchTokens ? null : parts[1];
-      if (!['token', 'tokens', 'i'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
-      phase = kind === 'i' ? 'image' : 'token';
+      if (!['token', 'tokens', 'i', 'seo'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
+      phase = kind === 'i' ? 'image' : kind === 'seo' ? 'seo' : 'token';
       // Count malformed/unknown-ID attempts too. Otherwise the cheapest
       // enumeration/flood path would bypass every request budget simply by
       // never naming a real image. CORS preflight is the one exemption: it
       // carries no entitlement and is followed by the rate-limited token call.
       if (req.method !== 'OPTIONS') {
-        const rate = await rateLimited(req, kind === 'i' ? 'i' : 'token');
+        const rate = await rateLimited(req, kind === 'seo' ? 'seo' : kind === 'i' ? 'i' : 'token');
         if (rate.limited) {
           return deny(req, res, 429, 'too many requests', {
             phase, reason: 'rate-limit', headers: { 'Retry-After': String(rate.retryAfterSec || 60) },
@@ -1963,7 +1983,109 @@ export function createArchxMiddleware(options = {}) {
       try { id = decodeURIComponent(rawId || ''); }
       catch { return deny(req, res, 400, 'bad request', { phase, reason: 'bad-id-encoding' }); }
       routeId = validateImageId(id) ? id : null;
-      if (!validateImageId(id) || !index.has(id)) {
+      if (!validateImageId(id)) {
+        return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
+      }
+
+      if (kind === 'seo') {
+        const seo = cfg.seoCrawler;
+        if (!seo) return sendJson(req, res, 404, { error: 'not found' });
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          return deny(req, res, 405, 'method not allowed', { id, phase, reason: 'seo-method', headers: { Allow: 'GET, HEAD' } });
+        }
+        if (url.search) return deny(req, res, 400, 'bad request', { id, phase, reason: 'seo-query' });
+        if (!originAllowed(req)) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'origin' });
+
+        let verified = false;
+        try { verified = await withCallbackTimeout(seo.verify, [req, id], 'crawler verification'); }
+        catch (err) {
+          emitSecurityEvent('archx.crawler_verification_failed', req, {
+            id, phase, status: 503, reason: err?.code || 'verification-error',
+          });
+          return deny(req, res, 503, 'service unavailable', {
+            id, phase, reason: 'crawler-verification-unavailable', headers: { 'Retry-After': '1' },
+          });
+        }
+        if (verified !== true) {
+          return deny(req, res, 404, 'not found', { id, phase, reason: 'crawler-unverified' });
+        }
+        if (!index.has(id)) return deny(req, res, 404, 'not found', { id, phase, reason: 'unknown-or-invalid-id' });
+
+        const dims = await imageDimensions(id);
+        if (!dims?.width || !dims?.height) {
+          return deny(req, res, 415, 'unsupported image', { id, phase, reason: 'seo-image-invalid' });
+        }
+        const fraction = Math.min(seo.maxWidthFraction, cfg.maxWidthFraction);
+        const previewWidth = Math.min(seo.maxWidth, cfg.maxWidthCap, Math.floor(dims.width * fraction));
+        if (!Number.isInteger(previewWidth) || previewWidth < 64) {
+          return deny(req, res, 404, 'not found', { id, phase, reason: 'seo-preview-below-minimum' });
+        }
+        const master = resolveIndexedFile(id);
+        if (!master) return deny(req, res, 404, 'not found', { id, phase, reason: 'master-missing' });
+        if (master.stat.size > cfg.processing.maxInputBytes) {
+          return deny(req, res, 413, 'image too large', { id, phase, reason: 'master-too-large' });
+        }
+
+        const seoMarkKey = crypto.createHash('sha256').update(seo.watermark).digest('hex').slice(0, 16);
+        const seoCacheKey = `seo:${id}:${fileVersion(master.stat)}:${previewWidth}:${seo.maxWidthFraction}:${seo.quality}:${seo.format}:${seoMarkKey}`;
+        let previewBytes = getOutputCache(seoCacheKey);
+        if (!previewBytes) {
+          previewBytes = await processingSemaphore.run(async () => {
+            const sourceBytes = await fs.promises.readFile(master.filePath);
+            if (sourceBytes.length !== master.stat.size) {
+              const changed = new Error('master changed while reading crawler preview');
+              changed.code = 'ARCHX_MASTER_CHANGED';
+              throw changed;
+            }
+            const current = resolveIndexedFile(id);
+            if (!current || current.filePath !== master.filePath || fileVersion(current.stat) !== fileVersion(master.stat)) {
+              const changed = new Error('master changed while reading crawler preview');
+              changed.code = 'ARCHX_MASTER_CHANGED';
+              throw changed;
+            }
+            const base = await prepareDerivativeBase(sourceBytes, {
+              grid: 8,
+              maxWidth: previewWidth,
+              processing: cfg.processing,
+            });
+            const sharpModule = await import('sharp');
+            const sharp = sharpModule.default || sharpModule;
+            let pipeline = sharp(Buffer.from(base.data), {
+              raw: { width: base.w, height: base.h, channels: 4 },
+            }).timeout({ seconds: cfg.processing.timeoutSec });
+            pipeline = pipeline.composite([{ input: createSeoWatermarkSvg(base.w, base.h, seo.watermark) }]);
+            if (seo.format === 'jpeg') {
+              pipeline = pipeline.flatten({ background: '#fff' }).jpeg({
+                quality: seo.quality,
+                chromaSubsampling: '4:2:0',
+                mozjpeg: false,
+              });
+            } else {
+              pipeline = pipeline.webp({
+                quality: seo.quality,
+                alphaQuality: 80,
+                effort: Math.min(cfg.processing.webpEffort, 2),
+                smartSubsample: false,
+              });
+            }
+            return pipeline.toBuffer();
+          });
+          setOutputCache(seoCacheKey, previewBytes);
+        }
+        const contentType = seo.format === 'jpeg' ? 'image/jpeg' : 'image/webp';
+        res.writeHead(200, {
+          ...protectedHeaders(req, {
+            'Content-Type': contentType,
+            'Content-Length': previewBytes.length,
+            'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+            'CDN-Cache-Control': 'private, no-store',
+            'Surrogate-Control': 'no-store',
+          }),
+        });
+        return req.method === 'HEAD' ? res.end() : res.end(previewBytes);
+      }
+
+      if (!index.has(id)) {
         return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
       }
 
@@ -2528,6 +2650,11 @@ export function createArchxMiddleware(options = {}) {
         }
         if (err?.code === 'ARCHX_UNSUPPORTED_IMAGE') {
           return deny(req, res, 415, 'unsupported image', { id: routeId, phase, reason: 'unsupported-image' });
+        }
+        if (err?.code === 'ARCHX_MASTER_CHANGED') {
+          return deny(req, res, 503, 'service unavailable', {
+            id: routeId, phase, reason: 'master-changed-during-preview', headers: { 'Retry-After': '1' },
+          });
         }
         if (err?.code === 'ARCHX_PROCESSING_BUSY') {
           return deny(req, res, 503, 'service unavailable', {

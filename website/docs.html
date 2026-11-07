@@ -57,8 +57,10 @@
         <li><a href="#profiles">Profiles: lite · performance · elite</a></li>
         <li><a href="#options">Key options</a></li>
         <li><a href="#galleries">Galleries &amp; many images</a></li>
+        <li><a href="#api-helpers">Events &amp; offline helpers</a></li>
         <li class="idx-group">Server</li>
         <li><a href="#server-rules">The five server rules</a></li>
+        <li><a href="#seo-previews">Verified-crawler SEO previews</a></li>
         <li><a href="#server-ops">Health checks &amp; metrics</a></li>
         <li class="idx-group">Ownership &amp; limits</li>
         <li><a href="#ownership">Ownership proof</a></li>
@@ -224,6 +226,23 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
       from a bounded cache, and <code>handler.stats()</code> shows hit
       rates so you can size things with data.</p>
 
+      <h2 id="api-helpers">Events &amp; offline helpers</h2>
+      <p>The package root provides named event/plugin APIs
+      (<code>onClientEvent</code>, <code>offClientEvent</code>,
+      <code>usePlugin</code>, and <code>listPlugins</code>) as well as the
+      convenient <code>Archx.on/off/use/plugins</code> methods. Global events
+      are frozen and sanitized: no tokens, keys, pixels, source objects, or
+      raw errors. Plugin setup receives only the registration API/version;
+      an event listener can also receive a <code>ProtectedImage</code>
+      instance, which should not be forwarded to telemetry.</p>
+      <p>For ingest/offline workflows, the root and
+      <code>/scramble</code> entry expose <code>assayStegoEmbed</code> (real
+      embed-quality/content-class pre-flight) and
+      <code>applyForensicBlocks</code> (mutating RGBA pixel helper). The
+      assay measures your chosen pixels and can optionally self-detect; it
+      is not a detection guarantee or standalone attribution. The README
+      documents signatures, return fields, and mutation behavior.</p>
+
       <h2 id="server-rules">The five server rules</h2>
       <p>Most real-world failures of tools like this are deployment
       failures. These five rules are enforced or checked by the library —
@@ -253,6 +272,35 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
         (public masters, query-string tokens, single-instance state behind
         a load balancer&hellip;) — treat them as release failures.</li>
       </ol>
+
+      <h2 id="seo-previews">Verified-crawler SEO previews</h2>
+      <p>SEO image delivery is a separate, opt-in route. Configure
+      <code>seoCrawler</code> to add <code>GET</code>/<code>HEAD
+      {basePath}/seo/:id</code>; without it the route is disabled. The
+      required <code>verify(req,id)</code> callback must authenticate the
+      crawler using a trusted signal, such as provider-verified source-IP
+      data or reverse-and-forward DNS. A <code>User-Agent</code> string is
+      spoofable and must never be the only check. Archx does not bundle a
+      crawler IP database.</p>
+      <pre class="code mono">seoCrawler: {
+  verify: async (req, id) =&gt; verifyCrawlerFromTrustedSourceIp(req),
+  watermark: '© Studio',
+  maxWidth: 320,             // hard cap: 640 px
+  maxWidthFraction: 0.5,     // hard cap: 0.9 of the master width
+  quality: 55,               // hard cap: 75
+  format: 'webp',            // or 'jpeg'
+}</pre>
+      <p>Only an exact <code>true</code> response permits an ordinary image;
+      false/unverified callers get a non-disclosing 404, while verifier
+      errors/timeouts fail closed. The preview is lossy, never wider than
+      both configured caps, and carries a visible tiled <strong>PREVIEW
+      ONLY</strong> watermark. It contains no Archx token or container and
+      uses <code>private, no-store</code> response headers. Normal tokenized
+      <code>/i/:id</code> delivery is unchanged. Include the preview URL in
+      crawler-visible page HTML only when the page serves semantically
+      equivalent content; keep the regular protected viewer as the human
+      experience. See the operations guide for CDN bypass and trusted-proxy
+      requirements.</p>
 
       <h2 id="server-ops">Health checks &amp; metrics</h2>
       <p>Small operational helpers ship with the server surface, so the

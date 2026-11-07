@@ -607,6 +607,160 @@ test('public server surface does not export generic token signing/verification p
   // against the real redemption path rather than a test-only helper.
 });
 
+test('verified SEO crawler route is opt-in, standard-image, low-resolution, watermarked, and fail-closed', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-'));
+  const seoMaster = await sharp({
+    create: { width: 1600, height: 1200, channels: 3, background: '#fff' },
+  }).jpeg().toBuffer();
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), seoMaster);
+  const verifyCalls = [];
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    seoCrawler: {
+      verify: async (req, id) => {
+        verifyCalls.push(id);
+        if (req.headers['x-test-verified-crawler'] === 'error') throw new Error('verification backend is unavailable');
+        return req.headers['x-test-verified-crawler'] === 'yes';
+      },
+      watermark: 'Test & <Studio>',
+      maxWidth: 640,
+      maxWidthFraction: 0.25,
+      quality: 55,
+      format: 'webp',
+    },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const unverified = await fetch(`${base}/archx/seo/cat`, { headers: { 'user-agent': 'Googlebot' } });
+  assert.equal(unverified.status, 404, 'a crawler-looking User-Agent is not enough');
+  assert.equal(unverified.headers.get('content-type'), 'application/json; charset=utf-8');
+
+  const response = await fetch(`${base}/archx/seo/cat`, { headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/webp');
+  assert.match(response.headers.get('cache-control'), /private.*no-store/);
+  assert.match(response.headers.get('x-content-type-options'), /nosniff/);
+  const preview = Buffer.from(await response.arrayBuffer());
+  const metadata = await sharp(preview).metadata();
+  assert.equal(metadata.format, 'webp');
+  assert.equal(metadata.width, 400, 'the 0.25 master-width fraction is stricter than the configured 640 px cap');
+  assert.equal(metadata.height, 300);
+  assert.ok(preview.length > 0);
+  const { data: markedPixels, info: markedInfo } = await sharp(preview).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const topBannerPixel = (5 * markedInfo.width + Math.floor(markedInfo.width / 2)) * markedInfo.channels;
+  assert.ok(markedPixels[topBannerPixel] < 180, 'the server-baked preview banner visibly darkens an otherwise white image');
+  assert.deepEqual(verifyCalls, ['cat', 'cat']);
+
+  const verifierFailure = await fetch(`${base}/archx/seo/cat`, { headers: { 'x-test-verified-crawler': 'error' } });
+  assert.equal(verifierFailure.status, 503, 'verification infrastructure failures fail closed');
+  assert.match(verifierFailure.headers.get('cache-control'), /no-store/);
+
+  const query = await fetch(`${base}/archx/seo/cat?width=160`, { headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(query.status, 400, 'SEO derivatives do not accept query-driven cache variants');
+  const method = await fetch(`${base}/archx/seo/cat`, { method: 'POST' });
+  assert.equal(method.status, 405);
+  const ordinaryRoute = await fetch(`${base}/archx/i/cat`);
+  assert.equal(ordinaryRoute.status, 403, 'enabling SEO delivery does not weaken token-gated Archx delivery');
+  const head = await fetch(`${base}/archx/seo/cat`, { method: 'HEAD', headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(head.status, 200);
+  assert.ok(Number(head.headers.get('content-length')) > 0);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+});
+
+test('verified SEO crawler can emit a capped standard JPEG derivative', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-jpeg-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(640, 480));
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    seoCrawler: {
+      verify: () => true,
+      watermark: 'Preview label',
+      maxWidth: 320,
+      maxWidthFraction: 0.25,
+      quality: 50,
+      format: 'jpeg',
+    },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/archx/seo/cat`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  assert.match(response.headers.get('cache-control'), /private.*no-store/);
+  const metadata = await sharp(Buffer.from(await response.arrayBuffer())).metadata();
+  assert.equal(metadata.format, 'jpeg');
+  assert.equal(metadata.width, 160);
+  assert.equal(metadata.height, 120);
+});
+
+test('SEO preview rate limits are isolated from protected image delivery', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-rate-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    rateLimitPerMinute: 1,
+    seoCrawler: { verify: () => true, watermark: 'Preview label' },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${base}/archx/seo/cat`)).status, 200);
+  assert.equal((await fetch(`${base}/archx/i/cat`)).status, 403,
+    'an SEO request must not consume the protected image route rate-limit budget');
+  assert.equal((await fetch(`${base}/archx/seo/cat`)).status, 429,
+    'the SEO route still has an independent rate limit');
+});
+
+test('SEO crawler configuration is strict and disabled by omission', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-config-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const base = { secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true };
+  for (const seoCrawler of [
+    { watermark: 'Studio' },
+    { verify: () => true, watermark: 'Studio', maxWidth: 641 },
+    { verify: () => true, watermark: 'Studio', quality: 76 },
+    { verify: () => true, watermark: 'Studio', format: 'png' },
+    { verify: () => true, watermark: '  ' },
+    { verify: () => true, watermark: 'Studio', unused: true },
+  ]) {
+    assert.throws(() => createArchxMiddleware({ ...base, seoCrawler }), /seoCrawler/i);
+  }
+  const handler = createArchxMiddleware(base);
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/archx/seo/cat`);
+  assert.equal(response.status, 404);
+});
+
 test('HTTP middleware: token flow serves scrambled container, blocks everything else', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-test-'));
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
