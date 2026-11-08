@@ -8,6 +8,10 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { rotateRgba } from '../src/core/pixels.js';
+import { makeTexturedRgba, cropRgba } from './helpers/stego-crop-corpus.mjs';
+import { fetchVerifiedArchx } from '../examples/chunked-transport/client.js';
+import { createChunkedAssetServer } from '../examples/chunked-transport/server.mjs';
 import {
   buildScramblePlan, scramblePixels, scramblePixelsPadded, paddedSize,
   encodeContainer, decodeContainer, isArchxContainer,
@@ -4232,6 +4236,39 @@ test('v1.17 tilt search deskews small-angle rotations', () => {
     `reported tilt in the applied range (got ${hit.deskewed})`);
 });
 
+test('v1.30 layout v5 affine deskew recovers 10–30° rotations and a combined keystone capture', async () => {
+  const w = 480, h = 320;
+  const master = await syntheticMaster(w, h);
+  const { data } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), w, h, 'AFFINE-DESKEW', {
+    key: 'affine-deskew-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  for (const angle of [10, 20, 30]) {
+    const photographed = rotateRgba(marked, w, h, (angle * Math.PI) / 180);
+    const hit = detectStegoFingerprint(photographed, w, h, {
+      key: 'affine-deskew-key', profile: 'robust', layoutVersion: 5,
+      searchGeometry: true, searchTilt: true, maxTimeMs: 30_000,
+    });
+    assert.equal(hit.found, true, JSON.stringify({ angle, hit }));
+    assert.equal(hit.fingerprint, stegoFingerprint('AFFINE-DESKEW'));
+    assert.ok(Math.abs(hit.deskewed - angle) <= 2, `estimated ${hit.deskewed}° for ${angle}° capture`);
+    assert.equal(hit.deskewMethod, 'sync-pilot-affine');
+  }
+  const texture = makeTexturedRgba(w, h, 0x7361);
+  const texturedMark = embedStegoFingerprint(texture, w, h, 'AFFINE-COMPOUND', {
+    key: 'affine-compound-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const phoneCapture = rotateRgba(keystoneCorrectRgba(texturedMark, w, h, -0.20, 0.10), w, h, (20 * Math.PI) / 180);
+  const compound = detectStegoFingerprint(phoneCapture, w, h, {
+    key: 'affine-compound-key', profile: 'robust', layoutVersion: 5,
+    searchGeometry: true, searchTilt: true, searchPerspective: true, maxTimeMs: 60_000,
+  });
+  assert.equal(compound.found, true, JSON.stringify(compound));
+  assert.equal(compound.fingerprint, stegoFingerprint('AFFINE-COMPOUND'));
+  assert.ok(Math.abs(compound.deskewed - 20) <= 2);
+  assert.ok(compound.perspective, 'the recovered affine deskew is followed by keystone registration');
+});
+
 test('perspective registration recovers a mild keystone-warped StegoMark and the CLI flag', async () => {
   const w = 480, h = 320;
   const base = new Uint8Array(w * h * 4);
@@ -5093,6 +5130,31 @@ test('v1.30 layout v5: dense registration recovers a severe asymmetric crop', as
   }
 });
 
+test('v1.30 layout v5: textured crop corpus recovers asymmetric 56–62% retained frames', () => {
+  const sourceWidth = 640, sourceHeight = 420;
+  const source = makeTexturedRgba(sourceWidth, sourceHeight);
+  const marked = embedStegoFingerprint(source, sourceWidth, sourceHeight, 'TEXTURED-DEEP-CROP', {
+    key: 'v5-textured-crop-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const cases = [
+    { left: 37, top: 19, width: 520, height: 320 },
+    { left: 105, top: 8, width: 420, height: 398 },
+    { left: 9, top: 92, width: 622, height: 250 },
+    { left: 158, top: 0, width: 360, height: 420 },
+  ];
+  for (const crop of cases) {
+    const suspect = cropRgba(marked, sourceWidth, crop);
+    const hit = detectStegoFingerprint(suspect, crop.width, crop.height, {
+      key: 'v5-textured-crop-key', profile: 'robust', layoutVersion: 5,
+      searchGeometry: true, maxTimeMs: 60_000,
+    });
+    assert.equal(hit.found, true, JSON.stringify({ crop, retained: crop.width * crop.height / (sourceWidth * sourceHeight), hit }));
+    assert.equal(hit.fingerprint, stegoFingerprint('TEXTURED-DEEP-CROP'));
+    assert.ok(hit.syncRegistration.cells >= 10);
+    assert.ok(hit.syncRegistration.agreement >= 0.7);
+  }
+});
+
 test('v1.30 assay reports layoutVersion and self-verifies a v5 embed', async () => {
   const master = await syntheticMaster();
   const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -5381,6 +5443,48 @@ test('v1.25: perceptual matcher recognises flipped/rotated/transposed suspects',
 
   assert.throws(() => matchPerceptualFingerprint(img, w, h, 'not-a-fingerprint'), TypeError);
   assert.throws(() => matchPerceptualFingerprint(img, w, h, ref, { maxDistance: 65 }), RangeError);
+});
+
+test('reference chunked transport signs manifests, verifies every chunk, and never exposes partial assets', async (t) => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const source = Buffer.alloc(91_337);
+  let state = 0x31415926;
+  for (let i = 0; i < source.length; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    source[i] = state >>> 24;
+  }
+  let authorizationChecks = 0;
+  const server = createChunkedAssetServer({
+    assets: { 'catalog-01': source },
+    privateKey,
+    chunkBytes: 16_384,
+    authorize: async (_req, assetId) => { authorizationChecks++; return assetId === 'catalog-01'; },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const options = {
+    publicJwk: publicKey.export({ format: 'jwk' }),
+    expectedAssetId: 'catalog-01',
+    cryptoImpl: crypto.webcrypto,
+  };
+  const complete = await fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, options);
+  assert.deepEqual(Buffer.from(await complete.arrayBuffer()), source);
+  assert.ok(authorizationChecks >= 7, 'manifest and every chunk request are authorized independently');
+  await assert.rejects(fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, {
+    ...options, expectedAssetId: 'other-asset',
+  }), /manifest exceeds transport bounds/);
+
+  const tamperFetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (!String(input).includes('/archx-chunks/catalog-01/')) return response;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    bytes[0] ^= 1;
+    return new Response(bytes, { status: response.status, headers: response.headers });
+  };
+  await assert.rejects(fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, {
+    ...options, fetchImpl: tamperFetch,
+  }), /chunk length or digest mismatch/);
 });
 
 test('release coherence: exported VERSION equals package.json version', () => {

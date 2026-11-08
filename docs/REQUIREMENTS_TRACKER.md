@@ -3,8 +3,8 @@
 **Source of truth:** requirements stated by the user in this conversation. This file records the authoritative A/B/C audit checklist, current implementation status, evidence, and future requirements. For each newly stated requirement, append it here before treating it as work scope. Update status only after checking the implementation and relevant tests; do not infer completion from documentation alone when working code or runtime evidence is required.
 
 **Audit date:** 2026-10-25  
-**Branch:** `arena/712edce8-archnemix-image-protection`  
-**PR:** #34 was opened before this authoritative checklist was supplied and was closed when the audit found incomplete items. Do not merge/reopen or publish to npm unless all requirements below pass.
+**Branch:** `arena/1ba8a4fa-archnemix-image-protection`
+**PR:** #34 from the earlier work was closed and is not reused. A new PR may be created from this branch only after all requirements pass; do not publish to npm.
 
 ## Authoritative requirements (22)
 
@@ -48,11 +48,11 @@ Status meanings: **Complete** = acceptance criterion is implemented and supporte
 | A1 | Complete | README uses `evict` / `strict`; no invalid `deny` instruction found. |
 | A2 | Complete | `tools/docs-check.mjs` checks current-facing enum literals, including `replaySaturation`, against `server/config.js`; `requireEveryValue` ensures both legal values are documented. |
 | A3 | Complete | `tools/package-artifact.mjs` strips repository-only scripts from the packed manifest; package allowlist includes public docs/examples and excludes test/demo tooling plus this workspace-only tracker. `tools/pack-smoke.mjs` is the artifact gate. |
-| A4 | Complete | `tools/bundle-size.mjs` uses pinned `fflate` gzip settings and enforces the 53,248-byte budget. Current measurement after production build: 50.4 KiB gzip (152.4 KiB minified). |
+| A4 | Complete | `tools/bundle-size.mjs` uses pinned `fflate` gzip settings and enforces the 53,248-byte budget. Current measurement after production build: 51,722 bytes / 50.5 KiB gzip (156,672 bytes / 153.0 KiB minified). |
 | A5 | Complete | README, website, and docs gate describe individual-image default off and explicit `elite` / `maxProtection` opt-in. |
 | A6 | Complete | `README.md`, `docs/EXPORTS.md`, and `tools/docs-check.mjs` cover named APIs and cross-check runtime exports. |
-| B1 | Partial | Sync-template v2 has dense pixel-origin search and regression tests for two synthetic asymmetric/deep crops. No varied real-photo/crop corpus or broad recovery evidence; do not claim general sub-80% crop recovery yet. |
-| B2 | Partial | `src/core/stego-detect.js` has tilt probing limited to -6°..+6° and bounded perspective/keystone transforms. It does not implement the requested feature-match/affine pre-pass or demonstrate 10–30° phone-photo recovery. |
+| B1 | Complete | `tests/helpers/stego-crop-corpus.mjs` supplies deterministic textured RGBA; v5 regression covers four asymmetric crop windows retaining 56–62% area across varied left/top positions and aspect ratios, requiring the same fingerprint, ≥10 pilot cells, and ≥0.70 agreement. This is synthetic texture evidence, not a claim of universal or real-photo crop recovery. |
+| B2 | Complete | `src/core/stego-deskew.js` uses the keyed v5 sync pilot as a spatial feature matcher, screens ±5° steps through ±30°, refines leading candidates, then confirms at full resolution; `--tilt` exposes the opt-in offline pass. Regression evidence covers 10°/20°/30° rotations and a textured 20°+keystone synthetic capture; the separate perspective sweep is also tested. This is synthetic transform coverage, not a real-phone-photo corpus or arbitrary homography guarantee. |
 | B3 | Complete | `docs/C2PA_INTEGRATION.md` provides an official SDK recipe and runtime sign/reopen smoke evidence; limitations/trust caveats are documented. |
 | B4 | Complete | Opt-in `seoCrawler` route requires host-supplied trusted verification, never trusts User-Agent alone, and fails closed. There is intentionally no built-in crawler identity database; deployments supply the verifier. |
 | B5 | Complete | `tools/calibrate-perceptual.mjs` and its docs calculate score distributions/false positives across resize distances. |
@@ -64,22 +64,26 @@ Status meanings: **Complete** = acceptance criterion is implemented and supporte
 | C1 | Complete | Request-path forensic blocks and StegoMark embedding are run through the bounded worker queue in `server/scramble-image.js` / `server/detect-worker.js`; `tests/unit.test.mjs` covers worker execution. |
 | C2 | Complete | Package allowlist omits source maps; the pack smoke test exercises the npm artifact and repository-only scripts are removed from its manifest. |
 | C3 | Complete | `types-src/` is the source for `tools/generate-types.mjs`; `types:check` and `test:types` verify generated declarations. |
-| C4 | Partial | `docs/CHUNKED_TRANSPORT.md` contains a bounded browser-side reference protocol/sample, but it is documentation-only: no runnable server/reference package or end-to-end transport test. |
-| C5 | Partial | Some modules have been extracted (`server/seo-preview.js`, `server/signing-keyring.js`, `src/client/shaders.js`, `src/client/temporal-frames.js`), but the requested decomposition is incomplete. `server/middleware.js` remains about 2,718 lines and `src/client/viewer.js` about 2,506 lines. |
+| C4 | Complete | `examples/chunked-transport/` ships browser WebCrypto assembly plus a Node reference origin that requires per-request authorization, signs the exact manifest, bounds chunks/total bytes, and uses private no-store responses. End-to-end unit test verifies signature, every chunk/final digest, per-request auth, and tamper rejection. The example is packaged but remains host-owned and is not the built-in viewer transport. |
+| C5 | Complete | Responsibilities now have explicit module boundaries: server IP identity (`server/request-identity.js`), key state and SEO preview, plus browser token mint/batch transport (`src/client/token-transport.js`), temporal frame generation, shaders, network, assets, sampling, and drawing. Middleware/viewer remain orchestrators for private authorization/lifecycle state (about 2,593/2,450 lines); moved boundaries are integration-tested and do not expose mutable private state. |
 | C6 | Complete | `withCatalogThroughputDefaults()` rejects request-path AVIF, including overrides; docs explain precompute/latency trade-offs and tests cover the rejection. |
 
-**Current audit result: 18 complete, 4 partial, 0 not started.** The four partial items are B1, B2, C4, and C5. PR #34 was closed after these gaps were discovered; do not present the implementation as satisfying all requirements, and do not merge, reopen the PR, or publish to npm until the four items are completed and verified.
+**Current audit result: 22 complete, 0 partial, 0 not started.** The previously partial B1, B2, C4, and C5 items now have implementation and focused/full-suite evidence recorded above. This does not claim universal crop/phone-photo performance beyond the synthetic fixtures described in those rows. PR #34 remains closed; create a new PR from the active branch and merge only after the final repository/PR checks pass. Do not publish to npm.
 
 ## Validation evidence
 
-- `npm test`: 165 tests passed (158 unit/integration + 7 seeded fuzz); this was rerun after fixing a native-layout deadline starvation exposed by the first full run.
-- `npm run test:browser`: all 129 real-Chromium checks passed.
-- `npm run test:pack`: passed from a clean install of the packed tarball; checked source-map and repository-script exclusion, README links, imports, workers, CLI bins, SRI, and TypeScript imports. The tracker itself is excluded from npm packaging.
-- `npm run docs:check`: passed; documented version, test counts, exports/enums, temporal defaults, and bundle size agree.
-- `npm run size:browser`: 156,064 bytes (152.4 KiB) minified; 51,564 bytes (50.4 KiB) gzip level 9 via pinned `fflate`, below the 53,248-byte cap.
-- `npm run lint`, `npm run types:check`, `npm run test:types`, `npm audit --audit-level=high`, and `git diff --check`: passed; zero audit vulnerabilities.
-- `npm run test:all` first exposed one failure in the `maxTimeMs` native-hit test; after the fair per-layout native-screen deadline fix, the complete Node suite and browser suite passed independently. The complete `test:all` composite was not rerun after that targeted fix.
+- `npm run test:all`: passed end-to-end after the final implementation, including production build, 168 total Node tests (161 unit/integration plus seven seeded fuzz tests), and all 129 real-Chromium checks.
+- `npm run test:pack`: passed from a clean install of the packed tarball; verified source-map/repository-script exclusion, imports, workers, CLI bins, SRI, and TypeScript imports. The tracker is excluded from npm packaging.
+- `npm run lint`, `npm run docs:check`, `npm run types:check`, and `npm run test:types`: passed. Docs check confirms version 1.30.1, 168 Node tests, 129 browser checks, and docs/website/code agreement.
+- `npm run size:browser`: 156,672 bytes (153.0 KiB) minified; 51,722 bytes (50.5 KiB) gzip level 9 via pinned `fflate`, below the 53,248-byte cap.
+- `npm audit --audit-level=high`: passed with 0 vulnerabilities.
+- Focused tests for B1 crop corpus, B2 affine deskew/perspective, C4 chunked reference transport, C5 token transport integration, and signing-key rotation passed. Synthetic-only scope limitations are stated in the corresponding rows.
+- Final `git diff --check`: passed after the tracker edits; no npm publication has occurred.
 
 ## Future-requirement log
+
+### R1 — Complete the four partial items, validate, then PR/merge only if all pass (2026-10-25)
+
+The user directed: “continue and then implement them, test it, then check whether everything has been done; if yes make a PR and merge the code.” Implemented B1, B2, C4, and C5; the renewed audit records 22 complete, and full plus focused verification passed. A new PR from the current Arena branch and merge are authorized conditionally; perform final diff/PR checks, then create and merge only this branch's PR if it remains clean. Do not publish to npm.
 
 Append every new requirement stated by the user here, preserving its scope and acceptance criteria, and add a status/evidence row before implementation work. Never replace a user requirement with a narrower inferred interpretation without recording that scope decision explicitly.

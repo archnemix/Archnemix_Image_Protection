@@ -4,10 +4,10 @@
 import { chooseAssetVariant, loadAssetManifest, normalizeAssetIntegrityMode, verifyAssetVariantIntegrity } from './assets.js';
 import { cacheGetEntry, cachePut, cacheReleaseEntry, closeBitmapQuietly } from './bitmap-cache.js';
 import { asByteArray, scrambleCanvasLocally, setSmoothing, unscrambleToCanvas } from './draw.js';
-import { emitClientEvent, proofKeySkipReason } from './events.js';
+import { emitClientEvent } from './events.js';
 import { auditIntegrity, detectAutomation } from './integrity.js';
 import { NATIVES, getNativeContext, glNative, makeCanvas, nativeCall, nativeCreateImageBitmap, nativeDrawImage, nativeGetImageData, nativeGlDrawArrays, nativePutImageData } from './native.js';
-import { assertResponseFinalOrigin, createProofHeader, deriveTokenBatchEndpoint, fetchBounded, fetchControls, getProofKey, nonRetryableError, parseBoundedJson, parseTokenResponse, queueTokenBatchRequest, resolveHttpUrl } from './network.js';
+import { assertResponseFinalOrigin, createProofHeader, deriveTokenBatchEndpoint, fetchBounded, fetchControls, nonRetryableError, parseBoundedJson, parseTokenResponse, queueTokenBatchRequest } from './network.js';
 import { $, GL_CONTEXT_BUDGET, acquireGlSlot, ensureDevtoolsWatcher, getResizeObserver, getVisibilityObserver, glSlotsInUse, installGlobalGuards, releaseGlSlot, sharedResizeObserver } from './observers.js';
 import { DEFAULTS, mergeOptions, preset, sanitizeOptionsView, sessionId } from './options.js';
 import { hostToInstance, instances } from './registry.js';
@@ -17,6 +17,7 @@ import { SHADOW_CSS } from './styles.js';
 import { FRAGMENT_SHADER, VERTEX_SHADER } from './shaders.js';
 import { limiter, nextShuffledPhase, normalizeTemporalInterlace } from './temporal.js';
 import { buildTemporalFrames } from './temporal-frames.js';
+import { createPrefetchedTokenMint, createTokenMintContext } from './token-transport.js';
 
 // One console warning per page for the same-origin taint degradation
 // (audit D1): telemetry carries the machine-readable signal; this is for
@@ -606,96 +607,39 @@ export class ProtectedImage {
   }
 
   async #tokenMintContext(controls) {
-    const o = this.#options;
-    const src = this.#source || {};
-    const tokenId = this.#tokenSourceId();
-    const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
-    if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
-    const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
-    if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError('Archx: token endpoint must not contain a query or fragment');
-    const rect = this.#host.getBoundingClientRect?.();
-    const cssWidth = rect?.width || this.#host.clientWidth || 800;
-    const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
-    const { dprCap, oversample, requestQuality } = effectiveSampling(o);
-    const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
-    const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
-    const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-    const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-    const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
-    const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
-    const tokenTransport = ['header', 'query', 'auto'].includes(String(o.tokenTransport || 'header').toLowerCase())
-      ? String(o.tokenTransport || 'header').toLowerCase() : 'header';
-    const proofSetting = o.proofOfPossession;
-    const proofMode = proofSetting === false || proofSetting === 'off' ? 'off'
-      : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
-    const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
-    const popSkipReason = proofKeySkipReason(proofMode, proofKey);
-    if (popSkipReason && !this.#popSkipReported) {
-      this.#popSkipReported = true;
-      emitClientEvent('archx.pop_skipped', {
-        kind: 'proof-of-possession',
-        reason: popSkipReason,
-      }, this);
-    }
-    const mintUrl = new URL(endpointUrl.href);
-    mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(tokenId)}`;
-    mintUrl.searchParams.set('w', String(boxW));
-    mintUrl.searchParams.set('bw', String(boxW));
-    mintUrl.searchParams.set('bh', String(boxH));
-    mintUrl.searchParams.set('fit', fit);
-    if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
-
-    const tokenCacheKey = cacheDigest([
-      'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, tokenId,
-      boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
-      o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
-      controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
-    ]);
-    return {
-      endpointUrl, boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport,
-      proofMode, proofKey, mintUrl, tokenCacheKey,
-    };
+    return createTokenMintContext({
+      options: this.#options,
+      source: this.#source,
+      tokenId: this.#tokenSourceId(),
+      host: this.#host,
+      controls,
+      onProofSkipped: (reason) => {
+        if (this.#popSkipReported) return;
+        this.#popSkipReported = true;
+        emitClientEvent('archx.pop_skipped', {
+          kind: 'proof-of-possession',
+          reason,
+        }, this);
+      },
+    });
   }
 
   async #prefetchTokenBatchMint(force = false) {
-    const o = this.#options;
-    if (o.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
-    if (!force && this.#cachedBytes) return;
-    const tokenId = this.#tokenSourceId();
-    if (!tokenId || typeof tokenId !== 'string' || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return;
-    const controls = fetchControls(o);
-    let context;
-    try { context = await this.#tokenMintContext(controls); }
-    catch { return; } // _resolveBytes reports the authoritative error in-order.
-    if (this.#destroyed || this.#prefetchedTokenMint || context.tokenMethod !== 'POST') return;
-    const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, o);
-    if (!batchUrl) return;
-    const cacheBitmap = o.cacheBitmap !== false && o.memory !== 'strict';
-    if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return;
-    const headers = context.proofKey
-      ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': context.proofKey.header }
-      : { 'X-Archx-Request': 'token' };
-    const promise = queueTokenBatchRequest({
-      batchUrl,
-      item: {
-        id: tokenId,
-        w: context.boxW,
-        bw: context.boxW,
-        bh: context.boxH,
-        fit: context.fit,
-        ...(context.requestQuality != null ? { q: context.requestQuality } : {}),
-      },
-      headers,
-      credentials: controls.credentials,
-      controls,
+    const options = this.#options;
+    if (options.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
+    const prefetched = await createPrefetchedTokenMint({
+      options,
+      tokenId: this.#tokenSourceId(),
+      force,
+      hasCachedBytes: !!this.#cachedBytes,
+      alreadyPrefetched: !!this.#prefetchedTokenMint,
+      destroyed: this.#destroyed,
+      isAlreadyPrefetched: () => !!this.#prefetchedTokenMint,
+      isDestroyed: () => this.#destroyed,
       signal: this.#abort.signal,
-      options: o,
+      getMintContext: (controls) => this.#tokenMintContext(controls),
     });
-    // The authoritative await happens inside _resolveBytes. Attach a benign
-    // handler now so a destroyed/unused prefetch cannot surface as an
-    // unhandled rejection while other gallery items are still being queued.
-    promise.catch(() => {});
-    this.#prefetchedTokenMint = { key: context.tokenCacheKey, promise };
+    if (prefetched && !this.#prefetchedTokenMint && !this.#destroyed) this.#prefetchedTokenMint = prefetched;
   }
 
   async _resolveBytes(force = false) {

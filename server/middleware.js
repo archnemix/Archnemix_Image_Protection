@@ -24,7 +24,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { isIP } from 'node:net';
 import {
   stegoFingerprint as resolveStegoFingerprint,
   sniffImageInfo,
@@ -50,6 +49,7 @@ import { FORMAT_EXTENSIONS, TAINT_PNG, auditArchxServerConfig, canonicalDerivati
 import { TOKEN_AUDIENCE, TOKEN_SCOPE, deriveStegoFingerprint, deriveStegoKey, normalizeBindTokenTo, parseProofPublicKeyHeader, signToken, validateTokenClaims, verifyProofOfPossession, verifyToken } from './tokens.js';
 import { renderSeoPreview } from './seo-preview.js';
 import { createSigningKeyring } from './signing-keyring.js';
+import { createRequestIdentity } from './request-identity.js';
 
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
 export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withLiteDefaults, withPerformanceDefaults, withEliteDefaults, withMaxProtectionDefaults } from './config.js';
@@ -721,138 +721,7 @@ export function createArchxMiddleware(options = {}) {
     }
   }
 
-  // Canonical form for IP accounting AND token binding: an IPv4-mapped
-  // IPv6 address (::ffff:192.0.2.1, ::ffff:c000:0201, the expanded
-  // 0:0:0:0:0:ffff:192.0.2.1, and the ::ffff:0: translated form) IS the
-  // IPv4 address. Stripping only the dotted "::ffff:" prefix leaves the
-  // hex form as a "valid" IPv6 whose /64 and /48 prefixes are 0:0:0:0 and
-  // 0:0:0 — collapsing every IPv4 client on earth into ONE limiter
-  // bucket (the CVE-2026-30827 class). Defined before requestIp, which
-  // uses it for every candidate it returns.
-  const ipv6Groups = (ip) => {
-    try {
-      let addr = String(ip || '').toLowerCase();
-      const pct = addr.indexOf('%');
-      if (pct !== -1) addr = addr.slice(0, pct); // zone id (validated in canonicalIp)
-      const v4Tail = addr.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-      if (v4Tail) {
-        const octets = [Number(v4Tail[1]), Number(v4Tail[2]), Number(v4Tail[3]), Number(v4Tail[4])];
-        if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-        const hi = ((octets[0] << 8) | octets[1]).toString(16);
-        const lo = ((octets[2] << 8) | octets[3]).toString(16);
-        addr = addr.slice(0, addr.length - v4Tail[0].length) + hi + ':' + lo;
-      }
-      const halves = addr.split('::');
-      if (halves.length > 2) return null;
-      const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
-      const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
-      const missing = 8 - head.length - tail.length;
-      if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
-      const rawGroups = [...head, ...Array(missing).fill('0'), ...tail];
-      if (rawGroups.length !== 8 || rawGroups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
-      return rawGroups.map((g) => parseInt(g, 16).toString(16));
-    } catch { return null; }
-  };
-  // Canonical client identity for token binding, quotas and abuse
-  // accounting. IPv4-embedding transition forms collapse to the
-  // embedded IPv4 address: mapped/translated ::ffff:0:0/96, deprecated
-  // IPv4-compatible ::/96, NAT64 64:ff9b::/96 + 64:ff9b:1::/96 (every
-  // client behind a carrier NAT64 otherwise shares ONE /64 abuse
-  // bucket), 6to4 2002::/16 (one IPv4 = a whole free /48), and Teredo
-  // 2001:0::/32 (client IPv4 XORed into the last 32 bits). Zone ids
-  // (%eth0) are validated then stripped. All other IPv6 collapses to
-  // one expanded-group spelling. ::, ::1 and documentation ranges
-  // stay plain IPv6.
-  const canonicalIp = (ip) => {
-    if (typeof ip !== 'string' || !ip) return null;
-    let raw = ip.trim();
-    const pct = raw.indexOf('%');
-    if (pct !== -1) {
-      const zone = raw.slice(pct + 1);
-      if (!zone || zone.length > 32 || !/^[0-9A-Za-z._-]+$/.test(zone)) return null;
-      raw = raw.slice(0, pct);
-    }
-    const kind = isIP(raw);
-    if (kind === 4) return raw;
-    if (kind !== 6) return null;
-    const g = ipv6Groups(raw);
-    if (!g) return null;
-    const toIpv4 = (hiHex, loHex) => {
-      const hi = parseInt(hiHex, 16) || 0;
-      const lo = parseInt(loHex, 16) || 0;
-      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
-    };
-    const zero5 = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === '0';
-    if ((zero5 && g[5] === 'ffff') ||
-        (g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === 'ffff' && g[5] === '0')) {
-      return toIpv4(g[6], g[7]); // v4-mapped / v4-translated
-    }
-    if (zero5 && g[5] === '0' && (parseInt(g[6], 16) || 0) >= 0x0100) {
-      return toIpv4(g[6], g[7]); // deprecated v4-compatible (not :: or ::1)
-    }
-    if (g[0] === '64' && g[1] === 'ff9b' && (g[2] === '0' || g[2] === '1') &&
-        g[3] === '0' && g[4] === '0' && g[5] === '0') {
-      return toIpv4(g[6], g[7]); // NAT64 (RFC 6052 / RFC 8215)
-    }
-    if (g[0] === '2002') return toIpv4(g[1], g[2]); // 6to4 (RFC 3056)
-    if (g[0] === '2001' && g[1] === '0') {
-      const hi = (((parseInt(g[6], 16) || 0) ^ 0xffff) & 0xffff);
-      const lo = (((parseInt(g[7], 16) || 0) ^ 0xffff) & 0xffff);
-      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`; // Teredo (RFC 4380)
-    }
-    return g.join(':');
-  };
-  const requestIp = (req) => {
-    const socketIp = String(req.socket?.remoteAddress || '');
-    if (cfg.trustProxy && cfg.trustedProxyHops > 0) {
-      const forwarded = req.headers?.['x-forwarded-for'];
-      const raw = Array.isArray(forwarded) ? forwarded.join(',') : String(forwarded || '');
-      if (raw.length <= 4096) {
-        const chain = raw.split(',').map((part) => part.trim()).filter(Boolean);
-        // MDN/OWASP rule: select from the right by the number of proxies you
-        // actually control. The leftmost value is attacker-controlled unless
-        // every hop in front of this process overwrites/appends correctly.
-        // A chain SHORTER than the trusted hop count means the request did
-        // not traverse the expected proxies (direct origin hit, stripped
-        // header, miscounted depth): never fall back to chain[0] (fully
-        // attacker-controlled) — ignore XFF and use the socket peer.
-        const candidate = chain.length >= cfg.trustedProxyHops
-          ? chain[chain.length - cfg.trustedProxyHops]
-          : '';
-        const canon = canonicalIp(candidate);
-        if (canon) return canon;
-      }
-    }
-    const socketCanon = canonicalIp(socketIp);
-    if (socketCanon) return socketCanon;
-    return 'unknown';
-  };
-  // Rate/quota/abuse keys group IPv6 clients by /64 prefix: a single host
-  // typically controls a whole /64 (privacy extensions rotate interface
-  // IDs freely), so per-address limits are trivially evaded by rotation
-  // and the rotation also floods bounded limiter maps until blocked
-  // clients are evicted. Token IP BINDING deliberately keeps the exact
-  // address (requestIp) — only volumetric accounting groups.
-  const limiterIp = (req) => {
-    const ip = requestIp(req);
-    if (isIP(ip) !== 6) return ip;
-    const groups = ipv6Groups(ip);
-    return groups ? groups.slice(0, 4).join(':') + '::/64' : ip;
-  };
-  // Volumetric tiers for one request: IPv6 clients get their strict /64
-  // bucket AND an aggregate /48 ceiling at 4x, so a holder of a whole /48
-  // (65,536 /64s to rotate through) cannot mint unbounded fresh buckets.
-  const IPV6_AGGREGATE_MULTIPLIER = 4;
-  const limiterIpTiers = (req) => {
-    const ip = requestIp(req);
-    if (isIP(ip) !== 6) return [{ key: ip, mult: 1 }];
-    const groups = ipv6Groups(ip);
-    if (!groups) return [{ key: ip, mult: 1 }];
-    return [
-      { key: groups.slice(0, 4).join(':') + '::/64', mult: 1 },
-      { key: groups.slice(0, 3).join(':') + '::/48', mult: IPV6_AGGREGATE_MULTIPLIER },
-    ];
-  };
+  const { requestIp, limiterIp, limiterIpTiers } = createRequestIdentity(cfg);
   const hmacShort = (label, value, len = 24, keySecret = signingKeyring.secret) =>
     crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
   const safeEqual = (a, b) => {

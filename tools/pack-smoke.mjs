@@ -74,8 +74,11 @@ step('npm pack', () => {
     }
   }
   for (const required of ['server/detect-worker.js', 'server/middleware.js', 'server/scramble-image.js', 'server/ops.js',
-    'server/detect-stego-cli.js', 'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts',
-    'docs/OPERATIONS.md', 'docs/PAPERS.md', 'examples/archx-showcase.html']) {
+    'server/detect-stego-cli.js', 'server/request-identity.js', 'src/core/stego-deskew.js',
+    'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts',
+    'docs/OPERATIONS.md', 'docs/PAPERS.md', 'examples/archx-showcase.html',
+    'examples/chunked-transport/client.js', 'examples/chunked-transport/server.mjs',
+    'examples/chunked-transport/README.md']) {
     if (!names.includes(required)) throw new Error(`tarball is missing ${required}`);
   }
   // README-relative links are part of the installed package documentation,

@@ -2150,6 +2150,76 @@ function rotateRgba(src, w, h, angleRad) {
   return out;
 }
 
+// src/core/stego-deskew.js
+var clampByteSize = (value) => Math.max(64, Math.round(value));
+function centerCrop(rgba, width, height, fraction) {
+  if (fraction >= 1) return { rgba, width, height };
+  const cropWidth = clampByteSize(width * fraction);
+  const cropHeight = clampByteSize(height * fraction);
+  const left = Math.round((width - cropWidth) / 2);
+  const top = Math.round((height - cropHeight) / 2);
+  const out = new Uint8Array(cropWidth * cropHeight * 4);
+  for (let y = 0; y < cropHeight; y++) {
+    const start = ((top + y) * width + left) * 4;
+    out.set(rgba.subarray(start, start + cropWidth * 4), y * cropWidth * 4);
+  }
+  return { rgba: out, width: cropWidth, height: cropHeight };
+}
+function signalScore(hit) {
+  const sync = hit?.syncRegistration;
+  const signal = Number.isFinite(sync?.meanSignal) ? sync.meanSignal : hit?.meanSignal;
+  const agreement = Number.isFinite(sync?.agreement) ? sync.agreement : hit?.agreement;
+  if (!Number.isFinite(signal)) return 0;
+  return signal * (Number.isFinite(agreement) ? Math.max(0, agreement) : 1);
+}
+function searchStegoDeskew(rgba, width, height, probe, {
+  maxProxyEdge = 640,
+  maxCandidates = 3,
+  shouldStop = () => false
+} = {}) {
+  if (!(rgba instanceof Uint8Array) || rgba.length < width * height * 4 || !Number.isSafeInteger(width * height * 4) || typeof probe !== "function") return [];
+  const scale = Math.min(1, maxProxyEdge / Math.max(width, height));
+  const proxyWidth = clampByteSize(width * scale);
+  const proxyHeight = clampByteSize(height * scale);
+  const proxy = scale < 1 ? resampleRgba(rgba, width, height, proxyWidth, proxyHeight) : rgba;
+  const samples = /* @__PURE__ */ new Map();
+  const scan = (degrees) => {
+    const angle = Math.round(degrees * 10) / 10;
+    if (Math.abs(angle) < 0.01 || samples.has(angle) || shouldStop()) return;
+    const corrected = rotateRgba(proxy, proxyWidth, proxyHeight, -angle * Math.PI / 180);
+    let best = null;
+    for (const fraction of [1, 0.96, 0.92]) {
+      const view = centerCrop(corrected, proxyWidth, proxyHeight, fraction);
+      const hit = probe(view.rgba, view.width, view.height, angle);
+      if (hit?.found) {
+        samples.set(angle, { angle, score: signalScore(hit), hit });
+        return;
+      }
+      const score = signalScore(hit);
+      if (!best || score > best.score) best = { angle, score, hit };
+      if (shouldStop()) break;
+    }
+    if (best) samples.set(angle, best);
+  };
+  for (let magnitude = 5; magnitude <= 30; magnitude += 5) {
+    scan(magnitude);
+    if (samples.get(magnitude)?.hit?.found) break;
+    scan(-magnitude);
+    if (samples.get(-magnitude)?.hit?.found || shouldStop()) break;
+  }
+  if (![...samples.values()].some((sample) => sample.hit?.found) && !shouldStop()) {
+    const leaders = [...samples.values()].sort((a, b) => b.score - a.score).slice(0, 2);
+    for (const leader of leaders) {
+      for (let delta = -2; delta <= 2.001; delta += 1) {
+        if (delta !== 0) scan(leader.angle + delta);
+        if (shouldStop() || [...samples.values()].some((sample) => sample.hit?.found)) break;
+      }
+      if (shouldStop() || [...samples.values()].some((sample) => sample.hit?.found)) break;
+    }
+  }
+  return [...samples.values()].sort((a, b) => (b.hit?.found ? 1 : 0) - (a.hit?.found ? 1 : 0) || b.score - a.score).slice(0, maxCandidates);
+}
+
 // src/core/stego-detect.js
 function repairRobustViaFirstCrc(scores, hard, key, tag = "mac") {
   const first = Uint8Array.from(hard.subarray(0, 64));
@@ -2647,6 +2717,74 @@ function detectStegoFingerprint(rgba, w, h, {
     } catch {
     }
     return (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0) ? robustGeometry : standardGeometry;
+  }
+  if (concreteLayout === 5 && searchTilt && !_tiltProbe && srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+    const native = detectStegoFingerprint(srcTop, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile,
+      searchOffsets,
+      searchGeometry: false,
+      searchMirror: false,
+      searchRotation: false,
+      searchTilt: false,
+      searchPerspective: false,
+      _tiltProbe: true,
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout,
+      _planes: planesCache,
+      _deadline: deadline
+    });
+    if (native?.found) return native;
+    const deskewCandidates = searchStegoDeskew(
+      srcTop,
+      w,
+      h,
+      (candidate, candidateWidth, candidateHeight) => detectStegoFingerprint(
+        candidate,
+        candidateWidth,
+        candidateHeight,
+        {
+          key,
+          gridX,
+          gridY,
+          profile,
+          searchOffsets: true,
+          searchGeometry: false,
+          searchMirror: false,
+          searchRotation: false,
+          searchTilt: false,
+          searchPerspective: false,
+          layoutVersion: 5,
+          _mirrorProbe: true,
+          _tiltProbe: true,
+          _deadline: deadline
+        }
+      ),
+      { shouldStop: deadlineHit, maxCandidates: 2 }
+    );
+    for (const candidate of deskewCandidates) {
+      if (deadlineHit()) break;
+      const corrected = rotateRgba(srcTop, w, h, -candidate.angle * Math.PI / 180);
+      const confirmed = detectStegoFingerprint(corrected, w, h, {
+        key,
+        gridX,
+        gridY,
+        profile,
+        searchOffsets: true,
+        searchGeometry,
+        searchMirror,
+        searchRotation,
+        searchTilt: false,
+        searchPerspective,
+        _tiltProbe: true,
+        _layoutVersion: concreteLayout,
+        _planes: planesCache,
+        _deadline: deadline
+      });
+      if (confirmed?.found) return { ...confirmed, deskewed: candidate.angle, deskewMethod: "sync-pilot-affine" };
+    }
   }
   if (searchPerspective && !_perspectiveProbe && srcTop.length <= 12e6 * 4 && srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
     for (const [kx, ky] of PERSPECTIVE_TRANSFORMS) {
@@ -3721,7 +3859,7 @@ function detectStegoFingerprint(rgba, w, h, {
       delete best._scaleX;
       delete best._scaleY;
     }
-    if (!best?.found && searchTilt && !_tiltProbe) {
+    if (!best?.found && searchTilt && !_tiltProbe && concreteLayout !== 5) {
       try {
         if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
           const entry = planesEntry(srcTop);
@@ -7511,6 +7649,125 @@ function buildTemporalFrames(frame, cfg, document2) {
   return Array.from({ length: phases }, (_, phase) => mk(phase));
 }
 
+// src/client/token-transport.js
+async function createTokenMintContext({ options, source, tokenId, host, controls, onProofSkipped }) {
+  const src = source || {};
+  const endpointRaw = src.tokenEndpoint || options.tokenEndpoint;
+  if (!endpointRaw) throw new Error("Archx: tokenEndpoint required for {id} sources");
+  const endpointUrl = resolveHttpUrl(endpointRaw, { label: "token endpoint" });
+  if (endpointUrl.search || endpointUrl.hash) {
+    throw nonRetryableError("Archx: token endpoint must not contain a query or fragment");
+  }
+  const rect = host.getBoundingClientRect?.();
+  const cssWidth = rect?.width || host.clientWidth || 800;
+  const cssHeight = rect?.height || host.clientHeight || cssWidth * 0.75;
+  const { dprCap, oversample, requestQuality } = effectiveSampling(options);
+  const pixelScale = Math.min(globalThis.devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
+  const maxSourceWidth = boundedInteger(options.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
+  const boxW = canonicalSourceWidth(cssWidth * pixelScale, options.sourceWidthBuckets, maxSourceWidth);
+  const boxH = canonicalSourceWidth(cssHeight * pixelScale, options.sourceWidthBuckets, maxSourceWidth);
+  const fit = ["cover", "contain", "fill"].includes(options.fit) ? options.fit : "cover";
+  const tokenMethod = String(options.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
+  const tokenTransport = ["header", "query", "auto"].includes(String(options.tokenTransport || "header").toLowerCase()) ? String(options.tokenTransport || "header").toLowerCase() : "header";
+  const proofSetting = options.proofOfPossession;
+  const proofMode = proofSetting === false || proofSetting === "off" ? "off" : proofSetting === true || proofSetting === "required" ? "required" : "auto";
+  const proofKey = proofMode === "off" ? null : await getProofKey(proofMode === "required");
+  const popSkipReason = proofKeySkipReason(proofMode, proofKey);
+  if (popSkipReason) onProofSkipped?.(popSkipReason);
+  const mintUrl = new URL(endpointUrl.href);
+  mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, "/")}${encodeURIComponent(tokenId)}`;
+  mintUrl.searchParams.set("w", String(boxW));
+  mintUrl.searchParams.set("bw", String(boxW));
+  mintUrl.searchParams.set("bh", String(boxH));
+  mintUrl.searchParams.set("fit", fit);
+  if (requestQuality != null) mintUrl.searchParams.set("q", String(requestQuality));
+  const tokenCacheKey = cacheDigest([
+    "token",
+    1,
+    options.cacheScope || "",
+    endpointUrl.origin,
+    endpointUrl.pathname,
+    tokenId,
+    boxW,
+    boxH,
+    fit,
+    requestQuality,
+    tokenMethod,
+    tokenTransport,
+    proofKey?.jkt || proofMode,
+    controls.credentials,
+    options.allowedTokenOrigins || null,
+    options.grid,
+    options.scrambled === true,
+    options.key || "",
+    options.aesKey || "",
+    controls.maxResponseBytes,
+    controls.maxDecodedPixels,
+    controls.maxDecodedDimension
+  ]);
+  return {
+    endpointUrl,
+    boxW,
+    boxH,
+    fit,
+    requestQuality,
+    tokenMethod,
+    tokenTransport,
+    proofMode,
+    proofKey,
+    mintUrl,
+    tokenCacheKey
+  };
+}
+async function createPrefetchedTokenMint({
+  options,
+  tokenId,
+  force,
+  hasCachedBytes,
+  alreadyPrefetched,
+  destroyed,
+  isAlreadyPrefetched = () => alreadyPrefetched,
+  isDestroyed = () => destroyed,
+  signal,
+  getMintContext
+}) {
+  if (options.tokenBatch !== true || isAlreadyPrefetched() || isDestroyed()) return null;
+  if (!force && hasCachedBytes) return null;
+  if (!tokenId || typeof tokenId !== "string" || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return null;
+  const controls = fetchControls(options);
+  let context;
+  try {
+    context = await getMintContext(controls);
+  } catch {
+    return null;
+  }
+  if (isDestroyed() || isAlreadyPrefetched() || context.tokenMethod !== "POST") return null;
+  const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, options);
+  if (!batchUrl) return null;
+  const cacheBitmap = options.cacheBitmap !== false && options.memory !== "strict";
+  if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return null;
+  const headers = context.proofKey ? { "X-Archx-Request": "token", "X-Archx-Proof-Key": context.proofKey.header } : { "X-Archx-Request": "token" };
+  const promise = queueTokenBatchRequest({
+    batchUrl,
+    item: {
+      id: tokenId,
+      w: context.boxW,
+      bw: context.boxW,
+      bh: context.boxH,
+      fit: context.fit,
+      ...context.requestQuality != null ? { q: context.requestQuality } : {}
+    },
+    headers,
+    credentials: controls.credentials,
+    controls,
+    signal,
+    options
+  });
+  promise.catch(() => {
+  });
+  return { key: context.tokenCacheKey, promise };
+}
+
 // src/client/viewer.js
 var taintConsoleWarned = false;
 var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _popSkipReported, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _readyResolve, _readyReject, _readySettled, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, settleReadyAfterPaint_fn, rejectReady_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
@@ -9771,118 +10028,38 @@ waitForStableSize_fn = async function() {
   }
 };
 tokenMintContext_fn = async function(controls) {
-  const o = __privateGet(this, _options);
-  const src = __privateGet(this, _source) || {};
-  const tokenId = __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this);
-  const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
-  if (!endpointRaw) throw new Error("Archx: tokenEndpoint required for {id} sources");
-  const endpointUrl = resolveHttpUrl(endpointRaw, { label: "token endpoint" });
-  if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError("Archx: token endpoint must not contain a query or fragment");
-  const rect = __privateGet(this, _host).getBoundingClientRect?.();
-  const cssWidth = rect?.width || __privateGet(this, _host).clientWidth || 800;
-  const cssHeight = rect?.height || __privateGet(this, _host).clientHeight || cssWidth * 0.75;
-  const { dprCap, oversample, requestQuality } = effectiveSampling(o);
-  const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
-  const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
-  const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-  const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-  const fit = ["cover", "contain", "fill"].includes(o.fit) ? o.fit : "cover";
-  const tokenMethod = String(o.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
-  const tokenTransport = ["header", "query", "auto"].includes(String(o.tokenTransport || "header").toLowerCase()) ? String(o.tokenTransport || "header").toLowerCase() : "header";
-  const proofSetting = o.proofOfPossession;
-  const proofMode = proofSetting === false || proofSetting === "off" ? "off" : proofSetting === true || proofSetting === "required" ? "required" : "auto";
-  const proofKey = proofMode === "off" ? null : await getProofKey(proofMode === "required");
-  const popSkipReason = proofKeySkipReason(proofMode, proofKey);
-  if (popSkipReason && !__privateGet(this, _popSkipReported)) {
-    __privateSet(this, _popSkipReported, true);
-    emitClientEvent("archx.pop_skipped", {
-      kind: "proof-of-possession",
-      reason: popSkipReason
-    }, this);
-  }
-  const mintUrl = new URL(endpointUrl.href);
-  mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, "/")}${encodeURIComponent(tokenId)}`;
-  mintUrl.searchParams.set("w", String(boxW));
-  mintUrl.searchParams.set("bw", String(boxW));
-  mintUrl.searchParams.set("bh", String(boxH));
-  mintUrl.searchParams.set("fit", fit);
-  if (requestQuality != null) mintUrl.searchParams.set("q", String(requestQuality));
-  const tokenCacheKey = cacheDigest([
-    "token",
-    1,
-    o.cacheScope || "",
-    endpointUrl.origin,
-    endpointUrl.pathname,
-    tokenId,
-    boxW,
-    boxH,
-    fit,
-    requestQuality,
-    tokenMethod,
-    tokenTransport,
-    proofKey?.jkt || proofMode,
-    controls.credentials,
-    o.allowedTokenOrigins || null,
-    o.grid,
-    o.scrambled === true,
-    o.key || "",
-    o.aesKey || "",
-    controls.maxResponseBytes,
-    controls.maxDecodedPixels,
-    controls.maxDecodedDimension
-  ]);
-  return {
-    endpointUrl,
-    boxW,
-    boxH,
-    fit,
-    requestQuality,
-    tokenMethod,
-    tokenTransport,
-    proofMode,
-    proofKey,
-    mintUrl,
-    tokenCacheKey
-  };
+  return createTokenMintContext({
+    options: __privateGet(this, _options),
+    source: __privateGet(this, _source),
+    tokenId: __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this),
+    host: __privateGet(this, _host),
+    controls,
+    onProofSkipped: (reason) => {
+      if (__privateGet(this, _popSkipReported)) return;
+      __privateSet(this, _popSkipReported, true);
+      emitClientEvent("archx.pop_skipped", {
+        kind: "proof-of-possession",
+        reason
+      }, this);
+    }
+  });
 };
 prefetchTokenBatchMint_fn = async function(force = false) {
-  const o = __privateGet(this, _options);
-  if (o.tokenBatch !== true || __privateGet(this, _prefetchedTokenMint) || __privateGet(this, _destroyed)) return;
-  if (!force && __privateGet(this, _cachedBytes)) return;
-  const tokenId = __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this);
-  if (!tokenId || typeof tokenId !== "string" || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return;
-  const controls = fetchControls(o);
-  let context;
-  try {
-    context = await __privateMethod(this, _ProtectedImage_instances, tokenMintContext_fn).call(this, controls);
-  } catch {
-    return;
-  }
-  if (__privateGet(this, _destroyed) || __privateGet(this, _prefetchedTokenMint) || context.tokenMethod !== "POST") return;
-  const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, o);
-  if (!batchUrl) return;
-  const cacheBitmap = o.cacheBitmap !== false && o.memory !== "strict";
-  if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return;
-  const headers = context.proofKey ? { "X-Archx-Request": "token", "X-Archx-Proof-Key": context.proofKey.header } : { "X-Archx-Request": "token" };
-  const promise = queueTokenBatchRequest({
-    batchUrl,
-    item: {
-      id: tokenId,
-      w: context.boxW,
-      bw: context.boxW,
-      bh: context.boxH,
-      fit: context.fit,
-      ...context.requestQuality != null ? { q: context.requestQuality } : {}
-    },
-    headers,
-    credentials: controls.credentials,
-    controls,
+  const options = __privateGet(this, _options);
+  if (options.tokenBatch !== true || __privateGet(this, _prefetchedTokenMint) || __privateGet(this, _destroyed)) return;
+  const prefetched = await createPrefetchedTokenMint({
+    options,
+    tokenId: __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this),
+    force,
+    hasCachedBytes: !!__privateGet(this, _cachedBytes),
+    alreadyPrefetched: !!__privateGet(this, _prefetchedTokenMint),
+    destroyed: __privateGet(this, _destroyed),
+    isAlreadyPrefetched: () => !!__privateGet(this, _prefetchedTokenMint),
+    isDestroyed: () => __privateGet(this, _destroyed),
     signal: __privateGet(this, _abort).signal,
-    options: o
+    getMintContext: (controls) => __privateMethod(this, _ProtectedImage_instances, tokenMintContext_fn).call(this, controls)
   });
-  promise.catch(() => {
-  });
-  __privateSet(this, _prefetchedTokenMint, { key: context.tokenCacheKey, promise });
+  if (prefetched && !__privateGet(this, _prefetchedTokenMint) && !__privateGet(this, _destroyed)) __privateSet(this, _prefetchedTokenMint, prefetched);
 };
 /** Hook/automation gate. Returns true if loading may proceed. */
 securityGate_fn = function() {

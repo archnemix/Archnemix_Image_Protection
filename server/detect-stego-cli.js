@@ -68,7 +68,7 @@ if (!input || args.help) {
   --max-input-bytes <n> reject files above this size before reading (default 52428800)
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
   --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
-  --tilt             also search small-angle tilts (±6°) — slow, forensic mode
+  --tilt             keyed-pilot affine deskew (layout 5: ±30°; legacy: ±6°), offline/slow
   --perspective      register mild camera keystone/trapezoid (±20%; ≤12 MP, slow)
   --verify-ownership verify the signed ownership claim (metadata + perceptual
                      soft binding + stego) instead of stego detection only;

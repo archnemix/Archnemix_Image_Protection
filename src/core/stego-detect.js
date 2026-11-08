@@ -6,6 +6,7 @@
 
 import { STEGO_ROW_SEGMENTS, STEGO_SYNC_PILOT_CELLS, robustStegoCodeBits, bchStegoDecode, bchStegoSolveObserved, STEGO_V4_CODE_BITS, stegoLayout, robustStegoLayout, stegoGrid, robustStegoBytesValid, robustStegoFingerprintFromBits, stegoBitsToBytes, correctStegoBits, stegoCrc16, stegoMac16, ROBUST_MARKER_BITS } from './stego-code.js';
 import { buildLumaIntegral, mirroredVariant, rotatedVariant, transposedVariant, resampleRgba, rotateRgba, keystoneCorrectRgba, MIRROR_AXES } from './pixels.js';
+import { searchStegoDeskew } from './stego-deskew.js';
 
 function repairRobustViaFirstCrc(scores, hard, key, tag = 'mac') {
   const first = Uint8Array.from(hard.subarray(0, 64));
@@ -411,6 +412,41 @@ export function detectStegoFingerprint(rgba, w, h, {
     return (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0)
       ? robustGeometry
       : standardGeometry;
+  }
+  // Layout v5 carries a keyed sync pilot that acts as a spatial feature
+  // matcher. For offline forensic scans, estimate an affine rotation before
+  // the costly crop/scale search; then confirm the deskewed candidate at full
+  // resolution, with optional keystone correction for the common monitor-photo
+  // compound. Other layouts retain the legacy small-angle deskew path below.
+  if (concreteLayout === 5 && searchTilt && !_tiltProbe &&
+      srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+    const native = detectStegoFingerprint(srcTop, w, h, {
+      key, gridX, gridY, profile, searchOffsets, searchGeometry: false,
+      searchMirror: false, searchRotation: false, searchTilt: false,
+      searchPerspective: false, _tiltProbe: true, _mirrorProbe: true,
+      _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+    });
+    if (native?.found) return native;
+    const deskewCandidates = searchStegoDeskew(srcTop, w, h,
+      (candidate, candidateWidth, candidateHeight) => detectStegoFingerprint(
+        candidate, candidateWidth, candidateHeight, {
+          key, gridX, gridY, profile, searchOffsets: true,
+          searchGeometry: false, searchMirror: false, searchRotation: false,
+          searchTilt: false, searchPerspective: false, layoutVersion: 5,
+          _mirrorProbe: true, _tiltProbe: true, _deadline: deadline,
+        }),
+      { shouldStop: deadlineHit, maxCandidates: 2 });
+    for (const candidate of deskewCandidates) {
+      if (deadlineHit()) break;
+      const corrected = rotateRgba(srcTop, w, h, (-candidate.angle * Math.PI) / 180);
+      const confirmed = detectStegoFingerprint(corrected, w, h, {
+        key, gridX, gridY, profile, searchOffsets: true,
+        searchGeometry, searchMirror, searchRotation, searchTilt: false,
+        searchPerspective, _tiltProbe: true, _layoutVersion: concreteLayout,
+        _planes: planesCache, _deadline: deadline,
+      });
+      if (confirmed?.found) return { ...confirmed, deskewed: candidate.angle, deskewMethod: 'sync-pilot-affine' };
+    }
   }
   if (searchPerspective && !_perspectiveProbe && srcTop.length <= 12_000_000 * 4 &&
       srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
@@ -1766,7 +1802,7 @@ export function detectStegoFingerprint(rgba, w, h, {
   // unstable: residual scale mismatch flattens the peak over ~±1.5
   // degrees), then confirm a handful of candidate angles at full
   // resolution with the complete detector. Forensic opt-in.
-  if (!best?.found && searchTilt && !_tiltProbe) {
+  if (!best?.found && searchTilt && !_tiltProbe && concreteLayout !== 5) {
     try {
       if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
         const entry = planesEntry(srcTop);

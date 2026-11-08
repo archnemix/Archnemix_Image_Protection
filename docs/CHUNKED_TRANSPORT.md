@@ -2,9 +2,11 @@
 
 Archx's built-in loader accepts a complete `.archx` asset (`Blob`,
 `ArrayBuffer`, or `Uint8Array`). It does not define an HTTP chunk protocol.
-This reference shows a host-owned protocol that downloads and authenticates
-chunks, assembles the **entire** container, then hands it to Archx. It does
-not progressively render ciphertext or unauthenticated prefixes.
+This reference includes a runnable host-owned client/server example in
+[`examples/chunked-transport/`](../examples/chunked-transport/README.md): it
+downloads and authenticates bounded chunks, assembles the **entire** container,
+then hands it to Archx. It does not progressively render ciphertext or
+unauthenticated prefixes. The end-to-end tests run in `tests/unit.test.mjs`.
 
 ## Signed manifest format
 
@@ -151,5 +153,8 @@ Archx.load.image('#protected-image', completeAsset, { mode: 'shield' });
   transport behavior, not the legitimate viewer's ability to reconstruct the
   derivative.
 
-This is a protocol example, not an Archx-maintained server or a new transport
-API. See the README's `.archx` source forms and the [package export map](EXPORTS.md).
+The runnable implementation is a host-owned reference example, not a managed
+Archx server or a new built-in transport API. The example source is included in
+the npm artifact for copying/adaptation; test it against your own authorization,
+storage, concurrency, and key-rotation requirements. See the README's `.archx`
+source forms and the [package export map](EXPORTS.md).

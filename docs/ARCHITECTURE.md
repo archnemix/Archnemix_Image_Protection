@@ -21,8 +21,9 @@ surface`) pins `types/*.d.ts` to the real export surface.
 | `bch.js` | BCH(188,64) error-correcting code math for stego layouts 4/5 |
 | `stego-code.js` | StegoMark codeword layout, syndromes, tag math |
 | `pixels.js` | Luma planes, integral images, rotate/mirror/downscale primitives |
+| `stego-deskew.js` | Coarse/refined keyed sync-pilot affine rotation registration for offline layout-v5 scans |
 | `stego-embed.js` | StegoMark embedding |
-| `stego-detect.js` | StegoMark blind detection (geometry search, deskew, erasure repair) |
+| `stego-detect.js` | StegoMark blind detection (geometry search, dispatches pilot deskew, erasure repair) |
 | `stego-assay.js` | Embed pre-flight assay + collusion ranking |
 | `perceptual.js` | 64-bit DCT perceptual fingerprint |
 
@@ -48,7 +49,8 @@ identity, so scratch reuse there is a correctness bug (found in v1.19).
 | `observers.js` | Shared visibility/resize observers, global guards, devtools watcher, WebGL slot budget |
 | `sampling.js` | Canonical widths, DPR/connection-aware sampling |
 | `assets.js` | Signed asset-manifest loading/validation |
-| `network.js` | Bounded fetch, token mint/batch, proof-of-possession, challenge retry |
+| `network.js` | Bounded fetch, request execution, challenge retry |
+| `token-transport.js` | Token mint context, PoP skip telemetry callback, and batch-prefetch request assembly |
 | `draw.js` | Canvas/WebGL draw + poisoned-readback presentation |
 | `styles.js` | Shadow-DOM stylesheet |
 | `viewer.js` | `ProtectedImage` element class (the per-image state machine) |
@@ -69,6 +71,7 @@ resolved at call time, not module-eval time).
 | `bounded.js` | `SlidingWindowLimiter`, `BoundedTtlSet`, `AsyncSemaphore`, distinct-access tracking, memory state store |
 | `tokens.js` | HMAC token sign/verify, strict claim validation, proof-of-possession, stego derivation |
 | `signing-keyring.js` | Active signing-key state and scheduled activation/retirement |
+| `request-identity.js` | Proxy-aware IP canonicalization and distinct exact-token / IPv6 quota identities |
 | `config.js` | Strict config inspection/normalization, production audits, width/ID/path rules |
 | `scramble-image.js` | Sharp pipeline (lazy libvips), protected derivative generation, detect worker pool |
 | `seo-preview.js` | Low-resolution watermarked preview transformation for explicitly verified crawlers |
@@ -90,13 +93,15 @@ tests keep one import path.
 ## Decomposition boundary
 
 The viewer remains the `ProtectedImage` lifecycle/state machine, while
-its separately testable temporal-frame builder and WebGL shader sources
-live in `temporal-frames.js` and `shaders.js`. The server middleware still
-owns request authorization and response policy, but scheduled keyring state
-and the crawler-preview transformation are isolated in `signing-keyring.js`
-and `seo-preview.js`. Avoid moving private state or route policy merely to
-reduce line counts; split additional code when it has a stable contract and
-can be tested independently.
+its temporal-frame builder, WebGL shaders, and token transport/prefetch
+pipeline live in `temporal-frames.js`, `shaders.js`, and `token-transport.js`.
+The server middleware still owns request authorization and response policy,
+but proxy identity, scheduled keyring state, and crawler-preview transformation
+are isolated in `request-identity.js`, `signing-keyring.js`, and
+`seo-preview.js`. The chunked transport is a runnable client/server reference
+under `examples/chunked-transport/`; it is not built into the middleware.
+Avoid moving private state or route policy merely to reduce line counts; split
+additional code when it has a stable contract and can be tested independently.
 
 ## Refactor guardrails (learned during the v1.19 split)
 
