@@ -79,5 +79,6 @@ jobs:
       - run: npm run build
       - run: npm run test:types
       - run: npm run docs:check
-      - run: npm test
+      - name: Run npm test
+        run: node tools/run-tests-ci.mjs
       - run: npm run test:pack
