@@ -48,6 +48,8 @@ import {
 import { AsyncSemaphore, BoundedTtlSet, createMemoryStateStore } from './bounded.js';
 import { FORMAT_EXTENSIONS, TAINT_PNG, auditArchxServerConfig, canonicalDerivativeWidth, isPathInside, isPlainObject, normalizeAuthorizationResult, normalizeServerConfig, parseStrictInt, pathsOverlap, validateImageId, validateWatermarkValue } from './config.js';
 import { TOKEN_AUDIENCE, TOKEN_SCOPE, deriveStegoFingerprint, deriveStegoKey, normalizeBindTokenTo, parseProofPublicKeyHeader, signToken, validateTokenClaims, verifyProofOfPossession, verifyToken } from './tokens.js';
+import { renderSeoPreview } from './seo-preview.js';
+import { createSigningKeyring } from './signing-keyring.js';
 
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
 export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withLiteDefaults, withPerformanceDefaults, withEliteDefaults, withMaxProtectionDefaults } from './config.js';
@@ -68,25 +70,6 @@ export {
   loadOwnershipPrivateKey, loadOwnershipPublicKey,
 };
 export { createIssuanceLog, verifyIssuanceChain } from './issuance-log.js';
-
-function createSeoWatermarkSvg(width, height, label) {
-  const escape = (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-  const text = escape(`PREVIEW ONLY · ${label}`);
-  const fontSize = Math.max(12, Math.round(Math.min(width, height) / 8));
-  const tileWidth = Math.max(120, fontSize * 6);
-  const tileHeight = Math.max(56, fontSize * 3);
-  return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
-    `<defs><pattern id="p" width="${tileWidth}" height="${tileHeight}" patternUnits="userSpaceOnUse" patternTransform="rotate(-28)">` +
-    `<text x="8" y="${Math.ceil(tileHeight * 0.68)}" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="900" letter-spacing="1.5" fill="#fff" fill-opacity=".72" stroke="#111" stroke-opacity=".8" stroke-width="2.5" paint-order="stroke">${text}</text>` +
-    `</pattern></defs><rect width="100%" height="100%" fill="url(#p)"/>` +
-    `<rect x="2" y="2" width="${Math.max(1, width - 4)}" height="${Math.max(1, height - 4)}" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="${Math.max(2, Math.round(fontSize / 7))}"/>` +
-    `<rect x="0" y="0" width="${width}" height="${Math.max(22, fontSize + 12)}" fill="#111" fill-opacity=".65"/>` +
-    `<text x="8" y="${Math.max(18, fontSize + 2)}" font-family="Arial,sans-serif" font-size="${Math.max(12, Math.round(fontSize * .72))}" font-weight="900" fill="#fff" stroke="#111" stroke-width="1.5" paint-order="stroke">${text}</text></svg>`,
-  );
-}
-
 export function createArchxMiddleware(options = {}) {
   const cfg = normalizeServerConfig(options);
   // Scoped libvips loader policy for this instance's lifetime; released
@@ -95,9 +78,13 @@ export function createArchxMiddleware(options = {}) {
   const releaseSharpSecurity = cfg.processing.blockUntrustedSharpLoaders
     ? acquireSharpSecurityLease(cfg.processing.allowedInputFormats)
     : null;
-  const signingKeys = cfg.signingKeys;
-  const activeSecretId = cfg.activeSecretId;
-  const secret = signingKeys[activeSecretId];
+  const signingKeyring = createSigningKeyring({
+    signingKeys: cfg.signingKeys,
+    activeSecretId: cfg.activeSecretId,
+    schedule: cfg.signingKeySchedule,
+  });
+  const { signingKeys } = signingKeyring;
+  const refreshSigningKey = signingKeyring.refreshSigningKey;
   const secretForToken = (payload) => payload?.kid ? signingKeys[payload.kid] : null;
   const basePath = cfg.basePath;
   const ttlMs = cfg.ttlMs;
@@ -281,11 +268,11 @@ export function createArchxMiddleware(options = {}) {
         ? `${imageId}:${payloadLike.n}:${payloadLike.th || payloadLike.vh || ''}`
         : `${imageId}:static:${payloadLike.th || payloadLike.vh || ''}`, 32, keySecret)
     : null);
-  const deriveScrambleKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
+  const deriveScrambleKey = (id, nonce, keySecret = signingKeyring.secret, keyScope = 'legacy') =>
     scrambleKeyMode === 'per-token'
       ? nonce
       : crypto.createHmac('sha256', keySecret).update(`scramble:${id}:${keyScope}`).digest('hex').slice(0, 32);
-  const deriveAesKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
+  const deriveAesKey = (id, nonce, keySecret = signingKeyring.secret, keyScope = 'legacy') =>
     crypto.createHmac('sha256', keySecret)
       .update('aes:' + id + ':' + (scrambleKeyMode === 'per-token' ? nonce : keyScope))
       .digest().toString('base64');
@@ -465,8 +452,7 @@ export function createArchxMiddleware(options = {}) {
   // get unlinked as corrupt — cross-instance cache thrash in 1.12.0).
   // The tag's job is "written by someone holding a deployment secret",
   // and every keyring member qualifies. Entries retire with their kid.
-  const cacheTagSecrets = [...new Set([secret, ...Object.values(signingKeys || {})])].slice(0, 17);
-  const cacheTag = (key, bytes, keySecret = secret) => crypto.createHmac('sha256', keySecret)
+  const cacheTag = (key, bytes, keySecret = signingKeyring.secret) => crypto.createHmac('sha256', keySecret)
     .update('archx-cache-v1\0', 'utf8').update(String(key), 'utf8').update('\0').update(bytes).digest();
   const tagCacheBytes = (key, bytes) => Buffer.concat([Buffer.from('A1', 'latin1'), cacheTag(key, bytes), bytes]);
   function untagCacheBytes(key, stored) {
@@ -474,7 +460,7 @@ export function createArchxMiddleware(options = {}) {
     if (stored[0] !== 0x41 || stored[1] !== 0x31) return null; // legacy/foreign entry → regenerate
     const bytes = stored.subarray(34);
     const presented = stored.subarray(2, 34);
-    for (const keySecret of cacheTagSecrets) {
+    for (const keySecret of signingKeyring.cacheTagSecrets) {
       if (crypto.timingSafeEqual(presented, cacheTag(key, bytes, keySecret))) {
         return Buffer.from(bytes);
       }
@@ -866,7 +852,7 @@ export function createArchxMiddleware(options = {}) {
       { key: groups.slice(0, 3).join(':') + '::/48', mult: IPV6_AGGREGATE_MULTIPLIER },
     ];
   };
-  const hmacShort = (label, value, len = 24, keySecret = secret) =>
+  const hmacShort = (label, value, len = 24, keySecret = signingKeyring.secret) =>
     crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
   const safeEqual = (a, b) => {
     const ba = Buffer.from(String(a)); const bb = Buffer.from(String(b));
@@ -954,7 +940,7 @@ export function createArchxMiddleware(options = {}) {
     try { return String(auth.viewerId || ''); } catch { return ''; }
   }
 
-  function authorizationTrace(auth, viewerId = '', keySecret = secret) {
+  function authorizationTrace(auth, viewerId = '', keySecret = signingKeyring.secret) {
     const trace = {
       buyerId: auth?.buyerId ? String(auth.buyerId).slice(0, 256) : null,
       orderId: auth?.orderId ? String(auth.orderId).slice(0, 256) : null,
@@ -1122,7 +1108,7 @@ export function createArchxMiddleware(options = {}) {
     };
   }
 
-  async function quotaExceeded(req, id, viewerId, phase, keySecret = secret) {
+  async function quotaExceeded(req, id, viewerId, phase, keySecret = signingKeyring.secret) {
     const tiers = limiterIpTiers(req);
     const checks = [];
     // NARROWEST scope first, and stop at the first limiting check:
@@ -1307,6 +1293,7 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function mintTokenResponse(req, id, params = {}, proofThumbprint = null) {
+    refreshSigningKey();
     const hasParam = (name) => params?.[name] !== undefined && params?.[name] !== null && params?.[name] !== '';
     const paramValue = (name) => (hasParam(name) ? String(params[name]) : null);
     const entitlement = await authorizeRequest(req, id, 'token');
@@ -1384,6 +1371,7 @@ export function createArchxMiddleware(options = {}) {
     // authorize() may tighten (or modestly extend) this token's lifetime;
     // normalizeAuthorizationResult has already bounded it to 5..900 s.
     const exp = iat + (Number.isInteger(entitlement.ttlSec) ? entitlement.ttlSec * 1000 : ttlMs);
+    refreshSigningKey(iat);
     // `watermark: false` (or null) from authorize is an explicit
     // per-viewer opt-out of the global serverWatermark — e.g. paid
     // tiers see no visible mark. Previously `false` failed value
@@ -1396,7 +1384,7 @@ export function createArchxMiddleware(options = {}) {
     );
     const tokenPayload = {
       v: 2,
-      kid: activeSecretId,
+      kid: signingKeyring.activeSecretId,
       aud: TOKEN_AUDIENCE,
       scope: TOKEN_SCOPE,
       id, w, iat, exp, n: nonce,
@@ -1466,7 +1454,7 @@ export function createArchxMiddleware(options = {}) {
       } else {
         if (!stegoPerToken) tokenPayload.sgp = 0;
         issuedFingerprint = deriveStegoFingerprint({
-          id, nonce, viewerHash: fingerprintSubjectHash, secret, perToken: stegoPerToken,
+          id, nonce, viewerHash: fingerprintSubjectHash, secret: signingKeyring.secret, perToken: stegoPerToken,
         });
       }
       const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
@@ -1492,7 +1480,7 @@ export function createArchxMiddleware(options = {}) {
             fingerprint: issuedFingerprint,
             profile: issuedStegoProfile,
             keyScope: tokenPayload.sgk === 1 ? 'viewer' : 'image',
-            keyId: activeSecretId,
+            keyId: signingKeyring.activeSecretId,
           }], 'onStegoIssue callback');
         } catch {
           emitSecurityEvent('archx.stego_registry_failed', req, { id, phase: 'token', viewerId, status: 503 });
@@ -1526,7 +1514,7 @@ export function createArchxMiddleware(options = {}) {
           nonce,
           exp,
           issuedAt: new Date(iat).toISOString(),
-          keyId: activeSecretId,
+          keyId: signingKeyring.activeSecretId,
           width: w,
           quality: deliveryQuality,
           format: deliveryFormat,
@@ -1612,7 +1600,7 @@ export function createArchxMiddleware(options = {}) {
       }
     }
     if (Object.keys(bindings).length) tokenPayload.b = bindings;
-    const token = signToken(tokenPayload, secret);
+    const token = signToken(tokenPayload, signingKeyring.secret);
     const imagePath = `${basePath}/i/${encodeURIComponent(id)}`;
     const out = {
       // `url` is the clean URL by default. Only an explicit
@@ -1626,27 +1614,27 @@ export function createArchxMiddleware(options = {}) {
       url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
       cleanUrl: imagePath,
       token,
-      key: deriveScrambleKey(id, nonce, secret, variantKeyScope({
+      key: deriveScrambleKey(id, nonce, signingKeyring.secret, variantKeyScope({
         w, q: deliveryQuality, fmt: deliveryFormat,
         wm: tokenPayload.wm ?? null,
-        forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+        forensicSeed: computeForensicSeed(id, tokenPayload, signingKeyring.secret),
         stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
-      }, secret)),
+      }, signingKeyring.secret)),
       grid,
       exp,
     };
-    if (encrypt) out.aesKey = deriveAesKey(id, nonce, secret, variantKeyScope({
+    if (encrypt) out.aesKey = deriveAesKey(id, nonce, signingKeyring.secret, variantKeyScope({
       w, q: deliveryQuality, fmt: deliveryFormat,
       wm: tokenPayload.wm ?? null,
-      forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+      forensicSeed: computeForensicSeed(id, tokenPayload, signingKeyring.secret),
       stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
-    }, secret));
+    }, signingKeyring.secret));
     emitDeliveryEvent('archx.token_issued', {
       id,
       phase: 'token',
       viewerHash: viewerHash || null,
       traceHash: trace.hash || null,
-      keyId: activeSecretId,
+      keyId: signingKeyring.activeSecretId,
       width: w,
       quality: deliveryQuality,
       format: deliveryFormat,
@@ -1748,6 +1736,7 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function handler(req, res, next) {
+    refreshSigningKey();
     let routeId = null;
     let phase = null;
     try {
@@ -1976,7 +1965,14 @@ export function createArchxMiddleware(options = {}) {
             });
           }
         }
-        return sendJson(req, res, 200, { tokens, errors });
+        const issued = Object.keys(tokens).length;
+        const denied = Object.keys(errors).length;
+        return sendJson(req, res, 200, {
+          ok: denied === 0,
+          counts: { requested: batchBody.items.length, issued, denied },
+          tokens,
+          errors,
+        });
       }
 
       let id;
@@ -2043,32 +2039,13 @@ export function createArchxMiddleware(options = {}) {
               changed.code = 'ARCHX_MASTER_CHANGED';
               throw changed;
             }
-            const base = await prepareDerivativeBase(sourceBytes, {
-              grid: 8,
+            return renderSeoPreview(sourceBytes, {
               maxWidth: previewWidth,
               processing: cfg.processing,
+              watermark: seo.watermark,
+              quality: seo.quality,
+              format: seo.format,
             });
-            const sharpModule = await import('sharp');
-            const sharp = sharpModule.default || sharpModule;
-            let pipeline = sharp(Buffer.from(base.data), {
-              raw: { width: base.w, height: base.h, channels: 4 },
-            }).timeout({ seconds: cfg.processing.timeoutSec });
-            pipeline = pipeline.composite([{ input: createSeoWatermarkSvg(base.w, base.h, seo.watermark) }]);
-            if (seo.format === 'jpeg') {
-              pipeline = pipeline.flatten({ background: '#fff' }).jpeg({
-                quality: seo.quality,
-                chromaSubsampling: '4:2:0',
-                mozjpeg: false,
-              });
-            } else {
-              pipeline = pipeline.webp({
-                quality: seo.quality,
-                alphaQuality: 80,
-                effort: Math.min(cfg.processing.webpEffort, 2),
-                smartSubsample: false,
-              });
-            }
-            return pipeline.toBuffer();
           });
           setOutputCache(seoCacheKey, previewBytes);
         }
@@ -2679,6 +2656,7 @@ export function createArchxMiddleware(options = {}) {
 
   handler.configAudit = auditArchxServerConfig(options);
   handler.stats = () => {
+    refreshSigningKey();
     let storeStats = {};
     try {
       const maybeStats = typeof stateStore.stats === 'function' ? stateStore.stats() : null;
@@ -2692,7 +2670,7 @@ export function createArchxMiddleware(options = {}) {
       deploymentMode: cfg.deploymentMode,
       stateStore: storeStats.kind || stateStore.kind || (ownsStateStore ? 'memory' : 'custom'),
       stateStoreShared: !ownsStateStore,
-      activeSecretId,
+      activeSecretId: signingKeyring.activeSecretId,
       signingKeyCount: Object.keys(signingKeys).length,
       rateLimitClients: statNumber(storeStats.rateLimitClients),
       quotaClients: statNumber(storeStats.quotaClients),

@@ -134,7 +134,7 @@ function validateStegoConfig(value) {
     if (value.strength !== undefined && (typeof value.strength !== 'number' || !Number.isFinite(value.strength) || value.strength < 1 || value.strength > 16)) return false;
     if (value.gridX !== undefined && (!Number.isInteger(value.gridX) || value.gridX < 4 || value.gridX > 64)) return false;
     if (value.gridY !== undefined && (!Number.isInteger(value.gridY) || value.gridY < 4 || value.gridY > 64)) return false;
-    if (value.layoutVersion !== undefined && ![1, 2, 3, 4].includes(value.layoutVersion)) return false;
+    if (value.layoutVersion !== undefined && ![1, 2, 3, 4, 5].includes(value.layoutVersion)) return false;
     if (value.legacyCode !== undefined && typeof value.legacyCode !== 'boolean') return false;
     return true;
   } catch { return false; }
@@ -244,7 +244,7 @@ function inspectServerConfig(options = {}) {
     'processingQueueMax', 'processingQueueTimeoutMs', 'processingTimeoutSec',
     'publicDir', 'publicDirs', 'quality', 'quotas', 'rateLimitMaxClients',
     'rateLimitPerMinute', 'requireSameSiteTokenRequests', 'requireTokenRequestHeader',
-    'scrambleKeyMode', 'scramblePlanVersion', 'secret', 'secretId', 'secrets', 'serverWatermark', 'sharedCacheTtlMs',
+    'scrambleKeyMode', 'scramblePlanVersion', 'secret', 'secretId', 'secrets', 'signingKeySchedule', 'serverWatermark', 'sharedCacheTtlMs',
     'stateStore', 'stateStoreTimeoutMs', 'steganography',
     'stegoRegistryFailure', 'timeoutSec', 'tokenMethods', 'tokenRateLimitPerMinute',
     'trustProxy', 'trustedProxyHops', 'ttlSec', 'widthBuckets',
@@ -414,6 +414,58 @@ function inspectServerConfig(options = {}) {
     fail('basePath must be a simple absolute URL path without traversal, query, or fragment');
   }
   checkInt('ttlSec', options.ttlSec, 5, 900);
+  let signingKeySchedule = null;
+  if (options.signingKeySchedule !== undefined) {
+    const schedule = options.signingKeySchedule;
+    if (!isPlainObject(schedule)) {
+      fail('signingKeySchedule must be an object');
+    } else {
+      checkUnknownKeys('signingKeySchedule', schedule, new Set([
+        'activateSecretId', 'activateAt', 'retireSecretId', 'retireAt', 'graceSec',
+      ]));
+      const activateSecretId = String(schedule.activateSecretId || '');
+      const retireSecretId = String(schedule.retireSecretId || activeSecretId || '');
+      const activateAtText = schedule.activateAt;
+      const retireAtText = schedule.retireAt;
+      const activateAtMs = typeof activateAtText === 'string' &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(activateAtText)
+        ? Date.parse(activateAtText) : NaN;
+      const retireAtMs = typeof retireAtText === 'string' &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(retireAtText)
+        ? Date.parse(retireAtText) : NaN;
+      const graceSec = schedule.graceSec ?? 300;
+      if (!SECRET_ID_RE.test(activateSecretId) || !signingKeys.has(activateSecretId) || activateSecretId === retireSecretId) {
+        fail('signingKeySchedule.activateSecretId must name a different key already present in secrets');
+      }
+      if (!SECRET_ID_RE.test(retireSecretId) || !signingKeys.has(retireSecretId) || retireSecretId !== activeSecretId) {
+        fail('signingKeySchedule.retireSecretId must name the current active key');
+      }
+      if (!Number.isFinite(activateAtMs) || !Number.isFinite(retireAtMs) || retireAtMs <= activateAtMs) {
+        fail('signingKeySchedule.activateAt and retireAt must be ordered ISO-8601 UTC timestamps ending in Z');
+      }
+      if (!Number.isInteger(graceSec) || graceSec < 0 || graceSec > 86400) {
+        fail('signingKeySchedule.graceSec must be an integer from 0 to 86400');
+      }
+      // authorize() may extend a per-token lifetime up to 900 s, so schedule
+      // safety uses the API's maximum, not only the default ttlSec.
+      const ttlMs = 900_000;
+      const safeGraceSec = Number.isInteger(graceSec) && graceSec >= 0 && graceSec <= 86400 ? graceSec : 300;
+      if (Number.isFinite(activateAtMs) && Number.isFinite(retireAtMs) &&
+          retireAtMs < activateAtMs + ttlMs + safeGraceSec * 1000) {
+        fail('signingKeySchedule.retireAt must be at least max token TTL + grace after activateAt');
+      }
+      if (Number.isFinite(activateAtMs) && Number.isFinite(retireAtMs) &&
+          SECRET_ID_RE.test(activateSecretId) && SECRET_ID_RE.test(retireSecretId) &&
+          signingKeys.has(activateSecretId) && signingKeys.has(retireSecretId) &&
+          activateSecretId !== retireSecretId && retireSecretId === activeSecretId &&
+          retireAtMs > activateAtMs && retireAtMs >= activateAtMs + ttlMs + safeGraceSec * 1000) {
+        signingKeySchedule = Object.freeze({
+          activateSecretId, activateAtMs, activateAt: new Date(activateAtMs).toISOString(),
+          retireSecretId, retireAtMs, retireAt: new Date(retireAtMs).toISOString(), graceSec: safeGraceSec,
+        });
+      }
+    }
+  }
   checkInt('batchTokenMaxItems', options.batchTokenMaxItems, 1, 500);
   checkInt('batchTokenMaxBytes', options.batchTokenMaxBytes, 1024, 1024 * 1024);
   if (options.forensicScope !== undefined && !['viewer', 'image'].includes(options.forensicScope)) {
@@ -667,6 +719,7 @@ function inspectServerConfig(options = {}) {
     secret,
     signingKeys: Object.freeze(Object.fromEntries(signingKeys)),
     activeSecretId,
+    signingKeySchedule,
     deploymentMode,
     stateStore: suppliedStateStore,
     stateStoreTimeoutMs: options.stateStoreTimeoutMs ?? 250,
@@ -870,6 +923,12 @@ export function auditArchxServerConfig(options = {}) {
       stateStore: config.stateStore ? (config.stateStore.kind || 'custom') : 'memory',
       activeSecretId: config.activeSecretId,
       signingKeyCount: Object.keys(config.signingKeys).length,
+      signingKeySchedule: config.signingKeySchedule ? {
+        activateSecretId: config.signingKeySchedule.activateSecretId,
+        activateAt: config.signingKeySchedule.activateAt,
+        retireSecretId: config.signingKeySchedule.retireSecretId,
+        retireAt: config.signingKeySchedule.retireAt,
+      } : null,
       tokenMethods: config.tokenMethods,
       oneTimeTokens: config.oneTimeTokens,
       oneTimeTokenMaxEntries: config.oneTimeTokenMaxEntries,
@@ -980,6 +1039,10 @@ export function withCatalogThroughputDefaults(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('Archx catalog throughput defaults: options must be an object');
   }
+  if (options.format === 'avif' || options.allowSlowRequestAvif === true ||
+      options.processing?.allowSlowRequestAvif === true) {
+    throw new RangeError('Archx catalog throughput defaults: AVIF is precompute-only; use archx-build to produce AVIF derivatives instead of request-path encoding');
+  }
   const processing = isPlainObject(options.processing) ? options.processing : {};
   let steganography = options.steganography;
   if (steganography === true) {
@@ -1022,6 +1085,17 @@ export function withCatalogThroughputDefaults(options = {}) {
       ...processing,
     },
   };
+  // Keep per-request entitlement overrides inside the catalog profile's
+  // precompute-only AVIF policy without changing the caller's callback.
+  if (typeof options.authorize === 'function') {
+    const authorize = options.authorize;
+    out.authorize = async (...args) => {
+      const result = await authorize(...args);
+      return isPlainObject(result) && result.format === 'avif'
+        ? { ...result, allow: false }
+        : result;
+    };
+  }
   if (options.steganography !== undefined) out.steganography = steganography;
   return out;
 }
@@ -1153,7 +1227,7 @@ export function auditArchxProductionConfig(options = {}, { expectedInstances = 1
       blockers.push('oneTimeTokenMaxEntries is very small: the replay store must hold a full token-TTL of JTIs at peak mint rate or live entries are evicted (see archx.replay_store_evicted)');
     }
     if (summary.oneTimeTokens && summary.replaySaturation !== 'strict') {
-      recommendations.push("replaySaturation is 'evict' (availability mode): under sustained mint pressure the in-memory store can evict a live JTI and reopen a narrow replay window for that one signed, re-authorized token (watch archx.replay_store_evicted). Set replaySaturation: 'strict' to reject new claims instead, accepting redemption failures while saturated — size oneTimeTokenMaxEntries to peak-claim-rate × token TTL × safety margin either way");
+      blockers.push("replaySaturation must be 'strict' when oneTimeTokens is enabled for the hardened production baseline; 'evict' can reopen a replay window after live-claim eviction under pressure");
     }
     if (!summary.encrypt) blockers.push('encrypt must be true: unencrypted scrambled payloads are obfuscation, not secrecy — keyless tile-edge (jigsaw) attacks exist (independent solvers recovered at most 15/64 tiles on audited test images, but solvers improve and results vary by content); payload secrecy must not rely on solver weakness');
     if (summary.scramblePlanVersion !== 2) blockers.push('scramblePlanVersion must be 2: the v1 plan seed is 32-bit and brute-forceable');

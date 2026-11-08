@@ -3,7 +3,7 @@
  * texture-adaptive amplitude masking. Embed-side only — detectors
  * for shipped marks must keep reading them (see stego-code.js).
  */
-import { stegoFingerprint, stegoCodeBits, robustStegoCodeBits, bchStegoCodeBits, stegoLayout, robustStegoLayout, stegoGrid, STEGO_ROW_SEGMENTS } from './stego-code.js';
+import { stegoFingerprint, stegoCodeBits, robustStegoCodeBits, bchStegoCodeBits, stegoLayout, robustStegoLayout, stegoGrid, STEGO_ROW_SEGMENTS, STEGO_SYNC_PILOT_CELLS } from './stego-code.js';
 
 
 export function embedStegoFingerprint(rgba, w, h, payload, {
@@ -13,8 +13,8 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   legacyCode = false,
   // Layout space: 3 = SHA-256-seeded repetition code (default),
   // 2 = 128-bit cyrb128, 1 = pre-1.13 32-bit-truncated (both kept
-  // for compatibility testing), 4 = v1.20 BCH(188,64) code over the
-  // v3 cell layout (corrects 2e+s <= 36; needs a v1.20+ detector).
+  // for compatibility testing), 4 = BCH(188,64) over v3 cells,
+  // 5 = the same BCH code plus the v2 keyed sync-pilot lattice.
   layoutVersion = 3,
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
@@ -26,17 +26,21 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const v4 = layoutVersion === 4;
-  if (v4 && legacyCode) throw new Error('Archx stego: layoutVersion 4 always uses the keyed MAC payload (legacyCode is v1-v3 only)');
+  const syncV5 = layoutVersion === 5;
+  const v4 = layoutVersion === 4 || syncV5;
+  if (v4 && legacyCode) throw new Error(`Archx stego: layoutVersion ${layoutVersion} always uses the keyed MAC payload (legacyCode is v1-v3 only)`);
   const tag = legacyCode ? 'crc' : 'mac';
   const bits = v4
     ? bchStegoCodeBits(fingerprint, key)
     : robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  // v4 reuses the v3 layout seed space verbatim; only the codeword
-  // assigned to the cells changes (see bchStegoCodeBits).
-  const seedVersion = v4 || layoutVersion === 3 ? 3 : layoutVersion === 2 ? 2 : 1;
+  if (syncV5 && cellCount < 188 + STEGO_SYNC_PILOT_CELLS) {
+    throw new Error(`Archx stego: layoutVersion 5 requires at least ${188 + STEGO_SYNC_PILOT_CELLS} macro-cells`);
+  }
+  // v4/v5 reuse the v3 layout seed space; only the BCH codeword and,
+  // for v5, reserved sync-pilot cells differ.
+  const seedVersion = v4 || layoutVersion === 3 || layoutVersion === 5 ? 3 : layoutVersion === 2 ? 2 : 1;
   const { order, polarity, segmentPolarity } = robust
     ? robustStegoLayout(cellCount, key, seedVersion)
     : stegoLayout(cellCount, key, seedVersion);
@@ -55,7 +59,11 @@ export function embedStegoFingerprint(rgba, w, h, payload, {
       const x1 = Math.floor(((cx + 1) * w) / gx);
       if (x1 - x0 < 4 || y1 - y0 < 2) continue;
       const cell = cy * gx + cx;
-      const bit = bits[order[cell] % bits.length];
+      const layoutOrder = order[cell];
+      const isPilot = syncV5 && layoutOrder >= cellCount - STEGO_SYNC_PILOT_CELLS;
+      // Pilot cells carry a keyed, known sign (the shuffled index parity);
+      // all remaining cells carry the interleaved BCH payload repetitions.
+      const bit = isPilot ? (layoutOrder & 1) : bits[layoutOrder % bits.length];
       const pol = polarity[cell];
 
       // Perceptual masking: textured cells can hide a stronger mark than

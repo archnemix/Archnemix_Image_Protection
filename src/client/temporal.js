@@ -43,6 +43,20 @@ export const TEMPORAL_INTERLACE_PROFILES = Object.freeze({
   }),
 });
 
+/** Return a uniformly shuffled phase without repeating until the current bag is exhausted. */
+export function nextShuffledPhase(phaseBag, phases, random = Math.random) {
+  const count = Math.max(1, Math.floor(Number(phases) || 1));
+  if (!phaseBag.length || phaseBag[0] >= count) {
+    phaseBag.length = 0;
+    for (let i = 0; i < count; i++) phaseBag.push(i);
+    for (let i = count - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [phaseBag[i], phaseBag[j]] = [phaseBag[j], phaseBag[i]];
+    }
+  }
+  return phaseBag.pop();
+}
+
 export function clampTemporalNumber(value, fallback, min, max) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;

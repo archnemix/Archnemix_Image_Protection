@@ -17,12 +17,38 @@
  */
 import { parentPort } from 'node:worker_threads';
 import './node-crypto.js'; // hardware SHA/HMAC for the shared stego core
-import { detectStegoFingerprint } from '../src/scramble.js';
+import { detectStegoFingerprint, applyForensicBlocks, embedStegoFingerprint } from '../src/scramble.js';
 
 parentPort.on('message', (msg) => {
   const { id, kind, rgba, w, h, options } = msg || {};
   try {
     const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+    if (kind === 'mark') {
+      let marked = bytes;
+      if (options?.forensic) {
+        const forensic = options.forensic;
+        marked = applyForensicBlocks(marked, w, h, forensic.seed, {
+          blockSize: forensic.blockSize,
+          delta: forensic.delta,
+          signsVersion: forensic.signsVersion,
+        });
+      }
+      if (options?.stego) {
+        const stego = options.stego;
+        marked = embedStegoFingerprint(marked, w, h, stego.payload, {
+          key: stego.key,
+          profile: stego.profile,
+          strength: stego.strength,
+          gridX: stego.gridX,
+          gridY: stego.gridY,
+          layoutVersion: stego.layoutVersion,
+          legacyCode: stego.legacyCode,
+          inPlace: true,
+        });
+      }
+      parentPort.postMessage({ id, ok: true, result: marked }, [marked.buffer]);
+      return;
+    }
     if (kind === 'batch') {
       const planes = new Map();
       const keys = msg.keys || [];

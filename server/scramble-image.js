@@ -10,8 +10,8 @@ import { signOwnershipClaim, applyOwnershipMetadata } from './ownership.js';
 import { Worker } from 'node:worker_threads';
 import {
   buildScramblePlan, paddedSize, scramblePixels, scramblePixelsPadded,
-  encodeContainer, encryptPayload, generateKeyBase64, applyForensicBlocks,
-  embedStegoFingerprint, stegoFingerprint, sniffImageInfo, sha256Bytes,
+  encodeContainer, encryptPayload, generateKeyBase64,
+  stegoFingerprint, sniffImageInfo, sha256Bytes,
   perceptualFingerprint as computePerceptualFingerprint,
 } from '../src/scramble.js';
 
@@ -670,22 +670,23 @@ export async function finishDerivative(base, opts = {}, owned = false) {
     }
   }
   let forensicMarked = false;
+  let stegoMarked = false;
+  let resolvedStegoFingerprint = null;
+  const markOptions = {};
   if (opts.forensicSeed) {
-    ensureMutablePixels(); // applyForensicBlocks mutates in place
     const fx = typeof opts.forensic === 'object' && opts.forensic ? opts.forensic : {};
-    rawPixels = applyForensicBlocks(rawPixels, w, h, opts.forensicSeed, {
+    markOptions.forensic = {
+      seed: opts.forensicSeed,
       blockSize: fx.blockSize ?? 32,
       delta: fx.delta ?? 2,
       signsVersion: fx.signsVersion ?? 3,
-    });
+    };
     forensicMarked = true;
   }
 
   // Blind steganographic ownership fingerprint (pre-scramble): a suspect
   // screenshot/export can later be tested with detectStegoFingerprint() or
   // `archx-detect` and attributed to this image / viewer / issued token.
-  let stegoMarked = false;
-  let resolvedStegoFingerprint = null;
   const stegoCfg = typeof opts.steganography === 'object' && opts.steganography ? opts.steganography : {};
   const stegoPayload = opts.stegoPayload ?? stegoCfg.payload ??
     (opts.steganography === true ? key || 'archx' : null);
@@ -704,8 +705,8 @@ export async function finishDerivative(base, opts = {}, owned = false) {
       throw new TypeError('Archx image processing: stegoKey must differ from the scramble key (the scramble key is public wherever clients unscramble)');
     }
     const stegoProfile = opts.stegoProfile ?? stegoCfg.profile ?? 'standard';
-    ensureMutablePixels(); // embed below runs with inPlace: true
-    rawPixels = embedStegoFingerprint(rawPixels, w, h, stegoPayload, {
+    markOptions.stego = {
+      payload: stegoPayload,
       key: effectiveStegoKey,
       profile: stegoProfile,
       strength: opts.stegoStrength ?? stegoCfg.strength ?? 6,
@@ -713,10 +714,17 @@ export async function finishDerivative(base, opts = {}, owned = false) {
       gridY: stegoCfg.gridY ?? (stegoProfile === 'robust' ? 14 : 16),
       layoutVersion: opts.stegoLayoutVersion ?? stegoCfg.layoutVersion ?? 3,
       legacyCode: !!(opts.stegoLegacyCode ?? stegoCfg.legacyCode),
-      inPlace: true,
-    });
+    };
     stegoMarked = true;
     resolvedStegoFingerprint = stegoFingerprint(stegoPayload);
+  }
+
+  // Per-pixel marks are CPU work proportional to image area. Move both
+  // forensic blocks and StegoMark embedding to the bounded worker queue so
+  // a cold request cannot monopolize the HTTP event loop.
+  if (markOptions.forensic || markOptions.stego) {
+    ensureMutablePixels();
+    rawPixels = await enqueueImageMarks(rawPixels, w, h, markOptions);
   }
 
   const ownershipCfg = (opts.ownership && typeof opts.ownership === 'object' && opts.ownership.owner)
@@ -961,6 +969,19 @@ function releaseJobBytes(job) {
 function removeDetectSlot(slot) {
   const idx = detectSlots.indexOf(slot);
   if (idx >= 0) detectSlots.splice(idx, 1);
+  if (slot?.idleTimer) clearTimeout(slot.idleTimer);
+  if (slot) slot.idleTimer = null;
+}
+
+function retireDetectSlotWhenIdle(slot) {
+  if (!slot || slot.active || detectQueue.length || !detectSlots.includes(slot)) return;
+  if (slot.idleTimer) clearTimeout(slot.idleTimer);
+  slot.idleTimer = setTimeout(() => {
+    if (slot.active || detectQueue.length || !detectSlots.includes(slot)) return;
+    removeDetectSlot(slot);
+    try { slot.worker.terminate(); } catch { /* already gone */ }
+  }, 1000);
+  slot.idleTimer.unref?.();
 }
 
 /** Fail ONE slot's active job and retire its worker; queued jobs and
@@ -996,7 +1017,7 @@ function shutdownDetectWorkers(err) {
 function spawnDetectSlot() {
   const worker = new Worker(new URL('./detect-worker.js', import.meta.url), { type: 'module' });
   worker.unref();
-  const slot = { worker, active: null };
+  const slot = { worker, active: null, idleTimer: null };
   worker.on('message', (msg) => {
     const job = slot.active;
     if (!job || msg?.id !== job.id) return;
@@ -1004,8 +1025,9 @@ function spawnDetectSlot() {
     releaseJobBytes(job);
     if (job.timer) clearTimeout(job.timer);
     if (msg.ok) job.resolve(msg.result);
-    else job.reject(new Error(`Archx stego detection failed: ${msg.error || 'worker error'}`));
+    else job.reject(new Error(`Archx stego worker failed: ${msg.error || 'worker error'}`));
     pumpDetectQueue();
+    retireDetectSlotWhenIdle(slot);
   });
   worker.on('error', (err) => {
     if (detectSlots.includes(slot)) { failDetectSlot(slot, err); pumpDetectQueue(); }
@@ -1038,6 +1060,8 @@ function pumpDetectQueue() {
       job.reject(new Error(`Archx stego detection queue wait exceeded ${detectWorkerConfig.queueTimeoutMs}ms`));
       continue;
     }
+    if (slot.idleTimer) clearTimeout(slot.idleTimer);
+    slot.idleTimer = null;
     slot.active = job;
     job.timer = setTimeout(() => {
       if (slot.active !== job) return;
@@ -1100,6 +1124,12 @@ function enqueueDetectJob(messageBytes, w, h, kind, payload, options) {
     });
     pumpDetectQueue();
   });
+}
+
+function enqueueImageMarks(rgba, w, h, marks, timeoutMs) {
+  const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
+  if (!marks || (!marks.forensic && !marks.stego)) return Promise.resolve(bytes);
+  return enqueueDetectJob(bytes, w, h, 'mark', { options: marks }, { timeoutMs });
 }
 
 export function detectStegoFingerprintInWorker(rgba, w, h, options = {}) {
