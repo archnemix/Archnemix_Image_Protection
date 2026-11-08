@@ -12,6 +12,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,6 +35,21 @@ const needsShell = (cmd) => IS_WIN && (cmd === 'npm' || cmd === 'npx');
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, {
   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: needsShell(cmd), ...opts,
 });
+function readTarGzEntry(tarballPath, targetName) {
+  const tar = gunzipSync(fs.readFileSync(tarballPath));
+  for (let offset = 0; offset + 512 <= tar.length;) {
+    const block = tar.subarray(offset, offset + 512);
+    if (block.every((byte) => byte === 0)) break;
+    const name = block.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const prefix = block.subarray(345, 500).toString('utf8').replace(/\0.*$/, '');
+    const fullName = prefix ? `${prefix}/${name}` : name;
+    const size = Number.parseInt(block.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim() || '0', 8);
+    const start = offset + 512;
+    if (fullName === targetName) return tar.subarray(start, start + size);
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`tarball is missing ${targetName}`);
+}
 
 console.log(`pack-smoke workspace: ${work}`);
 let tarball;
@@ -41,6 +57,10 @@ step('npm pack', () => {
   const out = run('npm', ['pack', '--json'], { cwd: repoRoot });
   const meta = JSON.parse(out.slice(out.indexOf('[')));
   tarball = path.join(repoRoot, meta[0].filename);
+  const packedManifest = JSON.parse(readTarGzEntry(tarball, 'package/package.json').toString('utf8'));
+  if (Object.keys(packedManifest.scripts || {}).length) {
+    throw new Error(`npm artifact still exposes repository-only scripts: ${Object.keys(packedManifest.scripts).join(', ')}`);
+  }
   const names = meta[0].files.map((f) => f.path);
   if (names.some((name) => name.endsWith('.map'))) {
     throw new Error('npm artifact contains large source maps; rebuild with external maps and exclude them from "files"');

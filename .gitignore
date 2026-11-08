@@ -13,9 +13,10 @@ coverage/
 test-results/
 playwright-report/
 
-# Local package/release archives
+# Local package/release archives and temporary prepack manifest backup
 *.tgz
 *.zip
+.archx-package-artifact-backup
 
 # Operating-system and editor files
 .DS_Store

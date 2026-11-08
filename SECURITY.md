@@ -114,15 +114,16 @@ and may report spurious repaired decodes against them; upgrade
 detection tooling before relying on new marks. The cell layout is
 versioned the same way: v1.13 introduced the 128-bit-seeded
 `layoutVersion: 2`; **since v1.14, embeds default to the
-SHA-256-seeded `layoutVersion: 3`**, and v1.20 added the opt-in
-error-correcting `layoutVersion: 4` (BCH). Detectors dual-read older
-layouts and report the vintage as `layoutVersion`; a detector older
-than the layout cannot read it. The operators' rule is unchanged —
-upgrade detection tooling first, embed with an older
+SHA-256-seeded `layoutVersion: 3`**, v1.20 added the opt-in
+error-correcting `layoutVersion: 4` (BCH), and v1.30 added the
+experimental opt-in `layoutVersion: 5` (BCH plus a keyed registration
+pilot lattice). Detectors dual-read supported layouts and report the
+vintage as `layoutVersion`; a detector older than the layout cannot
+read it. Layout 5 is not the default and its synthetic asymmetric-crop
+regression is not a general survival guarantee. The operators' rule is
+unchanged — upgrade detection tooling first, embed with an older
 `layoutVersion` only where an unupgraded detector must read new
-marks, and prefer re-issuance. (This paragraph was two layout
-generations stale until v1.29; the code and `docs/COMPATIBILITY.md`
-were already correct — `layoutVersion: 3` is the default.)
+marks, and prefer re-issuance. `layoutVersion: 3` remains the default.
 
 Two deliberate, configurable trade-offs deserve explicit operator
 choices rather than defaults discovered by accident:

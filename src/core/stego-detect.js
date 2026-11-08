@@ -4,8 +4,8 @@
  * the multi-recipient collusion assay. Bounded by maxTimeMs.
  */
 
-import { STEGO_ROW_SEGMENTS, robustStegoCodeBits, bchStegoDecode, bchStegoSolveObserved, STEGO_V4_CODE_BITS, stegoLayout, robustStegoLayout, stegoGrid, robustStegoBytesValid, robustStegoFingerprintFromBits, stegoBitsToBytes, correctStegoBits, stegoCrc16, stegoMac16, ROBUST_MARKER_BITS } from './stego-code.js';
-import { buildLumaIntegral, mirroredVariant, rotatedVariant, transposedVariant, resampleRgba, rotateRgba, MIRROR_AXES } from './pixels.js';
+import { STEGO_ROW_SEGMENTS, STEGO_SYNC_PILOT_CELLS, robustStegoCodeBits, bchStegoDecode, bchStegoSolveObserved, STEGO_V4_CODE_BITS, stegoLayout, robustStegoLayout, stegoGrid, robustStegoBytesValid, robustStegoFingerprintFromBits, stegoBitsToBytes, correctStegoBits, stegoCrc16, stegoMac16, ROBUST_MARKER_BITS } from './stego-code.js';
+import { buildLumaIntegral, mirroredVariant, rotatedVariant, transposedVariant, resampleRgba, rotateRgba, keystoneCorrectRgba, MIRROR_AXES } from './pixels.js';
 
 function repairRobustViaFirstCrc(scores, hard, key, tag = 'mac') {
   const first = Uint8Array.from(hard.subarray(0, 64));
@@ -156,6 +156,12 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = 'mac') {
 }
 
 const STEGO_TIMEOUT = Symbol('archx-stego-timeout');
+const PERSPECTIVE_TRANSFORMS = Object.freeze([
+  [0.08, 0], [-0.08, 0], [0.16, 0], [-0.16, 0], [0.20, 0], [-0.20, 0],
+  [0, 0.08], [0, -0.08], [0, 0.16], [0, -0.16], [0, 0.20], [0, -0.20],
+  [0.10, 0.10], [0.10, -0.10], [-0.10, 0.10], [-0.10, -0.10],
+  [0.20, 0.20], [0.20, -0.20], [-0.20, 0.20], [-0.20, -0.20],
+]);
 
 export function detectStegoFingerprint(rgba, w, h, {
   key = '', gridX, gridY, profile = 'standard', searchOffsets = false, searchGeometry = false,
@@ -168,30 +174,37 @@ export function detectStegoFingerprint(rgba, w, h, {
   // ±6° on a downscaled proxy, refines by raw signal, then confirms
   // at full resolution. Off by default (cost); the CLI exposes --tilt.
   searchTilt = false,
+  // Bounded trapezoid/keystone registration for camera-photo suspects.
+  // This is opt-in because each warp is a full-resolution resample.
+  searchPerspective = false,
+  _perspectiveProbe = false,
   // Optional wall-clock budget for the WHOLE search (all layouts,
   // profiles, and probes share one deadline). On expiry the best
   // candidate so far is returned with `timedOut: true` instead of
   // running unbounded forensic stages. 0 (default) = unlimited.
   maxTimeMs = 0,
-  // Layout space: 'auto' (default) screens v3 (SHA-256-seeded),
-  // v4 (v1.20 BCH code over the v3 layout), then v2/v1 legacy
+  // Layout space: 'auto' (default) screens v5 (pilot-synchronized),
+  // v3 (SHA-256-seeded), v4 (BCH over the v3 layout), then legacy
   // seeds — native screens for all layouts first, then geometry
   // searches with the deadline sliced fairly across layouts;
-  // pass 1-4 to pin one space (full budget to that one search,
-  // roughly proportionally lower worst-case cost).
+  // pass 1-5 to pin one space (full budget to that one search,
+  // roughly proportionally lower worst-case cost). Dense v5 pixel-origin
+  // search is reserved for an explicitly pinned layoutVersion: 5.
   layoutVersion = 'auto',
   _mirrorProbe = false,
   _tiltProbe = false,
   _layoutVersion = 0,
+  _denseSyncSearch = false,
   _planes = null,
   _deadline = 0,
 } = {}) {
   const deadline = _deadline > 0 ? _deadline
     : (Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0);
   const deadlineHit = () => deadline > 0 && Date.now() > deadline;
-  const concreteLayout = (_layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 || _layoutVersion === 4)
+  const concreteLayout = (_layoutVersion >= 1 && _layoutVersion <= 5)
     ? _layoutVersion
-    : (layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 || layoutVersion === 4 ? layoutVersion : 0);
+    : (Number.isInteger(layoutVersion) && layoutVersion >= 1 && layoutVersion <= 5 ? layoutVersion : 0);
+  const denseSyncSearch = _denseSyncSearch || (layoutVersion === 5 && !_layoutVersion);
   // Shared read-only pixel planes for every recursive probe of this
   // top-level call: layout/profile/geometry/mirror fan-out used to
   // rebuild the luma plane + summed-area table (and the flipped copy)
@@ -220,13 +233,19 @@ export function detectStegoFingerprint(rgba, w, h, {
     // (bench p90), so a fair slice rarely costs a real recovery
     // but guarantees every layout is reached. Pinning a layout
     // still restores the full budget to that one search.
-    const order = [3, 4, 2, 1];
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, _mirrorProbe, _tiltProbe, _planes: planesCache };
+    const order = [5, 3, 4, 2, 1];
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, searchPerspective, _denseSyncSearch: denseSyncSearch, _mirrorProbe, _tiltProbe, _planes: planesCache };
     let best = null;
     const consider = (attempt) => {
       if (attempt && (!best || (attempt.confidence ?? 0) > (best.confidence ?? 0))) best = attempt;
     };
     for (const version of order) {
+      if (version === 5) {
+        const isRobustGrid = profile === 'robust';
+        const { gx, gy } = stegoGrid(w, h,
+          gridX ?? (isRobustGrid ? 20 : 24), gridY ?? (isRobustGrid ? 14 : 16));
+        if (gx * gy < STEGO_V4_CODE_BITS + STEGO_SYNC_PILOT_CELLS) continue;
+      }
       const attempt = detectStegoFingerprint(srcTop, w, h, {
         ...shared, searchGeometry: false, searchTilt: false, _layoutVersion: version, _deadline: deadline,
       });
@@ -269,14 +288,35 @@ export function detectStegoFingerprint(rgba, w, h, {
       : standard?.found && !robust?.found
         ? standard
         : (robust?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust : standard;
+    if (searchPerspective && !initial?.found && !_perspectiveProbe && srcTop.length <= 12_000_000 * 4 &&
+        srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+      // Twelve low-order keystone candidates: independent horizontal and
+      // vertical trapezoids plus four coupled directions. Every probe is
+      // a bounded native screen; it cannot recursively fan out into its
+      // own perspective search.
+      for (const [kx, ky] of PERSPECTIVE_TRANSFORMS) {
+        if (deadlineHit()) break;
+        const rectified = keystoneCorrectRgba(srcTop, w, h, kx, ky);
+        for (const candidateProfile of ['robust', 'standard']) {
+          const hit = detectStegoFingerprint(rectified, w, h, {
+            key, gridX, gridY, profile: candidateProfile, searchOffsets: true,
+            searchGeometry: false, searchMirror: false, searchRotation: false,
+            searchTilt: false, searchPerspective: false, _perspectiveProbe: true,
+            _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout,
+            _planes: planesCache, _deadline: deadline,
+          });
+          if (hit?.found) return { ...hit, perspective: { horizontal: kx, vertical: ky } };
+        }
+      }
+    }
     if (!searchGeometry || initial?.found) return initial;
     if (deadlineHit()) return initial?.timedOut ? initial : { ...initial, timedOut: true };
     const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+      key, gridX, gridY, profile: 'standard', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _denseSyncSearch: denseSyncSearch, _planes: planesCache, _deadline: deadline,
     });
     if (standardGeometry?.found) return standardGeometry;
     const robustGeometry = detectStegoFingerprint(srcTop, w, h, {
-      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _planes: planesCache, _deadline: deadline,
+      key, gridX, gridY, profile: 'robust', searchOffsets, searchGeometry: true, searchMirror: false, searchRotation: false, searchTilt, _mirrorProbe: true, _layoutVersion: concreteLayout, _denseSyncSearch: denseSyncSearch, _planes: planesCache, _deadline: deadline,
     });
     if (robustGeometry?.found) return robustGeometry;
     // Last bounded candidate: a horizontally mirrored suspect (a common
@@ -361,6 +401,21 @@ export function detectStegoFingerprint(rgba, w, h, {
       ? robustGeometry
       : standardGeometry;
   }
+  if (searchPerspective && !_perspectiveProbe && srcTop.length <= 12_000_000 * 4 &&
+      srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+    for (const [kx, ky] of PERSPECTIVE_TRANSFORMS) {
+      if (deadlineHit()) break;
+      const rectified = keystoneCorrectRgba(srcTop, w, h, kx, ky);
+      const hit = detectStegoFingerprint(rectified, w, h, {
+        key, gridX, gridY, profile, searchOffsets: true,
+        searchGeometry: false, searchMirror: false, searchRotation: false,
+        searchTilt: false, searchPerspective: false, _perspectiveProbe: true,
+        _mirrorProbe: true, _tiltProbe: true, _layoutVersion: concreteLayout,
+        _planes: planesCache, _deadline: deadline,
+      });
+      if (hit?.found) return { ...hit, perspective: { horizontal: kx, vertical: ky } };
+    }
+  }
   const src = srcTop;
   if (src.length < w * h * 4) throw new Error('Archx stego: pixel buffer is smaller than w×h×4');
   const robust = profile === 'robust';
@@ -369,7 +424,8 @@ export function detectStegoFingerprint(rgba, w, h, {
   // the 96/64-bit repetition codes. Everything downstream that is
   // parameterized by codeLength follows automatically; the repair
   // and coverage gates branch explicitly below.
-  const isV4 = concreteLayout === 4;
+  const isSyncV5 = concreteLayout === 5;
+  const isV4 = concreteLayout === 4 || isSyncV5;
   const codeLength = isV4 ? STEGO_V4_CODE_BITS : robust ? 96 : 64;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
@@ -377,9 +433,24 @@ export function detectStegoFingerprint(rgba, w, h, {
   const effectiveGridY = gridY ?? (robust ? 14 : 16);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
+  if (isSyncV5 && cellCount < codeLength + STEGO_SYNC_PILOT_CELLS) {
+    throw new Error(`Archx stego: layoutVersion 5 requires at least ${codeLength + STEGO_SYNC_PILOT_CELLS} macro-cells`);
+  }
   const { order, polarity, segmentPolarity } = robust
     ? robustStegoLayout(cellCount, key, isV4 ? 3 : concreteLayout)
     : stegoLayout(cellCount, key, isV4 ? 3 : concreteLayout);
+  const syncPilotCells = [];
+  if (isSyncV5) for (let cell = 0; cell < cellCount; cell++) {
+    if (order[cell] < cellCount - STEGO_SYNC_PILOT_CELLS) continue;
+    const signs = new Int8Array(rowSegments);
+    for (let segment = 0; segment < rowSegments; segment++) {
+      signs[segment] = polarity[cell] * segmentPolarity[cell * rowSegments + segment];
+    }
+    syncPilotCells.push({
+      cell, cx: cell % gx, cy: Math.floor(cell / gx),
+      bitSign: order[cell] & 1 ? 1 : -1, signs,
+    });
+  }
   const cw = w / gx, ch = h / gy;
   // One luma plane + summed-area table per source buffer, shared by
   // every recursive probe of this top-level call (see planesCache):
@@ -440,10 +511,13 @@ export function detectStegoFingerprint(rgba, w, h, {
   // facts about the fixed layout; folding the +/-1 product into one
   // Int8 keeps the floating-point score identical (multiplication
   // by +/-1 is an exact sign flip, and sign flips compose exactly).
-  const _cellBitAll = new Uint16Array(cellCount);
+  const _cellBitAll = new Int16Array(cellCount);
+  const _pilotBitAll = new Int8Array(cellCount);
   const _signPol = new Int8Array(cellCount * rowSegments);
   for (let i = 0; i < cellCount; i++) {
-    _cellBitAll[i] = order[i] % codeLength;
+    const pilot = isSyncV5 && order[i] >= cellCount - STEGO_SYNC_PILOT_CELLS;
+    _cellBitAll[i] = pilot ? -1 : order[i] % codeLength;
+    _pilotBitAll[i] = order[i] & 1;
     const pol = polarity[i];
     const base = i * rowSegments;
     for (let segment = 0; segment < rowSegments; segment++) {
@@ -484,6 +558,10 @@ export function detectStegoFingerprint(rgba, w, h, {
       if ((s.cellScore[ci] >= 0) === !!hit.bits[s.cellBitIdx[ci]]) agreeing++;
     }
     const agreement = s.cellLen ? agreeing / s.cellLen : 0;
+    const sync = s.result.syncRegistration;
+    const syncOk = s.result.syncTemplateVersion !== 2 ||
+      (sync && sync.cells >= 10 && sync.agreement >= 0.70 && sync.meanSignal >= 1.5);
+    if (!syncOk) return null;
     const mismRate = hit.mismatches / Math.max(1, s.order.length - 64);
     const tierOk = mismRate <= 0.10 ||
       (mismRate <= 0.20 && s.meanAbs >= 2.0 && agreement >= 0.82) ||
@@ -499,7 +577,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       agreement: Math.round(agreement * 1000) / 1000,
       confidence: Math.round(Math.max(0, Math.min(0.99, 0.42 + evidence2)) * 1000) / 1000,
     };
-    delete deep._evidence; delete deep._originX; delete deep._originY;
+    delete deep._evidence; delete deep._syncEvidence; delete deep._originX; delete deep._originY;
     delete deep._scaleX; delete deep._scaleY;
     return deep;
   };
@@ -521,6 +599,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     const bitScores = _bitScores.fill(0);
     const bitCounts = _bitCounts.fill(0);
     let cellLen = 0;
+    let pilotCells = 0, pilotAgreements = 0, pilotSignedSum = 0;
     // Hoisted row/column geometry (see scratch note above): identical
     // rounding and skip predicates, evaluated gy+gx times per probe
     // instead of per cell.
@@ -634,6 +713,14 @@ export function detectStegoFingerprint(rgba, w, h, {
         // outvote five correctly-marked repetitions of the same code bit.
         const score = Math.max(-12, Math.min(12, rawScore));
         const bitIndex = _cellBitAll[cellIndex];
+        if (bitIndex < 0) {
+          const expectedPilotSign = _pilotBitAll[cellIndex] ? 1 : -1;
+          const signedPilotScore = score * expectedPilotSign;
+          pilotCells++;
+          pilotSignedSum += signedPilotScore;
+          if (signedPilotScore > 0) pilotAgreements++;
+          continue;
+        }
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         _cellBitIdx[cellLen] = bitIndex;
@@ -995,10 +1082,17 @@ export function detectStegoFingerprint(rgba, w, h, {
     }
     const agreement = cellLen ? agreeing / cellLen : 0;
     const meanAbs = meanAbsPre;
+    const syncMeanSignal = pilotCells ? pilotSignedSum / pilotCells : 0;
+    const syncAgreement = pilotCells ? pilotAgreements / pilotCells : 0;
+    const syncOk = !isSyncV5 || (pilotCells >= 10 && syncMeanSignal >= 1.5 && syncAgreement >= 0.70);
+    const syncRank = isSyncV5 && pilotCells >= 6
+      ? Math.max(0, syncMeanSignal) * syncAgreement * Math.min(1, pilotCells / 16)
+      : 0;
+    const syncEvidence = isSyncV5 ? Math.min(0.9, syncRank * 0.15) : 0;
     // Unmarked photos naturally show ~0.60–0.68 self-agreement (majority
     // vote bias) and weak mean signal; genuine marks sit far above both.
     const evidence = Math.max(0, agreement - 0.64) * 2.4 +
-      Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) -
+      Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) + syncEvidence -
       (isV4 ? (corrected._bchBudget || 0) / 6 : Math.max(0, corrected.corrections)) * 0.04;
     const confidence = crcValid
       ? Math.max(0, Math.min(0.99, 0.42 + evidence))
@@ -1075,13 +1169,19 @@ export function detectStegoFingerprint(rgba, w, h, {
         (bchBudget <= 24 && meanAbs >= 2.5 && agreement >= 0.82) ||
         (meanAbs >= 3.5 && agreement >= 0.88));
     const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 &&
-      cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk;
+      cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk && syncOk;
     const _result = {
       found,
       fingerprint,
       profile: effectiveProfile,
       tagScheme: corrected.tagScheme ?? null,
       layoutVersion: concreteLayout,
+      syncTemplateVersion: isSyncV5 ? 2 : null,
+      syncRegistration: isSyncV5 ? {
+        cells: pilotCells,
+        agreement: Math.round(syncAgreement * 1000) / 1000,
+        meanSignal: Math.round(syncMeanSignal * 100) / 100,
+      } : null,
       erasureDecoded: corrected.erasureDecoded === true,
       erasedBits: codeLength - observedBits,
       observedBits,
@@ -1107,6 +1207,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       },
       grid: { x: gx, y: gy },
       _evidence: evidence,
+      _syncEvidence: syncRank,
       _originX: ox,
       _originY: oy,
       _scaleX: scaleX,
@@ -1194,9 +1295,9 @@ export function detectStegoFingerprint(rgba, w, h, {
   // Uniform crop+resize changes the suspect-pixel size and origin of the
   // original macro-cell grid. Search a bounded set of retained-area scales
   // (80–125%) at left/center/right and top/center/bottom origins, then refine
-  // the strongest geometries by sub-cell offsets. This intentionally does
-  // NOT claim perspective/rotation recovery: a phone photo usually needs
-  // manual deskew/crop to the displayed rectangle before detection.
+  // the strongest geometries by sub-cell offsets. This is axis-aligned
+  // scale/origin registration; optional tilt and bounded keystone probes
+  // are separate stages, not an arbitrary quadrilateral homography.
   if (searchGeometry && !best?.found) {
     const scaleValues = [0.8, 0.85, 0.9, 0.95, 1, 1.05, 1 / 0.9, 1 / 0.85, 1.2, 1.25];
     // 3-decimal precision: rounding to 1 decimal (pre-1.13) silently
@@ -1287,10 +1388,176 @@ export function detectStegoFingerprint(rgba, w, h, {
       }
     }
 
+    // Layout v5's sync pilot is independent of payload bits, so use it to
+    // register asymmetric crops before spending BCH decode work. The pilot
+    // score evaluates only the reserved keyed cells and selects the best
+    // origin for each scale pair; full decoding is reserved for the leaders.
+    if (isSyncV5 && !best?.found) {
+      const syncCandidate = (scaleX, scaleY, originX, originY) => {
+        const cellW0 = cw * scaleX, cellH0 = ch * scaleY;
+        let count = 0, positive = 0, signedSum = 0;
+        for (const pilot of syncPilotCells) {
+          const { cell, cx, cy } = pilot;
+          const rawX0 = originX + cx * cellW0, rawY0 = originY + cy * cellH0;
+          const x0 = Math.max(0, Math.round(rawX0)), x1 = Math.min(w, Math.round(rawX0 + cellW0));
+          const y0 = Math.max(0, Math.round(rawY0)), y1 = Math.min(h, Math.round(rawY0 + cellH0));
+          if (x1 - x0 < 4 || y1 - y0 < 2 || (x1 - x0) / cellW0 < 0.45 || (y1 - y0) / cellH0 < 0.45) continue;
+          let n = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, responseSum = 0;
+          for (let segment = 0; segment < rowSegments; segment++) {
+            const ry0 = Math.max(y0, Math.round(rawY0 + segment * cellH0 / rowSegments));
+            const ry1 = Math.min(y1, Math.round(rawY0 + (segment + 1) * cellH0 / rowSegments));
+            if (ry1 <= ry0) continue;
+            const rx0 = Math.max(x0, Math.round(rawX0));
+            const rx1 = Math.min(x1, Math.round(rawX0 + cellW0 / columnBands));
+            const rx2 = Math.min(x1, Math.round(rawX0 + 2 * cellW0 / columnBands));
+            const rx3 = Math.min(x1, Math.round(rawX0 + 3 * cellW0 / columnBands));
+            const rx4 = Math.min(x1, Math.round(rawX0 + cellW0));
+            if (rx1 <= rx0 || rx2 <= rx1 || rx3 <= rx2 || rx4 <= rx3) continue;
+            const m0 = rectSum(rx0, ry0, rx1, ry1) / ((rx1 - rx0) * (ry1 - ry0));
+            const m1 = rectSum(rx1, ry0, rx2, ry1) / ((rx2 - rx1) * (ry1 - ry0));
+            const m2 = rectSum(rx2, ry0, rx3, ry1) / ((rx3 - rx2) * (ry1 - ry0));
+            const m3 = rectSum(rx3, ry0, rx4, ry1) / ((rx4 - rx3) * (ry1 - ry0));
+            const response = ((m0 - 3 * m1 + 3 * m2 - m3) / 8) * pilot.signs[segment];
+            if (n === 0) r0 = response; else if (n === 1) r1 = response; else if (n === 2) r2 = response; else r3 = response;
+            n++; responseSum += response;
+          }
+          if (n < 2) continue;
+          let value;
+          if (!robust) value = responseSum / n;
+          else if (n === 2) value = Math.max(r0, r1);
+          else if (n === 3) value = Math.max(Math.min(r0, r1), Math.min(Math.max(r0, r1), r2));
+          else {
+            const max01 = Math.max(r0, r1), min01 = Math.min(r0, r1);
+            const max23 = Math.max(r2, r3), min23 = Math.min(r2, r3);
+            value = Math.max(Math.min(max01, max23), Math.max(min01, min23));
+          }
+          value = Math.max(-12, Math.min(12, value));
+          const signed = value * pilot.bitSign;
+          count++; signedSum += signed; if (signed > 0) positive++;
+        }
+        const meanSignal = count ? signedSum / count : 0;
+        const agreement = count ? positive / count : 0;
+        const rank = count >= 6 ? meanSignal * agreement * Math.min(1, count / 16) : 0;
+        return { scaleX, scaleY, originX, originY, count, meanSignal, agreement, rank };
+      };
+      if (_denseSyncSearch) {
+      // A coarse origin lattice is inadequate when the keyed pilot peak is
+      // only a few pixels wide. Probe pixel origins along likely source/crop
+      // aspect ratios, then subpixel-refine the strongest registrations.
+      const cropAspect = w / h;
+      const commonAspects = [
+        cropAspect, 0.5, 0.5625, 2 / 3, 0.75, 0.8, 1, 1.25, 4 / 3,
+        1.5, 1.52, 1.6, 16 / 9, 2, 2.4,
+      ].map((value) => Math.round(value * 1000) / 1000);
+      const nearestAspects = [...new Set(commonAspects)]
+        .sort((a, b) => Math.abs(Math.log(a / cropAspect)) - Math.abs(Math.log(b / cropAspect)))
+        .slice(0, 6);
+      const sourceAspectPriors = [...new Set([
+        ...nearestAspects, 1.5, 1.52, ...(cropAspect < 1 ? [2] : []),
+      ])];
+      let denseFound = false;
+      for (const sourceAspect of sourceAspectPriors) {
+        const denseRatio = sourceAspect / cropAspect;
+        const denseCandidates = [];
+        for (let scaleY = 0.9; scaleY <= 1.6001; scaleY += 0.025) {
+          const sy = Math.round(scaleY * 1000) / 1000, sx = denseRatio * sy;
+          if (sx < 0.75 || sx > 1.8) continue;
+          const rx = originRange(gx * cw * sx, w), ry = originRange(gy * ch * sy, h);
+          let winner = null;
+          for (let ox = Math.ceil(rx.min); ox <= rx.max; ox += 2) {
+            for (let oy = Math.ceil(ry.min); oy <= ry.max; oy += 2) {
+              const hit = syncCandidate(sx, sy, ox, oy);
+              if (!winner || hit.rank > winner.rank) winner = hit;
+            }
+            if (deadlineHit()) throw STEGO_TIMEOUT;
+          }
+          if (winner?.rank > 0) denseCandidates.push(winner);
+        }
+        denseCandidates.sort((a, b) => b.rank - a.rank);
+        const denseRefined = [];
+        for (const seed of denseCandidates.slice(0, 16)) {
+          let winner = null;
+          for (const fxScale of [0.99, 1, 1.01]) for (const fyScale of [0.99, 1, 1.01]) {
+            for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) {
+              const hit = syncCandidate(seed.scaleX * fxScale, seed.scaleY * fyScale,
+                seed.originX + dx, seed.originY + dy);
+              if (!winner || hit.rank > winner.rank) winner = hit;
+            }
+          }
+          if (winner?.rank > 0) denseRefined.push(winner);
+          if (deadlineHit()) throw STEGO_TIMEOUT;
+        }
+        denseRefined.sort((a, b) => b.rank - a.rank);
+        for (const candidate of denseRefined) {
+          const hit = consider(evaluate(candidate));
+          scaleCandidates.push(hit);
+          if (hit.found) { denseFound = true; break; }
+        }
+        if (denseFound) break;
+      }
+      if (best?.found) {
+        delete best._evidence; delete best._syncEvidence; delete best._originX; delete best._originY;
+        delete best._scaleX; delete best._scaleY;
+        return best;
+      }
+      }
+      const scales = [];
+      for (let scale = 0.75; scale <= 1.8001; scale += 0.05) scales.push(Math.round(scale * 1000) / 1000);
+      const offsetFractions = Array.from({ length: 17 }, (_, i) => i / 16);
+      const pilotLeaders = [];
+      for (const scaleX of scales) {
+        if (deadlineHit()) throw STEGO_TIMEOUT;
+        const rangeX = originRange(gx * cw * scaleX, w);
+        for (const scaleY of scales) {
+          const rangeY = originRange(gy * ch * scaleY, h);
+          let bestPilot = null;
+          for (const fx of offsetFractions) for (const fy of offsetFractions) {
+            const candidate = syncCandidate(scaleX, scaleY,
+              rangeX.min + (rangeX.max - rangeX.min) * fx,
+              rangeY.min + (rangeY.max - rangeY.min) * fy);
+            if (!bestPilot || candidate.rank > bestPilot.rank) bestPilot = candidate;
+          }
+          if (bestPilot?.rank > 0) pilotLeaders.push(bestPilot);
+        }
+      }
+      pilotLeaders.sort((a, b) => b.rank - a.rank);
+      // Pilot evidence is broad enough to select a coarse basin but can
+      // mis-rank a 1–2% scale error. Refine the keyed correlation itself
+      // around each leader (including sub-cell origin offsets) before
+      // spending the BCH decoder on candidates. Registration offsets are
+      // intrinsic to this v5 search and do not depend on the legacy
+      // `searchOffsets` toggle.
+      const registrationOffsets = [-0.25, -0.125, 0, 0.125, 0.25];
+      const locallyRefined = [];
+      for (let leaderIndex = 0; leaderIndex < pilotLeaders.length; leaderIndex++) {
+        if ((leaderIndex & 15) === 0 && deadlineHit()) throw STEGO_TIMEOUT;
+        const candidate = pilotLeaders[leaderIndex];
+        let localBest = null;
+        for (const fxScale of [0.985, 1, 1.015]) for (const fyScale of [0.985, 1, 1.015]) {
+          const scaleX = candidate.scaleX * fxScale, scaleY = candidate.scaleY * fyScale;
+          for (const fx of registrationOffsets) for (const fy of registrationOffsets) {
+            const shifted = syncCandidate(scaleX, scaleY,
+              candidate.originX + (gx * cw * (candidate.scaleX - scaleX)) / 2 + fx * cw * scaleX,
+              candidate.originY + (gy * ch * (candidate.scaleY - scaleY)) / 2 + fy * ch * scaleY);
+            if (!localBest || shifted.rank > localBest.rank) localBest = shifted;
+          }
+        }
+        if (localBest?.rank > 0) locallyRefined.push(localBest);
+      }
+      locallyRefined.sort((a, b) => b.rank - a.rank);
+      const chosen = locallyRefined.slice(0, 24);
+      for (const candidate of chosen) {
+        const full = consider(evaluate(candidate));
+        scaleCandidates.push(full);
+        if (full.found) break;
+      }
+    }
+
     // Then try edge/center origins for the strongest scale pairs.
     const originCandidates = [];
     const seenPairs = new Set();
-    for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
+    for (const candidate of scaleCandidates.sort((a, b) =>
+      isSyncV5 ? b._syncEvidence - a._syncEvidence : b._evidence - a._evidence)) {
       const key = `${Math.round(candidate._scaleX * 1000)}:${Math.round(candidate._scaleY * 1000)}`;
       if (seenPairs.has(key)) continue;
       seenPairs.add(key);
@@ -1316,19 +1583,20 @@ export function detectStegoFingerprint(rgba, w, h, {
           })));
         }
       }
-      if (seenPairs.size >= 4) break;
+      if (seenPairs.size >= (isSyncV5 ? 24 : 4)) break;
     }
 
     // Finally refine the best three geometries by sub-cell offsets.
     const refinements = [];
     const seenGeometries = new Set();
-    for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
+    for (const candidate of originCandidates.sort((a, b) =>
+      isSyncV5 ? b._syncEvidence - a._syncEvidence : b._evidence - a._evidence)) {
       const key = `${Math.round(candidate._scaleX * 1000)}:${Math.round(candidate._scaleY * 1000)}:` +
         `${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
       if (seenGeometries.has(key)) continue;
       seenGeometries.add(key);
       refinements.push(candidate);
-      if (refinements.length >= 3) break;
+      if (refinements.length >= (isSyncV5 ? 12 : 3)) break;
     }
     for (const coarseCandidate of refinements) {
       for (const fx of fractions) for (const fy of fractions) {
@@ -1349,7 +1617,7 @@ export function detectStegoFingerprint(rgba, w, h, {
     // re-centering the origin so the grid center stays anchored.
     if (!best?.found) {
       const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
-      const leaders = refinements.slice(0, 2);
+      const leaders = refinements.slice(0, isSyncV5 ? 8 : 2);
       for (const leader of leaders) {
         for (const fxScale of [1, ...fineFactors]) {
           for (const fyScale of [1, ...fineFactors]) {
@@ -1469,6 +1737,7 @@ export function detectStegoFingerprint(rgba, w, h, {
 
   if (best) {
     delete best._evidence;
+    delete best._syncEvidence;
     delete best._originX;
     delete best._originY;
     delete best._scaleX;
@@ -1641,6 +1910,7 @@ export function detectStegoFingerprint(rgba, w, h, {
       } catch { /* forensic escalation is best-effort */ }
     }
     delete best._evidence;
+    delete best._syncEvidence;
     delete best._originX;
     delete best._originY;
     delete best._scaleX;

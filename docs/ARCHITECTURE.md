@@ -18,7 +18,7 @@ surface`) pins `types/*.d.ts` to the real export surface.
 | `sniff.js` | Image/container byte sniffing, dimension extraction |
 | `container.js` | `.archx` container encode/decode (header + AES-GCM payload) |
 | `forensic.js` | Forensic block-sign marks and scoring |
-| `bch.js` | BCH(188,64) error-correcting code math for stego layout 4 |
+| `bch.js` | BCH(188,64) error-correcting code math for stego layouts 4/5 |
 | `stego-code.js` | StegoMark codeword layout, syndromes, tag math |
 | `pixels.js` | Luma planes, integral images, rotate/mirror/downscale primitives |
 | `stego-embed.js` | StegoMark embedding |
@@ -41,7 +41,9 @@ identity, so scratch reuse there is a correctness bug (found in v1.19).
 | `options.js` | `DEFAULTS`, profiles/presets, global config, page session ids |
 | `registry.js` | Live instance set + host→instance weak map |
 | `events.js` | Sanitized plugin event bus |
-| `temporal.js` | Temporal interlace profiles + renderer |
+| `temporal.js` | Temporal interlace profiles, phase scheduler, shared limiter |
+| `temporal-frames.js` | CPU-backed temporal frame construction from clean pixels |
+| `shaders.js` | WebGL vertex/fragment shader sources, separate from viewer lifecycle |
 | `bitmap-cache.js` | Decoded-bitmap LRU bounds |
 | `observers.js` | Shared visibility/resize observers, global guards, devtools watcher, WebGL slot budget |
 | `sampling.js` | Canonical widths, DPR/connection-aware sampling |
@@ -66,8 +68,10 @@ resolved at call time, not module-eval time).
 | `middleware.js` | `createArchxMiddleware` factory (request handling closure) + the `./server` re-export surface |
 | `bounded.js` | `SlidingWindowLimiter`, `BoundedTtlSet`, `AsyncSemaphore`, distinct-access tracking, memory state store |
 | `tokens.js` | HMAC token sign/verify, strict claim validation, proof-of-possession, stego derivation |
+| `signing-keyring.js` | Active signing-key state and scheduled activation/retirement |
 | `config.js` | Strict config inspection/normalization, production audits, width/ID/path rules |
-| `scramble-image.js` | Sharp pipeline (lazy libvips), derivative generation, detect worker pool |
+| `scramble-image.js` | Sharp pipeline (lazy libvips), protected derivative generation, detect worker pool |
+| `seo-preview.js` | Low-resolution watermarked preview transformation for explicitly verified crawlers |
 | `ownership.js` | Ed25519 ownership claims, EXIF/XMP embedding, layered rescan |
 | `issuance-log.js` | HMAC-chained tamper-evident issuance records |
 | `redis-state-store.js` | Shared state store for multi-instance deployments |
@@ -83,14 +87,16 @@ closure consumes a frozen config and never re-reads host options.
 `middleware.js` re-exports every documented `./server` name so hosts and
 tests keep one import path.
 
-## Deliberately not split further
+## Decomposition boundary
 
-`ProtectedImage` (`src/client/viewer.js`, ~2.9k lines) and the middleware
-factory (`server/middleware.js`, ~2.5k lines) are single cohesive
-units — one class, one closure — whose internals share lifecycle state
-by design. Splitting them further would trade that cohesion for
-accessor plumbing; if either grows a genuinely separable concern
-(e.g. a standalone zoom controller), split that concern out then.
+The viewer remains the `ProtectedImage` lifecycle/state machine, while
+its separately testable temporal-frame builder and WebGL shader sources
+live in `temporal-frames.js` and `shaders.js`. The server middleware still
+owns request authorization and response policy, but scheduled keyring state
+and the crawler-preview transformation are isolated in `signing-keyring.js`
+and `seo-preview.js`. Avoid moving private state or route policy merely to
+reduce line counts; split additional code when it has a stable contract and
+can be tested independently.
 
 ## Refactor guardrails (learned during the v1.19 split)
 

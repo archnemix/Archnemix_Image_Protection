@@ -5,7 +5,7 @@
  * (soft per-cell ranking of candidate recipients against a suspect
  * copy). Detection/attribution itself lives in stego-detect.js.
  */
-import { STEGO_ROW_SEGMENTS, bchStegoCodeBits, robustStegoCodeBits, robustStegoLayout, stegoCodeBits, stegoFingerprint, stegoGrid, stegoLayout } from './stego-code.js';
+import { STEGO_ROW_SEGMENTS, STEGO_SYNC_PILOT_CELLS, bchStegoCodeBits, robustStegoCodeBits, robustStegoLayout, stegoCodeBits, stegoFingerprint, stegoGrid, stegoLayout } from './stego-code.js';
 import { buildLumaIntegral } from './pixels.js';
 import { embedStegoFingerprint } from './stego-embed.js';
 import { detectStegoFingerprint } from './stego-detect.js';
@@ -92,9 +92,10 @@ export function assayStegoEmbed(rgba, w, h, {
     recommendedStrength: strength,
     warnings: [],
   };
-  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
-  if (gx * gy < codeBits) {
-    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size — use a larger delivery size`);
+  const codeBits = layoutVersion === 4 || layoutVersion === 5 ? 188 : robust ? 96 : 64;
+  const requiredCells = codeBits + (layoutVersion === 5 ? STEGO_SYNC_PILOT_CELLS : 0);
+  if (gx * gy < requiredCells) {
+    result.warnings.push(`grid has only ${gx * gy} cells; layout ${layoutVersion} needs at least ${requiredCells} data/pilot cells — use a larger delivery size`);
   }
   if (result.contentClass === 'binary-graphic') {
     result.warnings.push('near-binary high-contrast content (UI/text/periodic graphics) is StegoMark\'s documented weak class; expect poor recovery without much higher strength');
@@ -149,8 +150,9 @@ export function assayStegoCollusion(rgba, w, h, candidates, {
     throw new Error('Archx stego assay: candidates must be an array of 1..4096 entries');
   }
   const robust = profile === 'robust';
-  const v4 = layoutVersion === 4;
-  const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3; // v4 reuses v3 seeds
+  const v4 = layoutVersion === 4 || layoutVersion === 5;
+  const syncV5 = layoutVersion === 5;
+  const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3; // v4/v5 reuse v3 seeds
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const effectiveGridX = gridX ?? (robust ? 20 : 24);
@@ -262,7 +264,8 @@ export function assayStegoCollusion(rgba, w, h, candidates, {
     let cells = 0, agree = 0;
     for (let cell = 0; cell < cellCount; cell++) {
       const reading = readings[cell];
-      if (!Number.isFinite(reading)) continue;
+      if (!Number.isFinite(reading) ||
+          (syncV5 && order[cell] >= cellCount - STEGO_SYNC_PILOT_CELLS)) continue;
       const bitIndex = order[cell] % bits.length;
       bitSum[bitIndex] += reading;
       bitCount[bitIndex]++;

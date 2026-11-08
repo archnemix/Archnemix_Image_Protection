@@ -142,9 +142,11 @@ Contract requirements:
    in-memory store makes the same trade-off explicit instead:
    `replaySaturation: 'evict' | 'strict'` plus live counters in
    `handler.stats().replaySets` and the `archx.replay_store_evicted`
-   event. **Decide this one deliberately** (v1.20): the library
-   default stays `'evict'` for availability, `withHardenedProductionDefaults`
-   now sets `'strict'`, and neither is "the secure one" in isolation:
+   event. **Decide this one deliberately** (v1.20): the general library
+   default stays `'evict'` for compatibility, `withHardenedProductionDefaults`
+   sets `'strict'`, and the production audit now blocks `'evict'` whenever
+   one-time tokens are enabled. Strict mode is required for the hardened
+   production baseline; the default is not a production recommendation:
 
    | Policy | When the store is full of live claims | Failure you accept |
    | --- | --- | --- |
@@ -253,23 +255,60 @@ forensic seeds, StegoMark fingerprints/keys, and cache partitioning.
 
 Normal rotation:
 
-1. Generate at least 32 random bytes in your secret manager/KMS. Never put
-   secrets in source control, images, logs, or client configuration.
-2. Deploy every instance with both old and new keys, initially leaving the
-   active ID on the old key. Confirm `handler.configAudit.summary` reports
-   the expected active ID and key count (the audit exposes IDs/counts only,
-   never values).
-3. Change `activeSecretId` to the new key on every instance. A mixed fleet
-   is safe during this step because all instances can verify both IDs.
-4. Wait at least the longest effective token lifetime (the server `ttlSec`
-   default or any per-authorization `ttlSec`, whichever is greater) plus the
-   clock-skew/retry allowance. A conservative minimum is that maximum + 300
-   seconds. Static investigations may
-   need an old StegoMark detector secret for much longer; retain it offline
-   in the evidence vault even after removing it from serving nodes.
-5. Remove the old key from every serving keyring and redeploy/restart.
-6. Record the rotation time, key IDs, operator, approval/change ticket, and
-   the time the old key was retired.
+The repository includes a rotation helper. It creates a fresh 256-bit
+secret and an executable UTC activation/retirement schedule. After importing
+the two secrets on every instance, pass the schedule to middleware as
+`signingKeySchedule`; the middleware switches the signing key at activation
+and drops the old key from verification at retirement on the first request
+boundary at or after each instant. It does not deploy secret material to your
+secret manager:
+
+```sh
+npm run key:rotation-plan -- --current-id signing-2026a --ttl-sec 900 \
+  --activate-at 2026-11-14T00:00:00Z --output /secure/archx-rotation.json
+```
+
+The output file is created exclusively with mode `0600` and contains secret
+material. Import the generated key into your secret manager, make it available
+to every serving instance as `secrets[newSecretId]`, then securely remove the
+local file. Never check it in, attach it to a ticket, or forward it in
+logs/chat. Supply the emitted `schedule` object as `signingKeySchedule`, with
+`activeSecretId` still set to `currentSecretId`. Every instance evaluates the
+same UTC timestamps on request boundaries; keep clocks synchronized. For
+example:
+
+```js
+createArchxMiddleware({
+  secrets: { [currentSecretId]: oldSecret, [newSecretId]: newSecret },
+  activeSecretId: currentSecretId,
+  signingKeySchedule: handoff.schedule,
+  // other production options…
+});
+```
+
+1. Stage old and new secrets on every instance and deploy the same schedule.
+   The runtime audit reports IDs/timestamps/counts only, never secret values.
+2. Before `activateAt`, tokens continue to use the old key. At the first mint
+   after `activateAt`, all nodes sign with `newSecretId`; the old key remains
+   verifiable during the grace window.
+3. At `retireAt` (which validation requires to be at least the API maximum
+   token TTL of 900 seconds plus grace after activation), the first request
+   on each node removes the old key from token verification and disk-cache tag
+   verification. Old tokens
+   then fail closed. Monitor each node's `handler.stats().activeSecretId` to
+   confirm activation; configure a release/runbook alert for nodes that do not
+   receive traffic around the timestamps.
+4. Record the rotation time, key IDs, operator, approval/change ticket, and
+   confirmation that all instances activated and retired as scheduled.
+   Static investigations may need an old StegoMark detector secret much
+   longer; retain that separately in the evidence vault, not on serving nodes.
+
+The middleware schedules transitions deterministically, but importing and
+staging secrets remains a secret-manager/deployment action. Test the exact
+schedule in staging and verify both activation and retirement before
+production rollout. If rollback is needed before retirement, redeploy a
+corrected schedule while both secrets remain present; after retirement, a
+retired key must be re-added explicitly before it can verify old tokens.
 
 For suspected compromise, remove the compromised key immediately. Existing
 tokens under it will fail and clients must mint fresh tokens, which is the

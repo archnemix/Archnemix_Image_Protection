@@ -21,7 +21,10 @@ import {
 import { createArchxMiddleware } from '../server/middleware.js';
 
 const MULT = Math.max(1, Number(process.env.ARCHX_FUZZ_MULTIPLIER) || 1);
-const rand = mulberry32(0xa8c4f00d);
+const FUZZ_SEED = Number.isSafeInteger(Number(process.env.ARCHX_FUZZ_SEED))
+  ? Number(process.env.ARCHX_FUZZ_SEED) >>> 0
+  : 0xa8c4f00d;
+const rand = mulberry32(FUZZ_SEED);
 const ri = (n) => Math.floor(rand() * n);
 const pick = (arr) => arr[ri(arr.length)];
 const isArchxError = (err) => err instanceof Error && /^Archx:/.test(err.message);

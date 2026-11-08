@@ -3863,3 +3863,37 @@ re-ran clean (gallery-100 ≈38.6 ms/image in this sandbox, heap
 efficiency-relevant fix is BUG-1: doomed watermark configurations
 now die at startup instead of burning a full Sharp pipeline per
 request on derivatives that could never render.
+
+## 2.38 Layout v5 pilot-registration experiment (v1.30)
+
+Layout 5 is opt-in and keeps the BCH(188,64) payload/MAC while
+reserving 32 keyed, spatially shuffled cells for a known pilot
+pattern. The registration search scores only those pilot cells on
+a bounded scale/origin lattice, then adds a pixel-origin scan
+conditioned on common source/crop aspect-ratio priors and refines the
+strongest registrations before BCH decoding. This avoids paying the
+full codeword decoder for every geometry candidate while recovering
+narrow alignment peaks that the coarse lattice can miss. It requires at least 220 macro-cells (188 data
+plus 32 pilots); layouts 1–4 are unchanged and layout 3 remains the
+embed default. The detector shares the caller's `maxTimeMs` budget
+and reports `syncTemplateVersion` and pilot evidence in the result.
+The more expensive aspect-prior pixel-origin stage is used when v5 is
+explicitly pinned, so generic auto-detection does not spend that budget
+on every legacy-layout probe.
+
+**Regression evidence only, not a corpus claim.** On the exact
+`syntheticMaster()` helper output at its default 320×240 size,
+robust layout 5 (strength 8) auto-detects a full-frame copy and
+recovers the asymmetric raw crop x=15..274, y=12..211 (260×200,
+about 68% of the original area retained). A wrong-key full-frame
+negative is also rejected. A new severe-crop test embeds a 640×420
+synthetic master and automatically recovers both a 420×330 crop
+(about 52% area retained) and a 360×420 one-axis crop. Dense
+registration uses pixel-origin scoring at likely source/crop aspect
+ratios, then validates candidates through the keyed BCH payload/MAC;
+this is recovery for those fixtures, not a guarantee for arbitrary
+source aspect ratios or photo processing. These are synthetic tests,
+not photo measurements, not a false-positive-rate estimate, and not
+evidence for fragments. Layout 5 remains experimental; do not
+claim general crop recovery or change the default without a separate
+photo/graphic corpus, negative-control, quality, and runtime bench.
