@@ -20,10 +20,15 @@ const code = await new Promise((resolve, reject) => {
   child.once('close', (exitCode, signal) => resolve(exitCode ?? (signal ? 1 : 0)));
 });
 if (code !== 0) {
-  const failureLines = output.split(/\r?\n/).filter((line) =>
-    /^not ok \d+ - |^\s{2}(?:error|code|name|failureType):|^\s{4,}at /.test(line));
-  if (failureLines.length) {
-    const message = failureLines.slice(-40).join('\n').slice(-5000)
+  const lines = output.split(/\r?\n/);
+  const failureIndexes = lines.flatMap((line, i) => /^not ok \d+ - /.test(line) ? [i] : []);
+  const failureBlocks = failureIndexes.map((start, index) => {
+    const next = failureIndexes[index + 1] ?? lines.length;
+    const end = lines.slice(start + 1, next).findIndex((line) => /^# Subtest: /.test(line));
+    return lines.slice(start, end < 0 ? next : start + 1 + end).join('\n');
+  });
+  if (failureBlocks.length) {
+    const message = failureBlocks.join('\n---\n').slice(-8000)
       .replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
     process.stdout.write(`::error title=Node test failure details::${message}\n`);
   }
