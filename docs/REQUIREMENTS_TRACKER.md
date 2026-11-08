@@ -72,9 +72,9 @@ Status meanings: **Complete** = acceptance criterion is implemented and supporte
 
 ## Validation evidence
 
-- `npm run test:all`: passed end-to-end after the final implementation, including production build, 168 total Node tests (161 unit/integration plus seven seeded fuzz tests), and all 129 real-Chromium checks.
+- `npm run test:all`: passed end-to-end after the final implementation, including production build, 167 total Node tests (160 unit/integration plus seven seeded fuzz tests), and all 129 real-Chromium checks.
 - `npm run test:pack`: passed from a clean install of the packed tarball; verified source-map/repository-script exclusion, imports, workers, CLI bins, SRI, and TypeScript imports. The tracker is excluded from npm packaging.
-- `npm run lint`, `npm run docs:check`, `npm run types:check`, and `npm run test:types`: passed. Docs check confirms version 1.30.1, 168 Node tests, 129 browser checks, and docs/website/code agreement.
+- `npm run lint`, `npm run docs:check`, `npm run types:check`, and `npm run test:types`: passed. Docs check confirms version 1.30.1, 167 Node tests, 129 browser checks, and docs/website/code agreement.
 - `npm run size:browser`: 156,672 bytes (153.0 KiB) minified; 51,722 bytes (50.5 KiB) gzip level 9 via pinned `fflate`, below the 53,248-byte cap.
 - `npm audit --audit-level=high`: passed with 0 vulnerabilities.
 - Focused tests for B1 crop corpus, B2 affine deskew/perspective, C4 chunked reference transport, C5 token transport integration, and signing-key rotation passed. Synthetic-only scope limitations are stated in the corresponding rows.

@@ -855,7 +855,7 @@ Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 npm run lint        # node --check over every shipped/test source file
 npm run docs:check  # version/test-count/enums/exports/bundle-size/SRI agreement across docs, website, and code
 npm run size:browser # pinned fflate gzip-level-9 measurement; 52 KiB budget gate
-npm test            # 161 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 160 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,

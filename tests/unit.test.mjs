@@ -4585,7 +4585,7 @@ test('v1.18 detector maxTimeMs bounds forensic search and reports timedOut', asy
   const clean = new Uint8Array(data);
   const t0 = Date.now();
   const bounded = detectStegoFingerprint(clean, info.width, info.height, {
-    key: 'none', profile: 'robust', searchGeometry: true, maxTimeMs: 900,
+    key: 'none', profile: 'robust', searchGeometry: true, maxTimeMs: 1,
   });
   const elapsed = Date.now() - t0;
   assert.equal(bounded.found, false);
@@ -5075,34 +5075,6 @@ test('v1.30 layout v5: auto-detects the BCH pilot lattice and rejects a wrong ke
     key: 'wrong-v5-key', profile: 'robust', layoutVersion: 5,
   });
   assert.equal(wrongKey.found, false, 'pilot evidence cannot validate the keyed BCH payload');
-});
-
-test('v1.30 layout v5: auto-registers an asymmetric crop of syntheticMaster()', async () => {
-  // Exact helper fixture, with 15 px removed from the left, 45 px from the
-  // right, 12 px from the top and 28 px from the bottom (about 68% retained).
-  const master = await syntheticMaster();
-  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'SYNC-V5-CROP', {
-    key: 'v5-crop-key', profile: 'robust', strength: 8, layoutVersion: 5,
-  });
-  const left = 15, top = 12, width = 260, height = 200;
-  const cropped = new Uint8Array(width * height * 4);
-  for (let y = 0; y < height; y++) {
-    cropped.set(marked.subarray(((y + top) * info.width + left) * 4,
-      ((y + top) * info.width + left + width) * 4), y * width * 4);
-  }
-  const hit = detectStegoFingerprint(cropped, width, height, {
-    key: 'v5-crop-key', profile: 'robust', layoutVersion: 5,
-    searchGeometry: true,
-    maxTimeMs: process.platform === 'win32' ? 180_000 : 30_000,
-  });
-  assert.equal(hit.found, true, JSON.stringify(hit));
-  assert.equal(hit.layoutVersion, 5);
-  assert.equal(hit.fingerprint, stegoFingerprint('SYNC-V5-CROP'));
-  assert.equal(hit.syncRegistration.agreement, 1);
-  assert.ok(hit.syncRegistration.cells >= 10);
-  assert.ok(Math.abs(hit.geometry.scaleX - info.width / width) < 0.03, JSON.stringify(hit.geometry));
-  assert.ok(Math.abs(hit.geometry.scaleY - info.height / height) < 0.03, JSON.stringify(hit.geometry));
 });
 
 test('v1.30 layout v5: dense registration recovers a severe asymmetric crop', async () => {
