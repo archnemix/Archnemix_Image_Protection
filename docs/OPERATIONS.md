@@ -452,7 +452,7 @@ replay test are the verification.
 | `eventId` | Random UUID for deduplication/correlation |
 | `service` | Always `archx` |
 | `severity` | `notice`, `warning`, or `error` |
-| `outcome` | `denied`, `detected`, or `error` |
+| `outcome` | `denied`, `detected`, `completed`, or `error` |
 | `type` | Existing event type, such as `archx.denied` |
 | `at` | ISO-8601 UTC timestamp |
 | `imageId` / `id` | Validated image ID when available |
@@ -463,6 +463,14 @@ replay test are the verification.
 | `request.method` | HTTP method |
 | `request.route` | Route template; no token or query string |
 | `reason` | Bounded internal reason such as `token-replay` |
+| `keyId` / `previousKeyId` / `activeKeyId` | Key IDs only on scheduled signing-key lifecycle events; never secret values |
+
+Scheduled key rotation emits `archx.signing_key_activated` and
+`archx.signing_key_retired` once per transition through `onSecurityEvent`, with
+`outcome: completed`. Events contain key IDs only. They are emitted when a
+request boundary first observes the configured UTC transition, so each
+instance reports its own transition; deploy a shared schedule to all instances
+and monitor that every instance reports activation and retirement.
 
 Step-up challenges (v1.19) emit `archx.challenge_required` (403,
 `reason: challenge-required`) and `archx.challenge_passed` events in the

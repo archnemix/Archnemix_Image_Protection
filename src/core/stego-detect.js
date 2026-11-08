@@ -239,19 +239,30 @@ export function detectStegoFingerprint(rgba, w, h, {
     const consider = (attempt) => {
       if (attempt && (!best || (attempt.confidence ?? 0) > (best.confidence ?? 0))) best = attempt;
     };
-    for (const version of order) {
+    for (let i = 0; i < order.length; i++) {
+      const version = order[i];
       if (version === 5) {
         const isRobustGrid = profile === 'robust';
         const { gx, gy } = stegoGrid(w, h,
           gridX ?? (isRobustGrid ? 20 : 24), gridY ?? (isRobustGrid ? 14 : 16));
         if (gx * gy < STEGO_V4_CODE_BITS + STEGO_SYNC_PILOT_CELLS) continue;
       }
+      // Give each native layout screen a fair slice. A slow miss in the
+      // first layout must not consume the deadline before a later native
+      // layout can return an immediate hit. A slice timeout is local; only
+      // the top-level deadline ends the native phase.
+      let nativeDeadline = deadline;
+      if (deadline > 0) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        nativeDeadline = Math.min(deadline, Date.now() + Math.max(1, Math.ceil(remainingMs / (order.length - i))));
+      }
       const attempt = detectStegoFingerprint(srcTop, w, h, {
-        ...shared, searchGeometry: false, searchTilt: false, _layoutVersion: version, _deadline: deadline,
+        ...shared, searchGeometry: false, searchTilt: false, _layoutVersion: version, _deadline: nativeDeadline,
       });
       if (attempt?.found) return attempt;
       consider(attempt);
-      if (attempt?.timedOut || deadlineHit()) {
+      if (deadlineHit()) {
         if (best && !best.timedOut) best = { ...best, timedOut: true };
         return best;
       }

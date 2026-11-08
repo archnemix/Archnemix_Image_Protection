@@ -3,7 +3,7 @@
  * refreshSigningKey at request/mint boundaries so every instance observes
  * the same configured UTC transition without relying on process timers.
  */
-export function createSigningKeyring({ signingKeys: configuredKeys, activeSecretId, schedule }) {
+export function createSigningKeyring({ signingKeys: configuredKeys, activeSecretId, schedule, onTransition }) {
   const signingKeys = { ...configuredKeys };
   let activeId = activeSecretId;
   let activeSecret = signingKeys[activeId];
@@ -11,14 +11,20 @@ export function createSigningKeyring({ signingKeys: configuredKeys, activeSecret
 
   const refreshSigningKey = (now = Date.now()) => {
     if (!schedule) return;
-    if (now >= schedule.activateAtMs) {
+    if (now >= schedule.activateAtMs && activeId !== schedule.activateSecretId) {
+      const previousSecretId = activeId;
       activeId = schedule.activateSecretId;
       activeSecret = signingKeys[activeId];
+      try { onTransition?.('archx.signing_key_activated', { keyId: activeId, previousKeyId: previousSecretId }); }
+      catch { /* monitoring must not affect key activation */ }
     }
     if (now >= schedule.retireAtMs && schedule.retireSecretId !== activeId &&
         Object.hasOwn(signingKeys, schedule.retireSecretId)) {
-      delete signingKeys[schedule.retireSecretId];
+      const retiredSecretId = schedule.retireSecretId;
+      delete signingKeys[retiredSecretId];
       cacheTagKeys = Object.values(signingKeys).slice(0, 16);
+      try { onTransition?.('archx.signing_key_retired', { keyId: retiredSecretId, activeKeyId: activeId }); }
+      catch { /* monitoring must not affect key retirement */ }
     }
   };
 
