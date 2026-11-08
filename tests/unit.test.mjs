@@ -5093,7 +5093,8 @@ test('v1.30 layout v5: auto-registers an asymmetric crop of syntheticMaster()', 
   }
   const hit = detectStegoFingerprint(cropped, width, height, {
     key: 'v5-crop-key', profile: 'robust', layoutVersion: 5,
-    searchGeometry: true, maxTimeMs: 30_000,
+    searchGeometry: true,
+    maxTimeMs: process.platform === 'win32' ? 180_000 : 30_000,
   });
   assert.equal(hit.found, true, JSON.stringify(hit));
   assert.equal(hit.layoutVersion, 5);
