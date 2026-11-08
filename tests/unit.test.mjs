@@ -1886,9 +1886,11 @@ test('scheduled signing rotation activates and retires key IDs on request bounda
   const now = Date.now();
   const activateAt = new Date(now - 30 * 60_000).toISOString();
   const retireAt = new Date(now - 10 * 60_000).toISOString();
+  const rotationEvents = [];
   const scheduled = createArchxMiddleware({
     secrets: { old: oldSecret, next: newSecret },
     activeSecretId: 'old', ttlSec: 120, imagesDir: dir,
+    onSecurityEvent: (event) => rotationEvents.push(event),
     authorize: async () => ({ viewerId: 'rotation-viewer' }),
     signingKeySchedule: {
       activateSecretId: 'next', activateAt, retireSecretId: 'old', retireAt, graceSec: 60,
@@ -1915,6 +1917,18 @@ test('scheduled signing rotation activates and retires key IDs on request bounda
 
   assert.equal(scheduled.stats().activeSecretId, 'next');
   assert.equal(scheduled.stats().signingKeyCount, 1, 'retirement drops old key from the live keyring');
+  const activatedEvent = rotationEvents.find((event) => event.type === 'archx.signing_key_activated');
+  const retiredEvent = rotationEvents.find((event) => event.type === 'archx.signing_key_retired');
+  assert.equal(activatedEvent.outcome, 'completed');
+  assert.equal(activatedEvent.keyId, 'next');
+  assert.equal(activatedEvent.previousKeyId, 'old');
+  assert.equal(retiredEvent.outcome, 'completed');
+  assert.equal(retiredEvent.keyId, 'old');
+  assert.equal(retiredEvent.activeKeyId, 'next');
+  assert.equal(JSON.stringify(rotationEvents).includes(oldSecret), false);
+  assert.equal(JSON.stringify(rotationEvents).includes(newSecret), false);
+  assert.equal(rotationEvents.filter((event) => event.type === 'archx.signing_key_retired').length, 1,
+    'retirement event is emitted exactly once');
   assert.equal(scheduled.configAudit.summary.signingKeySchedule.activateSecretId, 'next');
   const fresh = await (await postToken(scheduledBase + '/archx/token/cat?w=160')).json();
   assert.equal(tokenPayloadForTest(fresh.token).kid, 'next');

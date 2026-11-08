@@ -2268,7 +2268,8 @@ function detectStegoFingerprint(rgba, w, h, {
     const consider2 = (attempt) => {
       if (attempt && (!best2 || (attempt.confidence ?? 0) > (best2.confidence ?? 0))) best2 = attempt;
     };
-    for (const version of order2) {
+    for (let i = 0; i < order2.length; i++) {
+      const version = order2[i];
       if (version === 5) {
         const isRobustGrid = profile === "robust";
         const { gx: gx2, gy: gy2 } = stegoGrid(
@@ -2279,16 +2280,22 @@ function detectStegoFingerprint(rgba, w, h, {
         );
         if (gx2 * gy2 < STEGO_V4_CODE_BITS + STEGO_SYNC_PILOT_CELLS) continue;
       }
+      let nativeDeadline = deadline;
+      if (deadline > 0) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        nativeDeadline = Math.min(deadline, Date.now() + Math.max(1, Math.ceil(remainingMs / (order2.length - i))));
+      }
       const attempt = detectStegoFingerprint(srcTop, w, h, {
         ...shared,
         searchGeometry: false,
         searchTilt: false,
         _layoutVersion: version,
-        _deadline: deadline
+        _deadline: nativeDeadline
       });
       if (attempt?.found) return attempt;
       consider2(attempt);
-      if (attempt?.timedOut || deadlineHit()) {
+      if (deadlineHit()) {
         if (best2 && !best2.timedOut) best2 = { ...best2, timedOut: true };
         return best2;
       }

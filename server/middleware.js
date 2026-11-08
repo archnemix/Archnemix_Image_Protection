@@ -82,6 +82,7 @@ export function createArchxMiddleware(options = {}) {
     signingKeys: cfg.signingKeys,
     activeSecretId: cfg.activeSecretId,
     schedule: cfg.signingKeySchedule,
+    onTransition: (type, details) => emitSecurityEvent(type, null, details),
   });
   const { signingKeys } = signingKeyring;
   const refreshSigningKey = signingKeyring.refreshSigningKey;
@@ -871,9 +872,11 @@ export function createArchxMiddleware(options = {}) {
         : 'notice';
     const outcome = type === 'archx.suspicious_scraping'
       ? 'detected'
-      : severity === 'error'
-        ? 'error'
-        : 'denied';
+      : type === 'archx.signing_key_activated' || type === 'archx.signing_key_retired'
+        ? 'completed'
+        : severity === 'error'
+          ? 'error'
+          : 'denied';
     const event = Object.freeze({
       // Versioned, SIEM-friendly fields. The original top-level fields remain
       // for backwards compatibility; `actor`/`request` are the structured
@@ -900,6 +903,9 @@ export function createArchxMiddleware(options = {}) {
         route: phase ? `${basePath}/${phase === 'token' ? 'token' : phase === 'seo' ? 'seo' : 'i'}/:id` : null,
       }),
       reason: details.reason || null,
+      keyId: details.keyId || null,
+      previousKeyId: details.previousKeyId || null,
+      activeKeyId: details.activeKeyId || null,
     });
     try {
       const result = onSecurityEvent(event);

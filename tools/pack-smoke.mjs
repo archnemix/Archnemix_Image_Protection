@@ -62,6 +62,9 @@ step('npm pack', () => {
     throw new Error(`npm artifact still exposes repository-only scripts: ${Object.keys(packedManifest.scripts).join(', ')}`);
   }
   const names = meta[0].files.map((f) => f.path);
+  if (names.includes('docs/REQUIREMENTS_TRACKER.md')) {
+    throw new Error('workspace-only requirements tracker must not be included in the published npm artifact');
+  }
   if (names.some((name) => name.endsWith('.map'))) {
     throw new Error('npm artifact contains large source maps; rebuild with external maps and exclude them from "files"');
   }
