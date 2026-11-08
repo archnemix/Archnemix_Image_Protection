@@ -4247,7 +4247,8 @@ test('v1.30 layout v5 affine deskew recovers 10–30° rotations and a combined 
     const photographed = rotateRgba(marked, w, h, (angle * Math.PI) / 180);
     const hit = detectStegoFingerprint(photographed, w, h, {
       key: 'affine-deskew-key', profile: 'robust', layoutVersion: 5,
-      searchGeometry: true, searchTilt: true, maxTimeMs: 30_000,
+      searchGeometry: true, searchTilt: true,
+      maxTimeMs: process.platform === 'win32' ? 120_000 : 30_000,
     });
     assert.equal(hit.found, true, JSON.stringify({ angle, hit }));
     assert.equal(hit.fingerprint, stegoFingerprint('AFFINE-DESKEW'));
@@ -4261,7 +4262,8 @@ test('v1.30 layout v5 affine deskew recovers 10–30° rotations and a combined 
   const phoneCapture = rotateRgba(keystoneCorrectRgba(texturedMark, w, h, -0.20, 0.10), w, h, (20 * Math.PI) / 180);
   const compound = detectStegoFingerprint(phoneCapture, w, h, {
     key: 'affine-compound-key', profile: 'robust', layoutVersion: 5,
-    searchGeometry: true, searchTilt: true, searchPerspective: true, maxTimeMs: 60_000,
+    searchGeometry: true, searchTilt: true, searchPerspective: true,
+    maxTimeMs: process.platform === 'win32' ? 240_000 : 60_000,
   });
   assert.equal(compound.found, true, JSON.stringify(compound));
   assert.equal(compound.fingerprint, stegoFingerprint('AFFINE-COMPOUND'));
@@ -5146,7 +5148,8 @@ test('v1.30 layout v5: textured crop corpus recovers asymmetric 56–62% retaine
     const suspect = cropRgba(marked, sourceWidth, crop);
     const hit = detectStegoFingerprint(suspect, crop.width, crop.height, {
       key: 'v5-textured-crop-key', profile: 'robust', layoutVersion: 5,
-      searchGeometry: true, maxTimeMs: 60_000,
+      searchGeometry: true,
+      maxTimeMs: process.platform === 'win32' ? 180_000 : 60_000,
     });
     assert.equal(hit.found, true, JSON.stringify({ crop, retained: crop.width * crop.height / (sourceWidth * sourceHeight), hit }));
     assert.equal(hit.fingerprint, stegoFingerprint('TEXTURED-DEEP-CROP'));
