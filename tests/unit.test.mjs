@@ -4352,12 +4352,17 @@ test('v1.17 detect worker: batch screening, queue cap, config validation', async
   assert.throws(() => configureStegoDetectWorker({ maxPending: 0 }), /maxPending/);
   const cfg = configureStegoDetectWorker({ maxPending: 1 });
   assert.equal(cfg.maxPending, 1);
-  const slow = detectStegoFingerprintInWorker(base, w, h, { key: 'none', profile: 'robust', searchGeometry: true });
+  // Queue-cap rejection is synchronous with respect to dispatch: post one
+  // ordinary worker job, then try to exceed maxPending in the same turn.
+  // Do not make this assertion depend on a very expensive negative geometry
+  // search completing; that workload can cross the worker's 120s hard timeout
+  // on slower Windows machines and is unrelated to the queue-cap contract.
+  const pending = detectStegoFingerprintInWorker(marked, w, h, { key: 'right-key', profile: 'robust' });
   await assert.rejects(
     detectStegoFingerprintInWorker(marked, w, h, { key: 'right-key', profile: 'robust' }),
     /queue is full/, 'cap rejects immediately instead of growing an unbounded queue',
   );
-  await slow;
+  await pending;
   configureStegoDetectWorker({ maxPending: 64 });
 });
 
@@ -4565,12 +4570,15 @@ test('v1.18 worker budgets: RGBA validation, pixel cap, queued-byte cap, batch k
     /at most 4096 pixels/, 'pixel cap is enforced pre-queue',
   );
   configureStegoDetectWorker({ maxPixels: 50_000_000, maxPending: 8, maxQueuedBytes: rgba.length + 1000 });
-  const slow = detectStegoFingerprintInWorker(rgba, w, h, { key: 'none', profile: 'robust', searchGeometry: true, searchTilt: true });
+  // Keep one ordinary job pending while checking byte accounting. The second
+  // call is made in the same turn, so this exercises the aggregate copy budget
+  // without relying on a long geometry/tilt search or the worker hard timeout.
+  const pending = detectStegoFingerprintInWorker(rgba, w, h, { key: 'none', profile: 'robust' });
   await assert.rejects(
     detectStegoFingerprintInWorker(rgba, w, h, { key: 'k' }),
     /queued-byte budget/, 'second job exceeds the total queued-byte budget',
   );
-  await slow;
+  await pending;
   configureStegoDetectWorker({ maxQueuedBytes: 512 * 1024 * 1024 });
   await assert.rejects(
     batchDetectStegoInWorker(rgba, w, h, ['x'.repeat(1025)], {}),
