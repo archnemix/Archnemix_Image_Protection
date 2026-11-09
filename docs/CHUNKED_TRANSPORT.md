@@ -35,103 +35,25 @@ the exact bytes that will be served.
 
 ## Browser reference
 
+The runnable client in [`examples/chunked-transport/client.js`](../examples/chunked-transport/client.js) is the canonical implementation; use it rather than maintaining a second transport copy. It requires a separately pinned RSA public JWK and returns a `Blob` only after verifying the complete manifest and container:
+
 ```js
-const PINNED_RSA_PUBLIC_JWK = Object.freeze({
-  kty: 'RSA', n: 'REPLACE_WITH_PINNED_MODULUS', e: 'AQAB',
-  alg: 'RS256', ext: true,
-});
-const MAX_ENVELOPE_BYTES = 512 * 1024;
-const MAX_CHUNKS = 256;
-const MAX_CHUNK_BYTES = 1024 * 1024;
-const MAX_CONTAINER_BYTES = 64 * 1024 * 1024;
-const fromBase64 = (value) => Uint8Array.from(atob(value), (ch) => ch.charCodeAt(0));
-const toHex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+import { fetchVerifiedArchx } from './client.js'; // copy the example module into your app
 
-async function readBounded(response, limit) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('streaming response body required');
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > limit) { await reader.cancel(); throw new Error('response exceeds byte limit'); }
-      chunks.push(value);
-    }
-  } finally { reader.releaseLock(); }
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
-  return result;
-}
-
-async function fetchVerifiedArchx(url, { signal, expectedAssetId } = {}) {
-  const envelopeResponse = await fetch(url, {
-    credentials: 'same-origin', cache: 'no-store', signal,
-  });
-  if (!envelopeResponse.ok) throw new Error(`manifest HTTP ${envelopeResponse.status}`);
-  const envelopeBytes = await readBounded(envelopeResponse, MAX_ENVELOPE_BYTES);
-  const envelope = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(envelopeBytes));
-  if (envelope?.version !== 1 || typeof envelope.manifest !== 'string' ||
-      typeof envelope.signature !== 'string') throw new Error('invalid manifest envelope');
-
-  const manifestBytes = fromBase64(envelope.manifest);
-  if (manifestBytes.length > 384 * 1024) throw new Error('manifest exceeds byte limit');
-  const signature = fromBase64(envelope.signature);
-  const verifyKey = await crypto.subtle.importKey(
-    'jwk', PINNED_RSA_PUBLIC_JWK,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-  );
-  if (!await crypto.subtle.verify('RSASSA-PKCS1-v1_5', verifyKey, signature, manifestBytes)) {
-    throw new Error('manifest signature invalid');
-  }
-  const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(manifestBytes));
-  if (manifest.version !== 1 || !Array.isArray(manifest.chunks) ||
-      manifest.chunks.length < 1 || manifest.chunks.length > MAX_CHUNKS ||
-      !Number.isFinite(Date.parse(manifest.expiresAt)) || Date.now() >= Date.parse(manifest.expiresAt) ||
-      (expectedAssetId !== undefined && manifest.assetId !== expectedAssetId) ||
-      !Number.isSafeInteger(manifest.contentLength) || manifest.contentLength < 1 ||
-      manifest.contentLength > MAX_CONTAINER_BYTES ||
-      !/^[0-9a-f]{64}$/.test(manifest.containerSha256)) {
-    throw new Error('manifest exceeds transport bounds');
-  }
-
-  const parts = [];
-  let total = 0;
-  for (const chunk of manifest.chunks) {
-    if (!chunk || typeof chunk.url !== 'string' ||
-        !Number.isSafeInteger(chunk.length) || chunk.length < 1 || chunk.length > MAX_CHUNK_BYTES ||
-        !/^[0-9a-f]{64}$/.test(chunk.sha256)) throw new Error('invalid chunk descriptor');
-    const chunkUrl = new URL(chunk.url, url);
-    if (chunkUrl.origin !== new URL(url, location.href).origin) throw new Error('cross-origin chunk refused');
-    const response = await fetch(chunkUrl, { credentials: 'same-origin', cache: 'no-store', signal });
-    if (!response.ok) throw new Error(`chunk HTTP ${response.status}`);
-    const bytes = await readBounded(response, chunk.length);
-    if (bytes.length !== chunk.length ||
-        toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))) !== chunk.sha256) {
-      throw new Error('chunk length or digest mismatch');
-    }
-    total += bytes.length;
-    if (total > MAX_CONTAINER_BYTES || total > manifest.contentLength) throw new Error('container exceeds bounds');
-    parts.push(bytes);
-  }
-  if (total !== manifest.contentLength) throw new Error('container length mismatch');
-  const complete = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) { complete.set(part, offset); offset += part.length; }
-  if (toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', complete))) !== manifest.containerSha256) {
-    throw new Error('container digest mismatch');
-  }
-  return new Blob([complete], { type: 'application/octet-stream' });
-}
-
-const completeAsset = await fetchVerifiedArchx('/archx/assets/catalog-01.manifest', {
+const completeAsset = await fetchVerifiedArchx('/archx-chunks/catalog-01.manifest', {
+  publicJwk: PINNED_RSA_PUBLIC_JWK, // configure independently of the manifest origin
   expectedAssetId: 'catalog-01',
+  signal: abortController.signal,
 });
 Archx.load.image('#protected-image', completeAsset, { mode: 'shield' });
 ```
+
+The implementation bounds the envelope, manifest, chunk count, individual
+chunks, and total container; validates asset IDs, expiry, origin, lengths, and
+SHA-256 digests; verifies the detached signature; disables redirects; and
+checks the final container digest before returning. Any failed bound or check
+rejects without returning partial bytes. The source is a host-owned example,
+not a package API or built-in Archx transport.
 
 ## Operational requirements
 

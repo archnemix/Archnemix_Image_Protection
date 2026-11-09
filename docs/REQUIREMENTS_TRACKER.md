@@ -4,7 +4,7 @@
 
 **Audit date:** 2026-10-25  
 **Branch:** `arena/1ba8a4fa-archnemix-image-protection`
-**PR:** #34 from the earlier work was closed and is not reused. A new PR may be created from this branch only after all requirements pass; do not publish to npm.
+**PR:** #34 from earlier work remains closed. PR #35 was merged from the prior Arena branch as commit `4ad9f6b`; this active branch is for the follow-up release-readiness audit. Do not publish to npm from this session.
 
 ## Authoritative requirements (22)
 
@@ -68,7 +68,7 @@ Status meanings: **Complete** = acceptance criterion is implemented and supporte
 | C5 | Complete | Responsibilities now have explicit module boundaries: server IP identity (`server/request-identity.js`), key state and SEO preview, plus browser token mint/batch transport (`src/client/token-transport.js`), temporal frame generation, shaders, network, assets, sampling, and drawing. Middleware/viewer remain orchestrators for private authorization/lifecycle state (about 2,593/2,450 lines); moved boundaries are integration-tested and do not expose mutable private state. |
 | C6 | Complete | `withCatalogThroughputDefaults()` rejects request-path AVIF, including overrides; docs explain precompute/latency trade-offs and tests cover the rejection. |
 
-**Current audit result: 22 complete, 0 partial, 0 not started.** The previously partial B1, B2, C4, and C5 items now have implementation and focused/full-suite evidence recorded above. This does not claim universal crop/phone-photo performance beyond the synthetic fixtures described in those rows. PR #34 remains closed; create a new PR from the active branch and merge only after the final repository/PR checks pass. Do not publish to npm.
+**Current audit result: 22 complete, 0 partial, 0 not started** for the inherited A/B/C checklist. The previous crop/deskew and transport evidence remains synthetic and fixture-bounded. PR #35 was merged; this branch carries the new release-readiness audit requirement below. No npm publication has occurred.
 
 ## Validation evidence
 
@@ -84,6 +84,14 @@ Status meanings: **Complete** = acceptance criterion is implemented and supporte
 
 ### R1 — Complete the four partial items, validate, then PR/merge only if all pass (2026-10-25)
 
-The user directed: “continue and then implement them, test it, then check whether everything has been done; if yes make a PR and merge the code.” Implemented B1, B2, C4, and C5; the renewed audit records 22 complete, and full plus focused verification passed. A new PR from the current Arena branch and merge are authorized conditionally; perform final diff/PR checks, then create and merge only this branch's PR if it remains clean. Do not publish to npm.
+The user directed: “continue and then implement them, test it, then check whether everything has been done; if yes make a PR and merge the code.” Implemented B1, B2, C4, and C5; PR #35 from the previous active branch was merged after full and focused verification. No npm publication occurred.
+
+### R2 — Release-readiness cleanup and cross-check (2026-10-25)
+
+The user requested a final cleanup pass: inspect for unused/dead code, logic flaws, and build integration gaps; read and verify every documentation file for honesty and contradictions against other docs and code; clean up repository structure where justified; audit the website for stale information; then create a PR and merge only if the checks show it is ready for the user to publish. Do not publish to npm. Record concrete findings, fixes, and validation evidence; do not make risky broad moves or delete files merely for cosmetic tidiness.
+
+**Status:** Repository audit/fixes complete; final CI and PR review pending. Concrete issues found and corrected: the compatibility table understated Windows CI and layout-v5 synthetic coverage; `STANDARDS.md`, `SECURITY.md`, `REVIEW_GUIDE.md`, `README.md`, and the website overstated or understated rotation/AI-watermark evidence; the architecture map placed the opt-in pilot-registration pre-pass in the wrong module boundary; the chunked-transport guide duplicated and lagged its runnable client; and the changelog still said v1.30.1 was awaiting publication although npm reports it published. No source file was deleted: static unused-code findings were reviewed and map to intentional browser/CLI/generated/type/test entry points or helpers used inside their defining modules. The repository is organized by source, server, tools, tests, docs, website, and examples; no structural move was justified.
+
+Validation so far: `npm ci`, lint, build/type generation, `types:check`, `test:types`, `docs:check`, `size:browser` (156,672 bytes minified; 51,722 bytes gzip), `test:pack`, local Markdown/website links, and `npm audit --audit-level=high` passed. A local `npm run verify` exceeded the 30-minute sandbox limit; the Node run showed two environment-timeout failures (layout-v5 affine test and detect-worker test) while CPU-heavy detector/fuzz tests took far longer than their ordinary CI profile. Do not treat this local timeout as a pass; require the branch's GitHub checks before merge. npm reports `1.30.1` as already published/latest, and its registry timestamp is later than the system date used for this audit. This version cannot be republished; the next release version and chronology need maintainer confirmation. No npm publish was run.
 
 Append every new requirement stated by the user here, preserving its scope and acceptance criteria, and add a status/evidence row before implementation work. Never replace a user requirement with a narrower inferred interpretation without recording that scope decision explicitly.
