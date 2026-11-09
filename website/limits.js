@@ -67,7 +67,7 @@ const ATTACKERS = [
     name: 'The camera',
     sub: 'A phone photographing the screen',
     outcome: 'Not preventable — by anyone.',
-    detail: 'The analog hole is physics: light leaves the screen, a sensor collects it. Archx’s honest contribution is a photograph of the delivered derivative (whose width depends on server policy), optionally interlaced. Phone-photo recovery is not validated by the shipped bench; common resize/re-encode recovery measurements do not establish camera-photo survival. Any vendor claiming more needs evidence.',
+    detail: 'The analog hole is physics: light leaves the screen, a sensor collects it. Archx’s honest contribution is a photograph of the delivered derivative (whose width depends on server policy), optionally interlaced. There is no real-camera/phone-photo recovery corpus: synthetic affine/keystone regressions do not establish camera-photo survival, and ordinary resize/re-encode measurements do not either. Any vendor claiming more needs evidence.',
     layers: { 'Resolution cap': 1, 'Temporal interlace': 1, 'StegoMark attribution': 1 },
     verdict: 'Walks away with: a photograph of a screen. Sometimes still attributable; never the file.',
   },
@@ -75,10 +75,10 @@ const ATTACKERS = [
     id: 'regen',
     name: 'The regenerator',
     sub: 'Diffusion re-synthesis / aggressive AI “enhancement”',
-    outcome: 'The mark dies; the trail may not.',
-    detail: 'Regeneration destroys every tested invisible watermark — classical and neural alike (literature: ~0–13% residual decode). StegoMark will usually not survive a full re-synthesis. What can survive: perceptual-hash proximity to your registered originals, issuance records, and the mundane evidence of where the copy surfaced. Plan your response around provenance and process, not a promise no one can keep.',
+    outcome: 'Marks are not a dependable defense; the trail may remain.',
+    detail: 'Published diffusion attacks reduce or remove many tested invisible watermark schemes, including neural methods. Archx StegoMark has not been measured against full diffusion regeneration, so treat it as vulnerable rather than claiming a measured failure or survival rate. What may remain: perceptual-hash proximity to registered originals, issuance records, and evidence of where the copy surfaced. Plan around provenance and process, not a promise no one can keep.',
     layers: { 'Issuance records': 1 },
-    verdict: 'Walks away with: a re-synthesized derivative. Attribution falls back to pHash, records, and investigation.',
+    verdict: 'Walks away with: a re-synthesized derivative. Attribution may rely on pHash, records, and investigation.',
   },
 ];
 

@@ -769,10 +769,12 @@ to investigate previously issued marks.
 
 ## 9. Design note: deep-zoom tile delivery (not shipped)
 
-Sketch only — no v1.17 code implements this. For gigapixel-style
-viewing (maps, gigapixel product zoom), the current single-derivative
-delivery forces a choice between capping zoom resolution and shipping
-one very large payload. A future tile mode would:
+Sketch only — no current code implements this deep-zoom, per-tile viewer
+mode. The chunked-transport example authenticates and assembles one complete
+`.archx` container; it does not provide viewport-driven zoom tiles. For
+gigapixel-style viewing (maps, gigapixel product zoom), the current
+single-derivative delivery forces a choice between capping zoom resolution
+and shipping one very large payload. A future tile mode would:
 
 - Split each authorized derivative into a fixed tile grid (e.g.
   512×512 display pixels, aligned to the width-bucket discipline so

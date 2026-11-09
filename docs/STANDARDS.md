@@ -57,7 +57,7 @@ called out as a gap with its disposition.
 | Control | Status / evidence |
 |---|---|
 | Visible + forensic marks | Met — server-baked pre-scramble watermark, block forensic mark, per-viewer/token scoping |
-| Steganographic fingerprint | Met with measured limits — blind detection CLI; survival claims limited to benchmarked resize/re-encode/blur/bounded-crop cases; rotation/phone-photo recovery explicitly unproven |
+| Steganographic fingerprint | Met with measured limits — blind detection CLI; resize/re-encode/blur and bounded crops have measured coverage. Layout-v5 has synthetic affine/keystone regression fixtures only; no real phone-photo corpus, arbitrary homography guarantee, or broad rotation/perspective claim is made |
 | C2PA | Operator — `onProvenanceIssue` hook emits a key-free issuance record for an external C2PA signer; Archx does not claim built-in Content Credentials |
 
 ## F. Supply chain & release engineering (OpenSSF-aligned)

@@ -119,8 +119,9 @@ error-correcting `layoutVersion: 4` (BCH), and v1.30 added the
 experimental opt-in `layoutVersion: 5` (BCH plus a keyed registration
 pilot lattice). Detectors dual-read supported layouts and report the
 vintage as `layoutVersion`; a detector older than the layout cannot
-read it. Layout 5 is not the default and its synthetic asymmetric-crop
-regression is not a general survival guarantee. The operators' rule is
+read it. Layout 5 is not the default. Its deterministic synthetic
+asymmetric-crop and affine/keystone fixtures are regression coverage,
+not a real-photo corpus or general survival guarantee. The operators' rule is
 unchanged — upgrade detection tooling first, embed with an older
 `layoutVersion` only where an unupgraded detector must read new
 marks, and prefer re-issuance. `layoutVersion: 3` remains the default.

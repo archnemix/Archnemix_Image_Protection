@@ -206,10 +206,11 @@ fail-closed registry behavior, detector false-positive controls and
 high-correction evidence gates, geometry search limits, standard versus
 robust profile selection, and the measured transform matrix in the
 README/research notes. Challenge robust decoding on unmarked controls,
-wrong keys, errors near the correction limit, and reproductions beyond the
-tested axis-aligned transforms. The perceptual soft binding is a second
-discovery signal; neither mark is represented as rotation-, perspective-,
-or AI-regeneration-proof. `onProvenanceIssue` is intentionally only a
+wrong keys, errors near the correction limit, and transforms beyond the
+bounded axis-aligned crop and synthetic layout-v5 affine/keystone fixtures;
+there is no real phone-photo corpus or general homography claim. The
+perceptual soft binding is a second discovery signal; neither mark is
+represented as rotation-, perspective-, or AI-regeneration-proof. `onProvenanceIssue` is intentionally only a
 key-free hook for an external provenance/C2PA system, not a built-in signer.
 
 ### 6. Operations and assurance claims

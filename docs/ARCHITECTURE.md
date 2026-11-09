@@ -28,9 +28,11 @@ surface`) pins `types/*.d.ts` to the real export surface.
 | `perceptual.js` | 64-bit DCT perceptual fingerprint |
 
 Rules: no DOM, no Node builtins. `pixels.js` owns raw-RGBA transforms;
-detector search lives in `stego-detect.js` only. `rotateRgba` always
-returns a fresh buffer — the detector's plane cache is keyed by buffer
-identity, so scratch reuse there is a correctness bug (found in v1.19).
+codeword/geometry candidate search is orchestrated by `stego-detect.js`,
+while the opt-in keyed-pilot affine registration pre-pass is isolated in
+`stego-deskew.js`. `rotateRgba` always returns a fresh buffer — the
+detector's plane cache is keyed by buffer identity, so scratch reuse there
+is a correctness bug (found in v1.19).
 
 ## `src/client/` — browser runtime (assembled by `src/archx.js`)
 

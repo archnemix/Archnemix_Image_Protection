@@ -340,9 +340,11 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
       <p>Honest grading: these are <em>attribution evidence</em>, ranked
       from strongest (exact StegoMark decode) to weakest (approximate
       perceptual match, corroborate before accusing anyone). Modern
-      AI regeneration can remove invisible marks — ours included; the
-      <a href="limits.html">threat-model page</a> says exactly where each
-      layer holds and where it does not.</p>
+      published diffusion attacks reduce or remove many tested invisible
+      watermark schemes. Archx StegoMark has not been measured against full
+      regeneration, so treat it as vulnerable rather than claiming a measured
+      survival rate. The <a href="limits.html">threat-model page</a> gives the
+      evidence boundary for each layer.</p>
 
       <h2 id="limits">Honest limits</h2>
       <div class="callout">

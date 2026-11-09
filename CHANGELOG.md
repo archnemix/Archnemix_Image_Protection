@@ -3,15 +3,19 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status (checked before the 1.30.1 publication).** The versions
-> confirmed on npm are `0.0.0-stage`, `1.22.0`, `1.26.0`, `1.28.0`,
-> `1.29.0`, and `1.30.0`; this branch prepares `1.30.1` for publication after
-> merge. Historically, other version headings were GitHub-only development
-> versions folded into a later npm release. In particular, 1.27.0's changes
-> shipped folded into 1.28.0 (an earlier wording claimed 1.27.0 itself had
-> been published before the maintainer's manual publish step ran — it had
-> not). `npm view @archnemix/image-protection versions` is the source of truth
-> for what is installable.
+> **Publication status (registry check for this audit).** npm currently lists
+> `1.30.1` as published/latest, so this repository version cannot be published
+> again with changed contents. No npm publication was made during this audit;
+> an npm release containing these documentation corrections requires a new
+> version decision and matching updates to `package.json`, the lockfile,
+> `src/client/version.js`, and this changelog. Historically, other version
+> headings were GitHub-only development versions folded into a later npm
+> release. In particular, 1.27.0's changes shipped folded into 1.28.0 (an
+> earlier wording incorrectly claimed 1.27.0 itself had been published).
+> `npm view @archnemix/image-protection versions` is the source of truth for
+> what is installable. The registry timestamp returned for 1.30.1 is later
+> than the system date used for this audit; confirm release chronology before
+> tagging or planning the next publication.
 
 ## [1.30.1] — 2026-11-06
 
