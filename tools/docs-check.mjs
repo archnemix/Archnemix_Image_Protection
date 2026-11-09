@@ -16,9 +16,10 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
+import { measureBrowserBundle, GZIP_BUDGET_BYTES } from './bundle-size.mjs';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { DEFAULTS, PRESETS } from '../src/client/options.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -72,6 +73,103 @@ const proseFiles = [
   ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
   'SECURITY.md', 'website/index.html', 'website/docs.html', 'website/technical.html', 'website/limits.html',
 ].filter((rel) => !PROSE_EXEMPT.has(rel) && fs.existsSync(path.join(root, rel)));
+// Keep documented option literals inside server/config.js enums. The checks
+// below cover public enums that appear in current-facing option examples;
+// historical research logs are exempt because they describe past releases.
+const ENUM_RULES = [
+  { option: 'replaySaturation', values: ['evict', 'strict'], source: /replaySaturation must be 'evict' or 'strict'/, requireEveryValue: true },
+  { option: 'format', values: ['webp', 'png', 'jpeg', 'avif'], source: /format must be 'webp', 'png', 'jpeg', or 'avif'/ },
+  { option: 'forensicScope', values: ['viewer', 'image'], source: /forensicScope must be 'viewer' or 'image'/ },
+  { option: 'memoryProfile', values: ['standard', 'compact'], source: /memoryProfile must be 'standard' or 'compact'/ },
+  { option: 'action', values: ['event', 'deny', 'challenge'], source: /abuseDetection\.action must be 'event', 'deny', or 'challenge'/ },
+  { option: 'stegoRegistryFailure', values: ['deny', 'allow'], source: /stegoRegistryFailure must be 'deny' or 'allow'/ },
+  { option: 'provenanceFailure', values: ['deny', 'allow'], source: /provenanceFailure must be 'deny' or 'allow'/ },
+  { option: 'tokenMethods', values: ['GET', 'POST'], source: /tokenMethods must contain only 'GET' and\/or 'POST'/ },
+  { option: 'jpegChromaSubsampling', values: ['4:2:0', '4:4:4'], source: /jpegChromaSubsampling must be '4:2:0' or '4:4:4'/ },
+];
+const currentDocs = ['README.md', ...proseFiles].map((rel) => [rel, read(rel)]);
+// The public-export inventory is checked against every declared runtime entry
+// point so adding an export cannot silently leave docs/EXPORTS.md stale.
+function collectRuntimeExports(rel, seen = new Set()) {
+  if (seen.has(rel)) return new Set();
+  seen.add(rel);
+  const text = read(rel);
+  const names = new Set();
+  for (const match of text.matchAll(/export\s*\{([^}]+)\}/g)) {
+    for (const item of match[1].split(',')) {
+      const clean = item.replace(/\/\/.*$/gm, '').trim();
+      if (!clean) continue;
+      const parts = clean.split(/\s+as\s+/);
+      names.add((parts[1] || parts[0]).trim());
+    }
+  }
+  for (const match of text.matchAll(/export\s+\*\s+from\s+['"](\.[^'"]+\.js)['"]/g)) {
+    const child = path.posix.normalize(path.posix.join(path.posix.dirname(rel), match[1]));
+    for (const name of collectRuntimeExports(child, seen)) names.add(name);
+  }
+  for (const match of text.matchAll(/export\s+(?:async\s+)?(?:function|class|const|let|var)\s+([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
+  for (const match of text.matchAll(/export\s+default\s+([A-Za-z_$][\w$]*)/g)) names.add(match[1]);
+  return names;
+}
+const publicExportDocs = read('docs/EXPORTS.md');
+const publicEntrySources = {
+  '.': ['src/index.js'],
+  './server': ['server/middleware.js'],
+  './server/scramble-image': ['server/scramble-image.js'],
+  './build': ['server/build-assets.js'],
+  './redis': ['server/redis-state-store.js'],
+  './scramble': ['src/scramble.js'],
+};
+for (const [subpath, sources] of Object.entries(publicEntrySources)) {
+  const actual = new Set(sources.flatMap((rel) => [...collectRuntimeExports(rel)]));
+  if (!publicExportDocs.includes(`\`${subpath === '.' ? '@archnemix/image-protection' : `@archnemix/image-protection/${subpath.slice(2)}`}\``)) {
+    fail(`docs/EXPORTS.md is missing package subpath ${subpath}`);
+  }
+  for (const name of actual) {
+    if (!publicExportDocs.includes(`\`${name}\``)) fail(`docs/EXPORTS.md is missing runtime export ${name} from ${subpath}`);
+  }
+}
+for (const rule of ENUM_RULES) {
+  const source = read('server/config.js');
+  if (!rule.source.test(source)) {
+    fail(`server/config.js enum validator for ${rule.option} changed; update ENUM_RULES and docs together`);
+    continue;
+  }
+  const seen = new Set();
+  const optionPattern = new RegExp(`\\b${rule.option}\\s*:\\s*(\\[[^\\]]*\\]|(?:['\"]([^'\"]+)['\"](?:\\s*\\|\\s*['\"]([^'\"]+)['\"])*))`, 'g');
+  for (const [rel, text] of currentDocs) {
+    for (const line of text.split(/\r?\n/)) {
+      for (const match of line.matchAll(optionPattern)) {
+        const literals = match[1].match(/['\"]([^'\"]+)['\"]/g) || [];
+        const values = literals.map((literal) => literal.slice(1, -1));
+        for (const value of values) {
+          seen.add(value);
+          if (!rule.values.includes(value)) {
+            fail(`${rel} documents ${rule.option}:${value}, but server/config.js accepts ${rule.values.map((v) => `'${v}'`).join(' or ')}`);
+          }
+        }
+      }
+    }
+  }
+  if (rule.requireEveryValue) {
+    for (const value of rule.values) if (!seen.has(value)) fail(`current-facing docs do not document ${rule.option}:'${value}'`);
+  }
+}
+for (const api of ['onClientEvent', 'offClientEvent', 'usePlugin', 'listPlugins', 'assayStegoEmbed', 'applyForensicBlocks']) {
+  if (!readme.includes(api)) fail(`README does not document public export ${api}`);
+}
+const interlacePresets = Object.keys(PRESETS).filter((name) => PRESETS[name].temporalInterlace != null).sort();
+if (DEFAULTS.temporalInterlace !== null) fail('client default temporalInterlace changed; update the README and website default descriptions');
+if (interlacePresets.join(',') !== 'elite,maxProtection') {
+  fail(`temporalInterlace preset defaults changed (${interlacePresets.join(', ') || 'none'}); update current-facing docs and the docs consistency gate`);
+}
+if (!readme.includes('off by default for individual images') ||
+    !readme.includes('`elite` and `maxProtection` presets opt into `balanced60`')) {
+  fail('README temporalInterlace default/preset wording does not match DEFAULTS and PRESETS in src/client/options.js');
+}
+if (!read('website/docs.html').includes('Elite sets it on.')) {
+  fail('website/docs.html must describe the elite temporalInterlace preset default');
+}
 const COUNT_PATTERNS = [
   [/(\d+) browser checks/g, BROWSER_RUNTIME, 'browser checks'],
   [/(\d+)(?:\/\d+)? (?:real-)?Chromium checks/g, BROWSER_RUNTIME, 'Chromium checks'],
@@ -119,10 +217,12 @@ if (!fs.existsSync(distPath)) {
   fail('dist/archx.min.js missing — run npm run build before docs:check');
 } else {
   const bytes = fs.readFileSync(distPath);
-  const kib = (bytes.length / 1024).toFixed(1);
-  const gz = (zlib.gzipSync(bytes).length / 1024).toFixed(1);
+  const size = measureBrowserBundle(distPath);
+  const kib = size.minifiedKiB;
+  const gz = size.gzippedKiB;
+  if (!size.withinBudget) fail(`browser gzip size ${size.gzippedBytes} bytes exceeds ${GZIP_BUDGET_BYTES}-byte budget (pinned fflate, gzip level ${size.gzipLevel})`);
   if (!readme.includes(`${kib} KiB minified`)) fail(`README bundle size is stale: dist is ${kib} KiB minified`);
-  if (!readme.includes(`${gz} KiB gzipped`)) fail(`README gzip size is stale: dist gzips to ${gz} KiB`);
+  if (!readme.includes(`${gz} KiB gzipped`)) fail(`README gzip size is stale: dist is ${gz} KiB using pinned fflate gzip level ${size.gzipLevel}`);
   const sri = `sha384-${crypto.createHash('sha384').update(bytes).digest('base64')}`;
   for (const rel of ['README.md', 'website/index.html', 'website/technical.html', 'website/limits.html']) {
     for (const m of read(rel).matchAll(/sha384-[A-Za-z0-9+/=]{40,}/g)) {

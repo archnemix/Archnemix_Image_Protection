@@ -3863,3 +3863,87 @@ re-ran clean (gallery-100 ≈38.6 ms/image in this sandbox, heap
 efficiency-relevant fix is BUG-1: doomed watermark configurations
 now die at startup instead of burning a full Sharp pipeline per
 request on derivatives that could never render.
+
+## 2.38 Layout v5 pilot-registration experiment (v1.30)
+
+Layout 5 is opt-in and keeps the BCH(188,64) payload/MAC while
+reserving 32 keyed, spatially shuffled cells for a known pilot
+pattern. The registration search scores only those pilot cells on
+a bounded scale/origin lattice, then adds a pixel-origin scan
+conditioned on common source/crop aspect-ratio priors and refines the
+strongest registrations before BCH decoding. This avoids paying the
+full codeword decoder for every geometry candidate while recovering
+narrow alignment peaks that the coarse lattice can miss. It requires at least 220 macro-cells (188 data
+plus 32 pilots); layouts 1–4 are unchanged and layout 3 remains the
+embed default. The detector shares the caller's `maxTimeMs` budget
+and reports `syncTemplateVersion` and pilot evidence in the result.
+The more expensive aspect-prior pixel-origin stage is used when v5 is
+explicitly pinned, so generic auto-detection does not spend that budget
+on every legacy-layout probe.
+
+**Regression evidence only, not a corpus claim.** On the exact
+`syntheticMaster()` helper output at its default 320×240 size,
+robust layout 5 (strength 8) auto-detects a full-frame copy and
+recovers the asymmetric raw crop x=15..274, y=12..211 (260×200,
+about 68% of the original area retained). A wrong-key full-frame
+negative is also rejected. A new severe-crop test embeds a 640×420
+synthetic master and automatically recovers both a 420×330 crop
+(about 52% area retained) and a 360×420 one-axis crop. Dense
+registration uses pixel-origin scoring at likely source/crop aspect
+ratios, then validates candidates through the keyed BCH payload/MAC;
+this is recovery for those fixtures, not a guarantee for arbitrary
+source aspect ratios or photo processing. These are synthetic tests,
+not photo measurements, not a false-positive-rate estimate, and not
+evidence for fragments. Layout 5 remains experimental; do not
+claim general crop recovery or change the default without a separate
+photo/graphic corpus, negative-control, quality, and runtime bench.
+
+## 2.39 Forensic crop, affine deskew, transport, and module follow-up (v1.30)
+
+### Deep/asymmetric crop evidence (B1)
+
+Added a deterministic textured RGBA crop fixture alongside the original
+`syntheticMaster()` cases. With a v5 robust mark, four asymmetric windows
+retaining approximately 56–62% of a 640×420 source recover the same fingerprint
+with at least ten keyed pilot cells and ≥0.70 pilot agreement. The windows vary
+left/top offsets and aspect ratio, including one-axis edge crops. This is
+stronger regression coverage than the earlier two fixtures but remains
+synthetic texture: it is not a real-photo corpus, does not establish every crop
+below 80%, and must not be described as universal crop recovery.
+
+### Pilot-feature affine deskew (B2)
+
+Added `src/core/stego-deskew.js` for explicitly requested offline forensic
+scans. It treats the v5 keyed sync pilot as a spatial feature set, scans
+clockwise/counterclockwise candidates in coarse 5° steps through ±30° on a
+bounded proxy, refines the two strongest signal basins at 1° steps, and
+confirms at full resolution before returning `deskewed` plus
+`deskewMethod: 'sync-pilot-affine'`. `archx-detect --tilt` documents the v5
+±30° search; legacy layouts retain the existing ±6° path. The bounded
+keystone registration remains separately available through `--perspective`.
+
+Synthetic regression tests recover exact 10°, 20°, and 30° rotations and a
+textured 20° rotation plus a mild keystone transform; the perspective-only
+test also exercises the keystone sweep. The compound test's detected
+correction is not necessarily the exact applied trapezoid, so this establishes
+fingerprint recovery for that fixture, not a general homography fit. This is
+not a measured phone-camera corpus. Both modes are opt-in, offline, and
+potentially slow; use `--max-time-ms` when an operational ceiling is required.
+No request-path detection or delivery behavior invokes this pre-pass.
+
+### Chunk transport and decomposition (C4/C5)
+
+`examples/chunked-transport/` now contains a runnable bounded reference origin
+and WebCrypto client, shipped as example source in the package and tested
+end-to-end for manifest signature, authorization on each request, per-chunk
+and whole-container hashes, and tampering rejection. It is still a host-owned
+reference, not the built-in viewer transport or a production storage engine.
+
+The server middleware now delegates proxy IP canonicalization/quota identities
+to `server/request-identity.js`, in addition to the existing keyring and SEO
+modules. The viewer's token-mint context and batch prefetch path now live in
+`src/client/token-transport.js`, alongside the previously separated shader
+and temporal-frame modules. These are behavioral module boundaries with
+existing integration tests; the owning middleware/viewer classes still retain
+request policy and per-image lifecycle state rather than exporting private
+mutable state solely to reduce file length.

@@ -672,7 +672,7 @@ if (document.getElementById('w-survival')) {
       case 'fortress':
         return {
           title: 'Fortress — Vault plus capture friction',
-          text: `Fortress normalizes to the Vault path and adds capture shielding, 60 Hz temporal interlace, strike lockout, DevTools blanking and integrity locking by default. The checker shimmer in the final frames only indicates that temporal split; screenshots and cameras can still capture a degraded display, and multi-frame capture can recombine it. ${branch}`,
+          text: `Fortress normalizes to the Vault path and adds capture shielding, strike lockout, DevTools blanking and integrity locking by default. Literal 60 Hz temporal interlace is opt-in in bare Fortress mode; the elite and maxProtection presets enable balanced60. When interlace is active, the checker shimmer in the final frames indicates that temporal split; screenshots and cameras can still capture a degraded display, and multi-frame capture can recombine it. ${branch}`,
         };
       case 'custom':
         return {

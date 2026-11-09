@@ -8,6 +8,8 @@
  *   POST {basePath}/token/:id?w=1200 -> { url, cleanUrl, token, key, aesKey?, grid, exp }
  *   GET  {basePath}/i/:id + X-Archx-Token -> application/octet-stream (.archx)
  *        (`?t=` is accepted only with explicit legacy `allowQueryTokens:true`)
+ *   GET  {basePath}/seo/:id -> low-resolution watermarked WebP/JPEG only when
+ *        the opt-in host-supplied seoCrawler.verify callback returns true
  *
  * Secure defaults are deny-by-default: startup fails unless the host supplies
  * an `authorize(req, id, { phase })` callback or explicitly sets
@@ -22,7 +24,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { isIP } from 'node:net';
 import {
   stegoFingerprint as resolveStegoFingerprint,
   sniffImageInfo,
@@ -46,6 +47,9 @@ import {
 import { AsyncSemaphore, BoundedTtlSet, createMemoryStateStore } from './bounded.js';
 import { FORMAT_EXTENSIONS, TAINT_PNG, auditArchxServerConfig, canonicalDerivativeWidth, isPathInside, isPlainObject, normalizeAuthorizationResult, normalizeServerConfig, parseStrictInt, pathsOverlap, validateImageId, validateWatermarkValue } from './config.js';
 import { TOKEN_AUDIENCE, TOKEN_SCOPE, deriveStegoFingerprint, deriveStegoKey, normalizeBindTokenTo, parseProofPublicKeyHeader, signToken, validateTokenClaims, verifyProofOfPossession, verifyToken } from './tokens.js';
+import { renderSeoPreview } from './seo-preview.js';
+import { createSigningKeyring } from './signing-keyring.js';
+import { createRequestIdentity } from './request-identity.js';
 
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
 export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withLiteDefaults, withPerformanceDefaults, withEliteDefaults, withMaxProtectionDefaults } from './config.js';
@@ -66,7 +70,6 @@ export {
   loadOwnershipPrivateKey, loadOwnershipPublicKey,
 };
 export { createIssuanceLog, verifyIssuanceChain } from './issuance-log.js';
-
 export function createArchxMiddleware(options = {}) {
   const cfg = normalizeServerConfig(options);
   // Scoped libvips loader policy for this instance's lifetime; released
@@ -75,9 +78,14 @@ export function createArchxMiddleware(options = {}) {
   const releaseSharpSecurity = cfg.processing.blockUntrustedSharpLoaders
     ? acquireSharpSecurityLease(cfg.processing.allowedInputFormats)
     : null;
-  const signingKeys = cfg.signingKeys;
-  const activeSecretId = cfg.activeSecretId;
-  const secret = signingKeys[activeSecretId];
+  const signingKeyring = createSigningKeyring({
+    signingKeys: cfg.signingKeys,
+    activeSecretId: cfg.activeSecretId,
+    schedule: cfg.signingKeySchedule,
+    onTransition: (type, details) => emitSecurityEvent(type, null, details),
+  });
+  const { signingKeys } = signingKeyring;
+  const refreshSigningKey = signingKeyring.refreshSigningKey;
   const secretForToken = (payload) => payload?.kid ? signingKeys[payload.kid] : null;
   const basePath = cfg.basePath;
   const ttlMs = cfg.ttlMs;
@@ -261,11 +269,11 @@ export function createArchxMiddleware(options = {}) {
         ? `${imageId}:${payloadLike.n}:${payloadLike.th || payloadLike.vh || ''}`
         : `${imageId}:static:${payloadLike.th || payloadLike.vh || ''}`, 32, keySecret)
     : null);
-  const deriveScrambleKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
+  const deriveScrambleKey = (id, nonce, keySecret = signingKeyring.secret, keyScope = 'legacy') =>
     scrambleKeyMode === 'per-token'
       ? nonce
       : crypto.createHmac('sha256', keySecret).update(`scramble:${id}:${keyScope}`).digest('hex').slice(0, 32);
-  const deriveAesKey = (id, nonce, keySecret = secret, keyScope = 'legacy') =>
+  const deriveAesKey = (id, nonce, keySecret = signingKeyring.secret, keyScope = 'legacy') =>
     crypto.createHmac('sha256', keySecret)
       .update('aes:' + id + ':' + (scrambleKeyMode === 'per-token' ? nonce : keyScope))
       .digest().toString('base64');
@@ -445,8 +453,7 @@ export function createArchxMiddleware(options = {}) {
   // get unlinked as corrupt — cross-instance cache thrash in 1.12.0).
   // The tag's job is "written by someone holding a deployment secret",
   // and every keyring member qualifies. Entries retire with their kid.
-  const cacheTagSecrets = [...new Set([secret, ...Object.values(signingKeys || {})])].slice(0, 17);
-  const cacheTag = (key, bytes, keySecret = secret) => crypto.createHmac('sha256', keySecret)
+  const cacheTag = (key, bytes, keySecret = signingKeyring.secret) => crypto.createHmac('sha256', keySecret)
     .update('archx-cache-v1\0', 'utf8').update(String(key), 'utf8').update('\0').update(bytes).digest();
   const tagCacheBytes = (key, bytes) => Buffer.concat([Buffer.from('A1', 'latin1'), cacheTag(key, bytes), bytes]);
   function untagCacheBytes(key, stored) {
@@ -454,7 +461,7 @@ export function createArchxMiddleware(options = {}) {
     if (stored[0] !== 0x41 || stored[1] !== 0x31) return null; // legacy/foreign entry → regenerate
     const bytes = stored.subarray(34);
     const presented = stored.subarray(2, 34);
-    for (const keySecret of cacheTagSecrets) {
+    for (const keySecret of signingKeyring.cacheTagSecrets) {
       if (crypto.timingSafeEqual(presented, cacheTag(key, bytes, keySecret))) {
         return Buffer.from(bytes);
       }
@@ -714,139 +721,8 @@ export function createArchxMiddleware(options = {}) {
     }
   }
 
-  // Canonical form for IP accounting AND token binding: an IPv4-mapped
-  // IPv6 address (::ffff:192.0.2.1, ::ffff:c000:0201, the expanded
-  // 0:0:0:0:0:ffff:192.0.2.1, and the ::ffff:0: translated form) IS the
-  // IPv4 address. Stripping only the dotted "::ffff:" prefix leaves the
-  // hex form as a "valid" IPv6 whose /64 and /48 prefixes are 0:0:0:0 and
-  // 0:0:0 — collapsing every IPv4 client on earth into ONE limiter
-  // bucket (the CVE-2026-30827 class). Defined before requestIp, which
-  // uses it for every candidate it returns.
-  const ipv6Groups = (ip) => {
-    try {
-      let addr = String(ip || '').toLowerCase();
-      const pct = addr.indexOf('%');
-      if (pct !== -1) addr = addr.slice(0, pct); // zone id (validated in canonicalIp)
-      const v4Tail = addr.match(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-      if (v4Tail) {
-        const octets = [Number(v4Tail[1]), Number(v4Tail[2]), Number(v4Tail[3]), Number(v4Tail[4])];
-        if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
-        const hi = ((octets[0] << 8) | octets[1]).toString(16);
-        const lo = ((octets[2] << 8) | octets[3]).toString(16);
-        addr = addr.slice(0, addr.length - v4Tail[0].length) + hi + ':' + lo;
-      }
-      const halves = addr.split('::');
-      if (halves.length > 2) return null;
-      const head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
-      const tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
-      const missing = 8 - head.length - tail.length;
-      if (missing < 0 || (halves.length === 1 && missing !== 0)) return null;
-      const rawGroups = [...head, ...Array(missing).fill('0'), ...tail];
-      if (rawGroups.length !== 8 || rawGroups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
-      return rawGroups.map((g) => parseInt(g, 16).toString(16));
-    } catch { return null; }
-  };
-  // Canonical client identity for token binding, quotas and abuse
-  // accounting. IPv4-embedding transition forms collapse to the
-  // embedded IPv4 address: mapped/translated ::ffff:0:0/96, deprecated
-  // IPv4-compatible ::/96, NAT64 64:ff9b::/96 + 64:ff9b:1::/96 (every
-  // client behind a carrier NAT64 otherwise shares ONE /64 abuse
-  // bucket), 6to4 2002::/16 (one IPv4 = a whole free /48), and Teredo
-  // 2001:0::/32 (client IPv4 XORed into the last 32 bits). Zone ids
-  // (%eth0) are validated then stripped. All other IPv6 collapses to
-  // one expanded-group spelling. ::, ::1 and documentation ranges
-  // stay plain IPv6.
-  const canonicalIp = (ip) => {
-    if (typeof ip !== 'string' || !ip) return null;
-    let raw = ip.trim();
-    const pct = raw.indexOf('%');
-    if (pct !== -1) {
-      const zone = raw.slice(pct + 1);
-      if (!zone || zone.length > 32 || !/^[0-9A-Za-z._-]+$/.test(zone)) return null;
-      raw = raw.slice(0, pct);
-    }
-    const kind = isIP(raw);
-    if (kind === 4) return raw;
-    if (kind !== 6) return null;
-    const g = ipv6Groups(raw);
-    if (!g) return null;
-    const toIpv4 = (hiHex, loHex) => {
-      const hi = parseInt(hiHex, 16) || 0;
-      const lo = parseInt(loHex, 16) || 0;
-      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
-    };
-    const zero5 = g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === '0';
-    if ((zero5 && g[5] === 'ffff') ||
-        (g[0] === '0' && g[1] === '0' && g[2] === '0' && g[3] === '0' && g[4] === 'ffff' && g[5] === '0')) {
-      return toIpv4(g[6], g[7]); // v4-mapped / v4-translated
-    }
-    if (zero5 && g[5] === '0' && (parseInt(g[6], 16) || 0) >= 0x0100) {
-      return toIpv4(g[6], g[7]); // deprecated v4-compatible (not :: or ::1)
-    }
-    if (g[0] === '64' && g[1] === 'ff9b' && (g[2] === '0' || g[2] === '1') &&
-        g[3] === '0' && g[4] === '0' && g[5] === '0') {
-      return toIpv4(g[6], g[7]); // NAT64 (RFC 6052 / RFC 8215)
-    }
-    if (g[0] === '2002') return toIpv4(g[1], g[2]); // 6to4 (RFC 3056)
-    if (g[0] === '2001' && g[1] === '0') {
-      const hi = (((parseInt(g[6], 16) || 0) ^ 0xffff) & 0xffff);
-      const lo = (((parseInt(g[7], 16) || 0) ^ 0xffff) & 0xffff);
-      return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`; // Teredo (RFC 4380)
-    }
-    return g.join(':');
-  };
-  const requestIp = (req) => {
-    const socketIp = String(req.socket?.remoteAddress || '');
-    if (cfg.trustProxy && cfg.trustedProxyHops > 0) {
-      const forwarded = req.headers?.['x-forwarded-for'];
-      const raw = Array.isArray(forwarded) ? forwarded.join(',') : String(forwarded || '');
-      if (raw.length <= 4096) {
-        const chain = raw.split(',').map((part) => part.trim()).filter(Boolean);
-        // MDN/OWASP rule: select from the right by the number of proxies you
-        // actually control. The leftmost value is attacker-controlled unless
-        // every hop in front of this process overwrites/appends correctly.
-        // A chain SHORTER than the trusted hop count means the request did
-        // not traverse the expected proxies (direct origin hit, stripped
-        // header, miscounted depth): never fall back to chain[0] (fully
-        // attacker-controlled) — ignore XFF and use the socket peer.
-        const candidate = chain.length >= cfg.trustedProxyHops
-          ? chain[chain.length - cfg.trustedProxyHops]
-          : '';
-        const canon = canonicalIp(candidate);
-        if (canon) return canon;
-      }
-    }
-    const socketCanon = canonicalIp(socketIp);
-    if (socketCanon) return socketCanon;
-    return 'unknown';
-  };
-  // Rate/quota/abuse keys group IPv6 clients by /64 prefix: a single host
-  // typically controls a whole /64 (privacy extensions rotate interface
-  // IDs freely), so per-address limits are trivially evaded by rotation
-  // and the rotation also floods bounded limiter maps until blocked
-  // clients are evicted. Token IP BINDING deliberately keeps the exact
-  // address (requestIp) — only volumetric accounting groups.
-  const limiterIp = (req) => {
-    const ip = requestIp(req);
-    if (isIP(ip) !== 6) return ip;
-    const groups = ipv6Groups(ip);
-    return groups ? groups.slice(0, 4).join(':') + '::/64' : ip;
-  };
-  // Volumetric tiers for one request: IPv6 clients get their strict /64
-  // bucket AND an aggregate /48 ceiling at 4x, so a holder of a whole /48
-  // (65,536 /64s to rotate through) cannot mint unbounded fresh buckets.
-  const IPV6_AGGREGATE_MULTIPLIER = 4;
-  const limiterIpTiers = (req) => {
-    const ip = requestIp(req);
-    if (isIP(ip) !== 6) return [{ key: ip, mult: 1 }];
-    const groups = ipv6Groups(ip);
-    if (!groups) return [{ key: ip, mult: 1 }];
-    return [
-      { key: groups.slice(0, 4).join(':') + '::/64', mult: 1 },
-      { key: groups.slice(0, 3).join(':') + '::/48', mult: IPV6_AGGREGATE_MULTIPLIER },
-    ];
-  };
-  const hmacShort = (label, value, len = 24, keySecret = secret) =>
+  const { requestIp, limiterIp, limiterIpTiers } = createRequestIdentity(cfg);
+  const hmacShort = (label, value, len = 24, keySecret = signingKeyring.secret) =>
     crypto.createHmac('sha256', keySecret).update(label + ':' + String(value)).digest('base64url').slice(0, len);
   const safeEqual = (a, b) => {
     const ba = Buffer.from(String(a)); const bb = Buffer.from(String(b));
@@ -865,9 +741,11 @@ export function createArchxMiddleware(options = {}) {
         : 'notice';
     const outcome = type === 'archx.suspicious_scraping'
       ? 'detected'
-      : severity === 'error'
-        ? 'error'
-        : 'denied';
+      : type === 'archx.signing_key_activated' || type === 'archx.signing_key_retired'
+        ? 'completed'
+        : severity === 'error'
+          ? 'error'
+          : 'denied';
     const event = Object.freeze({
       // Versioned, SIEM-friendly fields. The original top-level fields remain
       // for backwards compatibility; `actor`/`request` are the structured
@@ -891,9 +769,12 @@ export function createArchxMiddleware(options = {}) {
       }),
       request: Object.freeze({
         method: req?.method ? String(req.method).toUpperCase() : null,
-        route: phase ? `${basePath}/${phase === 'token' ? 'token' : 'i'}/:id` : null,
+        route: phase ? `${basePath}/${phase === 'token' ? 'token' : phase === 'seo' ? 'seo' : 'i'}/:id` : null,
       }),
       reason: details.reason || null,
+      keyId: details.keyId || null,
+      previousKeyId: details.previousKeyId || null,
+      activeKeyId: details.activeKeyId || null,
     });
     try {
       const result = onSecurityEvent(event);
@@ -934,7 +815,7 @@ export function createArchxMiddleware(options = {}) {
     try { return String(auth.viewerId || ''); } catch { return ''; }
   }
 
-  function authorizationTrace(auth, viewerId = '', keySecret = secret) {
+  function authorizationTrace(auth, viewerId = '', keySecret = signingKeyring.secret) {
     const trace = {
       buyerId: auth?.buyerId ? String(auth.buyerId).slice(0, 256) : null,
       orderId: auth?.orderId ? String(auth.orderId).slice(0, 256) : null,
@@ -1102,7 +983,7 @@ export function createArchxMiddleware(options = {}) {
     };
   }
 
-  async function quotaExceeded(req, id, viewerId, phase, keySecret = secret) {
+  async function quotaExceeded(req, id, viewerId, phase, keySecret = signingKeyring.secret) {
     const tiers = limiterIpTiers(req);
     const checks = [];
     // NARROWEST scope first, and stop at the first limiting check:
@@ -1287,6 +1168,7 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function mintTokenResponse(req, id, params = {}, proofThumbprint = null) {
+    refreshSigningKey();
     const hasParam = (name) => params?.[name] !== undefined && params?.[name] !== null && params?.[name] !== '';
     const paramValue = (name) => (hasParam(name) ? String(params[name]) : null);
     const entitlement = await authorizeRequest(req, id, 'token');
@@ -1364,6 +1246,7 @@ export function createArchxMiddleware(options = {}) {
     // authorize() may tighten (or modestly extend) this token's lifetime;
     // normalizeAuthorizationResult has already bounded it to 5..900 s.
     const exp = iat + (Number.isInteger(entitlement.ttlSec) ? entitlement.ttlSec * 1000 : ttlMs);
+    refreshSigningKey(iat);
     // `watermark: false` (or null) from authorize is an explicit
     // per-viewer opt-out of the global serverWatermark — e.g. paid
     // tiers see no visible mark. Previously `false` failed value
@@ -1376,7 +1259,7 @@ export function createArchxMiddleware(options = {}) {
     );
     const tokenPayload = {
       v: 2,
-      kid: activeSecretId,
+      kid: signingKeyring.activeSecretId,
       aud: TOKEN_AUDIENCE,
       scope: TOKEN_SCOPE,
       id, w, iat, exp, n: nonce,
@@ -1446,7 +1329,7 @@ export function createArchxMiddleware(options = {}) {
       } else {
         if (!stegoPerToken) tokenPayload.sgp = 0;
         issuedFingerprint = deriveStegoFingerprint({
-          id, nonce, viewerHash: fingerprintSubjectHash, secret, perToken: stegoPerToken,
+          id, nonce, viewerHash: fingerprintSubjectHash, secret: signingKeyring.secret, perToken: stegoPerToken,
         });
       }
       const strength = entStegoCfg.strength ?? stegoGlobalCfg.strength;
@@ -1472,7 +1355,7 @@ export function createArchxMiddleware(options = {}) {
             fingerprint: issuedFingerprint,
             profile: issuedStegoProfile,
             keyScope: tokenPayload.sgk === 1 ? 'viewer' : 'image',
-            keyId: activeSecretId,
+            keyId: signingKeyring.activeSecretId,
           }], 'onStegoIssue callback');
         } catch {
           emitSecurityEvent('archx.stego_registry_failed', req, { id, phase: 'token', viewerId, status: 503 });
@@ -1506,7 +1389,7 @@ export function createArchxMiddleware(options = {}) {
           nonce,
           exp,
           issuedAt: new Date(iat).toISOString(),
-          keyId: activeSecretId,
+          keyId: signingKeyring.activeSecretId,
           width: w,
           quality: deliveryQuality,
           format: deliveryFormat,
@@ -1592,7 +1475,7 @@ export function createArchxMiddleware(options = {}) {
       }
     }
     if (Object.keys(bindings).length) tokenPayload.b = bindings;
-    const token = signToken(tokenPayload, secret);
+    const token = signToken(tokenPayload, signingKeyring.secret);
     const imagePath = `${basePath}/i/${encodeURIComponent(id)}`;
     const out = {
       // `url` is the clean URL by default. Only an explicit
@@ -1606,27 +1489,27 @@ export function createArchxMiddleware(options = {}) {
       url: cfg.allowQueryTokens ? `${imagePath}?t=${token}` : imagePath,
       cleanUrl: imagePath,
       token,
-      key: deriveScrambleKey(id, nonce, secret, variantKeyScope({
+      key: deriveScrambleKey(id, nonce, signingKeyring.secret, variantKeyScope({
         w, q: deliveryQuality, fmt: deliveryFormat,
         wm: tokenPayload.wm ?? null,
-        forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+        forensicSeed: computeForensicSeed(id, tokenPayload, signingKeyring.secret),
         stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
-      }, secret)),
+      }, signingKeyring.secret)),
       grid,
       exp,
     };
-    if (encrypt) out.aesKey = deriveAesKey(id, nonce, secret, variantKeyScope({
+    if (encrypt) out.aesKey = deriveAesKey(id, nonce, signingKeyring.secret, variantKeyScope({
       w, q: deliveryQuality, fmt: deliveryFormat,
       wm: tokenPayload.wm ?? null,
-      forensicSeed: computeForensicSeed(id, tokenPayload, secret),
+      forensicSeed: computeForensicSeed(id, tokenPayload, signingKeyring.secret),
       stegoPayload: effectiveStego ? (tokenPayload.sg || issuedFingerprint) : null,
-    }, secret));
+    }, signingKeyring.secret));
     emitDeliveryEvent('archx.token_issued', {
       id,
       phase: 'token',
       viewerHash: viewerHash || null,
       traceHash: trace.hash || null,
-      keyId: activeSecretId,
+      keyId: signingKeyring.activeSecretId,
       width: w,
       quality: deliveryQuality,
       format: deliveryFormat,
@@ -1728,6 +1611,7 @@ export function createArchxMiddleware(options = {}) {
   }
 
   async function handler(req, res, next) {
+    refreshSigningKey();
     let routeId = null;
     let phase = null;
     try {
@@ -1773,14 +1657,14 @@ export function createArchxMiddleware(options = {}) {
       if (!isBatchTokens && parts.length !== 2) return sendJson(req, res, 404, { error: 'not found' });
       const kind = isBatchTokens ? 'tokens' : parts[0];
       const rawId = isBatchTokens ? null : parts[1];
-      if (!['token', 'tokens', 'i'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
-      phase = kind === 'i' ? 'image' : 'token';
+      if (!['token', 'tokens', 'i', 'seo'].includes(kind)) return sendJson(req, res, 404, { error: 'not found' });
+      phase = kind === 'i' ? 'image' : kind === 'seo' ? 'seo' : 'token';
       // Count malformed/unknown-ID attempts too. Otherwise the cheapest
       // enumeration/flood path would bypass every request budget simply by
       // never naming a real image. CORS preflight is the one exemption: it
       // carries no entitlement and is followed by the rate-limited token call.
       if (req.method !== 'OPTIONS') {
-        const rate = await rateLimited(req, kind === 'i' ? 'i' : 'token');
+        const rate = await rateLimited(req, kind === 'seo' ? 'seo' : kind === 'i' ? 'i' : 'token');
         if (rate.limited) {
           return deny(req, res, 429, 'too many requests', {
             phase, reason: 'rate-limit', headers: { 'Retry-After': String(rate.retryAfterSec || 60) },
@@ -1956,14 +1840,104 @@ export function createArchxMiddleware(options = {}) {
             });
           }
         }
-        return sendJson(req, res, 200, { tokens, errors });
+        const issued = Object.keys(tokens).length;
+        const denied = Object.keys(errors).length;
+        return sendJson(req, res, 200, {
+          ok: denied === 0,
+          counts: { requested: batchBody.items.length, issued, denied },
+          tokens,
+          errors,
+        });
       }
 
       let id;
       try { id = decodeURIComponent(rawId || ''); }
       catch { return deny(req, res, 400, 'bad request', { phase, reason: 'bad-id-encoding' }); }
       routeId = validateImageId(id) ? id : null;
-      if (!validateImageId(id) || !index.has(id)) {
+      if (!validateImageId(id)) {
+        return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
+      }
+
+      if (kind === 'seo') {
+        const seo = cfg.seoCrawler;
+        if (!seo) return sendJson(req, res, 404, { error: 'not found' });
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          return deny(req, res, 405, 'method not allowed', { id, phase, reason: 'seo-method', headers: { Allow: 'GET, HEAD' } });
+        }
+        if (url.search) return deny(req, res, 400, 'bad request', { id, phase, reason: 'seo-query' });
+        if (!originAllowed(req)) return deny(req, res, 403, 'forbidden', { id, phase, reason: 'origin' });
+
+        let verified = false;
+        try { verified = await withCallbackTimeout(seo.verify, [req, id], 'crawler verification'); }
+        catch (err) {
+          emitSecurityEvent('archx.crawler_verification_failed', req, {
+            id, phase, status: 503, reason: err?.code || 'verification-error',
+          });
+          return deny(req, res, 503, 'service unavailable', {
+            id, phase, reason: 'crawler-verification-unavailable', headers: { 'Retry-After': '1' },
+          });
+        }
+        if (verified !== true) {
+          return deny(req, res, 404, 'not found', { id, phase, reason: 'crawler-unverified' });
+        }
+        if (!index.has(id)) return deny(req, res, 404, 'not found', { id, phase, reason: 'unknown-or-invalid-id' });
+
+        const dims = await imageDimensions(id);
+        if (!dims?.width || !dims?.height) {
+          return deny(req, res, 415, 'unsupported image', { id, phase, reason: 'seo-image-invalid' });
+        }
+        const fraction = Math.min(seo.maxWidthFraction, cfg.maxWidthFraction);
+        const previewWidth = Math.min(seo.maxWidth, cfg.maxWidthCap, Math.floor(dims.width * fraction));
+        if (!Number.isInteger(previewWidth) || previewWidth < 64) {
+          return deny(req, res, 404, 'not found', { id, phase, reason: 'seo-preview-below-minimum' });
+        }
+        const master = resolveIndexedFile(id);
+        if (!master) return deny(req, res, 404, 'not found', { id, phase, reason: 'master-missing' });
+        if (master.stat.size > cfg.processing.maxInputBytes) {
+          return deny(req, res, 413, 'image too large', { id, phase, reason: 'master-too-large' });
+        }
+
+        const seoMarkKey = crypto.createHash('sha256').update(seo.watermark).digest('hex').slice(0, 16);
+        const seoCacheKey = `seo:${id}:${fileVersion(master.stat)}:${previewWidth}:${seo.maxWidthFraction}:${seo.quality}:${seo.format}:${seoMarkKey}`;
+        let previewBytes = getOutputCache(seoCacheKey);
+        if (!previewBytes) {
+          previewBytes = await processingSemaphore.run(async () => {
+            const sourceBytes = await fs.promises.readFile(master.filePath);
+            if (sourceBytes.length !== master.stat.size) {
+              const changed = new Error('master changed while reading crawler preview');
+              changed.code = 'ARCHX_MASTER_CHANGED';
+              throw changed;
+            }
+            const current = resolveIndexedFile(id);
+            if (!current || current.filePath !== master.filePath || fileVersion(current.stat) !== fileVersion(master.stat)) {
+              const changed = new Error('master changed while reading crawler preview');
+              changed.code = 'ARCHX_MASTER_CHANGED';
+              throw changed;
+            }
+            return renderSeoPreview(sourceBytes, {
+              maxWidth: previewWidth,
+              processing: cfg.processing,
+              watermark: seo.watermark,
+              quality: seo.quality,
+              format: seo.format,
+            });
+          });
+          setOutputCache(seoCacheKey, previewBytes);
+        }
+        const contentType = seo.format === 'jpeg' ? 'image/jpeg' : 'image/webp';
+        res.writeHead(200, {
+          ...protectedHeaders(req, {
+            'Content-Type': contentType,
+            'Content-Length': previewBytes.length,
+            'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+            'CDN-Cache-Control': 'private, no-store',
+            'Surrogate-Control': 'no-store',
+          }),
+        });
+        return req.method === 'HEAD' ? res.end() : res.end(previewBytes);
+      }
+
+      if (!index.has(id)) {
         return deny(req, res, 404, 'not found', { id: routeId, phase, reason: 'unknown-or-invalid-id' });
       }
 
@@ -2529,6 +2503,11 @@ export function createArchxMiddleware(options = {}) {
         if (err?.code === 'ARCHX_UNSUPPORTED_IMAGE') {
           return deny(req, res, 415, 'unsupported image', { id: routeId, phase, reason: 'unsupported-image' });
         }
+        if (err?.code === 'ARCHX_MASTER_CHANGED') {
+          return deny(req, res, 503, 'service unavailable', {
+            id: routeId, phase, reason: 'master-changed-during-preview', headers: { 'Retry-After': '1' },
+          });
+        }
         if (err?.code === 'ARCHX_PROCESSING_BUSY') {
           return deny(req, res, 503, 'service unavailable', {
             id: routeId, phase, reason: 'processing-busy', headers: { 'Retry-After': '1' },
@@ -2552,6 +2531,7 @@ export function createArchxMiddleware(options = {}) {
 
   handler.configAudit = auditArchxServerConfig(options);
   handler.stats = () => {
+    refreshSigningKey();
     let storeStats = {};
     try {
       const maybeStats = typeof stateStore.stats === 'function' ? stateStore.stats() : null;
@@ -2565,7 +2545,7 @@ export function createArchxMiddleware(options = {}) {
       deploymentMode: cfg.deploymentMode,
       stateStore: storeStats.kind || stateStore.kind || (ownsStateStore ? 'memory' : 'custom'),
       stateStoreShared: !ownsStateStore,
-      activeSecretId,
+      activeSecretId: signingKeyring.activeSecretId,
       signingKeyCount: Object.keys(signingKeys).length,
       rateLimitClients: statNumber(storeStats.rateLimitClients),
       quotaClients: statNumber(storeStats.quotaClients),

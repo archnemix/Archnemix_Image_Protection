@@ -47,7 +47,7 @@ function parseArgs(argv, booleanFlags = new Set()) {
   return out;
 }
 
-const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'verify-ownership', 'help', 'no-orientations']));
+const args = parseArgs(process.argv.slice(2), new Set(['json', 'no-search', 'no-geometry', 'tilt', 'perspective', 'verify-ownership', 'help', 'no-orientations']));
 const input = args._[0];
 if (!input || args.help) {
   console.log(`Usage: archx-detect <suspect image> [options]
@@ -60,7 +60,7 @@ if (!input || args.help) {
   --no-orientations  perceptual match in the shipped orientation only (default:
                        also probes flips/90° rotations/transposes of the suspect)
   --profile <p>      auto (default), standard, or robust
-  --layout <n>       pin codeword layout 1-4 (default auto: tries 3, 4, 2, 1)
+  --layout <n>       pin codeword layout 1-5 (default auto: tries 5, 3, 4, 2, 1)
   --max-time-ms <n>  wall-clock budget for the whole search (default 0 = unlimited;
                        on expiry the best candidate so far returns with timedOut)
   --grid-x <n>       detector grid columns, integer 4–64 (profile default)
@@ -68,7 +68,8 @@ if (!input || args.help) {
   --max-input-bytes <n> reject files above this size before reading (default 52428800)
   --no-search        disable sub-cell offset search (faster, less crop-tolerant)
   --no-geometry      disable crop scale/origin search (faster, less crop-tolerant)
-  --tilt             also search small-angle tilts (±6°) — slow, forensic mode
+  --tilt             keyed-pilot affine deskew (layout 5: ±30°; legacy: ±6°), offline/slow
+  --perspective      register mild camera keystone/trapezoid (±20%; ≤12 MP, slow)
   --verify-ownership verify the signed ownership claim (metadata + perceptual
                      soft binding + stego) instead of stego detection only;
                      public key from ARCHX_OWNERSHIP_PUBLIC_KEY (PEM) or
@@ -90,7 +91,7 @@ if (!key && !args.json) {
 
 const profile = args.profile || 'auto';
 const layoutArg = args['layout'] ? Number(args['layout']) : 'auto';
-if (layoutArg !== 'auto' && ![1, 2, 3, 4].includes(layoutArg)) { console.error('Archx detect: --layout must be 1, 2, 3 or 4'); process.exit(1); }
+if (layoutArg !== 'auto' && ![1, 2, 3, 4, 5].includes(layoutArg)) { console.error('Archx detect: --layout must be 1, 2, 3, 4 or 5'); process.exit(1); }
 const gridX = args['grid-x'] ? Number(args['grid-x']) : undefined;
 const gridY = args['grid-y'] ? Number(args['grid-y']) : undefined;
 const maxInputBytes = args['max-input-bytes'] ? Number(args['max-input-bytes']) : 50 * 1024 * 1024;
@@ -159,7 +160,7 @@ try {
       publicKey: pubPem,
       stegoKey: key || null,
       claim: args.claim ? String(args.claim) : null,
-      detectOptions: { searchTilt: !!args.tilt },
+      detectOptions: { searchTilt: !!args.tilt, searchPerspective: !!args.perspective },
     });
     if (args.json) console.log(JSON.stringify({ file: input, ownership: report }, null, 2));
     else {
@@ -184,6 +185,7 @@ try {
     gridY,
     searchOffsets: !args['no-search'],
     searchTilt: !!args.tilt,
+    searchPerspective: !!args.perspective,
     searchGeometry: !args['no-geometry'],
     maxTimeMs: args['max-time-ms'] ? Number(args['max-time-ms']) : 0,
   });
@@ -252,6 +254,7 @@ if (args.json) {
   console.log(`  profile     : ${result.profile || 'standard'}`);
   console.log(`  confidence  : ${result.confidence} (cell agreement ${result.agreement}, corrections ${result.corrections})`);
   if (result.geometry) console.log(`  geometry    : scale ${result.geometry.scaleX}×${result.geometry.scaleY}, origin ${result.geometry.originX},${result.geometry.originY}`);
+  if (result.perspective) console.log(`  registration: keystone h=${result.perspective.horizontal}, v=${result.perspective.vertical}`);
   if (expected) console.log(`  expected    : ${expected} ${matchesExpectation ? '— MATCH' : '— does NOT match'}`);
   console.log(`  soft binding: ${suspectPerceptualFingerprint}${perceptualComparison ? ` (distance ${perceptualComparison.distance}/64 — ${perceptualComparison.match ? 'MATCH' : 'does NOT match'}${perceptualComparison.orientation !== 'identity' ? ` via ${perceptualComparison.orientation} correction` : ''})` : ''}`);
   if (result.mirrored) console.log('  note        : mark was recovered from a horizontally flipped suspect.');

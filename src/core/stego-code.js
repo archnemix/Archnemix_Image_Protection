@@ -260,14 +260,17 @@ export function correctStegoBits(bits, reliability, key, maxDepth = 3) {
 }
 
 export const STEGO_ROW_SEGMENTS = 4;
+// Layout v5 reserves a keyed, spatially shuffled pilot set; data cells
+// remain interleaved over the rest of the frame for BCH-188 decoding.
+export const STEGO_SYNC_PILOT_CELLS = 32;
 
 // Layout seeds: v3 (1.14+) seeds sfc32 from SHA-256 with warm-up; v2
 // (1.13) seeds through cyrb128+sfc32 (128-bit state). The pre-1.13
 // layouts seeded mulberry32 with hashSeed(...) >>> 0, truncating every
 // stego key — however strong — to a 2^32 layout space
 // (GPU-brute-forceable from a known clean/marked pair). v1 and v2
-// below reproduce their sequences bit-exactly so existing marks keep
-// detecting; detection tries v3, v2, then v1 ("auto").
+  // below reproduce their sequences bit-exactly so existing marks keep
+  // detecting; auto detection tries v5, v3, v4, v2, then v1.
 function layoutRand(seedString, version, legacyHashSeedArg) {
   if (version === 1) return mulberry32(hashSeed(seedString, legacyHashSeedArg));
   if (version === 2) return sfc32(...cyrb128(seedString));

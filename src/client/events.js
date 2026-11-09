@@ -39,6 +39,13 @@ export function sanitizeClientEvent(type, details = {}, instance = null) {
   });
 }
 
+export function proofKeySkipReason(proofMode, proofKey, cryptoObject = globalThis.crypto) {
+  if (proofMode !== 'auto' || proofKey) return null;
+  const available = !!(cryptoObject?.subtle?.generateKey && cryptoObject?.subtle?.exportKey &&
+    cryptoObject?.subtle?.sign && cryptoObject?.subtle?.digest && cryptoObject?.getRandomValues);
+  return available ? 'key-generation-failed' : 'webcrypto-unavailable';
+}
+
 export function emitClientEvent(type, details = {}, instance = null) {
   const event = sanitizeClientEvent(type, details, instance);
   const invoke = (listener) => {

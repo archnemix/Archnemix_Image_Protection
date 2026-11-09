@@ -1574,6 +1574,7 @@ function correctStegoBits(bits, reliability, key, maxDepth = 3) {
   return { bits, corrections: -1, tagScheme: null };
 }
 var STEGO_ROW_SEGMENTS = 4;
+var STEGO_SYNC_PILOT_CELLS = 32;
 function layoutRand(seedString, version, legacyHashSeedArg) {
   if (version === 1) return mulberry32(hashSeed(seedString, legacyHashSeedArg));
   if (version === 2) return sfc32(...cyrb128(seedString));
@@ -1755,8 +1756,8 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   legacyCode = false,
   // Layout space: 3 = SHA-256-seeded repetition code (default),
   // 2 = 128-bit cyrb128, 1 = pre-1.13 32-bit-truncated (both kept
-  // for compatibility testing), 4 = v1.20 BCH(188,64) code over the
-  // v3 cell layout (corrects 2e+s <= 36; needs a v1.20+ detector).
+  // for compatibility testing), 4 = BCH(188,64) over v3 cells,
+  // 5 = the same BCH code plus the v2 keyed sync-pilot lattice.
   layoutVersion = 3
 } = {}) {
   const src = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
@@ -1768,13 +1769,17 @@ function embedStegoFingerprint(rgba, w, h, payload, {
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
   const fingerprint = stegoFingerprint(payload);
-  const v4 = layoutVersion === 4;
-  if (v4 && legacyCode) throw new Error("Archx stego: layoutVersion 4 always uses the keyed MAC payload (legacyCode is v1-v3 only)");
+  const syncV5 = layoutVersion === 5;
+  const v4 = layoutVersion === 4 || syncV5;
+  if (v4 && legacyCode) throw new Error(`Archx stego: layoutVersion ${layoutVersion} always uses the keyed MAC payload (legacyCode is v1-v3 only)`);
   const tag = legacyCode ? "crc" : "mac";
   const bits = v4 ? bchStegoCodeBits(fingerprint, key) : robust ? robustStegoCodeBits(fingerprint, key, tag) : stegoCodeBits(fingerprint, key, tag);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
-  const seedVersion = v4 || layoutVersion === 3 ? 3 : layoutVersion === 2 ? 2 : 1;
+  if (syncV5 && cellCount < 188 + STEGO_SYNC_PILOT_CELLS) {
+    throw new Error(`Archx stego: layoutVersion 5 requires at least ${188 + STEGO_SYNC_PILOT_CELLS} macro-cells`);
+  }
+  const seedVersion = v4 || layoutVersion === 3 || layoutVersion === 5 ? 3 : layoutVersion === 2 ? 2 : 1;
   const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, seedVersion) : stegoLayout(cellCount, key, seedVersion);
   const out = inPlace ? src : new Uint8Array(src);
   const baseAmp = Math.max(1, Math.min(16, Number(strength) || 6));
@@ -1787,7 +1792,9 @@ function embedStegoFingerprint(rgba, w, h, payload, {
       const x1 = Math.floor((cx + 1) * w / gx);
       if (x1 - x0 < 4 || y1 - y0 < 2) continue;
       const cell = cy * gx + cx;
-      const bit = bits[order[cell] % bits.length];
+      const layoutOrder = order[cell];
+      const isPilot = syncV5 && layoutOrder >= cellCount - STEGO_SYNC_PILOT_CELLS;
+      const bit = isPilot ? layoutOrder & 1 : bits[layoutOrder % bits.length];
       const pol = polarity[cell];
       let sum = 0, sum2 = 0, n = 0;
       for (let y = y0; y < y1; y += 2) {
@@ -2006,6 +2013,29 @@ function resampleRgba(src, w, h, nw, nh) {
   }
   return out;
 }
+function keystoneCorrectRgba(src, w, h, horizontal = 0, vertical = 0) {
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 || !Number.isFinite(horizontal) || !Number.isFinite(vertical) || Math.abs(horizontal) > 0.4 || Math.abs(vertical) > 0.4 || src.length < w * h * 4) throw new TypeError("invalid keystone image or parameters");
+  const out = new Uint8Array(w * h * 4);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  for (let y = 0; y < h; y++) {
+    const v = h > 1 ? y / (h - 1) - 0.5 : 0;
+    let di = y * w * 4;
+    for (let x = 0; x < w; x++, di += 4) {
+      const u = w > 1 ? x / (w - 1) - 0.5 : 0;
+      const sx = Math.min(w - 1, Math.max(0, cx + (x - cx) / (1 + horizontal * v)));
+      const sy = Math.min(h - 1, Math.max(0, cy + (y - cy) / (1 + vertical * u)));
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+      const wx = sx - x0, wy = sy - y0, invWx = 1 - wx, invWy = 1 - wy;
+      const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
+      const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+      for (let c = 0; c < 4; c++) {
+        out[di + c] = (src[i00 + c] * invWx + src[i10 + c] * wx) * invWy + (src[i01 + c] * invWx + src[i11 + c] * wx) * wy;
+      }
+    }
+  }
+  return out;
+}
 function rotateRgba(src, w, h, angleRad) {
   const out = new Uint8Array(w * h * 4);
   const cx = (w - 1) / 2, cy = (h - 1) / 2;
@@ -2032,6 +2062,76 @@ function rotateRgba(src, w, h, angleRad) {
     }
   }
   return out;
+}
+
+// src/core/stego-deskew.js
+var clampByteSize = (value) => Math.max(64, Math.round(value));
+function centerCrop(rgba, width, height, fraction) {
+  if (fraction >= 1) return { rgba, width, height };
+  const cropWidth = clampByteSize(width * fraction);
+  const cropHeight = clampByteSize(height * fraction);
+  const left = Math.round((width - cropWidth) / 2);
+  const top = Math.round((height - cropHeight) / 2);
+  const out = new Uint8Array(cropWidth * cropHeight * 4);
+  for (let y = 0; y < cropHeight; y++) {
+    const start = ((top + y) * width + left) * 4;
+    out.set(rgba.subarray(start, start + cropWidth * 4), y * cropWidth * 4);
+  }
+  return { rgba: out, width: cropWidth, height: cropHeight };
+}
+function signalScore(hit) {
+  const sync = hit?.syncRegistration;
+  const signal = Number.isFinite(sync?.meanSignal) ? sync.meanSignal : hit?.meanSignal;
+  const agreement = Number.isFinite(sync?.agreement) ? sync.agreement : hit?.agreement;
+  if (!Number.isFinite(signal)) return 0;
+  return signal * (Number.isFinite(agreement) ? Math.max(0, agreement) : 1);
+}
+function searchStegoDeskew(rgba, width, height, probe, {
+  maxProxyEdge = 640,
+  maxCandidates = 3,
+  shouldStop = () => false
+} = {}) {
+  if (!(rgba instanceof Uint8Array) || rgba.length < width * height * 4 || !Number.isSafeInteger(width * height * 4) || typeof probe !== "function") return [];
+  const scale = Math.min(1, maxProxyEdge / Math.max(width, height));
+  const proxyWidth = clampByteSize(width * scale);
+  const proxyHeight = clampByteSize(height * scale);
+  const proxy = scale < 1 ? resampleRgba(rgba, width, height, proxyWidth, proxyHeight) : rgba;
+  const samples = /* @__PURE__ */ new Map();
+  const scan = (degrees) => {
+    const angle = Math.round(degrees * 10) / 10;
+    if (Math.abs(angle) < 0.01 || samples.has(angle) || shouldStop()) return;
+    const corrected = rotateRgba(proxy, proxyWidth, proxyHeight, -angle * Math.PI / 180);
+    let best = null;
+    for (const fraction of [1, 0.96, 0.92]) {
+      const view = centerCrop(corrected, proxyWidth, proxyHeight, fraction);
+      const hit = probe(view.rgba, view.width, view.height, angle);
+      if (hit?.found) {
+        samples.set(angle, { angle, score: signalScore(hit), hit });
+        return;
+      }
+      const score = signalScore(hit);
+      if (!best || score > best.score) best = { angle, score, hit };
+      if (shouldStop()) break;
+    }
+    if (best) samples.set(angle, best);
+  };
+  for (let magnitude = 5; magnitude <= 30; magnitude += 5) {
+    scan(magnitude);
+    if (samples.get(magnitude)?.hit?.found) break;
+    scan(-magnitude);
+    if (samples.get(-magnitude)?.hit?.found || shouldStop()) break;
+  }
+  if (![...samples.values()].some((sample) => sample.hit?.found) && !shouldStop()) {
+    const leaders = [...samples.values()].sort((a, b) => b.score - a.score).slice(0, 2);
+    for (const leader of leaders) {
+      for (let delta = -2; delta <= 2.001; delta += 1) {
+        if (delta !== 0) scan(leader.angle + delta);
+        if (shouldStop() || [...samples.values()].some((sample) => sample.hit?.found)) break;
+      }
+      if (shouldStop() || [...samples.values()].some((sample) => sample.hit?.found)) break;
+    }
+  }
+  return [...samples.values()].sort((a, b) => (b.hit?.found ? 1 : 0) - (a.hit?.found ? 1 : 0) || b.score - a.score).slice(0, maxCandidates);
 }
 
 // src/core/stego-detect.js
@@ -2155,6 +2255,28 @@ function repairRobustStegoBits(scores, hard, key, maxFlips = 5, tag = "mac") {
   return null;
 }
 var STEGO_TIMEOUT = Symbol("archx-stego-timeout");
+var PERSPECTIVE_TRANSFORMS = Object.freeze([
+  [0.08, 0],
+  [-0.08, 0],
+  [0.16, 0],
+  [-0.16, 0],
+  [0.2, 0],
+  [-0.2, 0],
+  [0, 0.08],
+  [0, -0.08],
+  [0, 0.16],
+  [0, -0.16],
+  [0, 0.2],
+  [0, -0.2],
+  [0.1, 0.1],
+  [0.1, -0.1],
+  [-0.1, 0.1],
+  [-0.1, -0.1],
+  [0.2, 0.2],
+  [0.2, -0.2],
+  [-0.2, 0.2],
+  [-0.2, -0.2]
+]);
 function detectStegoFingerprint(rgba, w, h, {
   key = "",
   gridX,
@@ -2171,27 +2293,34 @@ function detectStegoFingerprint(rgba, w, h, {
   // ±6° on a downscaled proxy, refines by raw signal, then confirms
   // at full resolution. Off by default (cost); the CLI exposes --tilt.
   searchTilt = false,
+  // Bounded trapezoid/keystone registration for camera-photo suspects.
+  // This is opt-in because each warp is a full-resolution resample.
+  searchPerspective = false,
+  _perspectiveProbe = false,
   // Optional wall-clock budget for the WHOLE search (all layouts,
   // profiles, and probes share one deadline). On expiry the best
   // candidate so far is returned with `timedOut: true` instead of
   // running unbounded forensic stages. 0 (default) = unlimited.
   maxTimeMs = 0,
-  // Layout space: 'auto' (default) screens v3 (SHA-256-seeded),
-  // v4 (v1.20 BCH code over the v3 layout), then v2/v1 legacy
+  // Layout space: 'auto' (default) screens v5 (pilot-synchronized),
+  // v3 (SHA-256-seeded), v4 (BCH over the v3 layout), then legacy
   // seeds — native screens for all layouts first, then geometry
   // searches with the deadline sliced fairly across layouts;
-  // pass 1-4 to pin one space (full budget to that one search,
-  // roughly proportionally lower worst-case cost).
+  // pass 1-5 to pin one space (full budget to that one search,
+  // roughly proportionally lower worst-case cost). Dense v5 pixel-origin
+  // search is reserved for an explicitly pinned layoutVersion: 5.
   layoutVersion = "auto",
   _mirrorProbe = false,
   _tiltProbe = false,
   _layoutVersion = 0,
+  _denseSyncSearch = false,
   _planes = null,
   _deadline = 0
 } = {}) {
   const deadline = _deadline > 0 ? _deadline : Number.isFinite(maxTimeMs) && maxTimeMs > 0 ? Date.now() + maxTimeMs : 0;
   const deadlineHit = () => deadline > 0 && Date.now() > deadline;
-  const concreteLayout = _layoutVersion === 1 || _layoutVersion === 2 || _layoutVersion === 3 || _layoutVersion === 4 ? _layoutVersion : layoutVersion === 1 || layoutVersion === 2 || layoutVersion === 3 || layoutVersion === 4 ? layoutVersion : 0;
+  const concreteLayout = _layoutVersion >= 1 && _layoutVersion <= 5 ? _layoutVersion : Number.isInteger(layoutVersion) && layoutVersion >= 1 && layoutVersion <= 5 ? layoutVersion : 0;
+  const denseSyncSearch = _denseSyncSearch || layoutVersion === 5 && !_layoutVersion;
   const planesCache = _planes || /* @__PURE__ */ new Map();
   const srcTop = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba);
   const planesEntry = (buf) => {
@@ -2203,23 +2332,40 @@ function detectStegoFingerprint(rgba, w, h, {
     return entry;
   };
   if (!concreteLayout) {
-    const order2 = [3, 4, 2, 1];
-    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, _mirrorProbe, _tiltProbe, _planes: planesCache };
+    const order2 = [5, 3, 4, 2, 1];
+    const shared = { key, gridX, gridY, profile, searchOffsets, searchMirror, searchRotation, searchPerspective, _denseSyncSearch: denseSyncSearch, _mirrorProbe, _tiltProbe, _planes: planesCache };
     let best2 = null;
     const consider2 = (attempt) => {
       if (attempt && (!best2 || (attempt.confidence ?? 0) > (best2.confidence ?? 0))) best2 = attempt;
     };
-    for (const version of order2) {
+    for (let i = 0; i < order2.length; i++) {
+      const version = order2[i];
+      if (version === 5) {
+        const isRobustGrid = profile === "robust";
+        const { gx: gx2, gy: gy2 } = stegoGrid(
+          w,
+          h,
+          gridX ?? (isRobustGrid ? 20 : 24),
+          gridY ?? (isRobustGrid ? 14 : 16)
+        );
+        if (gx2 * gy2 < STEGO_V4_CODE_BITS + STEGO_SYNC_PILOT_CELLS) continue;
+      }
+      let nativeDeadline = deadline;
+      if (deadline > 0) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) break;
+        nativeDeadline = Math.min(deadline, Date.now() + Math.max(1, Math.ceil(remainingMs / (order2.length - i))));
+      }
       const attempt = detectStegoFingerprint(srcTop, w, h, {
         ...shared,
         searchGeometry: false,
         searchTilt: false,
         _layoutVersion: version,
-        _deadline: deadline
+        _deadline: nativeDeadline
       });
       if (attempt?.found) return attempt;
       consider2(attempt);
-      if (attempt?.timedOut || deadlineHit()) {
+      if (deadlineHit()) {
         if (best2 && !best2.timedOut) best2 = { ...best2, timedOut: true };
         return best2;
       }
@@ -2282,6 +2428,33 @@ function detectStegoFingerprint(rgba, w, h, {
       _deadline: deadline
     });
     const initial = robust2?.found && !standard?.found ? robust2 : standard?.found && !robust2?.found ? standard : (robust2?.confidence ?? 0) > (standard?.confidence ?? 0) ? robust2 : standard;
+    if (searchPerspective && !initial?.found && !_perspectiveProbe && srcTop.length <= 12e6 * 4 && srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+      for (const [kx, ky] of PERSPECTIVE_TRANSFORMS) {
+        if (deadlineHit()) break;
+        const rectified = keystoneCorrectRgba(srcTop, w, h, kx, ky);
+        for (const candidateProfile of ["robust", "standard"]) {
+          const hit = detectStegoFingerprint(rectified, w, h, {
+            key,
+            gridX,
+            gridY,
+            profile: candidateProfile,
+            searchOffsets: true,
+            searchGeometry: false,
+            searchMirror: false,
+            searchRotation: false,
+            searchTilt: false,
+            searchPerspective: false,
+            _perspectiveProbe: true,
+            _mirrorProbe: true,
+            _tiltProbe: true,
+            _layoutVersion: concreteLayout,
+            _planes: planesCache,
+            _deadline: deadline
+          });
+          if (hit?.found) return { ...hit, perspective: { horizontal: kx, vertical: ky } };
+        }
+      }
+    }
     if (!searchGeometry || initial?.found) return initial;
     if (deadlineHit()) return initial?.timedOut ? initial : { ...initial, timedOut: true };
     const standardGeometry = detectStegoFingerprint(srcTop, w, h, {
@@ -2296,6 +2469,7 @@ function detectStegoFingerprint(rgba, w, h, {
       searchTilt,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
+      _denseSyncSearch: denseSyncSearch,
       _planes: planesCache,
       _deadline: deadline
     });
@@ -2312,6 +2486,7 @@ function detectStegoFingerprint(rgba, w, h, {
       searchTilt,
       _mirrorProbe: true,
       _layoutVersion: concreteLayout,
+      _denseSyncSearch: denseSyncSearch,
       _planes: planesCache,
       _deadline: deadline
     });
@@ -2457,11 +2632,105 @@ function detectStegoFingerprint(rgba, w, h, {
     }
     return (robustGeometry?.confidence ?? 0) > (standardGeometry?.confidence ?? 0) ? robustGeometry : standardGeometry;
   }
+  if (concreteLayout === 5 && searchTilt && !_tiltProbe && srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+    const native = detectStegoFingerprint(srcTop, w, h, {
+      key,
+      gridX,
+      gridY,
+      profile,
+      searchOffsets,
+      searchGeometry: false,
+      searchMirror: false,
+      searchRotation: false,
+      searchTilt: false,
+      searchPerspective: false,
+      _tiltProbe: true,
+      _mirrorProbe: true,
+      _layoutVersion: concreteLayout,
+      _planes: planesCache,
+      _deadline: deadline
+    });
+    if (native?.found) return native;
+    const deskewCandidates = searchStegoDeskew(
+      srcTop,
+      w,
+      h,
+      (candidate, candidateWidth, candidateHeight) => detectStegoFingerprint(
+        candidate,
+        candidateWidth,
+        candidateHeight,
+        {
+          key,
+          gridX,
+          gridY,
+          profile,
+          searchOffsets: true,
+          searchGeometry: false,
+          searchMirror: false,
+          searchRotation: false,
+          searchTilt: false,
+          searchPerspective: false,
+          layoutVersion: 5,
+          _mirrorProbe: true,
+          _tiltProbe: true,
+          _deadline: deadline
+        }
+      ),
+      { shouldStop: deadlineHit, maxCandidates: 2 }
+    );
+    for (const candidate of deskewCandidates) {
+      if (deadlineHit()) break;
+      const corrected = rotateRgba(srcTop, w, h, -candidate.angle * Math.PI / 180);
+      const confirmed = detectStegoFingerprint(corrected, w, h, {
+        key,
+        gridX,
+        gridY,
+        profile,
+        searchOffsets: true,
+        searchGeometry,
+        searchMirror,
+        searchRotation,
+        searchTilt: false,
+        searchPerspective,
+        _tiltProbe: true,
+        _layoutVersion: concreteLayout,
+        _planes: planesCache,
+        _deadline: deadline
+      });
+      if (confirmed?.found) return { ...confirmed, deskewed: candidate.angle, deskewMethod: "sync-pilot-affine" };
+    }
+  }
+  if (searchPerspective && !_perspectiveProbe && srcTop.length <= 12e6 * 4 && srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
+    for (const [kx, ky] of PERSPECTIVE_TRANSFORMS) {
+      if (deadlineHit()) break;
+      const rectified = keystoneCorrectRgba(srcTop, w, h, kx, ky);
+      const hit = detectStegoFingerprint(rectified, w, h, {
+        key,
+        gridX,
+        gridY,
+        profile,
+        searchOffsets: true,
+        searchGeometry: false,
+        searchMirror: false,
+        searchRotation: false,
+        searchTilt: false,
+        searchPerspective: false,
+        _perspectiveProbe: true,
+        _mirrorProbe: true,
+        _tiltProbe: true,
+        _layoutVersion: concreteLayout,
+        _planes: planesCache,
+        _deadline: deadline
+      });
+      if (hit?.found) return { ...hit, perspective: { horizontal: kx, vertical: ky } };
+    }
+  }
   const src = srcTop;
   if (src.length < w * h * 4) throw new Error("Archx stego: pixel buffer is smaller than w\xD7h\xD74");
   const robust = profile === "robust";
   const effectiveProfile = robust ? "robust" : "standard";
-  const isV4 = concreteLayout === 4;
+  const isSyncV5 = concreteLayout === 5;
+  const isV4 = concreteLayout === 4 || isSyncV5;
   const codeLength = isV4 ? STEGO_V4_CODE_BITS : robust ? 96 : 64;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
@@ -2469,7 +2738,25 @@ function detectStegoFingerprint(rgba, w, h, {
   const effectiveGridY = gridY ?? (robust ? 14 : 16);
   const { gx, gy } = stegoGrid(w, h, effectiveGridX, effectiveGridY);
   const cellCount = gx * gy;
+  if (isSyncV5 && cellCount < codeLength + STEGO_SYNC_PILOT_CELLS) {
+    throw new Error(`Archx stego: layoutVersion 5 requires at least ${codeLength + STEGO_SYNC_PILOT_CELLS} macro-cells`);
+  }
   const { order, polarity, segmentPolarity } = robust ? robustStegoLayout(cellCount, key, isV4 ? 3 : concreteLayout) : stegoLayout(cellCount, key, isV4 ? 3 : concreteLayout);
+  const syncPilotCells = [];
+  if (isSyncV5) for (let cell = 0; cell < cellCount; cell++) {
+    if (order[cell] < cellCount - STEGO_SYNC_PILOT_CELLS) continue;
+    const signs = new Int8Array(rowSegments);
+    for (let segment = 0; segment < rowSegments; segment++) {
+      signs[segment] = polarity[cell] * segmentPolarity[cell * rowSegments + segment];
+    }
+    syncPilotCells.push({
+      cell,
+      cx: cell % gx,
+      cy: Math.floor(cell / gx),
+      bitSign: order[cell] & 1 ? 1 : -1,
+      signs
+    });
+  }
   const cw = w / gx, ch = h / gy;
   const planes = planesEntry(src);
   if (!planes.luma) {
@@ -2507,10 +2794,13 @@ function detectStegoFingerprint(rgba, w, h, {
   const _bandW = new Int32Array(gx * columnBands);
   const _colAllBands = new Uint8Array(gx);
   const _gains = new Uint16Array(codeLength);
-  const _cellBitAll = new Uint16Array(cellCount);
+  const _cellBitAll = new Int16Array(cellCount);
+  const _pilotBitAll = new Int8Array(cellCount);
   const _signPol = new Int8Array(cellCount * rowSegments);
   for (let i = 0; i < cellCount; i++) {
-    _cellBitAll[i] = order[i] % codeLength;
+    const pilot = isSyncV5 && order[i] >= cellCount - STEGO_SYNC_PILOT_CELLS;
+    _cellBitAll[i] = pilot ? -1 : order[i] % codeLength;
+    _pilotBitAll[i] = order[i] & 1;
     const pol = polarity[i];
     const base = i * rowSegments;
     for (let segment = 0; segment < rowSegments; segment++) {
@@ -2535,6 +2825,9 @@ function detectStegoFingerprint(rgba, w, h, {
       if (s.cellScore[ci] >= 0 === !!hit.bits[s.cellBitIdx[ci]]) agreeing++;
     }
     const agreement = s.cellLen ? agreeing / s.cellLen : 0;
+    const sync = s.result.syncRegistration;
+    const syncOk = s.result.syncTemplateVersion !== 2 || sync && sync.cells >= 10 && sync.agreement >= 0.7 && sync.meanSignal >= 1.5;
+    if (!syncOk) return null;
     const mismRate = hit.mismatches / Math.max(1, s.order.length - 64);
     const tierOk = mismRate <= 0.1 || mismRate <= 0.2 && s.meanAbs >= 2 && agreement >= 0.82 || s.meanAbs >= 2.5 && agreement >= 0.82;
     if (!(agreement >= 0.72 && s.meanAbs >= 1.2 && tierOk)) return null;
@@ -2552,6 +2845,7 @@ function detectStegoFingerprint(rgba, w, h, {
       confidence: Math.round(Math.max(0, Math.min(0.99, 0.42 + evidence2)) * 1e3) / 1e3
     };
     delete deep._evidence;
+    delete deep._syncEvidence;
     delete deep._originX;
     delete deep._originY;
     delete deep._scaleX;
@@ -2568,6 +2862,7 @@ function detectStegoFingerprint(rgba, w, h, {
     const bitScores = _bitScores.fill(0);
     const bitCounts = _bitCounts.fill(0);
     let cellLen = 0;
+    let pilotCells = 0, pilotAgreements = 0, pilotSignedSum = 0;
     for (let cy = 0; cy < gy; cy++) {
       const rawY0 = oy + cy * cellH0;
       const rawY1 = rawY0 + cellH0;
@@ -2662,6 +2957,14 @@ function detectStegoFingerprint(rgba, w, h, {
         }
         const score = Math.max(-12, Math.min(12, rawScore));
         const bitIndex = _cellBitAll[cellIndex];
+        if (bitIndex < 0) {
+          const expectedPilotSign = _pilotBitAll[cellIndex] ? 1 : -1;
+          const signedPilotScore = score * expectedPilotSign;
+          pilotCells++;
+          pilotSignedSum += signedPilotScore;
+          if (signedPilotScore > 0) pilotAgreements++;
+          continue;
+        }
         bitScores[bitIndex] += score;
         bitCounts[bitIndex]++;
         _cellBitIdx[cellLen] = bitIndex;
@@ -2892,7 +3195,12 @@ function detectStegoFingerprint(rgba, w, h, {
     }
     const agreement = cellLen ? agreeing / cellLen : 0;
     const meanAbs = meanAbsPre;
-    const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) - (isV4 ? (corrected._bchBudget || 0) / 6 : Math.max(0, corrected.corrections)) * 0.04;
+    const syncMeanSignal = pilotCells ? pilotSignedSum / pilotCells : 0;
+    const syncAgreement = pilotCells ? pilotAgreements / pilotCells : 0;
+    const syncOk = !isSyncV5 || pilotCells >= 10 && syncMeanSignal >= 1.5 && syncAgreement >= 0.7;
+    const syncRank = isSyncV5 && pilotCells >= 6 ? Math.max(0, syncMeanSignal) * syncAgreement * Math.min(1, pilotCells / 16) : 0;
+    const syncEvidence = isSyncV5 ? Math.min(0.9, syncRank * 0.15) : 0;
+    const evidence = Math.max(0, agreement - 0.64) * 2.4 + Math.min(0.55, Math.max(0, meanAbs - 1.4) / 8) + syncEvidence - (isV4 ? (corrected._bchBudget || 0) / 6 : Math.max(0, corrected.corrections)) * 0.04;
     const confidence = crcValid ? Math.max(0, Math.min(0.99, 0.42 + evidence)) : Math.max(0, Math.min(0.49, evidence));
     const minBitCount = Math.min(...bitCounts);
     const observedBits = bitCounts.reduce((count, value) => count + (value > 0 ? 1 : 0), 0);
@@ -2907,13 +3215,19 @@ function detectStegoFingerprint(rgba, w, h, {
     const standardCorrectionOk = isV4 || robust || (legacyScheme ? correctionCount <= 1 && agreement >= 0.95 : correctionCount <= 1 || meanAbs >= 2 && agreement >= 0.85);
     const bchBudget = corrected._bchBudget || 0;
     const v4CorrectionOk = !isV4 || (corrected._mismRate != null ? corrected._mismRate <= 0.1 || corrected._mismRate <= 0.2 && meanAbs >= 2 && agreement >= 0.82 || meanAbs >= 2.5 && agreement >= 0.82 : bchBudget <= 12 || bchBudget <= 24 && meanAbs >= 2.5 && agreement >= 0.82 || meanAbs >= 3.5 && agreement >= 0.88);
-    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk;
+    const found = crcValid && agreement >= 0.72 && meanAbs >= 1.2 && cellLen >= 96 && bitCoverageOk && robustCorrectionOk && standardCorrectionOk && v4CorrectionOk && syncOk;
     const _result = {
       found,
       fingerprint,
       profile: effectiveProfile,
       tagScheme: corrected.tagScheme ?? null,
       layoutVersion: concreteLayout,
+      syncTemplateVersion: isSyncV5 ? 2 : null,
+      syncRegistration: isSyncV5 ? {
+        cells: pilotCells,
+        agreement: Math.round(syncAgreement * 1e3) / 1e3,
+        meanSignal: Math.round(syncMeanSignal * 100) / 100
+      } : null,
       erasureDecoded: corrected.erasureDecoded === true,
       erasedBits: codeLength - observedBits,
       observedBits,
@@ -2939,6 +3253,7 @@ function detectStegoFingerprint(rgba, w, h, {
       },
       grid: { x: gx, y: gy },
       _evidence: evidence,
+      _syncEvidence: syncRank,
       _originX: ox,
       _originY: oy,
       _scaleX: scaleX,
@@ -3123,9 +3438,197 @@ function detectStegoFingerprint(rgba, w, h, {
           if (best?.found) break;
         }
       }
+      if (isSyncV5 && !best?.found) {
+        const syncCandidate = (scaleX, scaleY, originX, originY) => {
+          const cellW0 = cw * scaleX, cellH0 = ch * scaleY;
+          let count = 0, positive = 0, signedSum = 0;
+          for (const pilot of syncPilotCells) {
+            const { cell, cx, cy } = pilot;
+            const rawX0 = originX + cx * cellW0, rawY0 = originY + cy * cellH0;
+            const x0 = Math.max(0, Math.round(rawX0)), x1 = Math.min(w, Math.round(rawX0 + cellW0));
+            const y0 = Math.max(0, Math.round(rawY0)), y1 = Math.min(h, Math.round(rawY0 + cellH0));
+            if (x1 - x0 < 4 || y1 - y0 < 2 || (x1 - x0) / cellW0 < 0.45 || (y1 - y0) / cellH0 < 0.45) continue;
+            let n = 0, r0 = 0, r1 = 0, r2 = 0, r3 = 0, responseSum = 0;
+            for (let segment = 0; segment < rowSegments; segment++) {
+              const ry0 = Math.max(y0, Math.round(rawY0 + segment * cellH0 / rowSegments));
+              const ry1 = Math.min(y1, Math.round(rawY0 + (segment + 1) * cellH0 / rowSegments));
+              if (ry1 <= ry0) continue;
+              const rx0 = Math.max(x0, Math.round(rawX0));
+              const rx1 = Math.min(x1, Math.round(rawX0 + cellW0 / columnBands));
+              const rx2 = Math.min(x1, Math.round(rawX0 + 2 * cellW0 / columnBands));
+              const rx3 = Math.min(x1, Math.round(rawX0 + 3 * cellW0 / columnBands));
+              const rx4 = Math.min(x1, Math.round(rawX0 + cellW0));
+              if (rx1 <= rx0 || rx2 <= rx1 || rx3 <= rx2 || rx4 <= rx3) continue;
+              const m0 = rectSum(rx0, ry0, rx1, ry1) / ((rx1 - rx0) * (ry1 - ry0));
+              const m1 = rectSum(rx1, ry0, rx2, ry1) / ((rx2 - rx1) * (ry1 - ry0));
+              const m2 = rectSum(rx2, ry0, rx3, ry1) / ((rx3 - rx2) * (ry1 - ry0));
+              const m3 = rectSum(rx3, ry0, rx4, ry1) / ((rx4 - rx3) * (ry1 - ry0));
+              const response = (m0 - 3 * m1 + 3 * m2 - m3) / 8 * pilot.signs[segment];
+              if (n === 0) r0 = response;
+              else if (n === 1) r1 = response;
+              else if (n === 2) r2 = response;
+              else r3 = response;
+              n++;
+              responseSum += response;
+            }
+            if (n < 2) continue;
+            let value;
+            if (!robust) value = responseSum / n;
+            else if (n === 2) value = Math.max(r0, r1);
+            else if (n === 3) value = Math.max(Math.min(r0, r1), Math.min(Math.max(r0, r1), r2));
+            else {
+              const max01 = Math.max(r0, r1), min01 = Math.min(r0, r1);
+              const max23 = Math.max(r2, r3), min23 = Math.min(r2, r3);
+              value = Math.max(Math.min(max01, max23), Math.max(min01, min23));
+            }
+            value = Math.max(-12, Math.min(12, value));
+            const signed = value * pilot.bitSign;
+            count++;
+            signedSum += signed;
+            if (signed > 0) positive++;
+          }
+          const meanSignal = count ? signedSum / count : 0;
+          const agreement = count ? positive / count : 0;
+          const rank = count >= 6 ? meanSignal * agreement * Math.min(1, count / 16) : 0;
+          return { scaleX, scaleY, originX, originY, count, meanSignal, agreement, rank };
+        };
+        if (_denseSyncSearch) {
+          const cropAspect = w / h;
+          const commonAspects = [
+            cropAspect,
+            0.5,
+            0.5625,
+            2 / 3,
+            0.75,
+            0.8,
+            1,
+            1.25,
+            4 / 3,
+            1.5,
+            1.52,
+            1.6,
+            16 / 9,
+            2,
+            2.4
+          ].map((value) => Math.round(value * 1e3) / 1e3);
+          const nearestAspects = [...new Set(commonAspects)].sort((a, b) => Math.abs(Math.log(a / cropAspect)) - Math.abs(Math.log(b / cropAspect))).slice(0, 6);
+          const sourceAspectPriors = [.../* @__PURE__ */ new Set([
+            ...nearestAspects,
+            1.5,
+            1.52,
+            ...cropAspect < 1 ? [2] : []
+          ])];
+          let denseFound = false;
+          for (const sourceAspect of sourceAspectPriors) {
+            const denseRatio = sourceAspect / cropAspect;
+            const denseCandidates = [];
+            for (let scaleY = 0.9; scaleY <= 1.6001; scaleY += 0.025) {
+              const sy = Math.round(scaleY * 1e3) / 1e3, sx = denseRatio * sy;
+              if (sx < 0.75 || sx > 1.8) continue;
+              const rx = originRange(gx * cw * sx, w), ry = originRange(gy * ch * sy, h);
+              let winner = null;
+              for (let ox = Math.ceil(rx.min); ox <= rx.max; ox += 2) {
+                for (let oy = Math.ceil(ry.min); oy <= ry.max; oy += 2) {
+                  const hit = syncCandidate(sx, sy, ox, oy);
+                  if (!winner || hit.rank > winner.rank) winner = hit;
+                }
+                if (deadlineHit()) throw STEGO_TIMEOUT;
+              }
+              if (winner?.rank > 0) denseCandidates.push(winner);
+            }
+            denseCandidates.sort((a, b) => b.rank - a.rank);
+            const denseRefined = [];
+            for (const seed of denseCandidates.slice(0, 16)) {
+              let winner = null;
+              for (const fxScale of [0.99, 1, 1.01]) for (const fyScale of [0.99, 1, 1.01]) {
+                for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) {
+                  const hit = syncCandidate(
+                    seed.scaleX * fxScale,
+                    seed.scaleY * fyScale,
+                    seed.originX + dx,
+                    seed.originY + dy
+                  );
+                  if (!winner || hit.rank > winner.rank) winner = hit;
+                }
+              }
+              if (winner?.rank > 0) denseRefined.push(winner);
+              if (deadlineHit()) throw STEGO_TIMEOUT;
+            }
+            denseRefined.sort((a, b) => b.rank - a.rank);
+            for (const candidate of denseRefined) {
+              const hit = consider(evaluate(candidate));
+              scaleCandidates.push(hit);
+              if (hit.found) {
+                denseFound = true;
+                break;
+              }
+            }
+            if (denseFound) break;
+          }
+          if (best?.found) {
+            delete best._evidence;
+            delete best._syncEvidence;
+            delete best._originX;
+            delete best._originY;
+            delete best._scaleX;
+            delete best._scaleY;
+            return best;
+          }
+        }
+        const scales = [];
+        for (let scale = 0.75; scale <= 1.8001; scale += 0.05) scales.push(Math.round(scale * 1e3) / 1e3);
+        const offsetFractions = Array.from({ length: 17 }, (_, i) => i / 16);
+        const pilotLeaders = [];
+        for (const scaleX of scales) {
+          if (deadlineHit()) throw STEGO_TIMEOUT;
+          const rangeX = originRange(gx * cw * scaleX, w);
+          for (const scaleY of scales) {
+            const rangeY = originRange(gy * ch * scaleY, h);
+            let bestPilot = null;
+            for (const fx of offsetFractions) for (const fy of offsetFractions) {
+              const candidate = syncCandidate(
+                scaleX,
+                scaleY,
+                rangeX.min + (rangeX.max - rangeX.min) * fx,
+                rangeY.min + (rangeY.max - rangeY.min) * fy
+              );
+              if (!bestPilot || candidate.rank > bestPilot.rank) bestPilot = candidate;
+            }
+            if (bestPilot?.rank > 0) pilotLeaders.push(bestPilot);
+          }
+        }
+        pilotLeaders.sort((a, b) => b.rank - a.rank);
+        const registrationOffsets = [-0.25, -0.125, 0, 0.125, 0.25];
+        const locallyRefined = [];
+        for (let leaderIndex = 0; leaderIndex < pilotLeaders.length; leaderIndex++) {
+          if ((leaderIndex & 15) === 0 && deadlineHit()) throw STEGO_TIMEOUT;
+          const candidate = pilotLeaders[leaderIndex];
+          let localBest = null;
+          for (const fxScale of [0.985, 1, 1.015]) for (const fyScale of [0.985, 1, 1.015]) {
+            const scaleX = candidate.scaleX * fxScale, scaleY = candidate.scaleY * fyScale;
+            for (const fx of registrationOffsets) for (const fy of registrationOffsets) {
+              const shifted = syncCandidate(
+                scaleX,
+                scaleY,
+                candidate.originX + gx * cw * (candidate.scaleX - scaleX) / 2 + fx * cw * scaleX,
+                candidate.originY + gy * ch * (candidate.scaleY - scaleY) / 2 + fy * ch * scaleY
+              );
+              if (!localBest || shifted.rank > localBest.rank) localBest = shifted;
+            }
+          }
+          if (localBest?.rank > 0) locallyRefined.push(localBest);
+        }
+        locallyRefined.sort((a, b) => b.rank - a.rank);
+        const chosen = locallyRefined.slice(0, 24);
+        for (const candidate of chosen) {
+          const full = consider(evaluate(candidate));
+          scaleCandidates.push(full);
+          if (full.found) break;
+        }
+      }
       const originCandidates = [];
       const seenPairs = /* @__PURE__ */ new Set();
-      for (const candidate of scaleCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      for (const candidate of scaleCandidates.sort((a, b) => isSyncV5 ? b._syncEvidence - a._syncEvidence : b._evidence - a._evidence)) {
         const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}`;
         if (seenPairs.has(key2)) continue;
         seenPairs.add(key2);
@@ -3148,16 +3651,16 @@ function detectStegoFingerprint(rgba, w, h, {
             })));
           }
         }
-        if (seenPairs.size >= 4) break;
+        if (seenPairs.size >= (isSyncV5 ? 24 : 4)) break;
       }
       const refinements = [];
       const seenGeometries = /* @__PURE__ */ new Set();
-      for (const candidate of originCandidates.sort((a, b) => b._evidence - a._evidence)) {
+      for (const candidate of originCandidates.sort((a, b) => isSyncV5 ? b._syncEvidence - a._syncEvidence : b._evidence - a._evidence)) {
         const key2 = `${Math.round(candidate._scaleX * 1e3)}:${Math.round(candidate._scaleY * 1e3)}:${Math.round(candidate._originX)}:${Math.round(candidate._originY)}`;
         if (seenGeometries.has(key2)) continue;
         seenGeometries.add(key2);
         refinements.push(candidate);
-        if (refinements.length >= 3) break;
+        if (refinements.length >= (isSyncV5 ? 12 : 3)) break;
       }
       for (const coarseCandidate of refinements) {
         for (const fx of fractions) for (const fy of fractions) {
@@ -3171,7 +3674,7 @@ function detectStegoFingerprint(rgba, w, h, {
       }
       if (!best?.found) {
         const fineFactors = [0.965, 0.977, 0.988, 1.012, 1.023, 1.035];
-        const leaders = refinements.slice(0, 2);
+        const leaders = refinements.slice(0, isSyncV5 ? 8 : 2);
         for (const leader of leaders) {
           for (const fxScale of [1, ...fineFactors]) {
             for (const fyScale of [1, ...fineFactors]) {
@@ -3264,12 +3767,13 @@ function detectStegoFingerprint(rgba, w, h, {
     }
     if (best) {
       delete best._evidence;
+      delete best._syncEvidence;
       delete best._originX;
       delete best._originY;
       delete best._scaleX;
       delete best._scaleY;
     }
-    if (!best?.found && searchTilt && !_tiltProbe) {
+    if (!best?.found && searchTilt && !_tiltProbe && concreteLayout !== 5) {
       try {
         if (srcTop.length >= w * h * 4 && Number.isSafeInteger(w * h * 4)) {
           const entry = planesEntry(srcTop);
@@ -3495,6 +3999,7 @@ function detectStegoFingerprint(rgba, w, h, {
       }
     }
     delete best._evidence;
+    delete best._syncEvidence;
     delete best._originX;
     delete best._originY;
     delete best._scaleX;
@@ -3600,9 +4105,10 @@ function assayStegoEmbed(rgba, w, h, {
     recommendedStrength: strength,
     warnings: []
   };
-  const codeBits = layoutVersion === 4 ? 188 : robust ? 96 : 64;
-  if (gx * gy < codeBits) {
-    result.warnings.push(`grid has only ${gx * gy} cells for a ${codeBits}-bit codeword: some bits get no cell at this size \u2014 use a larger delivery size`);
+  const codeBits = layoutVersion === 4 || layoutVersion === 5 ? 188 : robust ? 96 : 64;
+  const requiredCells = codeBits + (layoutVersion === 5 ? STEGO_SYNC_PILOT_CELLS : 0);
+  if (gx * gy < requiredCells) {
+    result.warnings.push(`grid has only ${gx * gy} cells; layout ${layoutVersion} needs at least ${requiredCells} data/pilot cells \u2014 use a larger delivery size`);
   }
   if (result.contentClass === "binary-graphic") {
     result.warnings.push("near-binary high-contrast content (UI/text/periodic graphics) is StegoMark's documented weak class; expect poor recovery without much higher strength");
@@ -3645,7 +4151,8 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     throw new Error("Archx stego assay: candidates must be an array of 1..4096 entries");
   }
   const robust = profile === "robust";
-  const v4 = layoutVersion === 4;
+  const v4 = layoutVersion === 4 || layoutVersion === 5;
+  const syncV5 = layoutVersion === 5;
   const layout = layoutVersion === 1 ? 1 : layoutVersion === 2 ? 2 : 3;
   const rowSegments = STEGO_ROW_SEGMENTS;
   const columnBands = 4;
@@ -3742,7 +4249,7 @@ function assayStegoCollusion(rgba, w, h, candidates, {
     let cells = 0, agree = 0;
     for (let cell = 0; cell < cellCount; cell++) {
       const reading = readings[cell];
-      if (!Number.isFinite(reading)) continue;
+      if (!Number.isFinite(reading) || syncV5 && order[cell] >= cellCount - STEGO_SYNC_PILOT_CELLS) continue;
       const bitIndex = order[cell] % bits.length;
       bitSum[bitIndex] += reading;
       bitCount[bitIndex]++;
@@ -4345,6 +4852,18 @@ var TEMPORAL_INTERLACE_PROFILES = Object.freeze({
     chroma: true
   })
 });
+function nextShuffledPhase(phaseBag, phases, random = Math.random) {
+  const count = Math.max(1, Math.floor(Number(phases) || 1));
+  if (!phaseBag.length || phaseBag[0] >= count) {
+    phaseBag.length = 0;
+    for (let i = 0; i < count; i++) phaseBag.push(i);
+    for (let i = count - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [phaseBag[i], phaseBag[j]] = [phaseBag[j], phaseBag[i]];
+    }
+  }
+  return phaseBag.pop();
+}
 function clampTemporalNumber(value, fallback, min, max) {
   const n = Number(value);
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
@@ -6134,6 +6653,11 @@ function sanitizeClientEvent(type, details = {}, instance = null) {
     issues: Array.isArray(details.issues) ? Object.freeze(details.issues.slice(0, 40).map((issue) => cleanText(issue, 120)).filter(Boolean)) : null
   });
 }
+function proofKeySkipReason(proofMode, proofKey, cryptoObject = globalThis.crypto) {
+  if (proofMode !== "auto" || proofKey) return null;
+  const available = !!(cryptoObject?.subtle?.generateKey && cryptoObject?.subtle?.exportKey && cryptoObject?.subtle?.sign && cryptoObject?.subtle?.digest && cryptoObject?.getRandomValues);
+  return available ? "key-generation-failed" : "webcrypto-unavailable";
+}
 function emitClientEvent(type, details = {}, instance = null) {
   const event = sanitizeClientEvent(type, details, instance);
   const invoke = (listener) => {
@@ -6643,9 +7167,524 @@ var SHADOW_CSS = `
   }
 `;
 
+// src/client/shaders.js
+var VERTEX_SHADER = `#version 300 es
+      layout(location=0) in vec2 p; out vec2 vUv;
+      void main(){ vUv = p*0.5+0.5; vUv.y = 1.0-vUv.y; gl_Position = vec4(p,0.,1.); }`;
+var FRAGMENT_SHADER = `#version 300 es
+      precision highp float;
+      uniform sampler2D uTex; uniform sampler2D uMap; uniform sampler2D uWm;
+      uniform float uGrid; uniform vec2 uCrop; uniform vec2 uFitScale; uniform vec2 uFitOffset;
+      uniform float uScrambled; uniform float uSeed; uniform float uWmOn;
+      uniform float uLensOn; uniform float uLensActive; uniform vec2 uLensCenter;
+      uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
+      uniform float uTemporalOn; uniform float uTemporalSign;
+      uniform float uTemporalStrength; uniform float uTemporalBlock;
+      uniform float uTemporalPattern; uniform float uTemporalChroma;
+      uniform float uTemporalDuty; uniform float uTemporalBias; uniform float uBiasSeed;
+      uniform float uInterlaceOn; uniform float uInterlacePhase;
+      uniform float uInterlacePhases; uniform float uInterlaceLayout;
+      uniform float uInterlaceCell; uniform float uInterlaceAxis;
+      uniform float uInterlaceFill; uniform float uInterlaceFillBlock;
+      uniform float uInterlaceFillStrength; uniform float uInterlaceHiddenScale;
+      uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
+      uniform float uInterlaceBias;
+      in vec2 vUv; out vec4 frag;
+      float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
+      float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
+      vec3 hash3(vec2 q){
+        return vec3(hash(q), hash(q+19.19), hash(q+47.47));
+      }
+      vec2 mapToSource(vec2 imageUv){
+        vec2 srcUv = imageUv;
+        if(uScrambled>0.5){
+          vec2 paddedUv = imageUv * uCrop; // orig->padded space
+          vec2 tile = floor(paddedUv*uGrid);
+          vec2 local = fract(paddedUv*uGrid);
+          vec4 m = texelFetch(uMap, ivec2(tile), 0);
+          vec2 srcTile = m.rg*255.0;
+          if(m.b>0.5) local.x = 1.0-local.x;
+          if(m.a>0.5) local.y = 1.0-local.y;
+          srcUv = (srcTile+local)/uGrid;
+          // Clamp inside the source tile so filtering never blends across
+          // scrambled-tile boundaries -> no seams.
+          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
+          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
+        }
+        return srcUv;
+      }
+      vec4 sampleImage(vec2 imageUv){
+        vec2 texSize = vec2(textureSize(uTex, 0));
+        vec2 srcUv = mapToSource(imageUv);
+        vec2 srcPx = srcUv * texSize;
+        float footprint = max(length(dFdx(srcPx)), length(dFdy(srcPx)));
+        // At ~1:1, fetch the exact texel instead of bilinear-blending two
+        // neighbours; this is the difference between crisp type/edges and mush.
+        if(footprint > 0.70 && footprint < 1.45){
+          ivec2 p = ivec2(clamp(floor(srcPx), vec2(0.0), texSize - 1.0));
+          return texelFetch(uTex, p, 0);
+        }
+        // When minifying, a small 2x2 supersample around the fragment footprint
+        // preserves substantially more detail than one bilinear tap (and, for a
+        // scrambled texture, avoids cross-tile mipmap bleeding).
+        if(footprint >= 1.45){
+          vec2 duvX = dFdx(imageUv);
+          vec2 duvY = dFdy(imageUv);
+          vec4 sum = vec4(0.0);
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX - 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX + 0.25*duvY));
+          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX + 0.25*duvY));
+          return sum * 0.25;
+        }
+        return texture(uTex, srcUv);
+      }
+      void main(){
+        if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
+        vec2 uv = vUv*uFitScale + uFitOffset;
+        if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){ frag=vec4(0.,0.,0.,1.); return; }
+        // Pointer lens: outside the trusted-pointer disc we sample a heavily
+        // quantised (pixelated) version, so a single screenshot/frame grab
+        // only ever contains one small sharp region.
+        vec2 effUv = uv;
+        float lensOutside = 0.0;
+        float lensDistPx = 0.0;
+        if(uLensOn>0.5){
+          vec2 centerPx = vec2(uLensCenter.x, 1.0-uLensCenter.y) * uResolution;
+          lensDistPx = distance(gl_FragCoord.xy, centerPx);
+          if(uLensActive<0.5 || lensDistPx > uLensRadius){
+            float block = max(uResolution.x, uResolution.y) / 34.0;
+            vec2 qxy = (floor(gl_FragCoord.xy / block) + 0.5) * block;
+            vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
+            effUv = qUv * uFitScale + uFitOffset;
+            lensOutside = 1.0;
+          }
+        }
+        vec4 c = sampleImage(effUv);
+        c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
+        if(lensOutside>0.5) c.rgb *= 0.82;
+        // Literal temporal interlace: each spatial cell belongs to exactly
+        // one phase. Inactive cells retain only the configured fill. This
+        // runs before the watermark so attribution is present in every
+        // presented phase and in a one-frame capture.
+        if(uInterlaceOn>0.5){
+          vec2 interlaceCell = floor(gl_FragCoord.xy / max(uInterlaceCell, 1.0));
+          float assigned = 0.0;
+          if(uInterlaceLayout<0.5){
+            assigned = mod(interlaceCell.x + (uInterlacePhases<2.5 ? interlaceCell.y : 2.0*interlaceCell.y), uInterlacePhases);
+          } else if(uInterlaceLayout<1.5){
+            assigned = mod(uInterlaceAxis>0.5 ? interlaceCell.x : interlaceCell.y, uInterlacePhases);
+          } else if(uInterlaceLayout<2.5){
+            assigned = min(floor(hash(interlaceCell + 913.7) * uInterlacePhases), uInterlacePhases - 1.0);
+          } else {
+            assigned = mod(interlaceCell.x + interlaceCell.y, uInterlacePhases);
+          }
+          // Cycle-zero-mean block bias (noise fill only): without it the
+          // per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
+          // median of a short screen recording is exactly c whenever the
+          // hidden deltas straddle it (~50% of pixels at 3 phases). A
+          // per-24px-block offset b, +b*(P-1)/P on the active phase and
+          // -b/P hidden, keeps the cycle mean exact while moving every
+          // cycle statistic off c. biasHash re-seeds every 90 frames, so
+          // longer recordings face a drifting bias, not a fixed offset.
+          float iBias = 0.0;
+          if(uInterlaceFill>2.5 && uInterlaceFill<3.5){
+            vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
+            iBias = (biasHash(biasCell) * 2.0 - 1.0) * uInterlaceBias * uInterlaceFillStrength;
+          }
+          if(abs(assigned-uInterlacePhase)<0.5){
+            c.rgb = c.rgb * uInterlaceActiveGain + vec3(iBias * (uInterlacePhases - 1.0) / max(uInterlacePhases, 1.0));
+          } else {
+            vec3 fillColor = c.rgb;
+            if(uInterlaceFill<0.5){
+              vec2 qxy = (floor(gl_FragCoord.xy / max(uInterlaceFillBlock, 1.0)) + 0.5) * uInterlaceFillBlock;
+              vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
+              vec2 fillUv = qUv * uFitScale + uFitOffset;
+              if(fillUv.x>=0.0 && fillUv.x<=1.0 && fillUv.y>=0.0 && fillUv.y<=1.0){
+                fillColor = sampleImage(fillUv).rgb;
+              }
+            } else if(uInterlaceFill<1.5){
+              fillColor = c.rgb * uInterlaceHiddenScale;
+            } else if(uInterlaceFill<2.5){
+              fillColor = vec3(0.0);
+            } else {
+              vec3 delta;
+              if(uTemporalChroma>0.5){
+                float v = hash(interlaceCell) - 0.5;
+                delta = vec3(v, -0.62*v, 0.78*v);
+              } else {
+                delta = hash3(interlaceCell) - 0.5;
+              }
+              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign - vec3(iBias / max(uInterlacePhases, 1.0) / max(uInterlaceFillStrength, 0.02));
+            }
+            c.rgb = mix(c.rgb, fillColor, uInterlaceFillStrength);
+          }
+        }
+        if(uWmOn>0.5){
+          vec4 wm = texture(uWm, vUv);
+          c.rgb = mix(c.rgb, wm.rgb, wm.a);
+        }
+        if(uLensOn>0.5 && uLensActive>0.5 && abs(lensDistPx-uLensRadius)<1.5){
+          c.rgb = mix(c.rgb, vec3(1.0), 0.35);
+        }
+        // Temporal shield: complementary per-block noise flips sign every
+        // presented frame. The eye integrates the pair toward the image;
+        // one screenshot/extension capture keeps a single noisy frame.
+        if(uTemporalOn>0.5){
+          vec2 blockCell = floor(gl_FragCoord.xy / max(uTemporalBlock, 1.0));
+          vec3 delta;
+          if(uTemporalPattern>1.5){
+            // Horizontal bands interact strongly with rolling-shutter rows.
+            float v = hash(vec2(0.0, blockCell.y)) - 0.5;
+            delta = uTemporalChroma>0.5 ? vec3(v, -0.62*v, 0.78*v) : hash3(vec2(0.0, blockCell.y)) - 0.5;
+          } else if(uTemporalPattern>0.5){
+            float parity = mod(blockCell.x + blockCell.y, 2.0) > 0.5 ? 1.0 : -1.0;
+            if(uTemporalChroma>0.5){
+              float v = (0.35 + 0.65*hash(blockCell)) * parity;
+              delta = vec3(v, -0.62*v, 0.78*v) * 0.5;
+            } else {
+              delta = (0.35 + 0.65*hash3(blockCell)) * parity * 0.5;
+            }
+          } else if(uTemporalChroma>0.5){
+            float v = hash(blockCell) - 0.5;
+            delta = vec3(v, -0.62*v, 0.78*v);
+          } else {
+            delta = hash3(blockCell) - 0.5;
+          }
+          c.rgb += delta * uTemporalStrength * uTemporalSign;
+          // Asymmetric duty bias: a slowly-drifting per-block offset b is
+          // applied +2b/3 on one frame and -b/3 on the next two. The
+          // temporal MEAN the eye integrates is exactly c, but the sample
+          // MEDIAN of any short capture converges to c - b/3, not c \u2014
+          // median-filter recovery of the active/interlace subsets is
+          // permanently biased, and b re-rolls every ~90 frames so even
+          // long-window medians keep chasing a moving target.
+          vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
+          float b = biasHash(biasCell) - 0.5;
+          c.rgb += vec3(b) * uTemporalBias * uTemporalDuty;
+        }
+        frag = vec4(c.rgb, 1.0);
+      }`;
+
+// src/client/temporal-frames.js
+function buildTemporalFrames(frame, cfg, document2) {
+  const w = frame.width, h = frame.height;
+  const fctx = getNativeContext(frame, "2d");
+  let src;
+  try {
+    src = nativeGetImageData(fctx, 0, 0, w, h);
+  } catch {
+    return null;
+  }
+  const interlace = cfg.interlace;
+  const phases = Math.max(2, Math.min(4, cfg.phases || 2));
+  const needNoise = !!cfg.noise || interlace?.fill === "noise";
+  const noiseBlock = Math.max(1, cfg.block || 1);
+  const nbw = Math.ceil(w / noiseBlock), nbh = Math.ceil(h / noiseBlock);
+  const offsets = needNoise ? new Float32Array(nbw * nbh * 3) : null;
+  const amp = (cfg.noise ? cfg.strength : interlace?.noiseStrength || 0) * 255;
+  if (offsets) {
+    for (let by = 0; by < nbh; by++) {
+      for (let bx = 0; bx < nbw; bx++) {
+        const oi = (by * nbw + bx) * 3;
+        if (cfg.pattern === "bands" && bx > 0) {
+          offsets[oi] = offsets[oi - 3];
+          offsets[oi + 1] = offsets[oi - 2];
+          offsets[oi + 2] = offsets[oi - 1];
+          continue;
+        }
+        const parity = cfg.pattern === "checker" ? bx + by & 1 ? 1 : -1 : 1;
+        if (cfg.chroma) {
+          const scalar = cfg.pattern === "checker" ? (0.35 + Math.random() * 0.65) * amp * parity : (Math.random() * 2 - 1) * amp;
+          offsets[oi] = scalar;
+          offsets[oi + 1] = -0.62 * scalar;
+          offsets[oi + 2] = 0.78 * scalar;
+        } else if (cfg.pattern === "checker") {
+          offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
+          offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
+        } else {
+          offsets[oi] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
+          offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
+        }
+      }
+    }
+  }
+  const cell = Math.max(1, interlace?.cellSize || noiseBlock);
+  const bw = Math.ceil(w / cell), bh = Math.ceil(h / cell);
+  let assignments = null;
+  if (interlace) {
+    assignments = new Uint8Array(bw * bh);
+    for (let by = 0; by < bh; by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        let phase = 0;
+        if (interlace.layout === "strips") {
+          phase = (interlace.axis === "columns" ? bx : by) % phases;
+        } else if (interlace.layout === "blocks") {
+          phase = Math.random() * phases | 0;
+        } else if (interlace.layout === "pixels") {
+          phase = (bx + (phases === 2 ? by : 2 * by)) % phases;
+        } else {
+          phase = (bx + by) % phases;
+        }
+        assignments[by * bw + bx] = phase;
+      }
+    }
+  }
+  let lowData = null;
+  let lowW = 0;
+  let lowH = 0;
+  let lowBlock = 1;
+  if (interlace?.fill === "lowres") {
+    lowBlock = Math.max(1, interlace.fillBlock || 12);
+    lowW = Math.max(1, Math.ceil(w / lowBlock));
+    lowH = Math.max(1, Math.ceil(h / lowBlock));
+    try {
+      const low = makeCanvas(document2);
+      low.width = lowW;
+      low.height = lowH;
+      const lowCtx = getNativeContext(low, "2d");
+      setSmoothing(lowCtx, true);
+      nativeDrawImage(lowCtx, frame, 0, 0, lowW, lowH);
+      lowData = nativeGetImageData(lowCtx, 0, 0, lowW, lowH).data;
+      low.width = 0;
+      low.height = 0;
+    } catch {
+      lowData = null;
+    }
+  }
+  const biasBlock = 24;
+  const bbw = Math.ceil(w / biasBlock), bbh = Math.ceil(h / biasBlock);
+  const biasAmp = (interlace?.noiseStrength || 0) * 255 * 0.55;
+  const biases = interlace && interlace.fill === "noise" && biasAmp > 0 ? new Float32Array(bbw * bbh) : null;
+  if (biases) for (let i = 0; i < biases.length; i++) biases[i] = (Math.random() * 2 - 1) * biasAmp;
+  const colBias = biases ? new Int32Array(w) : null;
+  if (colBias) for (let x = 0; x < w; x++) colBias[x] = Math.min(bbw - 1, Math.floor(x / biasBlock));
+  const colNoiseOi = offsets ? new Int32Array(w) : null;
+  if (colNoiseOi) for (let x = 0; x < w; x++) colNoiseOi[x] = Math.min(nbw - 1, Math.floor(x / noiseBlock)) * 3;
+  const scratch = fctx.createImageData(w, h);
+  const mk = (phase) => {
+    const sign = (phase % 2 ? -1 : 1) * [1, 0.6, 1.3, 0.85][phase % 4];
+    const c = makeCanvas(document2);
+    c.width = w;
+    c.height = h;
+    const cctx = getNativeContext(c, "2d");
+    const out = scratch;
+    const s = src.data, d = out.data;
+    if (!interlace) {
+      for (let by = 0; by < nbh; by++) {
+        const y0 = by * noiseBlock;
+        const y1 = Math.min(h, y0 + noiseBlock);
+        for (let y = y0; y < y1; y++) {
+          let p = y * w * 4;
+          for (let bx = 0; bx < nbw; bx++) {
+            const oi = (by * nbw + bx) * 3;
+            const x1 = Math.min(w, (bx + 1) * noiseBlock);
+            for (let x = bx * noiseBlock; x < x1; x++, p += 4) {
+              d[p] = s[p] + sign * offsets[oi];
+              d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
+              d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
+              d[p + 3] = 255;
+            }
+          }
+        }
+      }
+      nativePutImageData(cctx, out, 0, 0);
+      return c;
+    }
+    const gain = interlace.activeGain || 1;
+    const fillMix = interlace.fillStrength;
+    for (let by = 0; by < bh; by++) {
+      const y0 = by * cell;
+      const y1 = Math.min(h, y0 + cell);
+      for (let bx = 0; bx < bw; bx++) {
+        const active = assignments[by * bw + bx] === phase;
+        const x0 = bx * cell;
+        const x1 = Math.min(w, x0 + cell);
+        for (let y = y0; y < y1; y++) {
+          let p = (y * w + x0) * 4;
+          const lowY = lowData ? Math.min(lowH - 1, Math.floor(y / lowBlock)) : 0;
+          const rowNoiseOi = offsets ? Math.min(nbh - 1, Math.floor(y / noiseBlock)) * nbw * 3 : 0;
+          const rowBiasOff = biases ? Math.min(bbh - 1, Math.floor(y / biasBlock)) * bbw : 0;
+          for (let x = x0; x < x1; x++, p += 4) {
+            const sr = s[p], sg = s[p + 1], sb = s[p + 2];
+            const bv = biases ? biases[rowBiasOff + colBias[x]] : 0;
+            let r, g, b;
+            if (active) {
+              const ab = bv * fillMix * (phases - 1) / phases;
+              r = sr * gain + ab;
+              g = sg * gain + ab;
+              b = sb * gain + ab;
+            } else {
+              let fr = sr, fg = sg, fb = sb;
+              if (interlace.fill === "lowres" && lowData) {
+                const lowX = Math.min(lowW - 1, Math.floor(x / lowBlock));
+                const li = (lowY * lowW + lowX) * 4;
+                fr = lowData[li];
+                fg = lowData[li + 1];
+                fb = lowData[li + 2];
+              } else if (interlace.fill === "dim") {
+                fr = sr * interlace.hiddenScale;
+                fg = sg * interlace.hiddenScale;
+                fb = sb * interlace.hiddenScale;
+              } else if (interlace.fill === "black") {
+                fr = 0;
+                fg = 0;
+                fb = 0;
+              } else if (interlace.fill === "noise" && offsets) {
+                const oi = rowNoiseOi + colNoiseOi[x];
+                const hb = bv / phases;
+                fr = sr - hb + sign * offsets[oi];
+                fg = sg - hb + sign * offsets[oi + 1];
+                fb = sb - hb + sign * offsets[oi + 2];
+              }
+              r = sr + (fr - sr) * fillMix;
+              g = sg + (fg - sg) * fillMix;
+              b = sb + (fb - sb) * fillMix;
+            }
+            if (cfg.noise && offsets) {
+              const oi = rowNoiseOi + colNoiseOi[x];
+              r += sign * offsets[oi];
+              g += sign * offsets[oi + 1];
+              b += sign * offsets[oi + 2];
+            }
+            d[p] = r;
+            d[p + 1] = g;
+            d[p + 2] = b;
+            d[p + 3] = 255;
+          }
+        }
+      }
+    }
+    nativePutImageData(cctx, out, 0, 0);
+    return c;
+  };
+  return Array.from({ length: phases }, (_, phase) => mk(phase));
+}
+
+// src/client/token-transport.js
+async function createTokenMintContext({ options, source, tokenId, host, controls, onProofSkipped }) {
+  const src = source || {};
+  const endpointRaw = src.tokenEndpoint || options.tokenEndpoint;
+  if (!endpointRaw) throw new Error("Archx: tokenEndpoint required for {id} sources");
+  const endpointUrl = resolveHttpUrl(endpointRaw, { label: "token endpoint" });
+  if (endpointUrl.search || endpointUrl.hash) {
+    throw nonRetryableError("Archx: token endpoint must not contain a query or fragment");
+  }
+  const rect = host.getBoundingClientRect?.();
+  const cssWidth = rect?.width || host.clientWidth || 800;
+  const cssHeight = rect?.height || host.clientHeight || cssWidth * 0.75;
+  const { dprCap, oversample, requestQuality } = effectiveSampling(options);
+  const pixelScale = Math.min(globalThis.devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
+  const maxSourceWidth = boundedInteger(options.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
+  const boxW = canonicalSourceWidth(cssWidth * pixelScale, options.sourceWidthBuckets, maxSourceWidth);
+  const boxH = canonicalSourceWidth(cssHeight * pixelScale, options.sourceWidthBuckets, maxSourceWidth);
+  const fit = ["cover", "contain", "fill"].includes(options.fit) ? options.fit : "cover";
+  const tokenMethod = String(options.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
+  const tokenTransport = ["header", "query", "auto"].includes(String(options.tokenTransport || "header").toLowerCase()) ? String(options.tokenTransport || "header").toLowerCase() : "header";
+  const proofSetting = options.proofOfPossession;
+  const proofMode = proofSetting === false || proofSetting === "off" ? "off" : proofSetting === true || proofSetting === "required" ? "required" : "auto";
+  const proofKey = proofMode === "off" ? null : await getProofKey(proofMode === "required");
+  const popSkipReason = proofKeySkipReason(proofMode, proofKey);
+  if (popSkipReason) onProofSkipped?.(popSkipReason);
+  const mintUrl = new URL(endpointUrl.href);
+  mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, "/")}${encodeURIComponent(tokenId)}`;
+  mintUrl.searchParams.set("w", String(boxW));
+  mintUrl.searchParams.set("bw", String(boxW));
+  mintUrl.searchParams.set("bh", String(boxH));
+  mintUrl.searchParams.set("fit", fit);
+  if (requestQuality != null) mintUrl.searchParams.set("q", String(requestQuality));
+  const tokenCacheKey = cacheDigest([
+    "token",
+    1,
+    options.cacheScope || "",
+    endpointUrl.origin,
+    endpointUrl.pathname,
+    tokenId,
+    boxW,
+    boxH,
+    fit,
+    requestQuality,
+    tokenMethod,
+    tokenTransport,
+    proofKey?.jkt || proofMode,
+    controls.credentials,
+    options.allowedTokenOrigins || null,
+    options.grid,
+    options.scrambled === true,
+    options.key || "",
+    options.aesKey || "",
+    controls.maxResponseBytes,
+    controls.maxDecodedPixels,
+    controls.maxDecodedDimension
+  ]);
+  return {
+    endpointUrl,
+    boxW,
+    boxH,
+    fit,
+    requestQuality,
+    tokenMethod,
+    tokenTransport,
+    proofMode,
+    proofKey,
+    mintUrl,
+    tokenCacheKey
+  };
+}
+async function createPrefetchedTokenMint({
+  options,
+  tokenId,
+  force,
+  hasCachedBytes,
+  alreadyPrefetched,
+  destroyed,
+  isAlreadyPrefetched = () => alreadyPrefetched,
+  isDestroyed = () => destroyed,
+  signal,
+  getMintContext
+}) {
+  if (options.tokenBatch !== true || isAlreadyPrefetched() || isDestroyed()) return null;
+  if (!force && hasCachedBytes) return null;
+  if (!tokenId || typeof tokenId !== "string" || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return null;
+  const controls = fetchControls(options);
+  let context;
+  try {
+    context = await getMintContext(controls);
+  } catch {
+    return null;
+  }
+  if (isDestroyed() || isAlreadyPrefetched() || context.tokenMethod !== "POST") return null;
+  const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, options);
+  if (!batchUrl) return null;
+  const cacheBitmap = options.cacheBitmap !== false && options.memory !== "strict";
+  if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return null;
+  const headers = context.proofKey ? { "X-Archx-Request": "token", "X-Archx-Proof-Key": context.proofKey.header } : { "X-Archx-Request": "token" };
+  const promise = queueTokenBatchRequest({
+    batchUrl,
+    item: {
+      id: tokenId,
+      w: context.boxW,
+      bw: context.boxW,
+      bh: context.boxH,
+      fit: context.fit,
+      ...context.requestQuality != null ? { q: context.requestQuality } : {}
+    },
+    headers,
+    credentials: controls.credentials,
+    controls,
+    signal,
+    options
+  });
+  promise.catch(() => {
+  });
+  return { key: context.tokenCacheKey, promise };
+}
+
 // src/client/viewer.js
 var taintConsoleWarned = false;
-var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _readyResolve, _readyReject, _readySettled, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, settleReadyAfterPaint_fn, rejectReady_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, nextPhase_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
+var _options, _host, _root, _wrap, _canvas, _tilesEl, _shieldEl, _source, _bitmap, _meta, _abort, _decoy, _decoySize, _gl, _raf, _loaded, _destroyed, _glBudgetWarned, _taintWarned, _taintPromotedWebGL, _canaryDone, _canaryPause, _canaryProbe, _canaryWait, _canaryNextTry, _preserveFlagged, _integrityHardLock, _glReleasing, _taintImage, _risk, _blackoutTimer, _resizeTimer, _visibilityObs, _realCtx, _attemptHandler, _loading, _visible, _unloaded, _glProg, _glLoc, _glTex, _glMap, _glWm, _glWmOn, _glSource, _glMeta, _frameCanvas, _lensBase, _lensPoint, _lensRaf, _lensCells, _lensCoverage, _lensRadiusScale, _lensRadiusAt, _traceEl, _traceTimer, _strikes, _lockedUntil, _lockTimer, _integrityIssues, _bitmapReleased, _popSkipReported, _loadedOnce, _cachedBytes, _cachedExtra, _bitmapCacheEntry, _prefetchedTokenMint, _renderedW, _renderedH, _deviceBox, _glFrameBudget, _glFrames, _temporalSign, _temporalPhase, _temporalRaf, _temporalFrames, _temporalIndex, _temporalEngineActual, _phaseBag, _signBalance, _dutyIndex, _biasSeed, _biasFrames, _lastInteractAt, _idleSkip, _temporalInterlaceCache, _readyResolve, _readyReject, _readySettled, _ProtectedImage_instances, registerStrike_fn, trackLensTravel_fn, lensRadiusPx_fn, requestLensFrame_fn, tokenSourceId_fn, isTokenSource_fn, isAssetSource_fn, shouldUpgradeDerivative_fn, settleReadyAfterPaint_fn, rejectReady_fn, temporalConfig_fn, waitForStableSize_fn, tokenMintContext_fn, prefetchTokenBatchMint_fn, securityGate_fn, releaseSourceBitmap_fn, setupTemporalFrames_fn, paintTemporal2d_fn, startTemporal2d_fn, stopTemporal2d_fn, paintLens2d_fn, prepareDecoy_fn, getDecoy_fn, taintContext_fn, fresh2dCanvas_fn, prepareGlSource_fn, flagPreserveRewrite_fn, paintBlackout_fn, canaryPresentable_fn, captureCanaryProbe_fn, checkCanaryProbe_fn, glContinuous_fn;
 var ProtectedImage = class {
   constructor(target, source, options = {}) {
     __privateAdd(this, _ProtectedImage_instances);
@@ -6713,6 +7752,7 @@ var ProtectedImage = class {
     __privateAdd(this, _lockTimer, 0);
     __privateAdd(this, _integrityIssues, []);
     __privateAdd(this, _bitmapReleased, false);
+    __privateAdd(this, _popSkipReported, false);
     __privateAdd(this, _loadedOnce, false);
     __privateAdd(this, _cachedBytes, null);
     __privateAdd(this, _cachedExtra, null);
@@ -8126,203 +9166,8 @@ var ProtectedImage = class {
     return true;
   }
   _initGl(gl) {
-    const vs = `#version 300 es
-      layout(location=0) in vec2 p; out vec2 vUv;
-      void main(){ vUv = p*0.5+0.5; vUv.y = 1.0-vUv.y; gl_Position = vec4(p,0.,1.); }`;
-    const fs = `#version 300 es
-      precision highp float;
-      uniform sampler2D uTex; uniform sampler2D uMap; uniform sampler2D uWm;
-      uniform float uGrid; uniform vec2 uCrop; uniform vec2 uFitScale; uniform vec2 uFitOffset;
-      uniform float uScrambled; uniform float uSeed; uniform float uWmOn;
-      uniform float uLensOn; uniform float uLensActive; uniform vec2 uLensCenter;
-      uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
-      uniform float uTemporalOn; uniform float uTemporalSign;
-      uniform float uTemporalStrength; uniform float uTemporalBlock;
-      uniform float uTemporalPattern; uniform float uTemporalChroma;
-      uniform float uTemporalDuty; uniform float uTemporalBias; uniform float uBiasSeed;
-      uniform float uInterlaceOn; uniform float uInterlacePhase;
-      uniform float uInterlacePhases; uniform float uInterlaceLayout;
-      uniform float uInterlaceCell; uniform float uInterlaceAxis;
-      uniform float uInterlaceFill; uniform float uInterlaceFillBlock;
-      uniform float uInterlaceFillStrength; uniform float uInterlaceHiddenScale;
-      uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
-      uniform float uInterlaceBias;
-      in vec2 vUv; out vec4 frag;
-      float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
-      float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
-      vec3 hash3(vec2 q){
-        return vec3(hash(q), hash(q+19.19), hash(q+47.47));
-      }
-      vec2 mapToSource(vec2 imageUv){
-        vec2 srcUv = imageUv;
-        if(uScrambled>0.5){
-          vec2 paddedUv = imageUv * uCrop; // orig->padded space
-          vec2 tile = floor(paddedUv*uGrid);
-          vec2 local = fract(paddedUv*uGrid);
-          vec4 m = texelFetch(uMap, ivec2(tile), 0);
-          vec2 srcTile = m.rg*255.0;
-          if(m.b>0.5) local.x = 1.0-local.x;
-          if(m.a>0.5) local.y = 1.0-local.y;
-          srcUv = (srcTile+local)/uGrid;
-          // Clamp inside the source tile so filtering never blends across
-          // scrambled-tile boundaries -> no seams.
-          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
-          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
-        }
-        return srcUv;
-      }
-      vec4 sampleImage(vec2 imageUv){
-        vec2 texSize = vec2(textureSize(uTex, 0));
-        vec2 srcUv = mapToSource(imageUv);
-        vec2 srcPx = srcUv * texSize;
-        float footprint = max(length(dFdx(srcPx)), length(dFdy(srcPx)));
-        // At ~1:1, fetch the exact texel instead of bilinear-blending two
-        // neighbours; this is the difference between crisp type/edges and mush.
-        if(footprint > 0.70 && footprint < 1.45){
-          ivec2 p = ivec2(clamp(floor(srcPx), vec2(0.0), texSize - 1.0));
-          return texelFetch(uTex, p, 0);
-        }
-        // When minifying, a small 2x2 supersample around the fragment footprint
-        // preserves substantially more detail than one bilinear tap (and, for a
-        // scrambled texture, avoids cross-tile mipmap bleeding).
-        if(footprint >= 1.45){
-          vec2 duvX = dFdx(imageUv);
-          vec2 duvY = dFdy(imageUv);
-          vec4 sum = vec4(0.0);
-          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX - 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX - 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX + 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX + 0.25*duvY));
-          return sum * 0.25;
-        }
-        return texture(uTex, srcUv);
-      }
-      void main(){
-        if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
-        vec2 uv = vUv*uFitScale + uFitOffset;
-        if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){ frag=vec4(0.,0.,0.,1.); return; }
-        // Pointer lens: outside the trusted-pointer disc we sample a heavily
-        // quantised (pixelated) version, so a single screenshot/frame grab
-        // only ever contains one small sharp region.
-        vec2 effUv = uv;
-        float lensOutside = 0.0;
-        float lensDistPx = 0.0;
-        if(uLensOn>0.5){
-          vec2 centerPx = vec2(uLensCenter.x, 1.0-uLensCenter.y) * uResolution;
-          lensDistPx = distance(gl_FragCoord.xy, centerPx);
-          if(uLensActive<0.5 || lensDistPx > uLensRadius){
-            float block = max(uResolution.x, uResolution.y) / 34.0;
-            vec2 qxy = (floor(gl_FragCoord.xy / block) + 0.5) * block;
-            vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
-            effUv = qUv * uFitScale + uFitOffset;
-            lensOutside = 1.0;
-          }
-        }
-        vec4 c = sampleImage(effUv);
-        c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
-        if(lensOutside>0.5) c.rgb *= 0.82;
-        // Literal temporal interlace: each spatial cell belongs to exactly
-        // one phase. Inactive cells retain only the configured fill. This
-        // runs before the watermark so attribution is present in every
-        // presented phase and in a one-frame capture.
-        if(uInterlaceOn>0.5){
-          vec2 interlaceCell = floor(gl_FragCoord.xy / max(uInterlaceCell, 1.0));
-          float assigned = 0.0;
-          if(uInterlaceLayout<0.5){
-            assigned = mod(interlaceCell.x + (uInterlacePhases<2.5 ? interlaceCell.y : 2.0*interlaceCell.y), uInterlacePhases);
-          } else if(uInterlaceLayout<1.5){
-            assigned = mod(uInterlaceAxis>0.5 ? interlaceCell.x : interlaceCell.y, uInterlacePhases);
-          } else if(uInterlaceLayout<2.5){
-            assigned = min(floor(hash(interlaceCell + 913.7) * uInterlacePhases), uInterlacePhases - 1.0);
-          } else {
-            assigned = mod(interlaceCell.x + interlaceCell.y, uInterlacePhases);
-          }
-          // Cycle-zero-mean block bias (noise fill only): without it the
-          // per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
-          // median of a short screen recording is exactly c whenever the
-          // hidden deltas straddle it (~50% of pixels at 3 phases). A
-          // per-24px-block offset b, +b*(P-1)/P on the active phase and
-          // -b/P hidden, keeps the cycle mean exact while moving every
-          // cycle statistic off c. biasHash re-seeds every 90 frames, so
-          // longer recordings face a drifting bias, not a fixed offset.
-          float iBias = 0.0;
-          if(uInterlaceFill>2.5 && uInterlaceFill<3.5){
-            vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
-            iBias = (biasHash(biasCell) * 2.0 - 1.0) * uInterlaceBias * uInterlaceFillStrength;
-          }
-          if(abs(assigned-uInterlacePhase)<0.5){
-            c.rgb = c.rgb * uInterlaceActiveGain + vec3(iBias * (uInterlacePhases - 1.0) / max(uInterlacePhases, 1.0));
-          } else {
-            vec3 fillColor = c.rgb;
-            if(uInterlaceFill<0.5){
-              vec2 qxy = (floor(gl_FragCoord.xy / max(uInterlaceFillBlock, 1.0)) + 0.5) * uInterlaceFillBlock;
-              vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
-              vec2 fillUv = qUv * uFitScale + uFitOffset;
-              if(fillUv.x>=0.0 && fillUv.x<=1.0 && fillUv.y>=0.0 && fillUv.y<=1.0){
-                fillColor = sampleImage(fillUv).rgb;
-              }
-            } else if(uInterlaceFill<1.5){
-              fillColor = c.rgb * uInterlaceHiddenScale;
-            } else if(uInterlaceFill<2.5){
-              fillColor = vec3(0.0);
-            } else {
-              vec3 delta;
-              if(uTemporalChroma>0.5){
-                float v = hash(interlaceCell) - 0.5;
-                delta = vec3(v, -0.62*v, 0.78*v);
-              } else {
-                delta = hash3(interlaceCell) - 0.5;
-              }
-              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign - vec3(iBias / max(uInterlacePhases, 1.0) / max(uInterlaceFillStrength, 0.02));
-            }
-            c.rgb = mix(c.rgb, fillColor, uInterlaceFillStrength);
-          }
-        }
-        if(uWmOn>0.5){
-          vec4 wm = texture(uWm, vUv);
-          c.rgb = mix(c.rgb, wm.rgb, wm.a);
-        }
-        if(uLensOn>0.5 && uLensActive>0.5 && abs(lensDistPx-uLensRadius)<1.5){
-          c.rgb = mix(c.rgb, vec3(1.0), 0.35);
-        }
-        // Temporal shield: complementary per-block noise flips sign every
-        // presented frame. The eye integrates the pair toward the image;
-        // one screenshot/extension capture keeps a single noisy frame.
-        if(uTemporalOn>0.5){
-          vec2 blockCell = floor(gl_FragCoord.xy / max(uTemporalBlock, 1.0));
-          vec3 delta;
-          if(uTemporalPattern>1.5){
-            // Horizontal bands interact strongly with rolling-shutter rows.
-            float v = hash(vec2(0.0, blockCell.y)) - 0.5;
-            delta = uTemporalChroma>0.5 ? vec3(v, -0.62*v, 0.78*v) : hash3(vec2(0.0, blockCell.y)) - 0.5;
-          } else if(uTemporalPattern>0.5){
-            float parity = mod(blockCell.x + blockCell.y, 2.0) > 0.5 ? 1.0 : -1.0;
-            if(uTemporalChroma>0.5){
-              float v = (0.35 + 0.65*hash(blockCell)) * parity;
-              delta = vec3(v, -0.62*v, 0.78*v) * 0.5;
-            } else {
-              delta = (0.35 + 0.65*hash3(blockCell)) * parity * 0.5;
-            }
-          } else if(uTemporalChroma>0.5){
-            float v = hash(blockCell) - 0.5;
-            delta = vec3(v, -0.62*v, 0.78*v);
-          } else {
-            delta = hash3(blockCell) - 0.5;
-          }
-          c.rgb += delta * uTemporalStrength * uTemporalSign;
-          // Asymmetric duty bias: a slowly-drifting per-block offset b is
-          // applied +2b/3 on one frame and -b/3 on the next two. The
-          // temporal MEAN the eye integrates is exactly c, but the sample
-          // MEDIAN of any short capture converges to c - b/3, not c \u2014
-          // median-filter recovery of the active/interlace subsets is
-          // permanently biased, and b re-rolls every ~90 frames so even
-          // long-window medians keep chasing a moving target.
-          vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
-          float b = biasHash(biasCell) - 0.5;
-          c.rgb += vec3(b) * uTemporalBias * uTemporalDuty;
-        }
-        frag = vec4(c.rgb, 1.0);
-      }`;
+    const vs = VERTEX_SHADER;
+    const fs = FRAGMENT_SHADER;
     const compile = (type, srcText) => {
       const s = glNative(gl, "createShader", type);
       glNative(gl, "shaderSource", s, srcText);
@@ -8622,7 +9467,7 @@ var ProtectedImage = class {
           __privateSet(this, _biasSeed, Math.random() * 100);
         }
         __privateWrapper(this, _temporalIndex)._++;
-        __privateSet(this, _temporalPhase, __privateMethod(this, _ProtectedImage_instances, nextPhase_fn).call(this, interlace ? interlacePhases : 2));
+        __privateSet(this, _temporalPhase, nextShuffledPhase(__privateGet(this, _phaseBag), interlace ? interlacePhases : 2));
       }
       if (__privateGet(this, _glFrameBudget) !== Infinity && __privateGet(this, _glFrameBudget) > 0) __privateWrapper(this, _glFrameBudget)._--;
       const keepGoing = __privateMethod(this, _ProtectedImage_instances, glContinuous_fn).call(this) || __privateGet(this, _glFrameBudget) > 0 || __privateGet(this, _canaryPause);
@@ -8848,6 +9693,7 @@ _lockedUntil = new WeakMap();
 _lockTimer = new WeakMap();
 _integrityIssues = new WeakMap();
 _bitmapReleased = new WeakMap();
+_popSkipReported = new WeakMap();
 _loadedOnce = new WeakMap();
 _cachedBytes = new WeakMap();
 _cachedExtra = new WeakMap();
@@ -9096,110 +9942,38 @@ waitForStableSize_fn = async function() {
   }
 };
 tokenMintContext_fn = async function(controls) {
-  const o = __privateGet(this, _options);
-  const src = __privateGet(this, _source) || {};
-  const tokenId = __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this);
-  const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
-  if (!endpointRaw) throw new Error("Archx: tokenEndpoint required for {id} sources");
-  const endpointUrl = resolveHttpUrl(endpointRaw, { label: "token endpoint" });
-  if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError("Archx: token endpoint must not contain a query or fragment");
-  const rect = __privateGet(this, _host).getBoundingClientRect?.();
-  const cssWidth = rect?.width || __privateGet(this, _host).clientWidth || 800;
-  const cssHeight = rect?.height || __privateGet(this, _host).clientHeight || cssWidth * 0.75;
-  const { dprCap, oversample, requestQuality } = effectiveSampling(o);
-  const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
-  const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
-  const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-  const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-  const fit = ["cover", "contain", "fill"].includes(o.fit) ? o.fit : "cover";
-  const tokenMethod = String(o.tokenMethod || "POST").toUpperCase() === "GET" ? "GET" : "POST";
-  const tokenTransport = ["header", "query", "auto"].includes(String(o.tokenTransport || "header").toLowerCase()) ? String(o.tokenTransport || "header").toLowerCase() : "header";
-  const proofSetting = o.proofOfPossession;
-  const proofMode = proofSetting === false || proofSetting === "off" ? "off" : proofSetting === true || proofSetting === "required" ? "required" : "auto";
-  const proofKey = proofMode === "off" ? null : await getProofKey(proofMode === "required");
-  const mintUrl = new URL(endpointUrl.href);
-  mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, "/")}${encodeURIComponent(tokenId)}`;
-  mintUrl.searchParams.set("w", String(boxW));
-  mintUrl.searchParams.set("bw", String(boxW));
-  mintUrl.searchParams.set("bh", String(boxH));
-  mintUrl.searchParams.set("fit", fit);
-  if (requestQuality != null) mintUrl.searchParams.set("q", String(requestQuality));
-  const tokenCacheKey = cacheDigest([
-    "token",
-    1,
-    o.cacheScope || "",
-    endpointUrl.origin,
-    endpointUrl.pathname,
-    tokenId,
-    boxW,
-    boxH,
-    fit,
-    requestQuality,
-    tokenMethod,
-    tokenTransport,
-    proofKey?.jkt || proofMode,
-    controls.credentials,
-    o.allowedTokenOrigins || null,
-    o.grid,
-    o.scrambled === true,
-    o.key || "",
-    o.aesKey || "",
-    controls.maxResponseBytes,
-    controls.maxDecodedPixels,
-    controls.maxDecodedDimension
-  ]);
-  return {
-    endpointUrl,
-    boxW,
-    boxH,
-    fit,
-    requestQuality,
-    tokenMethod,
-    tokenTransport,
-    proofMode,
-    proofKey,
-    mintUrl,
-    tokenCacheKey
-  };
+  return createTokenMintContext({
+    options: __privateGet(this, _options),
+    source: __privateGet(this, _source),
+    tokenId: __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this),
+    host: __privateGet(this, _host),
+    controls,
+    onProofSkipped: (reason) => {
+      if (__privateGet(this, _popSkipReported)) return;
+      __privateSet(this, _popSkipReported, true);
+      emitClientEvent("archx.pop_skipped", {
+        kind: "proof-of-possession",
+        reason
+      }, this);
+    }
+  });
 };
 prefetchTokenBatchMint_fn = async function(force = false) {
-  const o = __privateGet(this, _options);
-  if (o.tokenBatch !== true || __privateGet(this, _prefetchedTokenMint) || __privateGet(this, _destroyed)) return;
-  if (!force && __privateGet(this, _cachedBytes)) return;
-  const tokenId = __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this);
-  if (!tokenId || typeof tokenId !== "string" || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return;
-  const controls = fetchControls(o);
-  let context;
-  try {
-    context = await __privateMethod(this, _ProtectedImage_instances, tokenMintContext_fn).call(this, controls);
-  } catch {
-    return;
-  }
-  if (__privateGet(this, _destroyed) || __privateGet(this, _prefetchedTokenMint) || context.tokenMethod !== "POST") return;
-  const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, o);
-  if (!batchUrl) return;
-  const cacheBitmap = o.cacheBitmap !== false && o.memory !== "strict";
-  if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return;
-  const headers = context.proofKey ? { "X-Archx-Request": "token", "X-Archx-Proof-Key": context.proofKey.header } : { "X-Archx-Request": "token" };
-  const promise = queueTokenBatchRequest({
-    batchUrl,
-    item: {
-      id: tokenId,
-      w: context.boxW,
-      bw: context.boxW,
-      bh: context.boxH,
-      fit: context.fit,
-      ...context.requestQuality != null ? { q: context.requestQuality } : {}
-    },
-    headers,
-    credentials: controls.credentials,
-    controls,
+  const options = __privateGet(this, _options);
+  if (options.tokenBatch !== true || __privateGet(this, _prefetchedTokenMint) || __privateGet(this, _destroyed)) return;
+  const prefetched = await createPrefetchedTokenMint({
+    options,
+    tokenId: __privateMethod(this, _ProtectedImage_instances, tokenSourceId_fn).call(this),
+    force,
+    hasCachedBytes: !!__privateGet(this, _cachedBytes),
+    alreadyPrefetched: !!__privateGet(this, _prefetchedTokenMint),
+    destroyed: __privateGet(this, _destroyed),
+    isAlreadyPrefetched: () => !!__privateGet(this, _prefetchedTokenMint),
+    isDestroyed: () => __privateGet(this, _destroyed),
     signal: __privateGet(this, _abort).signal,
-    options: o
+    getMintContext: (controls) => __privateMethod(this, _ProtectedImage_instances, tokenMintContext_fn).call(this, controls)
   });
-  promise.catch(() => {
-  });
-  __privateSet(this, _prefetchedTokenMint, { key: context.tokenCacheKey, promise });
+  if (prefetched && !__privateGet(this, _prefetchedTokenMint) && !__privateGet(this, _destroyed)) __privateSet(this, _prefetchedTokenMint, prefetched);
 };
 /** Hook/automation gate. Returns true if loading may proceed. */
 securityGate_fn = function() {
@@ -9242,218 +10016,13 @@ releaseSourceBitmap_fn = function() {
  */
 setupTemporalFrames_fn = function(frame, cfg) {
   __privateMethod(this, _ProtectedImage_instances, stopTemporal2d_fn).call(this, true);
-  const w = frame.width, h = frame.height;
-  const fctx = getNativeContext(frame, "2d");
-  let src;
-  try {
-    src = nativeGetImageData(fctx, 0, 0, w, h);
-  } catch {
-    return;
-  }
-  const interlace = cfg.interlace;
-  const phases = Math.max(2, Math.min(4, cfg.phases || 2));
-  const needNoise = !!cfg.noise || interlace?.fill === "noise";
-  const noiseBlock = Math.max(1, cfg.block || 1);
-  const nbw = Math.ceil(w / noiseBlock), nbh = Math.ceil(h / noiseBlock);
-  const offsets = needNoise ? new Float32Array(nbw * nbh * 3) : null;
-  const amp = (cfg.noise ? cfg.strength : interlace?.noiseStrength || 0) * 255;
-  if (offsets) {
-    for (let by = 0; by < nbh; by++) {
-      for (let bx = 0; bx < nbw; bx++) {
-        const oi = (by * nbw + bx) * 3;
-        if (cfg.pattern === "bands" && bx > 0) {
-          offsets[oi] = offsets[oi - 3];
-          offsets[oi + 1] = offsets[oi - 2];
-          offsets[oi + 2] = offsets[oi - 1];
-          continue;
-        }
-        const parity = cfg.pattern === "checker" ? bx + by & 1 ? 1 : -1 : 1;
-        if (cfg.chroma) {
-          const scalar = cfg.pattern === "checker" ? (0.35 + Math.random() * 0.65) * amp * parity : (Math.random() * 2 - 1) * amp;
-          offsets[oi] = scalar;
-          offsets[oi + 1] = -0.62 * scalar;
-          offsets[oi + 2] = 0.78 * scalar;
-        } else if (cfg.pattern === "checker") {
-          offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
-          offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
-          offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
-        } else {
-          offsets[oi] = (Math.random() * 2 - 1) * amp;
-          offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
-          offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
-        }
-      }
-    }
-  }
-  const cell = Math.max(1, interlace?.cellSize || noiseBlock);
-  const bw = Math.ceil(w / cell), bh = Math.ceil(h / cell);
-  let assignments = null;
-  if (interlace) {
-    assignments = new Uint8Array(bw * bh);
-    for (let by = 0; by < bh; by++) {
-      for (let bx = 0; bx < bw; bx++) {
-        let phase = 0;
-        if (interlace.layout === "strips") {
-          phase = (interlace.axis === "columns" ? bx : by) % phases;
-        } else if (interlace.layout === "blocks") {
-          phase = Math.random() * phases | 0;
-        } else if (interlace.layout === "pixels") {
-          phase = (bx + (phases === 2 ? by : 2 * by)) % phases;
-        } else {
-          phase = (bx + by) % phases;
-        }
-        assignments[by * bw + bx] = phase;
-      }
-    }
-  }
-  let lowData = null;
-  let lowW = 0;
-  let lowH = 0;
-  let lowBlock = 1;
-  if (interlace?.fill === "lowres") {
-    lowBlock = Math.max(1, interlace.fillBlock || 12);
-    lowW = Math.max(1, Math.ceil(w / lowBlock));
-    lowH = Math.max(1, Math.ceil(h / lowBlock));
-    try {
-      const low = makeCanvas(__privateGet(this, _host).ownerDocument);
-      low.width = lowW;
-      low.height = lowH;
-      const lowCtx = getNativeContext(low, "2d");
-      setSmoothing(lowCtx, true);
-      nativeDrawImage(lowCtx, frame, 0, 0, lowW, lowH);
-      lowData = nativeGetImageData(lowCtx, 0, 0, lowW, lowH).data;
-      low.width = 0;
-      low.height = 0;
-    } catch {
-      lowData = null;
-    }
-  }
-  const biasBlock = 24;
-  const bbw = Math.ceil(w / biasBlock), bbh = Math.ceil(h / biasBlock);
-  const biasAmp = (interlace?.noiseStrength || 0) * 255 * 0.55;
-  const biases = interlace && interlace.fill === "noise" && biasAmp > 0 ? new Float32Array(bbw * bbh) : null;
-  if (biases) for (let i = 0; i < biases.length; i++) biases[i] = (Math.random() * 2 - 1) * biasAmp;
-  const colBias = biases ? new Int32Array(w) : null;
-  if (colBias) for (let x = 0; x < w; x++) colBias[x] = Math.min(bbw - 1, Math.floor(x / biasBlock));
-  const colNoiseOi = offsets ? new Int32Array(w) : null;
-  if (colNoiseOi) for (let x = 0; x < w; x++) colNoiseOi[x] = Math.min(nbw - 1, Math.floor(x / noiseBlock)) * 3;
-  const scratch = fctx.createImageData(w, h);
-  const mk = (phase) => {
-    const sign = (phase % 2 ? -1 : 1) * [1, 0.6, 1.3, 0.85][phase % 4];
-    const c = makeCanvas(__privateGet(this, _host).ownerDocument);
-    c.width = w;
-    c.height = h;
-    const cctx = getNativeContext(c, "2d");
-    const out = scratch;
-    const s = src.data, d = out.data;
-    if (!interlace) {
-      for (let by = 0; by < nbh; by++) {
-        const y0 = by * noiseBlock;
-        const y1 = Math.min(h, y0 + noiseBlock);
-        for (let y = y0; y < y1; y++) {
-          let p = y * w * 4;
-          for (let bx = 0; bx < nbw; bx++) {
-            const oi = (by * nbw + bx) * 3;
-            const x1 = Math.min(w, (bx + 1) * noiseBlock);
-            for (let x = bx * noiseBlock; x < x1; x++, p += 4) {
-              d[p] = s[p] + sign * offsets[oi];
-              d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
-              d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
-              d[p + 3] = 255;
-            }
-          }
-        }
-      }
-      nativePutImageData(cctx, out, 0, 0);
-      return c;
-    }
-    const gain = interlace.activeGain || 1;
-    const fillMix = interlace.fillStrength;
-    for (let by = 0; by < bh; by++) {
-      const y0 = by * cell;
-      const y1 = Math.min(h, y0 + cell);
-      for (let bx = 0; bx < bw; bx++) {
-        const active = assignments[by * bw + bx] === phase;
-        const x0 = bx * cell;
-        const x1 = Math.min(w, x0 + cell);
-        for (let y = y0; y < y1; y++) {
-          let p = (y * w + x0) * 4;
-          const lowY = lowData ? Math.min(lowH - 1, Math.floor(y / lowBlock)) : 0;
-          const rowNoiseOi = offsets ? Math.min(nbh - 1, Math.floor(y / noiseBlock)) * nbw * 3 : 0;
-          const rowBiasOff = biases ? Math.min(bbh - 1, Math.floor(y / biasBlock)) * bbw : 0;
-          for (let x = x0; x < x1; x++, p += 4) {
-            const sr = s[p], sg = s[p + 1], sb = s[p + 2];
-            const bv = biases ? biases[rowBiasOff + colBias[x]] : 0;
-            let r, g, b;
-            if (active) {
-              const ab = bv * fillMix * (phases - 1) / phases;
-              r = sr * gain + ab;
-              g = sg * gain + ab;
-              b = sb * gain + ab;
-            } else {
-              let fr = sr, fg = sg, fb = sb;
-              if (interlace.fill === "lowres" && lowData) {
-                const lowX = Math.min(lowW - 1, Math.floor(x / lowBlock));
-                const li = (lowY * lowW + lowX) * 4;
-                fr = lowData[li];
-                fg = lowData[li + 1];
-                fb = lowData[li + 2];
-              } else if (interlace.fill === "dim") {
-                fr = sr * interlace.hiddenScale;
-                fg = sg * interlace.hiddenScale;
-                fb = sb * interlace.hiddenScale;
-              } else if (interlace.fill === "black") {
-                fr = 0;
-                fg = 0;
-                fb = 0;
-              } else if (interlace.fill === "noise" && offsets) {
-                const oi = rowNoiseOi + colNoiseOi[x];
-                const hb = bv / phases;
-                fr = sr - hb + sign * offsets[oi];
-                fg = sg - hb + sign * offsets[oi + 1];
-                fb = sb - hb + sign * offsets[oi + 2];
-              }
-              r = sr + (fr - sr) * fillMix;
-              g = sg + (fg - sg) * fillMix;
-              b = sb + (fb - sb) * fillMix;
-            }
-            if (cfg.noise && offsets) {
-              const oi = rowNoiseOi + colNoiseOi[x];
-              r += sign * offsets[oi];
-              g += sign * offsets[oi + 1];
-              b += sign * offsets[oi + 2];
-            }
-            d[p] = r;
-            d[p + 1] = g;
-            d[p + 2] = b;
-            d[p + 3] = 255;
-          }
-        }
-      }
-    }
-    nativePutImageData(cctx, out, 0, 0);
-    return c;
-  };
-  __privateSet(this, _temporalFrames, Array.from({ length: phases }, (_, phase) => mk(phase)));
+  __privateSet(this, _temporalFrames, buildTemporalFrames(frame, cfg, __privateGet(this, _host).ownerDocument));
+  if (!__privateGet(this, _temporalFrames)) return;
   __privateSet(this, _temporalIndex, 0);
   __privateSet(this, _temporalPhase, 0);
   __privateSet(this, _temporalSign, 1);
   __privateMethod(this, _ProtectedImage_instances, paintTemporal2d_fn).call(this);
   if (__privateGet(this, _visible)) __privateMethod(this, _ProtectedImage_instances, startTemporal2d_fn).call(this);
-};
-// Next temporal phase from a shuffled bag: every phase appears once per
-// cycle (so the eye still integrates the full set at the same rate) but
-// the ORDER is unpredictable, so fixed-cadence capture cannot parity-lock
-// onto a stable subsequence.
-nextPhase_fn = function(phases) {
-  if (!__privateGet(this, _phaseBag).length || __privateGet(this, _phaseBag)[0] >= phases) {
-    __privateSet(this, _phaseBag, Array.from({ length: phases }, (_, i) => i));
-    for (let i = phases - 1; i > 0; i--) {
-      const j = Math.random() * (i + 1) | 0;
-      [__privateGet(this, _phaseBag)[i], __privateGet(this, _phaseBag)[j]] = [__privateGet(this, _phaseBag)[j], __privateGet(this, _phaseBag)[i]];
-    }
-  }
-  return __privateGet(this, _phaseBag).pop();
 };
 paintTemporal2d_fn = function() {
   const ctx = __privateGet(this, _realCtx);
@@ -9477,7 +10046,7 @@ startTemporal2d_fn = function() {
     __privateSet(this, _temporalRaf, 0);
     if (__privateGet(this, _destroyed) || !__privateGet(this, _temporalFrames) || !__privateGet(this, _visible)) return;
     __privateWrapper(this, _temporalIndex)._++;
-    __privateSet(this, _temporalPhase, __privateMethod(this, _ProtectedImage_instances, nextPhase_fn).call(this, __privateGet(this, _temporalFrames).length));
+    __privateSet(this, _temporalPhase, nextShuffledPhase(__privateGet(this, _phaseBag), __privateGet(this, _temporalFrames).length));
     __privateMethod(this, _ProtectedImage_instances, paintTemporal2d_fn).call(this);
     __privateSet(this, _temporalRaf, requestAnimationFrame(step));
   };
@@ -10133,4 +10702,3 @@ export {
   validateArchxHeader,
   verifyEarlyIntegritySnapshot
 };
-//# sourceMappingURL=archx.esm.js.map

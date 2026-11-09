@@ -176,8 +176,9 @@ depends on them); old ownership PUBLIC keys stay published forever.
   and quota records through the bundled Redis adapter or an equivalently
   tested atomic store?
 - How are signing secrets generated, rotated, and retired?
-- Does the CDN bypass shared caching for protected token/image routes? Has
-  a replay test through the public CDN hostname passed?
+- Does the CDN bypass shared caching for protected token/image routes and, if
+  enabled, the SEO-preview route? Has a replay test through the public CDN
+  hostname passed?
 - Are StegoMark fingerprints saved with customer/order records and the key
   ID needed to investigate them later?
 - Are security events sent somewhere that a person actually monitors?

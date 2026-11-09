@@ -23,7 +23,7 @@ State that must agree across instances:
 
 - one-time token nonce claims;
 - one-time proof-of-possession proof IDs;
-- token/image rate-limit windows;
+- token/image rate-limit windows and a separate SEO-preview window when that optional route is enabled;
 - viewer/IP/image quotas;
 - distinct-image scraping detection.
 
@@ -142,9 +142,11 @@ Contract requirements:
    in-memory store makes the same trade-off explicit instead:
    `replaySaturation: 'evict' | 'strict'` plus live counters in
    `handler.stats().replaySets` and the `archx.replay_store_evicted`
-   event. **Decide this one deliberately** (v1.20): the library
-   default stays `'evict'` for availability, `withHardenedProductionDefaults`
-   now sets `'strict'`, and neither is "the secure one" in isolation:
+   event. **Decide this one deliberately** (v1.20): the general library
+   default stays `'evict'` for compatibility, `withHardenedProductionDefaults`
+   sets `'strict'`, and the production audit now blocks `'evict'` whenever
+   one-time tokens are enabled. Strict mode is required for the hardened
+   production baseline; the default is not a production recommendation:
 
    | Policy | When the store is full of live claims | Failure you accept |
    | --- | --- | --- |
@@ -253,23 +255,60 @@ forensic seeds, StegoMark fingerprints/keys, and cache partitioning.
 
 Normal rotation:
 
-1. Generate at least 32 random bytes in your secret manager/KMS. Never put
-   secrets in source control, images, logs, or client configuration.
-2. Deploy every instance with both old and new keys, initially leaving the
-   active ID on the old key. Confirm `handler.configAudit.summary` reports
-   the expected active ID and key count (the audit exposes IDs/counts only,
-   never values).
-3. Change `activeSecretId` to the new key on every instance. A mixed fleet
-   is safe during this step because all instances can verify both IDs.
-4. Wait at least the longest effective token lifetime (the server `ttlSec`
-   default or any per-authorization `ttlSec`, whichever is greater) plus the
-   clock-skew/retry allowance. A conservative minimum is that maximum + 300
-   seconds. Static investigations may
-   need an old StegoMark detector secret for much longer; retain it offline
-   in the evidence vault even after removing it from serving nodes.
-5. Remove the old key from every serving keyring and redeploy/restart.
-6. Record the rotation time, key IDs, operator, approval/change ticket, and
-   the time the old key was retired.
+The repository includes a rotation helper. It creates a fresh 256-bit
+secret and an executable UTC activation/retirement schedule. After importing
+the two secrets on every instance, pass the schedule to middleware as
+`signingKeySchedule`; the middleware switches the signing key at activation
+and drops the old key from verification at retirement on the first request
+boundary at or after each instant. It does not deploy secret material to your
+secret manager:
+
+```sh
+npm run key:rotation-plan -- --current-id signing-2026a --ttl-sec 900 \
+  --activate-at 2026-11-14T00:00:00Z --output /secure/archx-rotation.json
+```
+
+The output file is created exclusively with mode `0600` and contains secret
+material. Import the generated key into your secret manager, make it available
+to every serving instance as `secrets[newSecretId]`, then securely remove the
+local file. Never check it in, attach it to a ticket, or forward it in
+logs/chat. Supply the emitted `schedule` object as `signingKeySchedule`, with
+`activeSecretId` still set to `currentSecretId`. Every instance evaluates the
+same UTC timestamps on request boundaries; keep clocks synchronized. For
+example:
+
+```js
+createArchxMiddleware({
+  secrets: { [currentSecretId]: oldSecret, [newSecretId]: newSecret },
+  activeSecretId: currentSecretId,
+  signingKeySchedule: handoff.schedule,
+  // other production options…
+});
+```
+
+1. Stage old and new secrets on every instance and deploy the same schedule.
+   The runtime audit reports IDs/timestamps/counts only, never secret values.
+2. Before `activateAt`, tokens continue to use the old key. At the first mint
+   after `activateAt`, all nodes sign with `newSecretId`; the old key remains
+   verifiable during the grace window.
+3. At `retireAt` (which validation requires to be at least the API maximum
+   token TTL of 900 seconds plus grace after activation), the first request
+   on each node removes the old key from token verification and disk-cache tag
+   verification. Old tokens
+   then fail closed. Monitor each node's `handler.stats().activeSecretId` to
+   confirm activation; configure a release/runbook alert for nodes that do not
+   receive traffic around the timestamps.
+4. Record the rotation time, key IDs, operator, approval/change ticket, and
+   confirmation that all instances activated and retired as scheduled.
+   Static investigations may need an old StegoMark detector secret much
+   longer; retain that separately in the evidence vault, not on serving nodes.
+
+The middleware schedules transitions deterministically, but importing and
+staging secrets remains a secret-manager/deployment action. Test the exact
+schedule in staging and verify both activation and retirement before
+production rollout. If rollback is needed before retirement, redeploy a
+corrected schedule while both secrets remain present; after retirement, a
+retired key must be re-added explicitly before it can verify old tokens.
 
 For suspected compromise, remove the compromised key immediately. Existing
 tokens under it will fail and clients must mint fresh tokens, which is the
@@ -292,15 +331,35 @@ signing secret, access token, scramble key, or AES key.
 The origin sends private/no-store cache controls, CDN/surrogate controls,
 `Vary`, `nosniff`, and related headers for token and payload responses. A CDN
 rule must not override those controls. Protected token and payload routes
-should bypass shared caching entirely.
+should bypass shared caching entirely. If the opt-in `seoCrawler` route is
+configured, `{basePath}/seo/*` also sends `private, no-store`; bypass shared
+caching there too, even though the process may reuse a bounded in-memory
+watermarked derivative after re-running crawler verification on each request. SEO
+requests use a separate rate-limit namespace with the configured general
+`rateLimitPerMinute` ceiling, so preview traffic cannot consume the protected
+`/i/:id` route's rate budget.
+
+The SEO route is not the protected `/i/:id` route: `GET`/`HEAD /seo/:id`
+serves an ordinary WebP/JPEG only after the host's `seoCrawler.verify(req,id)`
+returns exactly `true`. The callback must authenticate the crawler from a
+trusted signal such as verified source-IP data; `User-Agent` matching alone
+is spoofable and is not sufficient. Forwarded client IP headers are trusted
+only when requests can arrive exclusively from the configured proxy and the
+proxy overwrites those headers. A false result is a non-disclosing 404; a
+callback error/timeout is fail-closed. The image is capped to at most 640 px,
+no more than the configured fraction of the master width, lossy quality at
+most 75, and a server-baked visible `PREVIEW ONLY` watermark. Do not map
+`/seo/*` back to master files or allow a CDN image optimizer to replace the
+response.
 
 ### CloudFront reference behavior
 
-Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, and `/archx/i/*` (adjust `basePath`):
+Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, `/archx/i/*`, and (only when enabled) `/archx/seo/*` (adjust `basePath`):
 
 - Viewer protocol: redirect HTTP to HTTPS or HTTPS only.
 - Allowed methods: token behavior must allow the configured token methods
-  and `OPTIONS`; image behavior allows `GET` and `OPTIONS`.
+  and `OPTIONS`; image behavior allows `GET` and `OPTIONS`; the optional SEO
+  behavior allows `GET` and `HEAD` only.
 - Cache policy: `Managed-CachingDisabled`.
 - Origin request policy: forward only what your `authorize()` needs, plus
   `X-Archx-Request`, `X-Archx-Proof-Key`, `X-Archx-Token`, `X-Archx-Proof`,
@@ -317,10 +376,10 @@ Create behaviors for `/archx/token/*`, the exact batch route `/archx/tokens`, an
 
 ### Cloudflare reference rule
 
-Create a Cache Rule for the token and payload paths:
+Create a Cache Rule for the token and payload paths (and the SEO path when enabled):
 
 - Expression based on URI path, for example:
-  `(starts_with(http.request.uri.path, "/archx/token/")) or (http.request.uri.path eq "/archx/tokens") or (starts_with(http.request.uri.path, "/archx/i/"))`
+  `(starts_with(http.request.uri.path, "/archx/token/")) or (http.request.uri.path eq "/archx/tokens") or (starts_with(http.request.uri.path, "/archx/i/")) or (starts_with(http.request.uri.path, "/archx/seo/"))`
 - Cache eligibility: **Bypass cache**.
 - Do not apply "Cache Everything", APO, Cache Reserve, Polish, Mirage, image
   resizing, or a Worker cache to these paths.
@@ -393,7 +452,7 @@ replay test are the verification.
 | `eventId` | Random UUID for deduplication/correlation |
 | `service` | Always `archx` |
 | `severity` | `notice`, `warning`, or `error` |
-| `outcome` | `denied`, `detected`, or `error` |
+| `outcome` | `denied`, `detected`, `completed`, or `error` |
 | `type` | Existing event type, such as `archx.denied` |
 | `at` | ISO-8601 UTC timestamp |
 | `imageId` / `id` | Validated image ID when available |
@@ -404,6 +463,14 @@ replay test are the verification.
 | `request.method` | HTTP method |
 | `request.route` | Route template; no token or query string |
 | `reason` | Bounded internal reason such as `token-replay` |
+| `keyId` / `previousKeyId` / `activeKeyId` | Key IDs only on scheduled signing-key lifecycle events; never secret values |
+
+Scheduled key rotation emits `archx.signing_key_activated` and
+`archx.signing_key_retired` once per transition through `onSecurityEvent`, with
+`outcome: completed`. Events contain key IDs only. They are emitted when a
+request boundary first observes the configured UTC transition, so each
+instance reports its own transition; deploy a shared schedule to all instances
+and monitor that every instance reports activation and retirement.
 
 Step-up challenges (v1.19) emit `archx.challenge_required` (403,
 `reason: challenge-required`) and `archx.challenge_passed` events in the

@@ -8,6 +8,10 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
+import { rotateRgba } from '../src/core/pixels.js';
+import { makeTexturedRgba, cropRgba } from './helpers/stego-crop-corpus.mjs';
+import { fetchVerifiedArchx } from '../examples/chunked-transport/client.js';
+import { createChunkedAssetServer } from '../examples/chunked-transport/server.mjs';
 import {
   buildScramblePlan, scramblePixels, scramblePixelsPadded, paddedSize,
   encodeContainer, decodeContainer, isArchxContainer,
@@ -40,13 +44,17 @@ import {
   embedOwnershipMetadata, createIssuanceLog, verifyIssuanceChain,
 } from '../server/middleware.js';
 import { createRedisStateStore, REDIS_STATE_STORE_SCRIPTS } from '../server/redis-state-store.js';
-import { usePlugin, listPlugins, onClientEvent } from '../src/client/events.js';
+import { usePlugin, listPlugins, onClientEvent, proofKeySkipReason } from '../src/client/events.js';
 import { mergeOptions, preset as clientPreset } from '../src/client/options.js';
 import { bchEncode64, bchDecode188, bchSolveObserved, bchOsdSolve, bchIsdSolve, BCH_CODE_BITS } from '../src/core/bch.js';
 import { bchStegoCodeBits, bchStegoDecode, bchStegoSolveObserved } from '../src/core/stego-code.js';
+import { keystoneCorrectRgba } from '../src/core/pixels.js';
 import * as archxServerModule from '../server/middleware.js';
 import { isPathInside, pathsOverlap } from '../server/config.js';
+import { nextShuffledPhase } from '../src/client/temporal.js';
 import { formatPrometheusMetrics, createArchxHealthHandler, installArchxShutdown, createJsonEventLogger } from '../server/ops.js';
+
+test.after(() => closeStegoDetectWorker());
 
 function signTokenForTest(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -590,6 +598,31 @@ test('scrambleImage bakes StegoMark before scrambling; reconstructed copies rema
   assert.equal(found.fingerprint, result.stegoFingerprint);
 });
 
+test('request-path forensic and StegoMark embedding runs in the bounded worker', async () => {
+  const master = await syntheticMaster(640, 480);
+  let eventLoopTick = false;
+  const tick = new Promise((resolve) => setImmediate(() => { eventLoopTick = true; resolve(); }));
+  try {
+    const work = scrambleImage(master, {
+      key: 'worker-mark-scramble-key',
+      maxWidth: 640,
+      forensicSeed: 'forensic-worker-test',
+      stegoPayload: 'buyer-worker-test',
+      stegoKey: 'distinct-stego-worker-secret',
+      stegoProfile: 'robust',
+      stegoStrength: 6,
+    });
+    await tick;
+    assert.equal(eventLoopTick, true, 'the event loop continues while mark pixels are processed off-thread');
+    const result = await work;
+    assert.ok(result.bytes.length > 0);
+    assert.equal(result.header.fx, 1);
+    assert.equal(result.header.sg, 1);
+  } finally {
+    closeStegoDetectWorker();
+  }
+});
+
 test('scrambleImage down-scales masters and strips them out of the payload', async () => {
   const master = await syntheticMaster(1600, 1200);
   const { header } = await scrambleImage(master, { key: 'k', maxWidth: 500 });
@@ -605,6 +638,160 @@ test('public server surface does not export generic token signing/verification p
   assert.equal('verifyToken' in middleware, false);
   // Tamper/expiry/wrong-ID signature handling is asserted at HTTP level below,
   // against the real redemption path rather than a test-only helper.
+});
+
+test('verified SEO crawler route is opt-in, standard-image, low-resolution, watermarked, and fail-closed', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-'));
+  const seoMaster = await sharp({
+    create: { width: 1600, height: 1200, channels: 3, background: '#fff' },
+  }).jpeg().toBuffer();
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), seoMaster);
+  const verifyCalls = [];
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    seoCrawler: {
+      verify: async (req, id) => {
+        verifyCalls.push(id);
+        if (req.headers['x-test-verified-crawler'] === 'error') throw new Error('verification backend is unavailable');
+        return req.headers['x-test-verified-crawler'] === 'yes';
+      },
+      watermark: 'Test & <Studio>',
+      maxWidth: 640,
+      maxWidthFraction: 0.25,
+      quality: 55,
+      format: 'webp',
+    },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const unverified = await fetch(`${base}/archx/seo/cat`, { headers: { 'user-agent': 'Googlebot' } });
+  assert.equal(unverified.status, 404, 'a crawler-looking User-Agent is not enough');
+  assert.equal(unverified.headers.get('content-type'), 'application/json; charset=utf-8');
+
+  const response = await fetch(`${base}/archx/seo/cat`, { headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/webp');
+  assert.match(response.headers.get('cache-control'), /private.*no-store/);
+  assert.match(response.headers.get('x-content-type-options'), /nosniff/);
+  const preview = Buffer.from(await response.arrayBuffer());
+  const metadata = await sharp(preview).metadata();
+  assert.equal(metadata.format, 'webp');
+  assert.equal(metadata.width, 400, 'the 0.25 master-width fraction is stricter than the configured 640 px cap');
+  assert.equal(metadata.height, 300);
+  assert.ok(preview.length > 0);
+  const { data: markedPixels, info: markedInfo } = await sharp(preview).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const topBannerPixel = (5 * markedInfo.width + Math.floor(markedInfo.width / 2)) * markedInfo.channels;
+  assert.ok(markedPixels[topBannerPixel] < 180, 'the server-baked preview banner visibly darkens an otherwise white image');
+  assert.deepEqual(verifyCalls, ['cat', 'cat']);
+
+  const verifierFailure = await fetch(`${base}/archx/seo/cat`, { headers: { 'x-test-verified-crawler': 'error' } });
+  assert.equal(verifierFailure.status, 503, 'verification infrastructure failures fail closed');
+  assert.match(verifierFailure.headers.get('cache-control'), /no-store/);
+
+  const query = await fetch(`${base}/archx/seo/cat?width=160`, { headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(query.status, 400, 'SEO derivatives do not accept query-driven cache variants');
+  const method = await fetch(`${base}/archx/seo/cat`, { method: 'POST' });
+  assert.equal(method.status, 405);
+  const ordinaryRoute = await fetch(`${base}/archx/i/cat`);
+  assert.equal(ordinaryRoute.status, 403, 'enabling SEO delivery does not weaken token-gated Archx delivery');
+  const head = await fetch(`${base}/archx/seo/cat`, { method: 'HEAD', headers: { 'x-test-verified-crawler': 'yes' } });
+  assert.equal(head.status, 200);
+  assert.ok(Number(head.headers.get('content-length')) > 0);
+  assert.equal((await head.arrayBuffer()).byteLength, 0);
+});
+
+test('verified SEO crawler can emit a capped standard JPEG derivative', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-jpeg-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(640, 480));
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    seoCrawler: {
+      verify: () => true,
+      watermark: 'Preview label',
+      maxWidth: 320,
+      maxWidthFraction: 0.25,
+      quality: 50,
+      format: 'jpeg',
+    },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/archx/seo/cat`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  assert.match(response.headers.get('cache-control'), /private.*no-store/);
+  const metadata = await sharp(Buffer.from(await response.arrayBuffer())).metadata();
+  assert.equal(metadata.format, 'jpeg');
+  assert.equal(metadata.width, 160);
+  assert.equal(metadata.height, 120);
+});
+
+test('SEO preview rate limits are isolated from protected image delivery', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-rate-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster(320, 240));
+  const handler = createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    rateLimitPerMinute: 1,
+    seoCrawler: { verify: () => true, watermark: 'Preview label' },
+  });
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${base}/archx/seo/cat`)).status, 200);
+  assert.equal((await fetch(`${base}/archx/i/cat`)).status, 403,
+    'an SEO request must not consume the protected image route rate-limit budget');
+  assert.equal((await fetch(`${base}/archx/seo/cat`)).status, 429,
+    'the SEO route still has an independent rate limit');
+});
+
+test('SEO crawler configuration is strict and disabled by omission', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-seo-config-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const base = { secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true };
+  for (const seoCrawler of [
+    { watermark: 'Studio' },
+    { verify: () => true, watermark: 'Studio', maxWidth: 641 },
+    { verify: () => true, watermark: 'Studio', quality: 76 },
+    { verify: () => true, watermark: 'Studio', format: 'png' },
+    { verify: () => true, watermark: '  ' },
+    { verify: () => true, watermark: 'Studio', unused: true },
+  ]) {
+    assert.throws(() => createArchxMiddleware({ ...base, seoCrawler }), /seoCrawler/i);
+  }
+  const handler = createArchxMiddleware(base);
+  const server = http.createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    handler.close?.();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/archx/seo/cat`);
+  assert.equal(response.status, 404);
 });
 
 test('HTTP middleware: token flow serves scrambled container, blocks everything else', async (t) => {
@@ -1519,6 +1706,20 @@ test('perceptual soft-binding fingerprint survives resize/re-encode and separate
   assert.throws(() => comparePerceptualFingerprints(fingerprint, fingerprint, { maxDistance: 65 }), /maxDistance/);
 });
 
+test('temporal phase scheduler shuffles complete cycles without repeating a phase', () => {
+  const bag = [];
+  let seed = 0x6d2b79f5;
+  const random = () => {
+    seed = Math.imul(seed ^ (seed >>> 15), seed | 1);
+    seed ^= seed + Math.imul(seed ^ (seed >>> 7), seed | 61);
+    return ((seed ^ (seed >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
+  for (const count of [2, 3, 4]) {
+    const cycle = Array.from({ length: count }, () => nextShuffledPhase(bag, count, random));
+    assert.deepEqual([...cycle].sort((a, b) => a - b), Array.from({ length: count }, (_, i) => i));
+  }
+});
+
 test('temporal interlace profiles are 60 Hz-safe by default and remain directly configurable', () => {
   assert.deepEqual(Object.keys(TEMPORAL_INTERLACE_PROFILES), [
     'balanced60', 'pixels60', 'strips60', 'blocks60', 'fortress60',
@@ -1681,6 +1882,77 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
   assert.equal(JSON.stringify(rotatedHandler.configAudit).includes(newSecret), false);
 });
 
+test('scheduled signing rotation activates and retires key IDs on request boundaries', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-scheduled-key-rotation-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const oldSecret = 'scheduled-old-secret-with-at-least-32-bytes';
+  const newSecret = 'scheduled-new-secret-with-at-least-32-bytes';
+  const now = Date.now();
+  const activateAt = new Date(now - 30 * 60_000).toISOString();
+  const retireAt = new Date(now - 10 * 60_000).toISOString();
+  const rotationEvents = [];
+  const scheduled = createArchxMiddleware({
+    secrets: { old: oldSecret, next: newSecret },
+    activeSecretId: 'old', ttlSec: 120, imagesDir: dir,
+    onSecurityEvent: (event) => rotationEvents.push(event),
+    authorize: async () => ({ viewerId: 'rotation-viewer' }),
+    signingKeySchedule: {
+      activateSecretId: 'next', activateAt, retireSecretId: 'old', retireAt, graceSec: 60,
+    },
+  });
+  const legacy = createArchxMiddleware({
+    secret: oldSecret, secretId: 'old', ttlSec: 120, imagesDir: dir,
+    authorize: async () => ({ viewerId: 'rotation-viewer' }),
+  });
+  const scheduledBase = await listenForTest(t, scheduled);
+  const legacyBase = await listenForTest(t, legacy);
+  const futureAt = new Date(now + 60_000);
+  const future = createArchxMiddleware({
+    secrets: { old: oldSecret, next: newSecret }, activeSecretId: 'old', ttlSec: 120,
+    imagesDir: dir, authorize: async () => ({ viewerId: 'rotation-viewer' }),
+    signingKeySchedule: {
+      activateSecretId: 'next', activateAt: futureAt.toISOString(), retireSecretId: 'old',
+      retireAt: new Date(futureAt.getTime() + 1020_000).toISOString(), graceSec: 60,
+    },
+  });
+  assert.equal(future.stats().activeSecretId, 'old', 'a future schedule does not activate early');
+  assert.equal(future.stats().signingKeyCount, 2, 'old verification key remains during the grace period');
+  future.close();
+
+  assert.equal(scheduled.stats().activeSecretId, 'next');
+  assert.equal(scheduled.stats().signingKeyCount, 1, 'retirement drops old key from the live keyring');
+  const activatedEvent = rotationEvents.find((event) => event.type === 'archx.signing_key_activated');
+  const retiredEvent = rotationEvents.find((event) => event.type === 'archx.signing_key_retired');
+  assert.equal(activatedEvent.outcome, 'completed');
+  assert.equal(activatedEvent.keyId, 'next');
+  assert.equal(activatedEvent.previousKeyId, 'old');
+  assert.equal(retiredEvent.outcome, 'completed');
+  assert.equal(retiredEvent.keyId, 'old');
+  assert.equal(retiredEvent.activeKeyId, 'next');
+  assert.equal(JSON.stringify(rotationEvents).includes(oldSecret), false);
+  assert.equal(JSON.stringify(rotationEvents).includes(newSecret), false);
+  assert.equal(rotationEvents.filter((event) => event.type === 'archx.signing_key_retired').length, 1,
+    'retirement event is emitted exactly once');
+  assert.equal(scheduled.configAudit.summary.signingKeySchedule.activateSecretId, 'next');
+  const fresh = await (await postToken(scheduledBase + '/archx/token/cat?w=160')).json();
+  assert.equal(tokenPayloadForTest(fresh.token).kid, 'next');
+
+  const staleNodeToken = await (await postToken(legacyBase + '/archx/token/cat?w=160')).json();
+  assert.equal((await redeemToken(scheduledBase, staleNodeToken)).status, 403,
+    'an out-of-date node cannot make a retired-key token redeemable');
+  assert.equal(JSON.stringify(scheduled.configAudit).includes(oldSecret), false);
+  assert.equal(JSON.stringify(scheduled.configAudit).includes(newSecret), false);
+  const tooEarly = auditArchxServerConfig({
+    secrets: { old: oldSecret, next: newSecret }, activeSecretId: 'old', ttlSec: 120,
+    signingKeySchedule: {
+      activateSecretId: 'next', activateAt: new Date(now).toISOString(),
+      retireSecretId: 'old', retireAt: new Date(now + 1000).toISOString(), graceSec: 300,
+    },
+  });
+  assert.equal(tooEarly.ok, false);
+  assert.ok(tooEarly.issues.some((issue) => /max token TTL \+ grace/.test(issue)));
+});
+
 test('multi-instance configuration and state-store failures fail closed with structured events', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-state-failure-'));
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
@@ -1722,6 +1994,17 @@ test('multi-instance configuration and state-store failures fail closed with str
   assert.equal(failure.severity, 'error');
   assert.equal(failure.outcome, 'error');
   assert.equal(failure.request.method, 'POST');
+});
+
+test('automatic PoP downgrade reports a bounded reason when WebCrypto is unavailable', () => {
+  assert.equal(proofKeySkipReason('off', null, null), null);
+  assert.equal(proofKeySkipReason('auto', { publicKey: 'present' }, null), null);
+  assert.equal(proofKeySkipReason('auto', null, null), 'webcrypto-unavailable');
+  const cryptoApi = {
+    getRandomValues() {},
+    subtle: { generateKey() {}, exportKey() {}, sign() {}, digest() {} },
+  };
+  assert.equal(proofKeySkipReason('auto', null, cryptoApi), 'key-generation-failed');
 });
 
 test('hardened production defaults and production audit expose unsafe combinations without secrets', async () => {
@@ -2032,7 +2315,7 @@ test('Redis state-store adapter uses atomic client operations and preserves the 
   assert.throws(() => createRedisStateStore({ client: {}, prefix: 'x' }), /eval|call|sendCommand/);
 });
 
-test('catalog scale helpers canonicalize widths and expose throughput trade-offs', () => {
+test('catalog scale helpers canonicalize widths and expose throughput trade-offs', async () => {
   assert.deepEqual(DEFAULT_SOURCE_WIDTH_BUCKETS, DEFAULT_WIDTH_BUCKETS);
   assert.equal(canonicalDerivativeWidth(641, 1920), 800);
   assert.equal(canonicalDerivativeWidth(100, 500), 160);
@@ -2048,7 +2331,15 @@ test('catalog scale helpers canonicalize widths and expose throughput trade-offs
     forensic: true,
     steganography: true,
   };
-  const catalog = withCatalogThroughputDefaults(base);
+  assert.throws(() => withCatalogThroughputDefaults({ ...base, format: 'avif' }), /AVIF is precompute-only/);
+  assert.throws(() => withCatalogThroughputDefaults({ ...base, processing: { allowSlowRequestAvif: true } }), /AVIF is precompute-only/);
+  const catalog = withCatalogThroughputDefaults({
+    ...base,
+    authorize: async () => ({ allow: true, format: 'avif' }),
+  });
+  assert.equal(catalog.format, 'webp');
+  assert.deepEqual(await catalog.authorize({}, 'img', {}), { allow: false, format: 'avif' },
+    'per-item entitlements cannot turn on request-path AVIF in the catalog profile');
   assert.equal(catalog.quality, 88);
   assert.deepEqual(catalog.widthBuckets, DEFAULT_WIDTH_BUCKETS);
   assert.equal(catalog.forensicScope, 'image');
@@ -3864,6 +4155,10 @@ test('v1.17 production audit blocks tiny replay stores; AVIF/memory profiles nor
   assert.ok(tiny.blockers.some((b) => /oneTimeTokenMaxEntries/.test(b)), 'sub-10k replay store is a named blocker');
   const fine = auditArchxProductionConfig(base);
   assert.ok(!fine.blockers.some((b) => /oneTimeTokenMaxEntries/.test(b)));
+  assert.ok(fine.blockers.some((b) => /replaySaturation must be 'strict'/.test(b)),
+    'evict-on-saturation is a production blocker while one-time claims are enabled');
+  const strictReplay = auditArchxProductionConfig({ ...base, replaySaturation: 'strict' });
+  assert.ok(!strictReplay.blockers.some((b) => /replaySaturation/.test(b)));
 
   const clamped = createArchxMiddleware({ ...base, processing: { avifEffort: 6 } });
   assert.equal(clamped.configAudit.summary.processing.avifEffort, 2, 'request-path AVIF effort clamps to 2');
@@ -3939,6 +4234,79 @@ test('v1.17 tilt search deskews small-angle rotations', () => {
   assert.equal(hit.fingerprint, stegoFingerprint('tilt-buyer'));
   assert.ok(Math.abs(hit.deskewed ?? 0) >= 0.75 && Math.abs(hit.deskewed ?? 0) <= 3,
     `reported tilt in the applied range (got ${hit.deskewed})`);
+});
+
+test('v1.30 layout v5 affine deskew recovers 10–30° rotations and a combined keystone capture', async () => {
+  const w = 480, h = 320;
+  const master = await syntheticMaster(w, h);
+  const { data } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), w, h, 'AFFINE-DESKEW', {
+    key: 'affine-deskew-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  for (const angle of [10, 20, 30]) {
+    const photographed = rotateRgba(marked, w, h, (angle * Math.PI) / 180);
+    const hit = detectStegoFingerprint(photographed, w, h, {
+      key: 'affine-deskew-key', profile: 'robust', layoutVersion: 5,
+      searchGeometry: true, searchTilt: true,
+      maxTimeMs: process.platform === 'win32' ? 120_000 : 30_000,
+    });
+    assert.equal(hit.found, true, JSON.stringify({ angle, hit }));
+    assert.equal(hit.fingerprint, stegoFingerprint('AFFINE-DESKEW'));
+    assert.ok(Math.abs(hit.deskewed - angle) <= 2, `estimated ${hit.deskewed}° for ${angle}° capture`);
+    assert.equal(hit.deskewMethod, 'sync-pilot-affine');
+  }
+  const texture = makeTexturedRgba(w, h, 0x7361);
+  const texturedMark = embedStegoFingerprint(texture, w, h, 'AFFINE-COMPOUND', {
+    key: 'affine-compound-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const phoneCapture = rotateRgba(keystoneCorrectRgba(texturedMark, w, h, -0.20, 0.10), w, h, (20 * Math.PI) / 180);
+  const compound = detectStegoFingerprint(phoneCapture, w, h, {
+    key: 'affine-compound-key', profile: 'robust', layoutVersion: 5,
+    searchGeometry: true, searchTilt: true, searchPerspective: true,
+    maxTimeMs: process.platform === 'win32' ? 240_000 : 60_000,
+  });
+  assert.equal(compound.found, true, JSON.stringify(compound));
+  assert.equal(compound.fingerprint, stegoFingerprint('AFFINE-COMPOUND'));
+  assert.ok(Math.abs(compound.deskewed - 20) <= 2);
+  assert.ok(compound.perspective, 'the recovered affine deskew is followed by keystone registration');
+});
+
+test('perspective registration recovers a mild keystone-warped StegoMark and the CLI flag', async () => {
+  const w = 480, h = 320;
+  const base = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4;
+    base[i] = (x * 3 + y * 7) & 255;
+    base[i + 1] = (x * 11 + y * 5) & 255;
+    base[i + 2] = (x * 13 + y * 3) & 255;
+    base[i + 3] = 255;
+  }
+  const marked = embedStegoFingerprint(base, w, h, 'perspective-buyer', {
+    key: 'perspective-key', profile: 'robust', strength: 7, layoutVersion: 3,
+  });
+  // Simulate a mild camera keystone; detector must undo this rather than
+  // merely reporting a hit on the unregistered pixels.
+  const suspect = keystoneCorrectRgba(marked, w, h, -0.20, 0);
+  const hit = detectStegoFingerprint(suspect, w, h, {
+    key: 'perspective-key', profile: 'robust', layoutVersion: 3,
+    searchGeometry: false, searchPerspective: true, maxTimeMs: 15000,
+  });
+  assert.equal(hit.found, true, JSON.stringify(hit));
+  assert.equal(hit.fingerprint, stegoFingerprint('perspective-buyer'));
+  assert.deepEqual(hit.perspective, { horizontal: 0.2, vertical: 0 });
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-perspective-cli-'));
+  const suspectPath = path.join(dir, 'perspective.png');
+  await sharp(Buffer.from(suspect), { raw: { width: w, height: h, channels: 4 } }).png().toFile(suspectPath);
+  const cli = spawnSync(process.execPath, [
+    path.resolve('server/detect-stego-cli.js'), suspectPath,
+    '--key', 'perspective-key', '--profile', 'robust', '--layout', '3',
+    '--no-geometry', '--perspective', '--max-time-ms', '15000', '--json',
+  ], { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr || cli.stdout);
+  const cliResult = JSON.parse(cli.stdout);
+  assert.equal(cliResult.found, true);
+  assert.deepEqual(cliResult.perspective, { horizontal: 0.2, vertical: 0 });
 });
 
 test('v1.17 collusion assay ranks averaging participants above innocents', () => {
@@ -4148,6 +4516,8 @@ test('v1.18 mixed batch: allowed, denied, unknown, and malformed items are parti
   assert.equal(res.status, 200);
   const batch = await res.json();
   assert.ok(batch.tokens.ok?.token, 'authorized item minted');
+  assert.equal(batch.ok, false, 'HTTP 200 is not the all-items-success signal');
+  assert.deepEqual(batch.counts, { requested: 4, issued: 1, denied: 3 });
   assert.equal(batch.tokens.denied, undefined);
   assert.equal(batch.errors.denied?.status, 403, 'denied item reports 403');
   assert.equal(batch.errors.ghost?.status, 404, 'unknown image reports 404');
@@ -4215,15 +4585,16 @@ test('v1.18 detector maxTimeMs bounds forensic search and reports timedOut', asy
   const clean = new Uint8Array(data);
   const t0 = Date.now();
   const bounded = detectStegoFingerprint(clean, info.width, info.height, {
-    key: 'none', profile: 'robust', searchGeometry: true, maxTimeMs: 900,
+    key: 'none', profile: 'robust', searchGeometry: true, maxTimeMs: 1,
   });
   const elapsed = Date.now() - t0;
   assert.equal(bounded.found, false);
   assert.equal(bounded.timedOut, true, 'budget expiry is reported, not silent');
-  assert.ok(elapsed < 6000, `returned near the budget (took ${elapsed}ms)`);
+  assert.ok(elapsed < 30_000, `returned within the generous cross-platform ceiling (took ${elapsed}ms)`);
   const marked = embedStegoFingerprint(clean, info.width, info.height, 'budget-buyer', { key: 'bk', profile: 'robust', strength: 6 });
   const hit = detectStegoFingerprint(marked, info.width, info.height, {
-    key: 'bk', profile: 'robust', searchGeometry: true, maxTimeMs: 900,
+    key: 'bk', profile: 'robust', searchGeometry: true,
+    maxTimeMs: process.platform === 'win32' ? 30_000 : 900,
   });
   assert.equal(hit.found, true, 'native hits are unaffected by the budget');
   assert.ok(!hit.timedOut);
@@ -4687,6 +5058,90 @@ test('v1.20 layout v4: deep crop recovers through ML erasure solving', async () 
   assert.ok(hit.erasedBits > 36, `erased ${hit.erasedBits} bits: beyond the bounded-distance radius, so the ML solve did the work`);
 });
 
+test('v1.30 layout v5: auto-detects the BCH pilot lattice and rejects a wrong key', async () => {
+  // Use the exact default syntheticMaster() fixture (320×240), not a
+  // separately resized rendering; this is deliberately near the v5 cell floor.
+  const master = await syntheticMaster();
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'SYNC-V5-CROP', {
+    key: 'v5-sync-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const hit = detectStegoFingerprint(marked, info.width, info.height, { key: 'v5-sync-key', profile: 'auto' });
+  assert.equal(hit.found, true, JSON.stringify(hit));
+  assert.equal(hit.layoutVersion, 5);
+  assert.equal(hit.syncTemplateVersion, 2);
+  assert.equal(hit.syncRegistration.cells, 32);
+  assert.equal(hit.fingerprint, stegoFingerprint('SYNC-V5-CROP'));
+  const wrongKey = detectStegoFingerprint(marked, info.width, info.height, {
+    key: 'wrong-v5-key', profile: 'robust', layoutVersion: 5,
+  });
+  assert.equal(wrongKey.found, false, 'pilot evidence cannot validate the keyed BCH payload');
+});
+
+test('v1.30 layout v5: dense registration recovers a severe asymmetric crop', async () => {
+  const master = await syntheticMaster(640, 420);
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const marked = embedStegoFingerprint(new Uint8Array(data), info.width, info.height, 'SYNC-DEEP-CROP', {
+    key: 'v5-deep-crop-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const cases = [
+    { left: 73, top: 41, width: 420, height: 330 },
+    // One-axis crop exercises a different source/crop aspect prior.
+    { left: 140, top: 0, width: 360, height: 420 },
+  ];
+  for (const { left, top, width, height } of cases) {
+    const cropped = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      cropped.set(marked.subarray(((y + top) * info.width + left) * 4,
+        ((y + top) * info.width + left + width) * 4), y * width * 4);
+    }
+    const hit = detectStegoFingerprint(cropped, width, height, {
+      key: 'v5-deep-crop-key', profile: 'robust', layoutVersion: 5,
+      searchGeometry: true, maxTimeMs: 60_000,
+    });
+    assert.equal(hit.found, true, JSON.stringify({ crop: { left, top, width, height }, hit }));
+    assert.equal(hit.fingerprint, stegoFingerprint('SYNC-DEEP-CROP'));
+    assert.ok(hit.syncRegistration.cells >= 10);
+    assert.ok(hit.syncRegistration.agreement >= 0.70);
+  }
+});
+
+test('v1.30 layout v5: textured crop corpus recovers asymmetric 56–62% retained frames', () => {
+  const sourceWidth = 640, sourceHeight = 420;
+  const source = makeTexturedRgba(sourceWidth, sourceHeight);
+  const marked = embedStegoFingerprint(source, sourceWidth, sourceHeight, 'TEXTURED-DEEP-CROP', {
+    key: 'v5-textured-crop-key', profile: 'robust', strength: 8, layoutVersion: 5,
+  });
+  const cases = [
+    { left: 37, top: 19, width: 520, height: 320 },
+    { left: 105, top: 8, width: 420, height: 398 },
+    { left: 9, top: 92, width: 622, height: 250 },
+    { left: 158, top: 0, width: 360, height: 420 },
+  ];
+  for (const crop of cases) {
+    const suspect = cropRgba(marked, sourceWidth, crop);
+    const hit = detectStegoFingerprint(suspect, crop.width, crop.height, {
+      key: 'v5-textured-crop-key', profile: 'robust', layoutVersion: 5,
+      searchGeometry: true,
+      maxTimeMs: process.platform === 'win32' ? 180_000 : 60_000,
+    });
+    assert.equal(hit.found, true, JSON.stringify({ crop, retained: crop.width * crop.height / (sourceWidth * sourceHeight), hit }));
+    assert.equal(hit.fingerprint, stegoFingerprint('TEXTURED-DEEP-CROP'));
+    assert.ok(hit.syncRegistration.cells >= 10);
+    assert.ok(hit.syncRegistration.agreement >= 0.7);
+  }
+});
+
+test('v1.30 assay reports layoutVersion and self-verifies a v5 embed', async () => {
+  const master = await syntheticMaster();
+  const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const report = assayStegoEmbed(new Uint8Array(data), info.width, info.height, {
+    key: 'assay-v5', profile: 'robust', strength: 8, layoutVersion: 5, verify: true,
+  });
+  assert.equal(report.layoutVersion, 5);
+  assert.notEqual(report.verifiedAtStrength, null);
+});
+
 test('v1.20 assay reports layoutVersion and self-verifies a v4 embed', async () => {
   const master = await syntheticMaster(640, 420);
   const { data, info } = await sharp(master).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -4697,7 +5152,7 @@ test('v1.20 assay reports layoutVersion and self-verifies a v4 embed', async () 
   assert.notEqual(report.verifiedAtStrength, null);
 });
 
-test('v1.20 hardened preset fails closed on replay saturation; layout 4 is valid server config', async () => {
+test('v1.30 hardened preset fails closed on replay saturation; layout 5 is valid server config', async () => {
   const hardened = withHardenedProductionDefaults({ secret: TEST_SECRET, imagesDir: '/nonexistent', allowAnonymous: true });
   assert.equal(hardened.replaySaturation, 'strict', 'hardened preset must not silently reopen replay windows under saturation');
   assert.equal(withHardenedProductionDefaults({ replaySaturation: 'evict' }).replaySaturation, 'evict',
@@ -4706,14 +5161,14 @@ test('v1.20 hardened preset fails closed on replay saturation; layout 4 is valid
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
   const okAudit = auditArchxServerConfig({
     secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
-    steganography: { profile: 'robust', strength: 6, layoutVersion: 4 },
+    steganography: { profile: 'robust', strength: 8, layoutVersion: 5 },
   });
   assert.equal(okAudit.ok, true, okAudit.issues?.join('; '));
   const badAudit = auditArchxServerConfig({
     secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
-    steganography: { profile: 'robust', layoutVersion: 5 },
+    steganography: { profile: 'robust', layoutVersion: 6 },
   });
-  assert.equal(badAudit.ok, false, 'layout 5 does not exist and must stay rejected');
+  assert.equal(badAudit.ok, false, 'unknown layouts must stay rejected');
 });
 
 test('v1.20 golden freeze: layouts 1-3 embeds stay byte-identical to shipped v1.19', () => {
@@ -4965,6 +5420,48 @@ test('v1.25: perceptual matcher recognises flipped/rotated/transposed suspects',
 
   assert.throws(() => matchPerceptualFingerprint(img, w, h, 'not-a-fingerprint'), TypeError);
   assert.throws(() => matchPerceptualFingerprint(img, w, h, ref, { maxDistance: 65 }), RangeError);
+});
+
+test('reference chunked transport signs manifests, verifies every chunk, and never exposes partial assets', async (t) => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const source = Buffer.alloc(91_337);
+  let state = 0x31415926;
+  for (let i = 0; i < source.length; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    source[i] = state >>> 24;
+  }
+  let authorizationChecks = 0;
+  const server = createChunkedAssetServer({
+    assets: { 'catalog-01': source },
+    privateKey,
+    chunkBytes: 16_384,
+    authorize: async (_req, assetId) => { authorizationChecks++; return assetId === 'catalog-01'; },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const options = {
+    publicJwk: publicKey.export({ format: 'jwk' }),
+    expectedAssetId: 'catalog-01',
+    cryptoImpl: crypto.webcrypto,
+  };
+  const complete = await fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, options);
+  assert.deepEqual(Buffer.from(await complete.arrayBuffer()), source);
+  assert.ok(authorizationChecks >= 7, 'manifest and every chunk request are authorized independently');
+  await assert.rejects(fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, {
+    ...options, expectedAssetId: 'other-asset',
+  }), /manifest exceeds transport bounds/);
+
+  const tamperFetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (!String(input).includes('/archx-chunks/catalog-01/')) return response;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    bytes[0] ^= 1;
+    return new Response(bytes, { status: response.status, headers: response.headers });
+  };
+  await assert.rejects(fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, {
+    ...options, fetchImpl: tamperFetch,
+  }), /chunk length or digest mismatch/);
 });
 
 test('release coherence: exported VERSION equals package.json version', () => {

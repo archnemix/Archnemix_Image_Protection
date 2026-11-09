@@ -59,7 +59,7 @@ if (args.assay) {
   // verified (or --assay-no-verify), 2 = no self-verifying strength found.
   if (!input) { console.error('Usage: archx-protect <input image> --assay [--stego-profile robust] [--stego-strength 6] [--json]'); process.exit(1); }
   const assayLayout = args['stego-layout'] ? Number(args['stego-layout']) : 3;
-  if (![1, 2, 3, 4].includes(assayLayout)) { console.error('Archx assay: --stego-layout must be 1, 2, 3 or 4'); process.exit(1); }
+  if (![1, 2, 3, 4, 5].includes(assayLayout)) { console.error('Archx assay: --stego-layout must be 1, 2, 3, 4 or 5'); process.exit(1); }
   const assayProfile = args['stego-profile'] || 'robust';
   const assayStrength = args['stego-strength'] ? Number(args['stego-strength']) : 6;
   const assayGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
@@ -123,7 +123,7 @@ if (!input || !output || args.help) {
   --stego-key <s>      StegoMark key (required with --stego; prefer ARCHX_STEGO_KEY; MUST differ from the scramble key)
   --stego-strength <n> StegoMark strength 1–16 (default 6; higher = tougher, slightly more visible)
   --stego-profile <p> standard (default) or robust low-frequency forensic profile
-  --stego-layout <n>  codeword layout 1-4 (default 3; 4 = BCH error correction, needs a v1.20+ detector)
+  --stego-layout <n>  codeword layout 1-5 (default 3; 4 = BCH, 5 = BCH + sync-template v2)
   --stego-grid-x <n>  StegoMark grid columns 4–64 (profile default)
   --stego-grid-y <n>  StegoMark grid rows 4–64 (profile default)
   --max-input-bytes <n> reject masters above this size (default 52428800)
@@ -145,7 +145,7 @@ const generatedAesKey = !!args.encrypt && !process.env.ARCHX_AES_KEY;
 const stegoProfile = args['stego-profile'] || 'standard';
 const stegoGridX = args['stego-grid-x'] ? Number(args['stego-grid-x']) : undefined;
 const stegoGridY = args['stego-grid-y'] ? Number(args['stego-grid-y']) : undefined;
-if (args['stego-layout'] && ![1, 2, 3, 4].includes(Number(args['stego-layout']))) {
+if (args['stego-layout'] && ![1, 2, 3, 4, 5].includes(Number(args['stego-layout']))) {
   console.error('Archx protect: --stego-layout must be 1, 2, 3 or 4');
   process.exit(1);
 }

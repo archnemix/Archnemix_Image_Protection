@@ -216,6 +216,37 @@ export function resampleRgba(src, w, h, nw, nh) {
   }
   return out;
 }
+// Rectify mild camera keystone on an RGBA suspect. The parameters describe
+// how horizontal/vertical scale changes from one edge to the other; callers
+// sweep a small, bounded set rather than fitting a free homography to noise.
+export function keystoneCorrectRgba(src, w, h, horizontal = 0, vertical = 0) {
+  if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 1 || h < 1 ||
+      !Number.isFinite(horizontal) || !Number.isFinite(vertical) ||
+      Math.abs(horizontal) > 0.4 || Math.abs(vertical) > 0.4 ||
+      src.length < w * h * 4) throw new TypeError('invalid keystone image or parameters');
+  const out = new Uint8Array(w * h * 4);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  for (let y = 0; y < h; y++) {
+    const v = h > 1 ? y / (h - 1) - 0.5 : 0;
+    let di = y * w * 4;
+    for (let x = 0; x < w; x++, di += 4) {
+      const u = w > 1 ? x / (w - 1) - 0.5 : 0;
+      const sx = Math.min(w - 1, Math.max(0, cx + (x - cx) / (1 + horizontal * v)));
+      const sy = Math.min(h - 1, Math.max(0, cy + (y - cy) / (1 + vertical * u)));
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+      const wx = sx - x0, wy = sy - y0, invWx = 1 - wx, invWy = 1 - wy;
+      const i00 = (y0 * w + x0) * 4, i10 = (y0 * w + x1) * 4;
+      const i01 = (y1 * w + x0) * 4, i11 = (y1 * w + x1) * 4;
+      for (let c = 0; c < 4; c++) {
+        out[di + c] = (src[i00 + c] * invWx + src[i10 + c] * wx) * invWy +
+          (src[i01 + c] * invWx + src[i11 + c] * wx) * wy;
+      }
+    }
+  }
+  return out;
+}
+
 export function rotateRgba(src, w, h, angleRad) {
   // Always a FRESH buffer: callers key plane caches by buffer
   // identity (planesEntry), so reusing a scratch buffer across

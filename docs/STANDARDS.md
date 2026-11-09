@@ -14,12 +14,12 @@ called out as a gap with its disposition.
 | API1 Broken Object Level Authorization | Authorization checked per image ID on mint **and** redemption | Met for protected deployments — `authorize()` runs at both phases; missing `authorize` fails startup unless the operator explicitly enables anonymous delivery. |
 | API2 Broken Authentication | Short-lived signed tokens; sender constraints where required | Met mechanism — HMAC-SHA256 v2 claims (audience/scope/expiry/one-time nonce), optional RFC 7638 key thumbprint + RFC 9449-style proof of possession, `timingSafeEqual` verification; the operator selects whether proof is optional or required. |
 | API3 Broken Object Property Level Authorization | Clients cannot widen width/quality/format beyond entitlement; no mass assignment | Met — signed claims are ceilings; request params strictly validated; token claims use a field allowlist |
-| API4 Unrestricted Resource Consumption | Rate/concurrency/size/time budgets everywhere | Met — separate token/image rate windows, quotas, bounded stores, Sharp pixel/byte/time budgets, processing semaphore + queue timeout, batch body byte cap **and read deadline** |
+| API4 Unrestricted Resource Consumption | Rate/concurrency/size/time budgets everywhere | Met — separate token/image rate windows plus an isolated optional SEO-preview window, quotas, bounded stores, Sharp pixel/byte/time budgets, processing semaphore + queue timeout, batch body byte cap **and read deadline** |
 | API5 Broken Function Level Authorization | No unauthenticated privileged functions | Met — no admin/debug endpoints exist; `taint.png` is intentionally public. Image routes require authorization unless the operator explicitly enables `allowAnonymous:true`. |
 | API6 Sensitive Business Flows | Bulk-view/scraping friction | Met — distinct-image abuse detection, per-viewer/image quotas, one-time tokens, batch still per-item authorized |
 | API7 SSRF | Server must not fetch attacker URLs | Met — masters are local files only; IDs are allowlisted and realpath-contained; Sharp string-path inputs are rejected |
 | API8 Security Misconfiguration | Secure defaults + startup validation | Met — strict unknown-option rejection, production config audit, hardened presets, generic errors |
-| API9 Improper Inventory | One versioned API surface | Met — routes are `{basePath}/token/:id`, `/tokens`, `/i/:id`, `/taint.png`; methods allowlisted (405 otherwise) |
+| API9 Improper Inventory | One versioned API surface | Met — routes are `{basePath}/token/:id`, `/tokens`, `/i/:id`, `/taint.png`, plus opt-in `{basePath}/seo/:id`; methods allowlisted (405 otherwise) |
 | API10 Unsafe Consumption | Treat upstream/store data as untrusted | Met — cached derivatives are container-validated **and HMAC-tagged**; Redis adapter validates value shapes; manifests schema-checked + optional SHA-256 pin |
 
 ## B. Browser platform & delivery

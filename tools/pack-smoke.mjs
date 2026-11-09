@@ -12,6 +12,7 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,6 +35,21 @@ const needsShell = (cmd) => IS_WIN && (cmd === 'npm' || cmd === 'npx');
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, {
   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: needsShell(cmd), ...opts,
 });
+function readTarGzEntry(tarballPath, targetName) {
+  const tar = gunzipSync(fs.readFileSync(tarballPath));
+  for (let offset = 0; offset + 512 <= tar.length;) {
+    const block = tar.subarray(offset, offset + 512);
+    if (block.every((byte) => byte === 0)) break;
+    const name = block.subarray(0, 100).toString('utf8').replace(/\0.*$/, '');
+    const prefix = block.subarray(345, 500).toString('utf8').replace(/\0.*$/, '');
+    const fullName = prefix ? `${prefix}/${name}` : name;
+    const size = Number.parseInt(block.subarray(124, 136).toString('ascii').replace(/\0.*$/, '').trim() || '0', 8);
+    const start = offset + 512;
+    if (fullName === targetName) return tar.subarray(start, start + size);
+    offset = start + Math.ceil(size / 512) * 512;
+  }
+  throw new Error(`tarball is missing ${targetName}`);
+}
 
 console.log(`pack-smoke workspace: ${work}`);
 let tarball;
@@ -41,10 +57,39 @@ step('npm pack', () => {
   const out = run('npm', ['pack', '--json'], { cwd: repoRoot });
   const meta = JSON.parse(out.slice(out.indexOf('[')));
   tarball = path.join(repoRoot, meta[0].filename);
+  const packedManifest = JSON.parse(readTarGzEntry(tarball, 'package/package.json').toString('utf8'));
+  if (Object.keys(packedManifest.scripts || {}).length) {
+    throw new Error(`npm artifact still exposes repository-only scripts: ${Object.keys(packedManifest.scripts).join(', ')}`);
+  }
   const names = meta[0].files.map((f) => f.path);
+  if (names.includes('docs/REQUIREMENTS_TRACKER.md')) {
+    throw new Error('workspace-only requirements tracker must not be included in the published npm artifact');
+  }
+  if (names.some((name) => name.endsWith('.map'))) {
+    throw new Error('npm artifact contains large source maps; rebuild with external maps and exclude them from "files"');
+  }
+  for (const name of names.filter((file) => /^dist\/.*\.js$/.test(file))) {
+    if (fs.readFileSync(path.join(repoRoot, name), 'utf8').includes('sourceMappingURL=')) {
+      throw new Error(`${name} links to a source map that is intentionally absent from the npm artifact`);
+    }
+  }
   for (const required of ['server/detect-worker.js', 'server/middleware.js', 'server/scramble-image.js', 'server/ops.js',
-    'server/detect-stego-cli.js', 'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts']) {
+    'server/detect-stego-cli.js', 'server/request-identity.js', 'src/core/stego-deskew.js',
+    'dist/archx.min.js', 'dist/archx.min.js.sri', 'types/index.d.ts',
+    'docs/OPERATIONS.md', 'docs/PAPERS.md', 'examples/archx-showcase.html',
+    'examples/chunked-transport/client.js', 'examples/chunked-transport/server.mjs',
+    'examples/chunked-transport/README.md']) {
     if (!names.includes(required)) throw new Error(`tarball is missing ${required}`);
+  }
+  // README-relative links are part of the installed package documentation,
+  // not just checkout-only navigation: catch future docs/files allowlist drift.
+  for (const match of fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8').matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+    const target = match[1].split(/[?#]/)[0];
+    if (!target || target.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
+    const normalized = path.posix.normalize(target.replace(/^\.\//, ''));
+    if (!names.includes(normalized) && !names.some((name) => name.startsWith(`${normalized.replace(/\/$/, '')}/`))) {
+      throw new Error(`README links to '${target}', which is not shipped in the npm artifact`);
+    }
   }
   // Structural guard (v1.29): every relative import in every shipped
   // server/src module must resolve to another shipped file. The

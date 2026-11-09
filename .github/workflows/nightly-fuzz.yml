@@ -1,0 +1,26 @@
+name: Nightly deep fuzz
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run expanded parser fuzz suite with a run-specific seed
+        env:
+          ARCHX_FUZZ_MULTIPLIER: '3'
+          ARCHX_FUZZ_SEED: ${{ github.run_id }}
+        run: npm run test:fuzz

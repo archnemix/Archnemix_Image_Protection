@@ -6,10 +6,13 @@ import fs from 'node:fs';
 
 fs.mkdirSync('dist', { recursive: true });
 
+// The default pack-safe build emits external maps without dangling links.
+// Add --debug when developing locally to add sourceMappingURL comments.
+const sourceMapMode = process.argv.includes('--debug') ? 'linked' : 'external';
 const common = {
   entryPoints: ['src/index.js'],
   bundle: true,
-  sourcemap: true,
+  sourcemap: sourceMapMode,
   target: ['es2020'],
   logLevel: 'info',
 };
@@ -22,7 +25,7 @@ await build({
   format: 'iife',
   globalName: 'ArchxGlobal',
   minify: true,
-  sourcemap: true,
+  sourcemap: sourceMapMode,
   target: ['es2020'],
   outfile: 'dist/archx.min.js',
 });

@@ -18,11 +18,12 @@ surface`) pins `types/*.d.ts` to the real export surface.
 | `sniff.js` | Image/container byte sniffing, dimension extraction |
 | `container.js` | `.archx` container encode/decode (header + AES-GCM payload) |
 | `forensic.js` | Forensic block-sign marks and scoring |
-| `bch.js` | BCH(188,64) error-correcting code math for stego layout 4 |
+| `bch.js` | BCH(188,64) error-correcting code math for stego layouts 4/5 |
 | `stego-code.js` | StegoMark codeword layout, syndromes, tag math |
 | `pixels.js` | Luma planes, integral images, rotate/mirror/downscale primitives |
+| `stego-deskew.js` | Coarse/refined keyed sync-pilot affine rotation registration for offline layout-v5 scans |
 | `stego-embed.js` | StegoMark embedding |
-| `stego-detect.js` | StegoMark blind detection (geometry search, deskew, erasure repair) |
+| `stego-detect.js` | StegoMark blind detection (geometry search, dispatches pilot deskew, erasure repair) |
 | `stego-assay.js` | Embed pre-flight assay + collusion ranking |
 | `perceptual.js` | 64-bit DCT perceptual fingerprint |
 
@@ -41,12 +42,15 @@ identity, so scratch reuse there is a correctness bug (found in v1.19).
 | `options.js` | `DEFAULTS`, profiles/presets, global config, page session ids |
 | `registry.js` | Live instance set + host→instance weak map |
 | `events.js` | Sanitized plugin event bus |
-| `temporal.js` | Temporal interlace profiles + renderer |
+| `temporal.js` | Temporal interlace profiles, phase scheduler, shared limiter |
+| `temporal-frames.js` | CPU-backed temporal frame construction from clean pixels |
+| `shaders.js` | WebGL vertex/fragment shader sources, separate from viewer lifecycle |
 | `bitmap-cache.js` | Decoded-bitmap LRU bounds |
 | `observers.js` | Shared visibility/resize observers, global guards, devtools watcher, WebGL slot budget |
 | `sampling.js` | Canonical widths, DPR/connection-aware sampling |
 | `assets.js` | Signed asset-manifest loading/validation |
-| `network.js` | Bounded fetch, token mint/batch, proof-of-possession, challenge retry |
+| `network.js` | Bounded fetch, request execution, challenge retry |
+| `token-transport.js` | Token mint context, PoP skip telemetry callback, and batch-prefetch request assembly |
 | `draw.js` | Canvas/WebGL draw + poisoned-readback presentation |
 | `styles.js` | Shadow-DOM stylesheet |
 | `viewer.js` | `ProtectedImage` element class (the per-image state machine) |
@@ -66,8 +70,11 @@ resolved at call time, not module-eval time).
 | `middleware.js` | `createArchxMiddleware` factory (request handling closure) + the `./server` re-export surface |
 | `bounded.js` | `SlidingWindowLimiter`, `BoundedTtlSet`, `AsyncSemaphore`, distinct-access tracking, memory state store |
 | `tokens.js` | HMAC token sign/verify, strict claim validation, proof-of-possession, stego derivation |
+| `signing-keyring.js` | Active signing-key state and scheduled activation/retirement |
+| `request-identity.js` | Proxy-aware IP canonicalization and distinct exact-token / IPv6 quota identities |
 | `config.js` | Strict config inspection/normalization, production audits, width/ID/path rules |
-| `scramble-image.js` | Sharp pipeline (lazy libvips), derivative generation, detect worker pool |
+| `scramble-image.js` | Sharp pipeline (lazy libvips), protected derivative generation, detect worker pool |
+| `seo-preview.js` | Low-resolution watermarked preview transformation for explicitly verified crawlers |
 | `ownership.js` | Ed25519 ownership claims, EXIF/XMP embedding, layered rescan |
 | `issuance-log.js` | HMAC-chained tamper-evident issuance records |
 | `redis-state-store.js` | Shared state store for multi-instance deployments |
@@ -83,14 +90,18 @@ closure consumes a frozen config and never re-reads host options.
 `middleware.js` re-exports every documented `./server` name so hosts and
 tests keep one import path.
 
-## Deliberately not split further
+## Decomposition boundary
 
-`ProtectedImage` (`src/client/viewer.js`, ~2.9k lines) and the middleware
-factory (`server/middleware.js`, ~2.5k lines) are single cohesive
-units — one class, one closure — whose internals share lifecycle state
-by design. Splitting them further would trade that cohesion for
-accessor plumbing; if either grows a genuinely separable concern
-(e.g. a standalone zoom controller), split that concern out then.
+The viewer remains the `ProtectedImage` lifecycle/state machine, while
+its temporal-frame builder, WebGL shaders, and token transport/prefetch
+pipeline live in `temporal-frames.js`, `shaders.js`, and `token-transport.js`.
+The server middleware still owns request authorization and response policy,
+but proxy identity, scheduled keyring state, and crawler-preview transformation
+are isolated in `request-identity.js`, `signing-keyring.js`, and
+`seo-preview.js`. The chunked transport is a runnable client/server reference
+under `examples/chunked-transport/`; it is not built into the middleware.
+Avoid moving private state or route policy merely to reduce line counts; split
+additional code when it has a stable contract and can be tested independently.
 
 ## Refactor guardrails (learned during the v1.19 split)
 

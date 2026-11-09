@@ -7,14 +7,17 @@ import { asByteArray, scrambleCanvasLocally, setSmoothing, unscrambleToCanvas } 
 import { emitClientEvent } from './events.js';
 import { auditIntegrity, detectAutomation } from './integrity.js';
 import { NATIVES, getNativeContext, glNative, makeCanvas, nativeCall, nativeCreateImageBitmap, nativeDrawImage, nativeGetImageData, nativeGlDrawArrays, nativePutImageData } from './native.js';
-import { assertResponseFinalOrigin, createProofHeader, deriveTokenBatchEndpoint, fetchBounded, fetchControls, getProofKey, nonRetryableError, parseBoundedJson, parseTokenResponse, queueTokenBatchRequest, resolveHttpUrl } from './network.js';
+import { assertResponseFinalOrigin, createProofHeader, deriveTokenBatchEndpoint, fetchBounded, fetchControls, nonRetryableError, parseBoundedJson, parseTokenResponse, queueTokenBatchRequest } from './network.js';
 import { $, GL_CONTEXT_BUDGET, acquireGlSlot, ensureDevtoolsWatcher, getResizeObserver, getVisibilityObserver, glSlotsInUse, installGlobalGuards, releaseGlSlot, sharedResizeObserver } from './observers.js';
 import { DEFAULTS, mergeOptions, preset, sanitizeOptionsView, sessionId } from './options.js';
 import { hostToInstance, instances } from './registry.js';
 import { boundedInteger, cacheDigest, canonicalSourceWidth, effectiveSampling, ensureTaintImage, fetchPriorityInit, fitRects, normalizedHttpCache, resolveTaintUrl } from './sampling.js';
 import { buildScramblePlan, decodeContainer, decryptPayload, hashSeed, isArchxContainer, mulberry32, sniffImageInfo } from '../scramble.js';
 import { SHADOW_CSS } from './styles.js';
-import { limiter, normalizeTemporalInterlace } from './temporal.js';
+import { FRAGMENT_SHADER, VERTEX_SHADER } from './shaders.js';
+import { limiter, nextShuffledPhase, normalizeTemporalInterlace } from './temporal.js';
+import { buildTemporalFrames } from './temporal-frames.js';
+import { createPrefetchedTokenMint, createTokenMintContext } from './token-transport.js';
 
 // One console warning per page for the same-origin taint degradation
 // (audit D1): telemetry carries the machine-readable signal; this is for
@@ -42,6 +45,7 @@ export class ProtectedImage {
   #traceEl = null; #traceTimer = 0;
   #strikes = 0; #lockedUntil = 0; #lockTimer = 0; #integrityIssues = [];
   #bitmapReleased = false;
+  #popSkipReported = false;
   #loadedOnce = false; #cachedBytes = null; #cachedExtra = null; #bitmapCacheEntry = null; #prefetchedTokenMint = null;
   #renderedW = 0; #renderedH = 0; #deviceBox = null;
   #glFrameBudget = 0; #glFrames = 0; #temporalSign = 1; #temporalPhase = 0;
@@ -603,88 +607,39 @@ export class ProtectedImage {
   }
 
   async #tokenMintContext(controls) {
-    const o = this.#options;
-    const src = this.#source || {};
-    const tokenId = this.#tokenSourceId();
-    const endpointRaw = src.tokenEndpoint || o.tokenEndpoint;
-    if (!endpointRaw) throw new Error('Archx: tokenEndpoint required for {id} sources');
-    const endpointUrl = resolveHttpUrl(endpointRaw, { label: 'token endpoint' });
-    if (endpointUrl.search || endpointUrl.hash) throw nonRetryableError('Archx: token endpoint must not contain a query or fragment');
-    const rect = this.#host.getBoundingClientRect?.();
-    const cssWidth = rect?.width || this.#host.clientWidth || 800;
-    const cssHeight = rect?.height || this.#host.clientHeight || cssWidth * 0.75;
-    const { dprCap, oversample, requestQuality } = effectiveSampling(o);
-    const pixelScale = Math.min(devicePixelRatio || 1, dprCap) * Math.max(1, oversample);
-    const maxSourceWidth = boundedInteger(o.maxSourceWidth, DEFAULTS.maxSourceWidth, 64, 16384);
-    const boxW = canonicalSourceWidth(cssWidth * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-    const boxH = canonicalSourceWidth(cssHeight * pixelScale, o.sourceWidthBuckets, maxSourceWidth);
-    const fit = ['cover', 'contain', 'fill'].includes(o.fit) ? o.fit : 'cover';
-    const tokenMethod = String(o.tokenMethod || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
-    const tokenTransport = ['header', 'query', 'auto'].includes(String(o.tokenTransport || 'header').toLowerCase())
-      ? String(o.tokenTransport || 'header').toLowerCase() : 'header';
-    const proofSetting = o.proofOfPossession;
-    const proofMode = proofSetting === false || proofSetting === 'off' ? 'off'
-      : proofSetting === true || proofSetting === 'required' ? 'required' : 'auto';
-    const proofKey = proofMode === 'off' ? null : await getProofKey(proofMode === 'required');
-    const mintUrl = new URL(endpointUrl.href);
-    mintUrl.pathname = `${mintUrl.pathname.replace(/\/?$/, '/')}${encodeURIComponent(tokenId)}`;
-    mintUrl.searchParams.set('w', String(boxW));
-    mintUrl.searchParams.set('bw', String(boxW));
-    mintUrl.searchParams.set('bh', String(boxH));
-    mintUrl.searchParams.set('fit', fit);
-    if (requestQuality != null) mintUrl.searchParams.set('q', String(requestQuality));
-
-    const tokenCacheKey = cacheDigest([
-      'token', 1, o.cacheScope || '', endpointUrl.origin, endpointUrl.pathname, tokenId,
-      boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport, proofKey?.jkt || proofMode, controls.credentials,
-      o.allowedTokenOrigins || null, o.grid, o.scrambled === true, o.key || '', o.aesKey || '',
-      controls.maxResponseBytes, controls.maxDecodedPixels, controls.maxDecodedDimension,
-    ]);
-    return {
-      endpointUrl, boxW, boxH, fit, requestQuality, tokenMethod, tokenTransport,
-      proofMode, proofKey, mintUrl, tokenCacheKey,
-    };
+    return createTokenMintContext({
+      options: this.#options,
+      source: this.#source,
+      tokenId: this.#tokenSourceId(),
+      host: this.#host,
+      controls,
+      onProofSkipped: (reason) => {
+        if (this.#popSkipReported) return;
+        this.#popSkipReported = true;
+        emitClientEvent('archx.pop_skipped', {
+          kind: 'proof-of-possession',
+          reason,
+        }, this);
+      },
+    });
   }
 
   async #prefetchTokenBatchMint(force = false) {
-    const o = this.#options;
-    if (o.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
-    if (!force && this.#cachedBytes) return;
-    const tokenId = this.#tokenSourceId();
-    if (!tokenId || typeof tokenId !== 'string' || tokenId.length > 256 || /[\u0000-\u001f\u007f]/.test(tokenId)) return;
-    const controls = fetchControls(o);
-    let context;
-    try { context = await this.#tokenMintContext(controls); }
-    catch { return; } // _resolveBytes reports the authoritative error in-order.
-    if (this.#destroyed || this.#prefetchedTokenMint || context.tokenMethod !== 'POST') return;
-    const batchUrl = deriveTokenBatchEndpoint(context.endpointUrl, o);
-    if (!batchUrl) return;
-    const cacheBitmap = o.cacheBitmap !== false && o.memory !== 'strict';
-    if (!force && cacheBitmap && cacheGetEntry(context.tokenCacheKey)) return;
-    const headers = context.proofKey
-      ? { 'X-Archx-Request': 'token', 'X-Archx-Proof-Key': context.proofKey.header }
-      : { 'X-Archx-Request': 'token' };
-    const promise = queueTokenBatchRequest({
-      batchUrl,
-      item: {
-        id: tokenId,
-        w: context.boxW,
-        bw: context.boxW,
-        bh: context.boxH,
-        fit: context.fit,
-        ...(context.requestQuality != null ? { q: context.requestQuality } : {}),
-      },
-      headers,
-      credentials: controls.credentials,
-      controls,
+    const options = this.#options;
+    if (options.tokenBatch !== true || this.#prefetchedTokenMint || this.#destroyed) return;
+    const prefetched = await createPrefetchedTokenMint({
+      options,
+      tokenId: this.#tokenSourceId(),
+      force,
+      hasCachedBytes: !!this.#cachedBytes,
+      alreadyPrefetched: !!this.#prefetchedTokenMint,
+      destroyed: this.#destroyed,
+      isAlreadyPrefetched: () => !!this.#prefetchedTokenMint,
+      isDestroyed: () => this.#destroyed,
       signal: this.#abort.signal,
-      options: o,
+      getMintContext: (controls) => this.#tokenMintContext(controls),
     });
-    // The authoritative await happens inside _resolveBytes. Attach a benign
-    // handler now so a destroyed/unused prefetch cannot surface as an
-    // unhandled rejection while other gallery items are still being queued.
-    promise.catch(() => {});
-    this.#prefetchedTokenMint = { key: context.tokenCacheKey, promise };
+    if (prefetched && !this.#prefetchedTokenMint && !this.#destroyed) this.#prefetchedTokenMint = prefetched;
   }
 
   async _resolveBytes(force = false) {
@@ -1453,233 +1408,13 @@ export class ProtectedImage {
    */
   #setupTemporalFrames(frame, cfg) {
     this.#stopTemporal2d(true);
-    const w = frame.width, h = frame.height;
-    const fctx = getNativeContext(frame, '2d');
-    let src;
-    try { src = nativeGetImageData(fctx, 0, 0, w, h); } catch { return; }
-
-    const interlace = cfg.interlace;
-    const phases = Math.max(2, Math.min(4, cfg.phases || 2));
-    const needNoise = !!cfg.noise || interlace?.fill === 'noise';
-    const noiseBlock = Math.max(1, cfg.block || 1);
-    const nbw = Math.ceil(w / noiseBlock), nbh = Math.ceil(h / noiseBlock);
-    const offsets = needNoise ? new Float32Array(nbw * nbh * 3) : null;
-    const amp = (cfg.noise ? cfg.strength : (interlace?.noiseStrength || 0)) * 255;
-    if (offsets) {
-      for (let by = 0; by < nbh; by++) {
-        for (let bx = 0; bx < nbw; bx++) {
-          const oi = (by * nbw + bx) * 3;
-          if (cfg.pattern === 'bands' && bx > 0) {
-            offsets[oi] = offsets[oi - 3];
-            offsets[oi + 1] = offsets[oi - 2];
-            offsets[oi + 2] = offsets[oi - 1];
-            continue;
-          }
-          const parity = cfg.pattern === 'checker' ? (((bx + by) & 1) ? 1 : -1) : 1;
-          if (cfg.chroma) {
-            // Opponent-colour modulation: human chroma sensitivity is lower
-            // than luma sensitivity, while Bayer sensors sample RGB unevenly.
-            const scalar = cfg.pattern === 'checker'
-              ? (0.35 + Math.random() * 0.65) * amp * parity
-              : (Math.random() * 2 - 1) * amp;
-            offsets[oi] = scalar;
-            offsets[oi + 1] = -0.62 * scalar;
-            offsets[oi + 2] = 0.78 * scalar;
-          } else if (cfg.pattern === 'checker') {
-            offsets[oi] = (0.35 + Math.random() * 0.65) * amp * parity;
-            offsets[oi + 1] = (0.35 + Math.random() * 0.65) * amp * parity;
-            offsets[oi + 2] = (0.35 + Math.random() * 0.65) * amp * parity;
-          } else {
-            offsets[oi] = (Math.random() * 2 - 1) * amp;
-            offsets[oi + 1] = (Math.random() * 2 - 1) * amp;
-            offsets[oi + 2] = (Math.random() * 2 - 1) * amp;
-          }
-        }
-      }
-    }
-
-    const cell = Math.max(1, interlace?.cellSize || noiseBlock);
-    const bw = Math.ceil(w / cell), bh = Math.ceil(h / cell);
-    let assignments = null;
-    if (interlace) {
-      assignments = new Uint8Array(bw * bh);
-      for (let by = 0; by < bh; by++) {
-        for (let bx = 0; bx < bw; bx++) {
-          let phase = 0;
-          if (interlace.layout === 'strips') {
-            phase = (interlace.axis === 'columns' ? bx : by) % phases;
-          } else if (interlace.layout === 'blocks') {
-            phase = (Math.random() * phases) | 0;
-          } else if (interlace.layout === 'pixels') {
-            phase = (bx + (phases === 2 ? by : 2 * by)) % phases;
-          } else {
-            phase = (bx + by) % phases;
-          }
-          assignments[by * bw + bx] = phase;
-        }
-      }
-    }
-
-    let lowData = null;
-    let lowW = 0;
-    let lowH = 0;
-    let lowBlock = 1;
-    if (interlace?.fill === 'lowres') {
-      lowBlock = Math.max(1, interlace.fillBlock || 12);
-      lowW = Math.max(1, Math.ceil(w / lowBlock));
-      lowH = Math.max(1, Math.ceil(h / lowBlock));
-      try {
-        const low = makeCanvas(this.#host.ownerDocument);
-        low.width = lowW; low.height = lowH;
-        const lowCtx = getNativeContext(low, '2d');
-        setSmoothing(lowCtx, true);
-        nativeDrawImage(lowCtx, frame, 0, 0, lowW, lowH);
-        lowData = nativeGetImageData(lowCtx, 0, 0, lowW, lowH).data;
-        low.width = 0; low.height = 0;
-      } catch {
-        lowData = null;
-      }
-    }
-
-    // Cycle-zero-mean block bias (noise fill only): with static frames
-    // the per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
-    // MEDIAN is exactly c whenever the hidden deltas straddle it. A
-    // fixed per-block offset b applied +b*(P-1)/P on the active phase
-    // and -b/P on hidden phases keeps the cycle mean exact (no visible
-    // brightness flicker) while moving every cycle statistic off c —
-    // the same construction as the shader path and the duty bias.
-    const biasBlock = 24;
-    const bbw = Math.ceil(w / biasBlock), bbh = Math.ceil(h / biasBlock);
-    const biasAmp = (interlace?.noiseStrength || 0) * 255 * 0.55;
-    const biases = (interlace && interlace.fill === 'noise' && biasAmp > 0)
-      ? new Float32Array(bbw * bbh) : null;
-    if (biases) for (let i = 0; i < biases.length; i++) biases[i] = (Math.random() * 2 - 1) * biasAmp;
-    const colBias = biases ? new Int32Array(w) : null;
-    if (colBias) for (let x = 0; x < w; x++) colBias[x] = Math.min(bbw - 1, Math.floor(x / biasBlock));
-    // Column lookup tables replace two Math.floor divisions per pixel
-    // in the frame builder (~6M divisions per 4-phase 1600px build).
-    const colNoiseOi = offsets ? new Int32Array(w) : null;
-    if (colNoiseOi) for (let x = 0; x < w; x++) colNoiseOi[x] = Math.min(nbw - 1, Math.floor(x / noiseBlock)) * 3;
-    // One scratch ImageData for all phases (putImageData copies sync).
-    const scratch = fctx.createImageData(w, h);
-
-    const mk = (phase) => {
-      // Per-phase amplitude diversity: with identical |delta| every phase,
-      // a short capture's per-pixel multiset is {c+d, c-d, ...} and its
-      // median/mean lands exactly on c. Varied amplitudes make short-window
-      // statistics land off-target; the eye still integrates the cycle.
-      const sign = (phase % 2 ? -1 : 1) * [1, 0.6, 1.3, 0.85][phase % 4];
-      const c = makeCanvas(this.#host.ownerDocument);
-      c.width = w; c.height = h;
-      const cctx = getNativeContext(c, '2d');
-      const out = scratch;
-      const s = src.data, d = out.data; // Uint8ClampedArray clamps assignments
-
-      if (!interlace) {
-        for (let by = 0; by < nbh; by++) {
-          const y0 = by * noiseBlock;
-          const y1 = Math.min(h, y0 + noiseBlock);
-          for (let y = y0; y < y1; y++) {
-            let p = y * w * 4;
-            for (let bx = 0; bx < nbw; bx++) {
-              const oi = (by * nbw + bx) * 3;
-              const x1 = Math.min(w, (bx + 1) * noiseBlock);
-              for (let x = bx * noiseBlock; x < x1; x++, p += 4) {
-                d[p] = s[p] + sign * offsets[oi];
-                d[p + 1] = s[p + 1] + sign * offsets[oi + 1];
-                d[p + 2] = s[p + 2] + sign * offsets[oi + 2];
-                d[p + 3] = 255;
-              }
-            }
-          }
-        }
-        nativePutImageData(cctx, out, 0, 0);
-        return c;
-      }
-
-      const gain = interlace.activeGain || 1;
-      const fillMix = interlace.fillStrength;
-      for (let by = 0; by < bh; by++) {
-        const y0 = by * cell;
-        const y1 = Math.min(h, y0 + cell);
-        for (let bx = 0; bx < bw; bx++) {
-          const active = assignments[by * bw + bx] === phase;
-          const x0 = bx * cell;
-          const x1 = Math.min(w, x0 + cell);
-          for (let y = y0; y < y1; y++) {
-            let p = (y * w + x0) * 4;
-            const lowY = lowData ? Math.min(lowH - 1, Math.floor(y / lowBlock)) : 0;
-            const rowNoiseOi = offsets ? Math.min(nbh - 1, Math.floor(y / noiseBlock)) * nbw * 3 : 0;
-            const rowBiasOff = biases ? Math.min(bbh - 1, Math.floor(y / biasBlock)) * bbw : 0;
-            for (let x = x0; x < x1; x++, p += 4) {
-              const sr = s[p], sg = s[p + 1], sb = s[p + 2];
-              const bv = biases ? biases[rowBiasOff + colBias[x]] : 0;
-              let r, g, b;
-              if (active) {
-                const ab = bv * fillMix * (phases - 1) / phases;
-                r = sr * gain + ab; g = sg * gain + ab; b = sb * gain + ab;
-              } else {
-                let fr = sr, fg = sg, fb = sb;
-                if (interlace.fill === 'lowres' && lowData) {
-                  const lowX = Math.min(lowW - 1, Math.floor(x / lowBlock));
-                  const li = (lowY * lowW + lowX) * 4;
-                  fr = lowData[li]; fg = lowData[li + 1]; fb = lowData[li + 2];
-                } else if (interlace.fill === 'dim') {
-                  fr = sr * interlace.hiddenScale;
-                  fg = sg * interlace.hiddenScale;
-                  fb = sb * interlace.hiddenScale;
-                } else if (interlace.fill === 'black') {
-                  fr = 0; fg = 0; fb = 0;
-                } else if (interlace.fill === 'noise' && offsets) {
-                  const oi = rowNoiseOi + colNoiseOi[x];
-                  const hb = bv / phases;
-                  fr = sr - hb + sign * offsets[oi];
-                  fg = sg - hb + sign * offsets[oi + 1];
-                  fb = sb - hb + sign * offsets[oi + 2];
-                }
-                r = sr + (fr - sr) * fillMix;
-                g = sg + (fg - sg) * fillMix;
-                b = sb + (fb - sb) * fillMix;
-              }
-              if (cfg.noise && offsets) {
-                const oi = rowNoiseOi + colNoiseOi[x];
-                r += sign * offsets[oi];
-                g += sign * offsets[oi + 1];
-                b += sign * offsets[oi + 2];
-              }
-              d[p] = r;
-              d[p + 1] = g;
-              d[p + 2] = b;
-              d[p + 3] = 255;
-            }
-          }
-        }
-      }
-      nativePutImageData(cctx, out, 0, 0);
-      return c;
-    };
-
-    this.#temporalFrames = Array.from({ length: phases }, (_, phase) => mk(phase));
+    this.#temporalFrames = buildTemporalFrames(frame, cfg, this.#host.ownerDocument);
+    if (!this.#temporalFrames) return;
     this.#temporalIndex = 0;
     this.#temporalPhase = 0;
     this.#temporalSign = 1;
     this.#paintTemporal2d();
     if (this.#visible) this.#startTemporal2d();
-  }
-
-  // Next temporal phase from a shuffled bag: every phase appears once per
-  // cycle (so the eye still integrates the full set at the same rate) but
-  // the ORDER is unpredictable, so fixed-cadence capture cannot parity-lock
-  // onto a stable subsequence.
-  #nextPhase(phases) {
-    if (!this.#phaseBag.length || this.#phaseBag[0] >= phases) {
-      this.#phaseBag = Array.from({ length: phases }, (_, i) => i);
-      for (let i = phases - 1; i > 0; i--) {
-        const j = (Math.random() * (i + 1)) | 0;
-        [this.#phaseBag[i], this.#phaseBag[j]] = [this.#phaseBag[j], this.#phaseBag[i]];
-      }
-    }
-    return this.#phaseBag.pop();
   }
 
   #paintTemporal2d() {
@@ -1705,7 +1440,7 @@ export class ProtectedImage {
       this.#temporalRaf = 0;
       if (this.#destroyed || !this.#temporalFrames || !this.#visible) return;
       this.#temporalIndex++;
-      this.#temporalPhase = this.#nextPhase(this.#temporalFrames.length);
+      this.#temporalPhase = nextShuffledPhase(this.#phaseBag, this.#temporalFrames.length);
       this.#paintTemporal2d();
       this.#temporalRaf = requestAnimationFrame(step);
     };
@@ -2290,203 +2025,8 @@ export class ProtectedImage {
   }
 
   _initGl(gl) {
-    const vs = `#version 300 es
-      layout(location=0) in vec2 p; out vec2 vUv;
-      void main(){ vUv = p*0.5+0.5; vUv.y = 1.0-vUv.y; gl_Position = vec4(p,0.,1.); }`;
-    const fs = `#version 300 es
-      precision highp float;
-      uniform sampler2D uTex; uniform sampler2D uMap; uniform sampler2D uWm;
-      uniform float uGrid; uniform vec2 uCrop; uniform vec2 uFitScale; uniform vec2 uFitOffset;
-      uniform float uScrambled; uniform float uSeed; uniform float uWmOn;
-      uniform float uLensOn; uniform float uLensActive; uniform vec2 uLensCenter;
-      uniform float uLensRadius; uniform vec2 uResolution; uniform float uLocked;
-      uniform float uTemporalOn; uniform float uTemporalSign;
-      uniform float uTemporalStrength; uniform float uTemporalBlock;
-      uniform float uTemporalPattern; uniform float uTemporalChroma;
-      uniform float uTemporalDuty; uniform float uTemporalBias; uniform float uBiasSeed;
-      uniform float uInterlaceOn; uniform float uInterlacePhase;
-      uniform float uInterlacePhases; uniform float uInterlaceLayout;
-      uniform float uInterlaceCell; uniform float uInterlaceAxis;
-      uniform float uInterlaceFill; uniform float uInterlaceFillBlock;
-      uniform float uInterlaceFillStrength; uniform float uInterlaceHiddenScale;
-      uniform float uInterlaceActiveGain; uniform float uInterlaceNoiseStrength;
-      uniform float uInterlaceBias;
-      in vec2 vUv; out vec4 frag;
-      float hash(vec2 q){ return fract(sin(dot(q, vec2(127.1,311.7))+uSeed)*43758.5453); }
-      float biasHash(vec2 q){ return fract(sin(dot(q, vec2(269.5,183.3))+uBiasSeed)*43758.5453); }
-      vec3 hash3(vec2 q){
-        return vec3(hash(q), hash(q+19.19), hash(q+47.47));
-      }
-      vec2 mapToSource(vec2 imageUv){
-        vec2 srcUv = imageUv;
-        if(uScrambled>0.5){
-          vec2 paddedUv = imageUv * uCrop; // orig->padded space
-          vec2 tile = floor(paddedUv*uGrid);
-          vec2 local = fract(paddedUv*uGrid);
-          vec4 m = texelFetch(uMap, ivec2(tile), 0);
-          vec2 srcTile = m.rg*255.0;
-          if(m.b>0.5) local.x = 1.0-local.x;
-          if(m.a>0.5) local.y = 1.0-local.y;
-          srcUv = (srcTile+local)/uGrid;
-          // Clamp inside the source tile so filtering never blends across
-          // scrambled-tile boundaries -> no seams.
-          vec2 texel = 1.0 / vec2(textureSize(uTex, 0));
-          srcUv = clamp(srcUv, srcTile/uGrid + texel*0.75, (srcTile+1.0)/uGrid - texel*0.75);
-        }
-        return srcUv;
-      }
-      vec4 sampleImage(vec2 imageUv){
-        vec2 texSize = vec2(textureSize(uTex, 0));
-        vec2 srcUv = mapToSource(imageUv);
-        vec2 srcPx = srcUv * texSize;
-        float footprint = max(length(dFdx(srcPx)), length(dFdy(srcPx)));
-        // At ~1:1, fetch the exact texel instead of bilinear-blending two
-        // neighbours; this is the difference between crisp type/edges and mush.
-        if(footprint > 0.70 && footprint < 1.45){
-          ivec2 p = ivec2(clamp(floor(srcPx), vec2(0.0), texSize - 1.0));
-          return texelFetch(uTex, p, 0);
-        }
-        // When minifying, a small 2x2 supersample around the fragment footprint
-        // preserves substantially more detail than one bilinear tap (and, for a
-        // scrambled texture, avoids cross-tile mipmap bleeding).
-        if(footprint >= 1.45){
-          vec2 duvX = dFdx(imageUv);
-          vec2 duvY = dFdy(imageUv);
-          vec4 sum = vec4(0.0);
-          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX - 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX - 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv - 0.25*duvX + 0.25*duvY));
-          sum += texture(uTex, mapToSource(imageUv + 0.25*duvX + 0.25*duvY));
-          return sum * 0.25;
-        }
-        return texture(uTex, srcUv);
-      }
-      void main(){
-        if(uLocked>0.5){ frag=vec4(0.,0.,0.,1.); return; }
-        vec2 uv = vUv*uFitScale + uFitOffset;
-        if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){ frag=vec4(0.,0.,0.,1.); return; }
-        // Pointer lens: outside the trusted-pointer disc we sample a heavily
-        // quantised (pixelated) version, so a single screenshot/frame grab
-        // only ever contains one small sharp region.
-        vec2 effUv = uv;
-        float lensOutside = 0.0;
-        float lensDistPx = 0.0;
-        if(uLensOn>0.5){
-          vec2 centerPx = vec2(uLensCenter.x, 1.0-uLensCenter.y) * uResolution;
-          lensDistPx = distance(gl_FragCoord.xy, centerPx);
-          if(uLensActive<0.5 || lensDistPx > uLensRadius){
-            float block = max(uResolution.x, uResolution.y) / 34.0;
-            vec2 qxy = (floor(gl_FragCoord.xy / block) + 0.5) * block;
-            vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
-            effUv = qUv * uFitScale + uFitOffset;
-            lensOutside = 1.0;
-          }
-        }
-        vec4 c = sampleImage(effUv);
-        c.rgb += (hash(gl_FragCoord.xy)-0.5)*(2.0/255.0); // forensic grain
-        if(lensOutside>0.5) c.rgb *= 0.82;
-        // Literal temporal interlace: each spatial cell belongs to exactly
-        // one phase. Inactive cells retain only the configured fill. This
-        // runs before the watermark so attribution is present in every
-        // presented phase and in a one-frame capture.
-        if(uInterlaceOn>0.5){
-          vec2 interlaceCell = floor(gl_FragCoord.xy / max(uInterlaceCell, 1.0));
-          float assigned = 0.0;
-          if(uInterlaceLayout<0.5){
-            assigned = mod(interlaceCell.x + (uInterlacePhases<2.5 ? interlaceCell.y : 2.0*interlaceCell.y), uInterlacePhases);
-          } else if(uInterlaceLayout<1.5){
-            assigned = mod(uInterlaceAxis>0.5 ? interlaceCell.x : interlaceCell.y, uInterlacePhases);
-          } else if(uInterlaceLayout<2.5){
-            assigned = min(floor(hash(interlaceCell + 913.7) * uInterlacePhases), uInterlacePhases - 1.0);
-          } else {
-            assigned = mod(interlaceCell.x + interlaceCell.y, uInterlacePhases);
-          }
-          // Cycle-zero-mean block bias (noise fill only): without it the
-          // per-pixel cycle multiset is {c, c+d1, c+d2} and the temporal
-          // median of a short screen recording is exactly c whenever the
-          // hidden deltas straddle it (~50% of pixels at 3 phases). A
-          // per-24px-block offset b, +b*(P-1)/P on the active phase and
-          // -b/P hidden, keeps the cycle mean exact while moving every
-          // cycle statistic off c. biasHash re-seeds every 90 frames, so
-          // longer recordings face a drifting bias, not a fixed offset.
-          float iBias = 0.0;
-          if(uInterlaceFill>2.5 && uInterlaceFill<3.5){
-            vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
-            iBias = (biasHash(biasCell) * 2.0 - 1.0) * uInterlaceBias * uInterlaceFillStrength;
-          }
-          if(abs(assigned-uInterlacePhase)<0.5){
-            c.rgb = c.rgb * uInterlaceActiveGain + vec3(iBias * (uInterlacePhases - 1.0) / max(uInterlacePhases, 1.0));
-          } else {
-            vec3 fillColor = c.rgb;
-            if(uInterlaceFill<0.5){
-              vec2 qxy = (floor(gl_FragCoord.xy / max(uInterlaceFillBlock, 1.0)) + 0.5) * uInterlaceFillBlock;
-              vec2 qUv = vec2(qxy.x / uResolution.x, 1.0 - qxy.y / uResolution.y);
-              vec2 fillUv = qUv * uFitScale + uFitOffset;
-              if(fillUv.x>=0.0 && fillUv.x<=1.0 && fillUv.y>=0.0 && fillUv.y<=1.0){
-                fillColor = sampleImage(fillUv).rgb;
-              }
-            } else if(uInterlaceFill<1.5){
-              fillColor = c.rgb * uInterlaceHiddenScale;
-            } else if(uInterlaceFill<2.5){
-              fillColor = vec3(0.0);
-            } else {
-              vec3 delta;
-              if(uTemporalChroma>0.5){
-                float v = hash(interlaceCell) - 0.5;
-                delta = vec3(v, -0.62*v, 0.78*v);
-              } else {
-                delta = hash3(interlaceCell) - 0.5;
-              }
-              fillColor = c.rgb + delta * uInterlaceNoiseStrength * uTemporalSign - vec3(iBias / max(uInterlacePhases, 1.0) / max(uInterlaceFillStrength, 0.02));
-            }
-            c.rgb = mix(c.rgb, fillColor, uInterlaceFillStrength);
-          }
-        }
-        if(uWmOn>0.5){
-          vec4 wm = texture(uWm, vUv);
-          c.rgb = mix(c.rgb, wm.rgb, wm.a);
-        }
-        if(uLensOn>0.5 && uLensActive>0.5 && abs(lensDistPx-uLensRadius)<1.5){
-          c.rgb = mix(c.rgb, vec3(1.0), 0.35);
-        }
-        // Temporal shield: complementary per-block noise flips sign every
-        // presented frame. The eye integrates the pair toward the image;
-        // one screenshot/extension capture keeps a single noisy frame.
-        if(uTemporalOn>0.5){
-          vec2 blockCell = floor(gl_FragCoord.xy / max(uTemporalBlock, 1.0));
-          vec3 delta;
-          if(uTemporalPattern>1.5){
-            // Horizontal bands interact strongly with rolling-shutter rows.
-            float v = hash(vec2(0.0, blockCell.y)) - 0.5;
-            delta = uTemporalChroma>0.5 ? vec3(v, -0.62*v, 0.78*v) : hash3(vec2(0.0, blockCell.y)) - 0.5;
-          } else if(uTemporalPattern>0.5){
-            float parity = mod(blockCell.x + blockCell.y, 2.0) > 0.5 ? 1.0 : -1.0;
-            if(uTemporalChroma>0.5){
-              float v = (0.35 + 0.65*hash(blockCell)) * parity;
-              delta = vec3(v, -0.62*v, 0.78*v) * 0.5;
-            } else {
-              delta = (0.35 + 0.65*hash3(blockCell)) * parity * 0.5;
-            }
-          } else if(uTemporalChroma>0.5){
-            float v = hash(blockCell) - 0.5;
-            delta = vec3(v, -0.62*v, 0.78*v);
-          } else {
-            delta = hash3(blockCell) - 0.5;
-          }
-          c.rgb += delta * uTemporalStrength * uTemporalSign;
-          // Asymmetric duty bias: a slowly-drifting per-block offset b is
-          // applied +2b/3 on one frame and -b/3 on the next two. The
-          // temporal MEAN the eye integrates is exactly c, but the sample
-          // MEDIAN of any short capture converges to c - b/3, not c —
-          // median-filter recovery of the active/interlace subsets is
-          // permanently biased, and b re-rolls every ~90 frames so even
-          // long-window medians keep chasing a moving target.
-          vec2 biasCell = floor(gl_FragCoord.xy / 24.0);
-          float b = biasHash(biasCell) - 0.5;
-          c.rgb += vec3(b) * uTemporalBias * uTemporalDuty;
-        }
-        frag = vec4(c.rgb, 1.0);
-      }`;
+    const vs = VERTEX_SHADER;
+    const fs = FRAGMENT_SHADER;
     const compile = (type, srcText) => {
       const s = glNative(gl, 'createShader', type);
       glNative(gl, 'shaderSource', s, srcText); glNative(gl, 'compileShader', s);
@@ -2765,7 +2305,7 @@ export class ProtectedImage {
           this.#biasSeed = Math.random() * 100;
         }
         this.#temporalIndex++;
-        this.#temporalPhase = this.#nextPhase(interlace ? interlacePhases : 2);
+        this.#temporalPhase = nextShuffledPhase(this.#phaseBag, interlace ? interlacePhases : 2);
       }
       if (this.#glFrameBudget !== Infinity && this.#glFrameBudget > 0) this.#glFrameBudget--;
       const keepGoing = this.#glContinuous() || this.#glFrameBudget > 0 || this.#canaryPause;

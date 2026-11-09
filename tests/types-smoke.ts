@@ -49,8 +49,9 @@ const { header } = decodeContainer(bytes);
 const pv: 1 | 2 | undefined = header.pv;
 void pv;
 const detection = detectStegoFingerprint(bytes, 8, 8, { profile: 'auto', searchGeometry: true, searchMirror: true, layoutVersion: 'auto' });
-const layoutVintage: 0 | 1 | 2 | 3 | 4 = detection.layoutVersion;
-void layoutVintage;
+const layoutVintage: 0 | 1 | 2 | 3 | 4 | 5 = detection.layoutVersion;
+const syncTemplateVersion: 2 | null | undefined = detection.syncTemplateVersion;
+void layoutVintage; void syncTemplateVersion;
 const found: boolean = detection.found;
 const mirrored: boolean | undefined = detection.mirrored;
 const mirrorAxis: 'x' | 'y' | 'xy' | undefined = detection.mirrorAxis;
@@ -69,6 +70,18 @@ const marked: Uint8Array = embedStegoFingerprint(bytes, 8, 8, 'buyer-42', { key:
 void marked;
 
 // --- server ---
+const seoOptions: ArchxServerOptions = {
+  seoCrawler: {
+    verify: async (req, id) => Boolean(req.socket.remoteAddress && id),
+    watermark: '© Studio',
+    maxWidth: 320,
+    maxWidthFraction: 0.5,
+    quality: 55,
+    format: 'webp',
+  },
+};
+void seoOptions;
+
 // Profile helpers (v1.28) accept and return server options.
 const liteOptions = withLiteDefaults({ secret: 's', imagesDir: '/srv/masters' });
 const balancedOptions = withPerformanceDefaults({ secret: 's', imagesDir: '/srv/masters' });
