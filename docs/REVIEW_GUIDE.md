@@ -36,36 +36,31 @@ Requirements:
 - for the exact browser-test environment used by CI, Linux or WSL is the
   most faithful setup.
 
-From a clean clone:
+From a clean clone, install the lockfile dependencies and run the standard
+checks. Generate the demo corpus first; some image and attribution tests use
+those fixtures.
 
 ```bash
 npm ci
 npm run demo:images
-npm run test:all
+npm run verify
+npm run test:pack
 npm audit --audit-level=high
-npm pack --dry-run
 ```
 
-`npm run test:all` rebuilds `dist/`, runs the Node unit/integration suite,
-and then runs the real-Chromium browser suite. At v1.30.1 the expected
-results are 167/167 Node tests (160 unit + 7 seeded fuzz), a clean
-`tsc --noEmit` type smoke test, 129/129 Chromium checks, and a passing
-packaged-artifact smoke test (`npm run test:pack`). With
-`ARCHX_TEST_REDIS_URL` pointed at a disposable Redis, `npm run
-test:redis` additionally verifies cross-instance redemption against
-the real adapter (CI runs all of these).
-including precomputed manifest assets, manifest-pinning/tampered-variant
-rejection, network-aware sampling, preload cache warming, a cold-stampede
-coalescing test, and a 100-image batch-minted gallery
-with no protected `<img>` elements.
-The Node suite includes production-default/audit tests, a two-handler
-shared-state replay/quota test, a Redis adapter fake-client contract test,
-buyer/order/provenance hook tests, robust StegoMark transforms, and a
-signing-key-rotation test. Chromium additionally patches WebGL draw methods
-after load and, in a separate page, installs a framebuffer-reading
-`drawArrays` hook before the Archx module evaluates; it contrasts Fortress
-fail-closed handling with Vault's documented monitor-and-render residual
-risk.
+At v1.30.2, the expected suite counts are 167 Node tests (160 unit and
+integration + 7 seeded fuzz) and 129 real-Chromium checks. `npm run verify`
+also runs lint, build, generated-type checks, the docs-consistency gate, and
+the dependency audit. `npm run test:pack` separately installs the packed
+tarball in a clean app and checks the public entry points, CLIs, worker, SRI,
+and TypeScript declarations.
+
+The Node suite covers authorization and replay, shared state, image decoding
+and processing limits, caches, provenance hooks, and StegoMark behavior. The
+Chromium suite checks visual output, browser API tripwires, asset integrity,
+viewer lifecycle, and the 100-image gallery. For the real Redis integration
+test, point `ARCHX_TEST_REDIS_URL` at a disposable Redis instance and run
+`npm run test:redis`; CI runs this test with a Redis service.
 
 To inspect the product manually:
 
