@@ -1358,14 +1358,14 @@ test('v1.5 strict configuration rejects typos, weak-secret bypasses, and ambiguo
   const valid = {
     v: 2, aud: 'archx:image', scope: 'image:view', id: 'cat', w: 800,
     iat: now, exp: now + 60000, n: 'nonce-1234567890', q: 95, fmt: 'webp',
-    vh: 'A'.repeat(20), sge: 1, sgs: 6, sgx: 24, sgy: 16,
+    vh: 'A'.repeat(20), sge: 1, sgs: 6, sgx: 24, sgy: 16, mse: 'M'.repeat(22),
     wm: { text: 'Viewer 42', opacity: 0.2 }, b: { ip: 'B'.repeat(16) },
   };
   const claimOpts = { id: 'cat', maxWidthCap: 1920, maxTtlMs: 120000, now: now + 1000 };
   assert.equal(validateTokenClaims(valid, claimOpts), true);
   for (const mutation of [
     { surprise: true }, { vh: 'short' }, { sgp: 1 }, { sgs: 99 }, { sgx: 65 },
-    { b: { ip: 'B'.repeat(24) } }, { b: { ip: 'B'.repeat(16), admin: 'C'.repeat(16) } },
+    { b: { ip: 'B'.repeat(24) } }, { b: { ip: 'B'.repeat(16), admin: 'C'.repeat(16) } }, { mse: 'short' },
     { wm: { text: 'x', evil: 1 } }, { wm: 'x'.repeat(513) }, { sg: 'bad\nvalue' },
   ]) assert.equal(validateTokenClaims({ ...valid, ...mutation }, claimOpts), false, JSON.stringify(mutation));
 });
@@ -1445,12 +1445,15 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
   let authMode = 'ok';
   let slowAuthorize = false;
   const issued = [];
+  const securityEvents = [];
   const { base, handler } = await startArchxFixture(t, {
     callbackTimeoutMs: 100,
     allowQueryTokens: true, // explicit compatibility opt-in under test
+    onSecurityEvent: (event) => securityEvents.push(event),
     onStegoIssue: async (record) => { issued.push(record); },
     authorize: async () => {
       if (slowAuthorize) await new Promise((resolve) => setTimeout(resolve, 250));
+      if (authMode === 'throws') throw new Error('private authorization backend detail');
       if (authMode === 'denied') return { allowed: false, viewerId: 'mallory' };
       if (authMode === 'stego') {
         return {
@@ -1495,13 +1498,36 @@ test('v1.5 HTTP: required mint header, clean header-token transport, callback ti
 
   authMode = 'denied';
   assert.equal((await postToken(base + '/archx/token/cat?w=200')).status, 403,
-    'an explicit allowed:false authorization result can never widen into access');
+    'an explicit allowed:false authorization result remains a policy denial');
+
+  authMode = 'throws';
+  const callbackErrorResponse = await postToken(base + '/archx/token/cat?w=200');
+  assert.equal(callbackErrorResponse.status, 500,
+    'a host authorization exception is not represented as an ordinary policy denial');
+  assert.equal((await callbackErrorResponse.text()).includes('private authorization backend detail'), false,
+    'callback error details are not returned to the client');
+  assert.equal(securityEvents.at(-1).type, 'archx.authorization_error');
+  assert.equal(securityEvents.at(-1).status, 500);
+  assert.equal(securityEvents.at(-1).reason, 'callback-error');
   authMode = 'ok';
 
   slowAuthorize = true;
-  assert.equal((await postToken(base + '/archx/token/cat?w=200')).status, 403,
-    'a hung authorize callback times out closed');
+  assert.equal((await postToken(base + '/archx/token/cat?w=200')).status, 503,
+    'a hung authorize callback fails closed as a temporary service failure, not a policy denial');
+  assert.equal(securityEvents.at(-1).type, 'archx.authorization_error');
+  assert.equal(securityEvents.at(-1).status, 503);
+  assert.equal(securityEvents.at(-1).reason, 'callback-timeout');
   slowAuthorize = false;
+
+  const transientAuthToken = await mint();
+  authMode = 'throws';
+  const transientDeliveryError = await redeemToken(base, transientAuthToken);
+  assert.equal(transientDeliveryError.status, 500,
+    'an exception at redemption is surfaced distinctly and fails closed');
+  assert.equal(securityEvents.at(-1).phase, 'image');
+  authMode = 'ok';
+  assert.equal((await redeemToken(base, transientAuthToken)).status, 200,
+    'a transient authorization exception does not consume the one-time claim');
 
   authMode = 'stego';
   const stegoToken = await mint('w=640');
@@ -1781,6 +1807,48 @@ async function listenForTest(t, handler) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
+test('memory-store generation rejects tokens minted by a recreated handler', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-memory-generation-'));
+  fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
+  const events = [];
+  const makeHandler = (onSecurityEvent = () => {}) => createArchxMiddleware({
+    secret: TEST_SECRET,
+    imagesDir: dir,
+    allowAnonymous: true,
+    onSecurityEvent,
+  });
+  const original = makeHandler();
+  const recreated = makeHandler((event) => events.push(event));
+  const originalBase = await listenForTest(t, original);
+  const recreatedBase = await listenForTest(t, recreated);
+
+  const token = await (await postToken(originalBase + '/archx/token/cat?w=160')).json();
+  assert.match(tokenPayloadForTest(token.token).mse, /^[A-Za-z0-9_-]{22}$/,
+    'memory-backed tokens carry a signed store-generation claim');
+  const crossGeneration = await redeemToken(recreatedBase, token);
+  assert.equal(crossGeneration.status, 403,
+    'a fresh memory store cannot treat an old token as unspent after handler/process recreation');
+  assert.equal(events.at(-1).reason, 'state-store-generation');
+  assert.equal((await redeemToken(originalBase, token)).status, 200,
+    'the rejected cross-generation attempt does not consume the original store claim');
+
+  const statelessA = createArchxMiddleware({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    oneTimeTokens: false, proofOfPossession: 'off',
+  });
+  const statelessB = createArchxMiddleware({
+    secret: TEST_SECRET, imagesDir: dir, allowAnonymous: true,
+    oneTimeTokens: false, proofOfPossession: 'off',
+  });
+  const statelessBaseA = await listenForTest(t, statelessA);
+  const statelessBaseB = await listenForTest(t, statelessB);
+  const statelessToken = await (await postToken(statelessBaseA + '/archx/token/cat?w=160')).json();
+  assert.equal(tokenPayloadForTest(statelessToken.token).mse, undefined,
+    'the generation claim is not added when both replay controls are explicitly disabled');
+  assert.equal((await redeemToken(statelessBaseB, statelessToken)).status, 200,
+    'explicitly stateless tokens retain their configured cross-handler behavior');
+});
+
 test('shared state store blocks cross-instance replay and quota bypass', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archx-shared-state-'));
   fs.writeFileSync(path.join(dir, 'cat.jpg'), await syntheticMaster());
@@ -1840,15 +1908,17 @@ test('signing-key rotation verifies old tokens with their issuing key and signs 
   const oldSecret = 'old-rotation-secret-with-32-plus-bytes';
   const newSecret = 'new-rotation-secret-with-32-plus-bytes';
   const authorize = async () => ({ viewerId: 'rotation-viewer' });
+  const sharedStateStore = createMemoryStateStore();
+  t.after(() => sharedStateStore.close());
   const oldHandler = createArchxMiddleware({
-    secret: oldSecret, secretId: '2026-01', imagesDir: dir, authorize,
+    secret: oldSecret, secretId: '2026-01', imagesDir: dir, authorize, stateStore: sharedStateStore,
   });
   const rotatedHandler = createArchxMiddleware({
     secrets: { '2026-01': oldSecret, '2026-02': newSecret },
-    activeSecretId: '2026-02', imagesDir: dir, authorize,
+    activeSecretId: '2026-02', imagesDir: dir, authorize, stateStore: sharedStateStore,
   });
   const retiredHandler = createArchxMiddleware({
-    secret: newSecret, secretId: '2026-02', imagesDir: dir, authorize,
+    secret: newSecret, secretId: '2026-02', imagesDir: dir, authorize, stateStore: sharedStateStore,
   });
   const oldBase = await listenForTest(t, oldHandler);
   const rotatedBase = await listenForTest(t, rotatedHandler);

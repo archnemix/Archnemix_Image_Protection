@@ -290,7 +290,7 @@
             <p class="w-out" id="planOut">Hover a tile…</p>
             <p class="w-note">This runs the shipped <span class="mono">buildScramblePlan</span> code (cyrb128+sfc32 / mulberry32, ported verbatim and parity-tested against the library). Left = original tiles, right = where each lands on the wire; ⇄/⇅ marks are mirrors.</p>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.2x plan-v2 work; golden tests pin both derivations. The widget’s port is diff-tested against <span class="mono">src/core/plan.js</span> outputs.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §§2.18 and 2.22 (plan-v2 introduction and default migration); golden tests pin both derivations. The widget’s port is diff-tested against <span class="mono">src/core/plan.js</span> outputs.</p></div>
         </div>
       </article>
 
@@ -308,7 +308,7 @@
             <div><h4>Pros</h4><ul><li>Strip statistics now resemble ordinary texture continuation.</li><li>Unpredictable without the key; irrelevant with it.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>The most intricate 200 lines in the scramble path; display never shows them (cropped before presentation), but they must stay bit-frozen.</li></ul></div>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>Seam statistics published per generation in RESEARCH (§2.2x padding work); fused pad+scramble output is equality-tested against the two-step form.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p>The reflection-padding seam measurement and follow-up are in RESEARCH §2.20; fused pad+scramble output is equality-tested against the two-step form.</p></div>
         </div>
       </article>
 
@@ -398,7 +398,7 @@
           <div><h3 class="decision-title">Deny-by-default authorization; the audit must never bless what startup refuses</h3>
           <div class="decision-tags"><span class="chip static">Security</span></div></div>
           <button class="decision-toggle" aria-expanded="false">Open</button></div>
-        <p class="decision-lede">On the server, no <span class="mono">authorize</span> callback and no explicit <span class="mono">allowAnonymous:true</span> mode ⇒ the constructor throws. Throwing authorizers deny. Unknown server-option keys throw. Weak secrets throw.</p>
+        <p class="decision-lede">On the server, no <span class="mono">authorize</span> callback and no explicit <span class="mono">allowAnonymous:true</span> mode ⇒ the constructor throws. An explicit denial returns 403; an <span class="mono">authorize</span> exception returns a generic 500, and a callback timeout returns 503. Both failures deny delivery and emit a separate <span class="mono">archx.authorization_error</span> event. Unknown server-option keys and weak secrets also fail at startup.</p>
         <div class="decision-body" hidden>
           <div class="decision-grid">
             <div><h4>The problem</h4><p>The most dangerous default in access-control code is the permissive one reached by omission: a forgotten callback, a typo’d option, an exception path that falls through to “serve”.</p></div>
@@ -428,7 +428,7 @@
             <div><h4>Pros</h4><ul><li>There is no direct image-file handle; authenticated scraping still depends on the host’s mint policy and quotas.</li><li>Pixel-exact 1:1 display is preserved (MAD 0 in browser tests).</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Screenshots by privileged tooling still work — degraded and attributable, never “prevented”.</li><li>Canvas breaks some a11y/save workflows; hosts keep alt-text duties (documented).</li></ul></div>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>122-check real-Chromium suite: encapsulation, decoy readback, black WebGL readback, replay, guards. RESEARCH §2.x viewer work.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p>129-check real-Chromium suite (`tests/browser-test.mjs`): encapsulation, decoy readback, black WebGL readback, replay, guards, and current lifecycle/integrity regressions.</p></div>
         </div>
       </article>
 
@@ -464,18 +464,18 @@
             <div><h4>The problem</h4><p>A leak arrives cropped, resized, re-compressed, screenshotted, sometimes mirrored. The watermark must be findable blind (no original), keyed (only the owner can read/forge), and cheap enough to embed per-viewer at request time in JavaScript.</p></div>
             <div><h4>We chose</h4><p>Cell-based spread spectrum with keyed polarity/segment signs, texture-adaptive amplitude (flat cells gentle, textured cells stronger), repetition coding (v1–v3) or BCH (v4, D-13). Detection integrates cell evidence over a luma integral image and searches geometry.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Neural marks (SynthID/StegaStamp class)</strong> — better PSNR (~40 dB class), but need trained encoder/decoder networks; not feasible in a dependency-free JS library, and regeneration attacks kill them too (measured in the literature at ~0–13% decode).</li><li><strong>LSB steganography</strong> — dies at the first JPEG re-save.</li><li><strong>DCT-QIM with JND masking</strong> — a real path to ~38–41 dB, but it is new embedding physics (a future layout version), not a patch to shipped marks.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Runs anywhere JS runs; per-token embedding ≈9 ms at 960px.</li><li>Survives the transform chain leaks actually go through (chart below).</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Runs anywhere JS runs; opt-in embedding adds CPU work that varies with image size and configuration.</li><li>Survives the fixed transform matrix shown below; this is not a screenshot/camera-capture or arbitrary-edit guarantee.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>28.6 dB-class distortion on the robust profile is visible under pixel-peeping — the price of the envelope, printed here rather than hidden.</li><li>Diffusion regeneration and 1-bit binarization remain outside the envelope.</li></ul></div>
           </div>
           <div class="widget" id="w-survival">
-            <h4>Widget — measured survival (shipped benchmark, strength 6)</h4>
+            <h4>Widget — recorded survival (1.30.2 StegoMark run, strength 6)</h4>
             <div class="w-row">
               <span class="seg" id="survSeg"><button data-m="class" class="is-active">Layout 4 · robust · by content class</button><button data-m="totals">Layout 3 vs 4 · totals</button></span>
             </div>
             <canvas id="survCanvas" width="860" height="300" aria-label="Bar chart of watermark survival rates"></canvas>
-            <p class="w-note" id="survNote">9 images × 11 transforms (crops, scales, JPEG/WebP rounds, screenshot chains, mirrors). False positives: <strong>0/369</strong> wrong-key checks. Re-run: <span class="mono">npm run bench:stego</span>.</p>
+            <p class="w-note" id="survNote">9 images × 11 fixed transform cases (JPEG q80/q50, resize, center/corner crop+resize, 90° rotation, flop, transpose, brightness+JPEG; no screenshot/camera captures). Robust: 85/99; standard: 63/99. False positives: <strong>0/369</strong> wrong-key checks (one-sided 95% upper bound ≈0.81%, not proof of zero risk). Detector budgets and host details are in the evidence artifact. Re-run: <span class="mono">npm run bench:stego:evidence</span>.</p>
           </div>
-          <div class="evidence"><h4>Evidence</h4><p>RESEARCH §2.24, §2.28 (full bench tables + PSNR by class). “Periodic” synthetic content is a measured 0/11 — adversarial test content, kept in the corpus on purpose.</p></div>
+          <div class="evidence"><h4>Evidence</h4><p><code>docs/RESEARCH.md §2.40</code> and <code>docs/evidence/stego-bench.json</code> record corpus, transforms, detector budgets, per-call timing percentiles, timeouts, and the finite wrong-key confidence bound. “Periodic” synthetic content measured 0/11; it is an adversarial stress host, not a proxy for all text.</p></div>
         </div>
       </article>
 
@@ -508,7 +508,7 @@
             <div><h4>The problem</h4><p>Powerful solvers try thousands of candidate codewords. Against a CRC — or a loose error cap — some noise candidate eventually “validates”, manufacturing a fingerprint from an unmarked image. We measured this happening (a wrong MAC-valid fingerprint at a loose cap) during development.</p></div>
             <div><h4>We chose</h4><p>MAC-16 inside every codeword version, mismatch caps at 0.30×(observed−64) (≈7σ from noise solves), hard clamp 0.34, agreement/evidence tiers. Legacy CRC codewords remain readable only behind an explicit compatibility flag.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>CRC tags</strong> — unkeyed: anyone can forge, noise can pass.</li><li><strong>Wider caps for more recoveries</strong> — buys true positives with false accusations; the exchange rate is unacceptable.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>0/369 wrong-key false positives on the final decoder (including every solver rung).</li><li>Forgery requires the stego key, not just the algorithm.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>0/369 wrong-key positives in the recorded sweep (one-sided 95% upper bound ≈0.81%; not a zero-risk guarantee).</li><li>Forgery requires the stego key, not just the algorithm.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Some genuinely-marked but heavily damaged copies correctly return “not found” instead of a guess. That is the intended asymmetry.</li></ul></div>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>FP sweep <span class="mono">bench:stego --fp</span> (369 checks); MAC-lottery incident and cap derivation in RESEARCH §2.28.</p></div>
@@ -575,7 +575,7 @@
             <div><h4>The problem</h4><p>Image parsers are a historic CVE farm, and naive multi-pass processing (decode → encode → decode) multiplies both risk and seconds. A 60,000×60,000 IHDR claim should cost a header check, not 14 GB.</p></div>
             <div><h4>We chose</h4><p>Sharp (peer dependency, operator-patched), chained operations, two-stage derivative construction (cacheable clean base → per-viewer finish), orientation baked only when present, output-pixel budgets that include scramble padding, and controlled error mapping for malformed input.</p></div>
             <div><h4>Alternatives rejected</h4><ul><li><strong>Pure-JS codecs (Jimp class)</strong> — ~14–40× slower, full-frame heap pressure.</li><li><strong>ImageMagick shell-outs</strong> — process-spawn attack surface + full in-memory frames.</li></ul></div>
-            <div><h4>Pros</h4><ul><li>Streaming keeps RAM flat; budgets make DoS arithmetic boring.</li><li>Cold 960px catalog derivative ≈63 ms; warm path is cache + tokens.</li></ul></div>
+            <div><h4>Pros</h4><ul><li>Streaming keeps RAM flat; budgets make DoS arithmetic boring.</li><li>A recorded 2-vCPU demo-master run measured the 960px catalog q88/effort-2 derivative at ≈46 ms; cold time varies by host, source, format, and cache state. The warm path is cache + tokens.</li></ul></div>
             <div><h4>Cons / costs</h4><ul><li>Native dependency to keep patched (documented; audit in CI).</li><li>Full-res 24 MP scrambled encodes are encoder-bound (~13 s mozjpeg) — sizing guidance, not magic.</li></ul></div>
           </div>
           <div class="evidence"><h4>Evidence</h4><p>Optimization bench (<span class="mono">npm run bench:opt</span>); pixel-bomb and garbage-master attacks held fast; fuzz suite over parsers. RESEARCH §2.27, §2.30.</p></div>

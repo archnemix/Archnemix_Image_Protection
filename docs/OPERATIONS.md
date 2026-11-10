@@ -453,7 +453,7 @@ replay test are the verification.
 | `service` | Always `archx` |
 | `severity` | `notice`, `warning`, or `error` |
 | `outcome` | `denied`, `detected`, `completed`, or `error` |
-| `type` | Existing event type, such as `archx.denied` |
+| `type` | Event type, such as `archx.denied`, `archx.authorization_error`, or `archx.processing_error` |
 | `at` | ISO-8601 UTC timestamp |
 | `imageId` / `id` | Validated image ID when available |
 | `phase` | `token`, `image`, or `null` |
@@ -464,6 +464,12 @@ replay test are the verification.
 | `request.route` | Route template; no token or query string |
 | `reason` | Bounded internal reason such as `token-replay` |
 | `keyId` / `previousKeyId` / `activeKeyId` | Key IDs only on scheduled signing-key lifecycle events; never secret values |
+
+An explicit `authorize()` denial remains `403` with an `archx.denied` event.
+A thrown callback returns generic `500`; a callback timeout returns `503` with
+`Retry-After: 1`. Both emit `archx.authorization_error` with only the bounded
+reason `callback-error` or `callback-timeout`; exception messages/stacks are
+not included. Monitor these separately from policy-denial rates.
 
 Scheduled key rotation emits `archx.signing_key_activated` and
 `archx.signing_key_retired` once per transition through `onSecurityEvent`, with

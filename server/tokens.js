@@ -105,7 +105,7 @@ export function verifyToken(token, secretOrKeyring) {
 
 const TOKEN_CLAIM_FIELDS = new Set([
   'v', 'kid', 'aud', 'scope', 'id', 'w', 'iat', 'exp', 'n', 'q', 'fmt', 'ls', 'vh', 'th', 'wm',
-  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'nwm', 'b', 'jkt',
+  'sg', 'sgp', 'sgs', 'sge', 'sgv', 'sgx', 'sgy', 'sgi', 'sgk', 'nsg', 'nwm', 'b', 'jkt', 'mse',
 ]);
 
 /** Strict server-side claim validation for v2 Archx image tokens. Signature
@@ -148,6 +148,7 @@ export function validateTokenClaims(payload, {
     if (payload.vh !== undefined && (typeof payload.vh !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(payload.vh))) return false;
     if (payload.th !== undefined && (typeof payload.th !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(payload.th))) return false;
     if (payload.jkt !== undefined && (typeof payload.jkt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload.jkt))) return false;
+    if (payload.mse !== undefined && (typeof payload.mse !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(payload.mse))) return false;
     if (payload.sg !== undefined && (typeof payload.sg !== 'string' || !payload.sg || payload.sg.length > 512 || /[\u0000-\u001f\u007f]/.test(payload.sg))) return false;
     if (payload.wm !== undefined && payload.wm !== null && !validateWatermarkValue(payload.wm)) return false;
     if (payload.b !== undefined) {

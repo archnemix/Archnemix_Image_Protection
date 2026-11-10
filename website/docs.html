@@ -32,7 +32,7 @@
 <main id="top">
 
   <section class="hero hero-doc">
-    <p class="kicker">Documentation · v1.30.2</p>
+    <p class="kicker">Documentation · v1.30.3</p>
     <h1>Use it, <em>step by step.</em></h1>
     <p class="lede">
       Everything you need to protect images with Archnemix — install, a
@@ -195,11 +195,11 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
           <tr><td><code>profile</code></td><td>—</td><td><code>'lite' | 'performance' | 'elite'</code> — fills unset options from the profile above.</td></tr>
           <tr><td><code>lazy</code></td><td><code>true</code></td><td>Load only when scrolled near the viewport (tune with <code>rootMargin</code>).</td></tr>
           <tr><td><code>tokenEndpoint</code></td><td><code>null</code></td><td>Required for <code>{ id }</code> sources; set it to your middleware route (for example, <code>'/archx/token/'</code>) so the viewer can mint a one-time delivery token.</td></tr>
-          <tr><td><code>watermark</code></td><td><code>''</code></td><td>Visible watermark text (or an object for position/opacity).</td></tr>
+          <tr><td><code>watermark</code></td><td><code>null</code></td><td>Visible watermark text (or an object for position/opacity).</td></tr>
           <tr><td><code>forensic</code></td><td><code>true</code></td><td>Invisible per-viewer forensic marking layer (the lite profile turns it off).</td></tr>
           <tr><td><code>temporalInterlace</code></td><td><code>null</code></td><td>Splits the picture across alternating 60&nbsp;Hz frames so captures hold only a subset + fill. Elite sets it on.</td></tr>
           <tr><td><code>proofOfPossession</code></td><td><code>'auto'</code></td><td>Binds the token to a non-extractable browser key so a copied URL cannot be redeemed elsewhere.</td></tr>
-          <tr><td><code>guards</code></td><td>all on</td><td>Right-click, drag, save-shortcut, print and screenshot-signal guards — each independently toggleable.</td></tr>
+          <tr><td><code>guards</code></td><td>most on; DevTools off</td><td>Right-click, drag, copy, long-press, print, blur and screenshot-signal guards are enabled by default; the DevTools-size heuristic is opt-in. Each is independently configurable.</td></tr>
           <tr><td><code>onAttempt</code></td><td>—</td><td>Callback/DOM events when copy attempts are detected, for your own logging.</td></tr>
         </tbody>
       </table></div>
@@ -326,11 +326,12 @@ app.get('/healthz', createArchxHealthHandler(handler));</pre>
         <li><strong>Visible watermark</strong> — baked into delivered
         pixels, per-buyer text supported (<code>{buyer}</code> placeholders).</li>
         <li><strong>StegoMark</strong> — an invisible, blind-detectable
-        fingerprint carrying an owner/order id. On the project&rsquo;s
-        99-case survival bench (single transforms: resize, JPEG, crop,
-        screenshot simulation&hellip;) the robust profile recovered the mark
-        in <strong>85 of 99</strong> cases with <strong>0 of 369</strong>
-        false positives on clean images.</li>
+        fingerprint carrying an owner/order id. On the recorded 1.30.2
+        StegoMark run (unchanged in 1.30.3), the 99-case fixed image-transform bench (JPEG q80/q50, resize,
+        center/corner crop+resize, 90&deg; rotation, flop, transpose, and
+        brightness+JPEG), the robust profile recovered 85 marks. The matrix
+        does not include screenshot or camera captures; the benchmark page
+        describes its corpus, timing budgets, and limits.</li>
         <li><strong>Perceptual fingerprint</strong> — a content hash that
         recognizes the picture itself even if every mark is stripped, for
         lookup against your own registry.</li>

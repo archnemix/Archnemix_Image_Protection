@@ -68,7 +68,11 @@ else {
 // COMPATIBILITY then carried stale counts while the gate printed "all
 // agree". Historical logs (RESEARCH.md, CHANGELOG.md, PAPERS.md) are
 // exempt by design — their numbers are true at their version.
-const PROSE_EXEMPT = new Set(['docs/RESEARCH.md', 'docs/PAPERS.md']);
+const PROSE_EXEMPT = new Set([
+  'docs/RESEARCH.md', 'docs/PAPERS.md',
+  // Internal audit history records suite sizes at each past validation point.
+  'docs/REQUIREMENTS_TRACKER.md',
+]);
 const proseFiles = [
   ...fs.readdirSync(path.join(root, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`),
   'SECURITY.md', 'website/index.html', 'website/docs.html', 'website/technical.html', 'website/limits.html',

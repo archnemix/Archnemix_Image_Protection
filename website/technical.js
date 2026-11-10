@@ -515,9 +515,9 @@ function drawSurvival() {
   });
   const note = document.getElementById('survNote');
   if (note && survMode === 'totals') {
-    note.innerHTML = 'The one-case robust gap is why layout 3 remains the default (D-13) — the flip bar was written <em>before</em> measuring. Layout 4 wins on quality: +1.4 dB PSNR on photos. False positives: <strong>0/369</strong>.';
+    note.innerHTML = 'Recorded on the 1.30.2 StegoMark implementation (unchanged in 1.30.3). The one-case robust gap is why layout 3 remains the default (D-13) — the flip bar was written <em>before</em> measuring. Layout 4 wins on quality: +1.4 dB PSNR on photos. False positives: <strong>0/369</strong> wrong-key checks (95% upper bound ≈0.81%).';
   } else if (note) {
-    note.innerHTML = '9 images × 11 transforms (crops, scales, JPEG/WebP rounds, screenshot chains, mirrors). False positives: <strong>0/369</strong> wrong-key checks. Re-run: <span class="mono">npm run bench:stego</span>.';
+    note.innerHTML = 'Recorded on the 1.30.2 StegoMark implementation (unchanged in 1.30.3): 9 images × 11 fixed transform cases (JPEG q80/q50, resize, center/corner crop+resize, 90° rotation, flop, transpose, brightness+JPEG; no screenshot/camera captures). Robust: 85/99; standard: 63/99. False positives: <strong>0/369</strong> wrong-key checks (95% upper bound ≈0.81%). Timings and budgets are in the evidence artifact. Re-run: <span class="mono">npm run bench:stego:evidence</span>.';
   }
 }
 if (document.getElementById('w-survival')) {

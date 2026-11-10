@@ -146,9 +146,9 @@
           <p>Canvas/WebGL rendering with no ordinary image URL to copy. Read-back
           gets a decoy; capture signals may trigger a black or degraded frame.
           Deliveries can carry an invisible StegoMark fingerprint tied to an
-          issuance record; in the project&rsquo;s single-transform bench it
-          recovered in 85 of 99 cases, including screenshot simulations, not
-          in every screenshot or attack.</p>
+          issuance record; in the project&rsquo;s 99-case fixed image-transform
+          bench it recovered in 85 cases. The matrix has no screenshot/camera
+          capture, and is not a universal recovery rate.</p>
         </div>
       </li>
     </ol>
@@ -163,7 +163,7 @@
         <tbody>
           <tr><td>Private masters</td><td>Keep originals outside public roots; startup rejects overlaps with roots declared to Archx.</td><td>Nothing at runtime</td></tr>
           <tr><td>Entitled derivatives</td><td>Only the authorized, width-capped derivative leaves; with the default fraction of 1, native-width pixels may be allowed. Set <code>maxWidthFraction</code> below 1 for preview-only delivery.</td><td>One Sharp transform, cached</td></tr>
-          <tr><td>Tile scramble + AES-256-GCM</td><td>Raw network capture gets scrambled bytes; reconstruction is possible with enough work. AES-GCM optionally protects the payload from parties without its key.</td><td>≈3&nbsp;ms per 1080p frame</td></tr>
+          <tr><td>Tile scramble + optional AES-256-GCM</td><td>Raw network capture gets scrambled bytes; reconstruction is possible with enough work. AES-GCM optionally protects the payload from parties without its key.</td><td>Fused pad + scramble measured at ≈2&nbsp;ms at 960&nbsp;px; Sharp decode/resize/encode is separate</td></tr>
           <tr><td>One-time signed tokens</td><td>HMAC tokens are spent on first use; sender constraints and authorization reduce replay and hot-linking, while new mints remain subject to host policy.</td><td>Microseconds</td></tr>
           <tr><td>Guarded viewer</td><td>No <span class="mono">src</span> to steal; poisoned read-back; screenshot-degrading temporal interlace at 60&nbsp;Hz.</td><td>GPU-cheap canvas work</td></tr>
           <tr><td>StegoMark fingerprint</td><td>Invisible per-recipient mark with BCH error correction; identified later by rescan, no original needed.</td><td>≈9&nbsp;ms at 960px, opt-in</td></tr>
@@ -180,10 +180,10 @@
     suites shipped in the repository. Run them yourself:
     <span class="mono">npm run bench:stego</span>, <span class="mono">npm run redteam</span>.</p>
     <div class="stats">
-      <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">leaked copies re-identified after a crop, resize, recompression or screenshot (single transforms &mdash; chained attacks do worse, measured in the research notes)</span></div>
-      <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">false accusations — unmarked images checked against wrong keys never produced a fingerprint</span></div>
-      <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">red-team attacks held — plus a second 32-case suite (HTTP ambiguity, prototype pollution, collusion averaging, orientation-damaged leaks, cache-deception shapes): 32/32</span></div>
-      <div class="stat"><span class="stat-n">167<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
+      <div class="stat"><span class="stat-n">85<span class="stat-of">/99</span></span><span class="stat-l">robust StegoMark recoveries in the fixed transform matrix (20 s per-call budget; 14 timeouts; no screenshot or camera captures)</span></div>
+      <div class="stat"><span class="stat-n">0<span class="stat-of">/369</span></span><span class="stat-l">wrong-key positives in this finite sweep (one-sided 95% upper bound ≈0.81%; not proof of zero risk)</span></div>
+      <div class="stat"><span class="stat-n">53<span class="stat-of">/53</span></span><span class="stat-l">scored defenses held in red-team v1 (55 cases total, 2 informational); red-team v2 held 32/32</span></div>
+      <div class="stat"><span class="stat-n">168<span class="stat-of">+129</span></span><span class="stat-l">Node tests (including seeded fuzz cases) and real-Chromium browser checks, plus a packaged-artifact smoke test</span></div>
     </div>
     <aside class="honest">
       <h3>The honest limits</h3>
@@ -228,9 +228,11 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
         <p class="fineprint">Three profiles set the defaults — <b>lite</b> spends the least
         CPU and memory, <b>performance</b> balances protection and cost, <b>elite</b> turns
         every hardening layer on — and any individual setting can still override them.</p>
-        <p class="fineprint">Prefer static hosting? The build CLI pre-scrambles assets for any CDN:
-        <span class="mono">npx archx-build</span>. Framework-free; Express, Fastify and plain
-        <span class="mono">node:http</span> all work.</p>
+        <p class="fineprint">Prefer static hosting? <span class="mono">npx archx-build</span>
+        creates scrambled derivatives and a manifest for CDN delivery. Its keys
+        are browser-delivered, so a public manifest is not access control or DRM;
+        keep private catalogs behind your own authorization/CDN layer. The dynamic
+        server middleware works with Express, Fastify, or plain <span class="mono">node:http</span>.</p>
       </div>
     </div>
 

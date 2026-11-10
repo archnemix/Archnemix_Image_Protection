@@ -51,6 +51,20 @@ import { renderSeoPreview } from './seo-preview.js';
 import { createSigningKeyring } from './signing-keyring.js';
 import { createRequestIdentity } from './request-identity.js';
 
+// A process-local replay store is intentionally not a substitute for a
+// persistent/shared store. Bind its tokens to the exact store instance so a
+// handler/store recreation cannot make a still-live token look unspent.
+const memoryStoreGenerations = new WeakMap();
+function generationForMemoryStore(store) {
+  if (store?.kind !== 'memory' || !store || typeof store !== 'object') return null;
+  let generation = memoryStoreGenerations.get(store);
+  if (!generation) {
+    generation = crypto.randomBytes(16).toString('base64url');
+    memoryStoreGenerations.set(store, generation);
+  }
+  return generation;
+}
+
 export { AsyncSemaphore, BoundedTtlSet, SlidingWindowLimiter, createMemoryStateStore } from './bounded.js';
 export { DEFAULT_WIDTH_BUCKETS, auditArchxProductionConfig, auditArchxServerConfig, canonicalDerivativeWidth, normalizeAuthorizationResult, validateImageId, validateWatermarkValue, withCatalogThroughputDefaults, withHardenedProductionDefaults, withLiteDefaults, withPerformanceDefaults, withEliteDefaults, withMaxProtectionDefaults } from './config.js';
 export { computeJwkThumbprint, deriveStegoFingerprint, deriveStegoKey, validateTokenClaims } from './tokens.js';
@@ -361,6 +375,9 @@ export function createArchxMiddleware(options = {}) {
     onLiveEvict: noteLiveEviction,
     saturation: cfg.replaySaturation === 'strict' ? 'strict' : 'evict',
   });
+  const memoryStoreGeneration = oneTimeTokens || cfg.proofOfPossession !== 'off'
+    ? generationForMemoryStore(stateStore)
+    : null;
   const stateStoreUnavailable = (cause) => {
     const err = new Error('Archx state store unavailable');
     err.code = 'ARCHX_STATE_STORE_UNAVAILABLE';
@@ -782,6 +799,19 @@ export function createArchxMiddleware(options = {}) {
     } catch { /* monitoring must never alter authorization */ }
   }
 
+  function isAuthorizationCallbackFailure(err) {
+    return err?.code === 'ARCHX_AUTHORIZATION_CALLBACK_ERROR' ||
+      err?.code === 'ARCHX_AUTHORIZATION_TIMEOUT';
+  }
+  function reportAuthorizationCallbackFailure(req, id, phase, err) {
+    const timedOut = err?.code === 'ARCHX_AUTHORIZATION_TIMEOUT';
+    const status = timedOut ? 503 : 500;
+    emitSecurityEvent('archx.authorization_error', req, {
+      id, phase, status, reason: timedOut ? 'callback-timeout' : 'callback-error',
+    });
+    return status;
+  }
+
   function emitDeliveryEvent(type, details = {}) {
     if (!onDelivery) return;
     // Deliberately metadata-only: never pass the bearer token, scramble key,
@@ -845,7 +875,18 @@ export function createArchxMiddleware(options = {}) {
     if (!authorize) return cfg.allowAnonymous ? Object.freeze({}) : null;
     let auth;
     try { auth = await withCallbackTimeout(authorize, [req, id, { phase, token }], 'authorize callback'); }
-    catch { return null; }
+    catch (err) {
+      // Keep application failures distinct from a deliberate false/denied
+      // policy result. The route maps this to a generic 500/503 response and
+      // a metadata-only authorization_error event; callback details never
+      // cross the HTTP boundary.
+      const failure = new Error('Authorization callback failed');
+      failure.code = err?.code === 'ARCHX_CALLBACK_TIMEOUT'
+        ? 'ARCHX_AUTHORIZATION_TIMEOUT'
+        : 'ARCHX_AUTHORIZATION_CALLBACK_ERROR';
+      failure.phase = phase;
+      throw failure;
+    }
     return normalizeAuthorizationResult(auth);
   }
 
@@ -1264,6 +1305,7 @@ export function createArchxMiddleware(options = {}) {
       scope: TOKEN_SCOPE,
       id, w, iat, exp, n: nonce,
     };
+    if (memoryStoreGeneration) tokenPayload.mse = memoryStoreGeneration;
     const viewerHash = viewerId ? hmacShort('viewer', viewerId, 20) : '';
     if (viewerId) tokenPayload.vh = viewerHash;
     if (trace.hash) tokenPayload.th = trace.hash;
@@ -1830,14 +1872,19 @@ export function createArchxMiddleware(options = {}) {
               });
               continue;
             }
-            const status = err?.code === 'ARCHX_CALLBACK_TIMEOUT' ? 503 : 500;
+            const authFailure = isAuthorizationCallbackFailure(err);
+            const status = err?.code === 'ARCHX_AUTHORIZATION_TIMEOUT' || err?.code === 'ARCHX_CALLBACK_TIMEOUT' ? 503 : 500;
             errors[ref] = {
               status,
               error: status === 503 ? 'service unavailable' : 'image processing failed',
             };
-            emitSecurityEvent('archx.processing_error', req, {
-              id: itemId, phase, status, reason: err?.code || 'batch-mint',
-            });
+            if (authFailure) {
+              reportAuthorizationCallbackFailure(req, itemId, phase, err);
+            } else {
+              emitSecurityEvent('archx.processing_error', req, {
+                id: itemId, phase, status, reason: err?.code || 'batch-mint',
+              });
+            }
           }
         }
         const issued = Object.keys(tokens).length;
@@ -2046,6 +2093,19 @@ export function createArchxMiddleware(options = {}) {
         if (!issuingSecret || !validateTokenClaims(payload, { id, maxWidthCap, maxTtlMs: Math.max(ttlMs, 900_000) })) {
           return deny(req, res, 403, 'invalid or expired token',
             { id, phase, reason: shapeBad ? 'token-count' : 'token-claims' });
+        }
+        // The built-in memory store loses claims when its instance is
+        // recreated (including a process restart). A signed generation claim
+        // makes tokens from any earlier/different memory store fail closed,
+        // rather than appearing unspent to the fresh store. Persistent/shared
+        // stores do not use this claim and keep their normal cross-instance
+        // replay semantics.
+        if (memoryStoreGeneration
+          ? payload.mse !== memoryStoreGeneration
+          : payload.mse !== undefined) {
+          return deny(req, res, 403, 'invalid or expired token', {
+            id, phase, reason: 'state-store-generation',
+          });
         }
 
         let verifiedProof = null;
@@ -2497,6 +2557,12 @@ export function createArchxMiddleware(options = {}) {
       // Controlled failures only: never leak paths, decoder details, stacks,
       // token material, or authorization internals to the client.
       if (!res.headersSent) {
+        if (isAuthorizationCallbackFailure(err)) {
+          const status = reportAuthorizationCallbackFailure(req, routeId, err.phase || phase, err);
+          return sendJson(req, res, status,
+            { error: status === 503 ? 'service unavailable' : 'authorization failed' },
+            status === 503 ? { 'Retry-After': '1' } : {});
+        }
         if (err?.code === 'ARCHX_INPUT_TOO_LARGE') {
           return deny(req, res, 413, 'image too large', { id: routeId, phase, reason: 'input-too-large' });
         }

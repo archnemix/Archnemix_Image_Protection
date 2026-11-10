@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-Security fixes land on the current 1.x minor release (this branch) and
-are released as new minors; there is no long-term-support branch and
-older minors do not receive backports. Pin a version only together
+Security fixes target the current supported 1.x release line and may ship
+as patch or minor releases, depending on scope. There is no long-term-support
+branch, and older minor lines do not receive backports. Pin a version only together
 with an upgrade cadence, especially because image decoding depends on
 current Sharp/libvips security fixes. State your exact version in
 every report so applicability can be judged.
@@ -42,14 +42,28 @@ use resolution caps, visible/forensic marks, quotas, monitoring, and your
 normal legal/commercial enforcement process alongside Archx.
 
 For more than one middleware process, use `deploymentMode:'multi-instance'`
-with a shared, atomic `stateStore`; process-local replay/quota state behind a
-load balancer is outside the supported security model. The bundled
+with a shared, atomic `stateStore`; process-local quota state behind a load
+balancer is outside the supported security model. When one-time tokens or
+proof-of-possession replay checks are enabled (the default), tokens issued
+with the built-in memory store are signed with a random store-generation claim. A
+handler created with a different memory store (including after a process
+restart) rejects those tokens rather than treating them as unspent. This is
+fail-closed invalidation, not persistence: restart loses local counters and
+clients must mint fresh tokens. Deploying this generation check also rejects
+pre-generation tokens presented to a memory store. The bundled
 `@archnemix/image-protection/redis` adapter still requires the host to own,
 secure, monitor, and integration-test its Redis/Valkey client and deployment.
 Rotate signing keys with the versioned keyring described in
 `docs/OPERATIONS.md`, verify that the CDN bypasses shared caching for
 token/payload routes and the optional SEO-preview route when enabled, and treat a state-store outage as a fail-closed `503`
 rather than weakening replay controls.
+
+An explicit `authorize()` denial is a policy result and returns `403`. If the
+callback throws, the request still fails closed with a generic `500`; if it
+exceeds `callbackTimeoutMs`, it fails closed with `503`. Both emit a separate
+`archx.authorization_error` event, without returning callback exception
+details through Archx. Treat these as host-application failures, not user
+denials.
 
 Derivative caches and precomputed assets do not change that boundary. A
 memory/disk/shared derivative cache is consulted only for scrambled bytes
