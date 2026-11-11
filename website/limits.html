@@ -51,7 +51,7 @@
       <div>
         <h3>What Archx does not do</h3>
         <ul>
-          <li><strong>Prevent screenshots.</strong> OS-level and extension captures happen above page JavaScript. Archx may degrade them (interlace, readback poisoning), but does not veto them. The 99-case single-transform bench recovered StegoMark in 85 cases, including screenshot simulations; misses are possible.</li>
+          <li><strong>Prevent screenshots.</strong> OS-level and extension captures happen above page JavaScript. Archx may degrade them (interlace, readback poisoning), but does not veto them. The 99-case fixed image-transform bench recovered StegoMark in 85 cases and does not include screenshot or camera captures; separate browser tests check viewer capture defenses, not mark recovery from captures. Misses remain possible.</li>
           <li><strong>Stop a camera.</strong> Temporal interlace and moiré-unfriendly patterns reduce quality; physics wins eventually. Attribution is the control here.</li>
           <li><strong>Survive AI regeneration.</strong> Published diffusion attacks reduce or remove many tested invisible watermark schemes, including neural methods. Archx’s StegoMark has not been measured against full diffusion regeneration; treat it as vulnerable rather than assuming it survives. If your threat is “regenerate my catalog”, you need provenance + legal process, not only marks.</li>
           <li><strong>Prove collusion alone.</strong> The assay ranks suspects for investigation; Tardos’ bound puts blind collusion-proof decoding outside a 96-bit channel. Anyone claiming otherwise at this payload size is selling something.</li>

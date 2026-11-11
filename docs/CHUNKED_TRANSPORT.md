@@ -60,10 +60,13 @@ not a package API or built-in Archx transport.
 - Authenticate and authorize the manifest and every chunk request. A signed
   manifest proves integrity, not entitlement; bind its `assetId`, expiry, and
   audience to your application authorization if it can be replayed.
-- Cap manifest size before parsing, cap chunk count/size/total bytes before
-  allocating, use request deadlines, and abort the remaining requests on error.
-  The sample limits total bytes but host production code should also impose a
-  finite manifest-response limit and concurrency cap.
+- Cap the manifest envelope and decoded manifest before parsing, and cap
+  chunk count/size/total bytes before allocating. The reference client enforces
+  finite envelope/manifest limits and fetches chunks sequentially (concurrency
+  one); pass an `AbortSignal` to enforce an application deadline because the
+  sample does not create its own timeout. Production hosts should retain or
+  tighten the byte caps, keep concurrency bounded, and abort remaining work on
+  error.
 - Verify exact-origin URLs, digests, the signature, and the final container
   digest. A deployment that cannot use WebCrypto verification must fail closed
   or verify the signed manifest in a trusted backend.

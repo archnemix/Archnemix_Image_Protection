@@ -11,6 +11,7 @@
  * corpus and configuration only — not a universal survival rate.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import {
@@ -25,7 +26,41 @@ const opt = (name, fallback) => {
 const STRENGTH = Number(opt('--strength', '6'));
 const LAYOUT = Number(opt('--layout', '3'));
 const KEY = 'bench-stego-key';
-const results = { config: { strength: STRENGTH, layoutVersion: LAYOUT, key: '(fixed bench key)' }, cases: [] };
+const MATRIX_BUDGET_MS = Object.freeze({ robust: 20_000, standard: 5_000 });
+const FP_GEOMETRY_BUDGET_MS = 30_000;
+const MATRIX_TRANSFORMS = Object.freeze([
+  'identity', 'jpeg80', 'jpeg50', 'resize0.7', 'center0.85', 'center0.7',
+  'corner0.7', 'rot90', 'flop', 'transposeMain', 'brightness',
+]);
+const RUN_STARTED_AT = Date.now();
+const results = {
+  config: {
+    strength: STRENGTH,
+    layoutVersion: LAYOUT,
+    key: '(fixed bench key)',
+    matrixBudgetMs: MATRIX_BUDGET_MS,
+    falsePositiveGeometryBudgetMs: FP_GEOMETRY_BUDGET_MS,
+    matrixTransforms: MATRIX_TRANSFORMS,
+  },
+  environment: {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    logicalCpus: os.availableParallelism?.() || os.cpus().length,
+    cpuModel: os.cpus()[0]?.model || null,
+    totalMemoryBytes: os.totalmem(),
+  },
+  cases: [],
+};
+
+function recordCorpus(items) {
+  results.corpus = {
+    images: items.map(({ name, kind }) => ({ name, kind })),
+    imageCount: items.length,
+    imageCountsByKind: Object.fromEntries([...new Set(items.map((item) => item.kind))]
+      .map((kind) => [kind, items.filter((item) => item.kind === kind).length])),
+  };
+}
 
 async function loadRaw(file, width = 800) {
   const { data, info } = await sharp(file).resize(width).ensureAlpha().raw()
@@ -132,6 +167,7 @@ async function transforms(marked, w, h) {
 
 async function runMatrix() {
   const items = await corpus();
+  recordCorpus(items);
   for (const item of items) {
     for (const profile of ['robust', 'standard']) {
       const marked = embedStegoFingerprint(item.buf, item.w, item.h, `bench-${item.name}`, {
@@ -140,14 +176,15 @@ async function runMatrix() {
       const quality = psnr(item.buf, marked);
       for (const [tName, suspect] of await transforms(marked, item.w, item.h)) {
         const t0 = Date.now();
+        const budgetMs = MATRIX_BUDGET_MS[profile];
         const hit = detectStegoFingerprint(suspect.buf, suspect.w, suspect.h, {
           key: KEY, profile,
           searchGeometry: profile === 'robust',
           searchOffsets: true,
-          maxTimeMs: profile === 'robust' ? 20_000 : 5_000,
+          maxTimeMs: budgetMs,
         });
         results.cases.push({
-          image: item.name, kind: item.kind, profile, transform: tName,
+          image: item.name, kind: item.kind, profile, transform: tName, budgetMs,
           found: hit.found && hit.fingerprint === stegoFingerprint(`bench-${item.name}`),
           timedOut: !!hit.timedOut, ms: Date.now() - t0, psnr: quality,
           erasureDecoded: !!hit.erasureDecoded, corrections: hit.corrections ?? 0,
@@ -160,8 +197,11 @@ async function runMatrix() {
 }
 
 async function runFp() {
+  const startedAt = Date.now();
   const items = await corpus();
+  recordCorpus(items);
   let checks = 0, fps = 0;
+  let nativeChecks = 0, geometryChecks = 0;
   // Native-screen wrong-key sweep (fast): the first gate every
   // forensic search must pass. 0/N => 95% upper bound ~= 3/N.
   for (const item of items) {
@@ -170,6 +210,7 @@ async function runFp() {
         key: `wrong-key-${k}`, profile: 'robust', searchOffsets: true,
       });
       checks++;
+      nativeChecks++;
       if (hit.found) fps++;
     }
   }
@@ -180,14 +221,23 @@ async function runFp() {
     });
     for (let k = 0; k < 3; k++) {
       const hit = detectStegoFingerprint(marked, item.w, item.h, {
-        key: `geometry-wrong-${k}`, profile: 'robust', searchGeometry: true, maxTimeMs: 30_000,
+        key: `geometry-wrong-${k}`, profile: 'robust', searchGeometry: true, maxTimeMs: FP_GEOMETRY_BUDGET_MS,
       });
       checks++;
+      geometryChecks++;
       if (hit.found) fps++;
       process.stdout.write('.');
     }
   }
-  results.falsePositives = { checks, falsePositives: fps, upperBound95: fps === 0 ? Math.round(30000 / checks) / 100 : null };
+  results.falsePositives = {
+    checks,
+    falsePositives: fps,
+    upperBound95: fps === 0 ? Math.round(30_000 / checks) / 100 : null,
+    nativeChecks,
+    geometryChecks,
+    geometryBudgetMs: FP_GEOMETRY_BUDGET_MS,
+    sweepMs: Date.now() - startedAt,
+  };
   console.log(`\nFP sweep: ${fps}/${checks} false positives`);
 }
 
@@ -238,5 +288,6 @@ if (results.cases.length) {
     console.log(`  detect time: max ${maxMs} ms, ${slow} timed out`);
   }
 }
+results.benchmarkWallMs = Date.now() - RUN_STARTED_AT;
 const out = opt('--json', null);
 if (out) fs.writeFileSync(out, JSON.stringify(results, null, 2));

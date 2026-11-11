@@ -1,21 +1,268 @@
 {
+  "schemaVersion": 2,
   "generatedBy": "npm run bench:stego:evidence",
-  "packageVersion": "1.28.0",
+  "measuredPackageVersion": "1.30.2",
+  "currentPackageVersion": "1.30.3",
   "config": {
     "strength": 6,
     "layoutVersion": 3,
     "key": "(fixed bench key)"
   },
+  "host": {
+    "node": "v22.22.3",
+    "platform": "linux",
+    "arch": "x64",
+    "logicalCpus": 2,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "totalMemoryBytes": 4131278848
+  },
+  "corpus": {
+    "imageCount": 9,
+    "images": [
+      {
+        "name": "aurora-valley",
+        "kind": "photo"
+      },
+      {
+        "name": "luxury-watch",
+        "kind": "photo"
+      },
+      {
+        "name": "neon-portrait",
+        "kind": "photo"
+      },
+      {
+        "name": "gallery-001",
+        "kind": "graphic"
+      },
+      {
+        "name": "gallery-002",
+        "kind": "graphic"
+      },
+      {
+        "name": "gallery-003",
+        "kind": "graphic"
+      },
+      {
+        "name": "synthetic-flat",
+        "kind": "flat"
+      },
+      {
+        "name": "synthetic-text",
+        "kind": "text-periodic"
+      },
+      {
+        "name": "document",
+        "kind": "text"
+      }
+    ],
+    "imageCountsByKind": {
+      "photo": 3,
+      "graphic": 3,
+      "flat": 1,
+      "text-periodic": 1,
+      "text": 1
+    },
+    "transformsPerImage": 11,
+    "transformCases": [
+      "identity",
+      "jpeg80",
+      "jpeg50",
+      "resize0.7",
+      "center0.85",
+      "center0.7",
+      "corner0.7",
+      "rot90",
+      "flop",
+      "transposeMain",
+      "brightness"
+    ],
+    "containsScreenshotCapture": false,
+    "notes": "Three demo photos, three generated gallery graphics, one synthetic flat image, one synthetic periodic-bar stress image, and one SVG-rendered document. Fixed operations include crop+resize, transpose, and brightness+JPEG; there is no screenshot/camera capture and no general transform-chain claim."
+  },
+  "timing": {
+    "unit": "milliseconds measured around each detector call with Date.now() (wall time)",
+    "matrixBudgetMs": {
+      "robust": 20000,
+      "standard": 5000
+    },
+    "falsePositiveGeometryBudgetMs": 30000,
+    "matrixWallMs": null,
+    "falsePositiveSweepWallMs": null,
+    "robust": {
+      "found": 85,
+      "total": 99,
+      "timedOut": 14,
+      "budgetMs": 20000,
+      "byKind": {
+        "photo": {
+          "found": 33,
+          "total": 33,
+          "timedOut": 0
+        },
+        "graphic": {
+          "found": 31,
+          "total": 33,
+          "timedOut": 2
+        },
+        "flat": {
+          "found": 11,
+          "total": 11,
+          "timedOut": 0
+        },
+        "text-periodic": {
+          "found": 0,
+          "total": 11,
+          "timedOut": 11
+        },
+        "text": {
+          "found": 10,
+          "total": 11,
+          "timedOut": 1
+        }
+      },
+      "timingsMs": {
+        "p50": 3529,
+        "p95": 20021,
+        "p99": 20046,
+        "max": 20046,
+        "sumOfDetectorCalls": 634457
+      }
+    },
+    "standard": {
+      "found": 63,
+      "total": 99,
+      "timedOut": 0,
+      "budgetMs": 5000,
+      "byKind": {
+        "photo": {
+          "found": 24,
+          "total": 33,
+          "timedOut": 0
+        },
+        "graphic": {
+          "found": 24,
+          "total": 33,
+          "timedOut": 0
+        },
+        "flat": {
+          "found": 8,
+          "total": 11,
+          "timedOut": 0
+        },
+        "text-periodic": {
+          "found": 0,
+          "total": 11,
+          "timedOut": 0
+        },
+        "text": {
+          "found": 7,
+          "total": 11,
+          "timedOut": 0
+        }
+      },
+      "timingsMs": {
+        "p50": 214,
+        "p95": 2778,
+        "p99": 3065,
+        "max": 3065,
+        "sumOfDetectorCalls": 67936
+      }
+    },
+    "runNote": "The initial evidence command exceeded the 30-minute foreground wait; its child continued and completed later. The exact overall and false-positive-sweep wall times were not captured."
+  },
   "robust": {
     "found": 85,
-    "total": 99
+    "total": 99,
+    "timedOut": 14,
+    "budgetMs": 20000,
+    "byKind": {
+      "photo": {
+        "found": 33,
+        "total": 33,
+        "timedOut": 0
+      },
+      "graphic": {
+        "found": 31,
+        "total": 33,
+        "timedOut": 2
+      },
+      "flat": {
+        "found": 11,
+        "total": 11,
+        "timedOut": 0
+      },
+      "text-periodic": {
+        "found": 0,
+        "total": 11,
+        "timedOut": 11
+      },
+      "text": {
+        "found": 10,
+        "total": 11,
+        "timedOut": 1
+      }
+    },
+    "timingsMs": {
+      "p50": 3529,
+      "p95": 20021,
+      "p99": 20046,
+      "max": 20046,
+      "sumOfDetectorCalls": 634457
+    }
   },
   "standard": {
     "found": 63,
-    "total": 99
+    "total": 99,
+    "timedOut": 0,
+    "budgetMs": 5000,
+    "byKind": {
+      "photo": {
+        "found": 24,
+        "total": 33,
+        "timedOut": 0
+      },
+      "graphic": {
+        "found": 24,
+        "total": 33,
+        "timedOut": 0
+      },
+      "flat": {
+        "found": 8,
+        "total": 11,
+        "timedOut": 0
+      },
+      "text-periodic": {
+        "found": 0,
+        "total": 11,
+        "timedOut": 0
+      },
+      "text": {
+        "found": 7,
+        "total": 11,
+        "timedOut": 0
+      }
+    },
+    "timingsMs": {
+      "p50": 214,
+      "p95": 2778,
+      "p99": 3065,
+      "max": 3065,
+      "sumOfDetectorCalls": 67936
+    }
   },
   "falsePositives": {
     "count": 0,
-    "checks": 369
-  }
+    "checks": 369,
+    "upperBound95Percent": 0.81,
+    "nativeWrongKeyChecks": 360,
+    "geometryWrongKeyChecks": 9,
+    "geometryBudgetMs": 30000
+  },
+  "limitations": [
+    "Results are specific to this corpus, fixed transform cases, strength, layout, detector budgets, and host; they are not a universal survival or false-positive guarantee.",
+    "Detector timeouts are reported separately and remain unsuccessful cases in the recovery denominator.",
+    "Zero false positives in this finite wrong-key sweep has a one-sided 95% upper bound; it does not prove a zero false-positive rate.",
+    "The matrix does not measure StegoMark recovery from screenshots, camera captures, arbitrary image-edit chains, real-world leaks, or collusion."
+  ]
 }

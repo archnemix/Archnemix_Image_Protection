@@ -3,16 +3,28 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status.** npm lists `1.30.1` as the latest published version.
-> This source tree prepares `1.30.2`; the registry did not list that version
-> when this change was prepared. Recheck the registry before publishing. This
-> repository does not publish automatically—publication remains the
-> maintainer's action. Historical version headings may describe GitHub-only
-> development releases later folded into a published version. For example,
-> 1.27.0's changes shipped in 1.28.0; an earlier note incorrectly said
-> 1.27.0 itself had been published.
+> **Publication status.** npm lists `1.30.2` as the latest published version.
+> This checkout prepares `1.30.3`; publication remains a maintainer action and
+> has not been performed here. Historical version headings may describe
+> GitHub-only development releases later folded into a published version.
+> For example, 1.27.0's changes shipped in 1.28.0; an earlier note
+> incorrectly said 1.27.0 itself had been published.
 
-## [1.30.2] — Unreleased
+## [1.30.3] — Unreleased
+
+Targeted server-security fixes and evidence/documentation corrections.
+
+- When one-time tokens or proof-of-possession replay checks are enabled, bind
+  built-in memory-store tokens to that store's generation, so tokens from a
+  recreated handler/store fail closed; use a shared persistent store for
+  cross-instance replay state.
+- Distinguish `authorize()` callback exceptions/timeouts from an explicit
+  policy denial: callback errors return a generic 500/503 and emit a
+  metadata-only `archx.authorization_error` event.
+- Correct reconstruction, CDN/static-manifest, screenshot-benchmark, package
+  command, and release-status wording; use the canonical 0BSD license text.
+
+## [1.30.2] — Published to npm
 
 Documentation and review-readiness corrections. No image-processing,
 token, or protection behavior changed.
@@ -22,7 +34,6 @@ token, or protection behavior changed.
 - Made the chunked-transport guide use its tested example client as the
   canonical implementation instead of maintaining duplicate sample code.
 - Clarified the reviewer guide's test coverage and repository navigation.
-- Prepared version 1.30.2 because 1.30.1 is already published.
 
 ## [1.30.1] — 2026-11-06
 

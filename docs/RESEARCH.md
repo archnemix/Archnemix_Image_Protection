@@ -3232,9 +3232,11 @@ independent penetration test.
   taint asset is byte-constant under a poisoned `X-Forwarded-Host`),
   error-body disclosure screen, and TRACE/OPTIONS method handling.
 - **Attribution abuse** — a 12-wrong-key lottery (0 attributions),
-  unmarked-noise suspects (0/3), a composed screenshot chain
-  (0.8× resize + blur + JPEG 50 + brightness) which still identifies
-  the correct recipient, and a two-buyer averaging collusion which
+  unmarked-noise suspects (0/3), a composed capture-like image-degradation
+  chain (0.8× resize + blur + JPEG 50 + brightness) which still identifies
+  the correct recipient. This is a separate red-team case, not an actual
+  browser screenshot or part of the 99-case survival matrix. A two-buyer
+  averaging collusion
   decodes to **nobody** rather than to an innocent third party —
   the correct-or-never-false property the system is designed for;
   identifying colluders remains the assay's candidate-testing
@@ -3947,3 +3949,81 @@ and temporal-frame modules. These are behavioral module boundaries with
 existing integration tests; the owning middleware/viewer classes still retain
 request policy and per-image lifecycle state rather than exporting private
 mutable state solely to reduce file length.
+
+## 2.40 Current review follow-up — replay, callback errors, and measured benchmark evidence (v1.30.3)
+
+### Memory-store replay generation
+
+The built-in state store remains process-local: it does not persist quotas or
+replay records and is not valid for a multi-process deployment. When one-time
+tokens or proof-of-possession replay checks are enabled (the default), each
+middleware bound to a memory store signs a random `mse` generation claim into
+tokens. A newly created handler with another memory store rejects a prior
+generation before authorization or nonce spending, rather than treating an already-spent
+JTI as fresh. This is fail-closed invalidation, not persistence; clients need
+to mint new tokens after a restart, and a shared persistent store remains
+required for cross-instance replay state. Missing generation claims are also
+rejected by a memory store, so tokens minted before this change fail closed
+there. Shared stores retain their existing atomic claim semantics and do not
+use this process-local claim.
+
+### Authorization callback failures
+
+`authorize()` returning an explicit deny continues to return 403 and emit
+`archx.denied`. A thrown callback now returns a generic 500; an Archx callback
+timeout returns a generic 503 with `Retry-After: 1`. Both fail closed and emit
+`archx.authorization_error` with only `callback-error` or `callback-timeout`;
+callback messages and stacks are not returned in the response or event. Batch
+minting retains its per-item error envelope and uses the same distinct event.
+Regression coverage confirms a temporary redemption callback failure does
+not consume the token's one-time claim.
+
+### Freshly recorded matrix and false-positive evidence
+
+`docs/evidence/stego-bench.json` retains the measured package version and
+host, per-profile timeouts, percentiles, budgets, transform-case names, and
+finite-sample false-positive bound. These data were captured with the 1.30.2
+StegoMark implementation; the 1.30.3 audit changes did not alter the StegoMark
+code. The `measuredPackageVersion` recorded in the artifact is therefore 1.30.2,
+not an implied fresh 1.30.3 benchmark.
+
+The corpus is nine items: three demo photos, three generated gallery
+graphics, one synthetic flat field, one synthetic periodic-bar stress host,
+and one SVG-rendered document. Each profile has 99 cases across identity,
+JPEG q80/q50, 0.7 resize, center crops at 0.85/0.7, a 0.7 corner crop,
+90-degree rotation, horizontal flop, transpose, and brightness plus JPEG q80.
+The crop cases include their resize-back step; the transpose and brightness
+cases are composed operations. There is no browser screenshot, camera capture,
+or general attack-chain transform in this 99-case matrix.
+
+| Profile | Per-call budget | Recovered | Timed out | p50 | p95 | max observed |
+|---|---:|---:|---:|---:|---:|---:|
+| robust | 20,000 ms (geometry enabled) | 85/99 | 14 | 3,529 ms | 20,021 ms | 20,046 ms |
+| standard | 5,000 ms (native search) | 63/99 | 0 | 214 ms | 2,778 ms | 3,065 ms |
+
+Robust by class: photos 33/33, graphics 31/33 (2 timeouts), flat 11/11,
+periodic pattern 0/11 (11 timeouts), rendered document 10/11 (1 timeout).
+Standard: photos 24/33, graphics 24/33, flat 8/11, periodic pattern 0/11,
+document 7/11. Detector-call timings use `Date.now()` wall time and nearest-rank
+percentiles. The 20,046 ms maximum slightly exceeds the nominal 20-second
+budget; the deadline is checked inside the synchronous search, not a hard
+process kill. All timed-out cases remain in the denominator and are not
+counted as recoveries. A different budget or host can change completion and
+therefore the score; 85/99 is not a budget-independent maximum.
+
+The wrong-key sweep checked 360 native-screen cases (40 keys per corpus item)
+and nine full-geometry cases (three keys on each of the three demo photos),
+with a 30-second detector budget for each geometry case. It found 0/369; the
+one-sided 95% upper bound is approximately 0.81%, not proof of a zero false-
+positive rate. The full evidence command exceeded the sandbox's 30-minute
+foreground wait; its child process completed later. Exact overall and
+false-positive-sweep wall times were not captured, so the artifact records
+that runtime limitation rather than inventing a duration.
+
+Run context: Node v22.22.3, Linux x64, Intel Xeon Processor @ 2.60 GHz,
+2 logical CPUs, 4,131,278,848 bytes reported memory. These are fixture-
+bounded measurements, not real-world photo/camera estimates or a throughput
+promise. The periodic pattern is an adversarial stress image, not a proxy for
+all text; the corpus contains only three real demo photos and three generated
+graphics. The separate v2 red-team degradation chain and Chromium capture
+checks answer different questions and are not included in this matrix.
