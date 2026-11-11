@@ -1745,8 +1745,7 @@ export function createArchxMiddleware(options = {}) {
         const declaredLength = req.headers?.['content-length'] == null
           ? null
           : Number(req.headers['content-length']);
-        // codeql[js/user-controlled-bypass] This fail-closed format/size gate only rejects malformed requests; accepted items still pass host authorization in mintTokenResponse before signing.
-        if (contentType !== 'application/json' || contentEncoding !== 'identity' ||
+        if (contentType !== 'application/json' || contentEncoding !== 'identity' || // lgtm[js/user-controlled-bypass] Invalid requests abort here; valid items still require host authorization in mintTokenResponse before signing.
             (declaredLength !== null &&
              (!Number.isFinite(declaredLength) || declaredLength < 0 || declaredLength > cfg.batchTokenMaxBytes))) {
           return deny(req, res, declaredLength > cfg.batchTokenMaxBytes ? 413 : 415,
@@ -1756,8 +1755,7 @@ export function createArchxMiddleware(options = {}) {
         }
         if (!originAllowed(req)) return deny(req, res, 403, 'forbidden', { phase, reason: 'origin' });
         if (!fetchSiteAllowed(req)) return deny(req, res, 403, 'forbidden', { phase, reason: 'cross-site-token' });
-        // codeql[js/user-controlled-bypass] This is a request/CSRF filter, not an authorization credential; mintTokenResponse separately invokes host authorization.
-        if (!tokenRequestHeaderAllowed(req)) {
+        if (!tokenRequestHeaderAllowed(req)) { // lgtm[js/user-controlled-bypass] This request marker is not an authorization credential; mintTokenResponse still invokes host authorization.
           return deny(req, res, 403, 'forbidden', { phase, reason: 'token-request-header' });
         }
 
@@ -1785,8 +1783,7 @@ export function createArchxMiddleware(options = {}) {
           }
           throw err;
         }
-        // codeql[js/user-controlled-bypass] Invalid or oversized batches abort without minting; each accepted item still passes host authorization before signing.
-        if (Object.keys(batchBody).some((field) => field !== 'items') ||
+        if (Object.keys(batchBody).some((field) => field !== 'items') || // lgtm[js/user-controlled-bypass] Invalid counts abort without minting; each accepted item still requires host authorization.
             !Array.isArray(batchBody.items) || !batchBody.items.length ||
             batchBody.items.length > cfg.batchTokenMaxItems) {
           return deny(req, res, 400, 'bad request', { phase, reason: 'batch-items' });
