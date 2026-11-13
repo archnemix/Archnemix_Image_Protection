@@ -21,6 +21,8 @@ jobs:
           set -euo pipefail
           page=1
           total=0
+          echo '| Alert | Rule | Location | Link |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---:|---|---|---|' >> "$GITHUB_STEP_SUMMARY"
           while :; do
             status=$(curl --silent --show-error --output /tmp/alerts.json --write-out '%{http_code}' \
               --header "Accept: application/vnd.github+json" \
@@ -37,7 +39,7 @@ jobs:
           const alerts = JSON.parse(require('fs').readFileSync('/tmp/alerts.json', 'utf8'));
           for (const a of alerts) {
             const loc = a.most_recent_instance?.location ?? {};
-            console.log(JSON.stringify({
+            const record = {
               number: a.number,
               state: a.state,
               rule: a.rule?.id,
@@ -45,7 +47,10 @@ jobs:
               start_line: loc.start_line,
               end_line: loc.end_line,
               html_url: a.html_url
-            }));
+            };
+            console.log(`::notice::CODEQL_ALERT ${JSON.stringify(record)}`);
+            const summary = process.env.GITHUB_STEP_SUMMARY;
+            require('fs').appendFileSync(summary, `| ${record.number} | ${record.rule} | ${record.path}:${record.start_line ?? '?'} | [alert](${record.html_url}) |\n`);
           }
           NODE
             total=$((total + count))
@@ -53,6 +58,7 @@ jobs:
             page=$((page + 1))
           done
           echo "Open CodeQL alerts returned: ${total}"
+          echo "**Open alerts returned: ${total}**" >> "$GITHUB_STEP_SUMMARY"
           if (( total > 0 )); then
-            echo "::warning::Open CodeQL alerts remain; the release gate is not satisfied."
+            echo "::warning::${total} open CodeQL alerts remain; the release gate is not satisfied."
           fi
