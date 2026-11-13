@@ -93,6 +93,9 @@ test('real Redis: cross-instance one-time redemption, races, quotas, fail-closed
 
   // Dead store fails closed — no silent local fallback.
   const deadClient = new Redis('redis://127.0.0.1:6399', { lazyConnect: true, maxRetriesPerRequest: 1, retryStrategy: () => null });
+  // The refused connection is deliberate; suppress ioredis's diagnostic for
+  // an unhandled error event while the HTTP path verifies fail-closed behavior.
+  deadClient.on('error', () => {});
   t.after(() => deadClient.disconnect());
   const deadStore = createRedisStateStore({ client: deadClient, prefix: `${prefix}d` });
   const dead = await startInstance(t, dir, deadStore);

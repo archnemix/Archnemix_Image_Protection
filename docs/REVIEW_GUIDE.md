@@ -48,9 +48,9 @@ npm run test:pack
 npm audit --audit-level=high
 ```
 
-At v1.30.3, the expected suite counts are 168 Node tests (161 unit and
+At v1.30.4, the expected suite counts are 169 Node tests (162 unit and
 integration + 7 seeded fuzz) and 129 real-Chromium checks. The npm registry
-currently lists 1.30.2 as latest. `npm run verify` also runs lint, build,
+currently lists 1.30.3 as latest; 1.30.4 is prepared but unpublished. `npm run verify` also runs lint, build,
 generated-type checks, the docs-consistency gate, and the dependency audit.
 `npm run test:pack` separately installs the packed tarball in a clean app and
 checks the public entry points, CLIs, worker, SRI, and TypeScript declarations.
@@ -60,9 +60,12 @@ and `tools/`; run these verification commands from a source clone.
 The Node suite covers authorization and replay, shared state, image decoding
 and processing limits, caches, provenance hooks, and StegoMark behavior. The
 Chromium suite checks visual output, browser API tripwires, asset integrity,
-viewer lifecycle, and the 100-image gallery. For the real Redis integration
-test, point `ARCHX_TEST_REDIS_URL` at a disposable Redis instance and run
-`npm run test:redis`; CI runs this test with a Redis service.
+viewer lifecycle, and the 100-image gallery. To run the real-Redis integration
+locally, install Redis Server >=6.0 and use `npm run test:redis:local`; this
+starts an isolated loopback server, disables persistence, runs the suite, and
+cleans up. For an already-running disposable Redis instance, point
+`ARCHX_TEST_REDIS_URL` at it and run `npm run test:redis`. CI runs the same
+test with a Redis service.
 
 To inspect the product manually:
 

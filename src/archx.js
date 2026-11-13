@@ -44,6 +44,7 @@ import { ProtectedImage } from './client/viewer.js';
 import {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS, preset,
   getGlobalConfig, setGlobalConfig, sanitizeOptionsView, resetPageSession,
+  warnUnknownOptionKeys,
 } from './client/options.js';
 import { TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace } from './client/temporal.js';
 import { instances } from './client/registry.js';
@@ -70,6 +71,7 @@ const Archx = {
   temporalInterlaceProfiles: TEMPORAL_INTERLACE_PROFILES,
   normalizeTemporalInterlace,
   config(partial = {}) {
+    warnUnknownOptionKeys(partial);
     const clean = {};
     for (const [k, v] of Object.entries(partial)) if (v !== undefined) clean[k] = v;
     const current = getGlobalConfig();

@@ -16,7 +16,7 @@ var __privateWrapper = (obj, member, setter, getter) => ({
 });
 
 // src/client/version.js
-var VERSION = "1.30.3";
+var VERSION = "1.30.4";
 
 // src/core/bytes.js
 function asBytes(bytes) {
@@ -5152,6 +5152,25 @@ var DEFAULTS = {
   // (sanitizedEvent, instance) => void — generic monitoring/plugin hook; never receives tokens/keys/pixels
   alt: ""
 };
+var KNOWN_OPTION_KEYS = /* @__PURE__ */ new Set([
+  ...Object.keys(DEFAULTS),
+  // Public, optional presentation/click options consumed by ProtectedImage
+  // but intentionally omitted from the shared global defaults.
+  "aspectRatio",
+  "height",
+  "showBadge",
+  "swallowClick",
+  "width"
+]);
+function warnUnknownOptionKeys(options, additionalKeys = []) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) return;
+  const known = additionalKeys.length ? /* @__PURE__ */ new Set([...KNOWN_OPTION_KEYS, ...additionalKeys]) : KNOWN_OPTION_KEYS;
+  for (const key of Object.keys(options)) {
+    if (!known.has(key)) {
+      console.warn(`[Archx] Unknown option key: "${key}" \u2014 check spelling. See the README for valid options.`);
+    }
+  }
+}
 var globalConfig = structuredCloneSafe(DEFAULTS);
 function structuredCloneSafe(obj) {
   return JSON.parse(JSON.stringify(obj, (k, v) => typeof v === "function" ? void 0 : v));
@@ -10320,7 +10339,8 @@ glContinuous_fn = function() {
 };
 
 // src/client/loaders.js
-function loadImage(target, source, options) {
+function loadImage(target, source, options = {}) {
+  warnUnknownOptionKeys(options);
   const inst = new ProtectedImage(target, source, options);
   return inst;
 }
@@ -10397,6 +10417,7 @@ async function preloadAssets(assetIds, options = {}) {
   });
 }
 function loadGallery(container, items, options = {}) {
+  warnUnknownOptionKeys(options, ["itemClass"]);
   const host = $(container);
   if (!host) throw new Error("Archx: gallery container not found");
   const galleryDefaults = {
@@ -10423,6 +10444,7 @@ function loadGallery(container, items, options = {}) {
     const isObj = item && typeof item === "object" && ("src" in item || "id" in item || "assetId" in item || "asset" in item);
     const src = isObj && "src" in item ? item.src : item;
     const per = isObj ? { alt: item.alt || "", ...item.options || {} } : {};
+    warnUnknownOptionKeys(per);
     return new ProtectedImage(cell, src, { ...galleryDefaults, ...options, ...per });
   });
   return { instances: made, ready: Promise.allSettled(made.map((i) => i.ready)) };
@@ -10589,6 +10611,7 @@ var Archx = {
   temporalInterlaceProfiles: TEMPORAL_INTERLACE_PROFILES,
   normalizeTemporalInterlace,
   config(partial = {}) {
+    warnUnknownOptionKeys(partial);
     const clean = {};
     for (const [k, v] of Object.entries(partial)) if (v !== void 0) clean[k] = v;
     const current = getGlobalConfig();
