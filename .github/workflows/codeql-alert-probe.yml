@@ -29,6 +29,11 @@ jobs:
           import urllib.parse
           import urllib.request
 
+          def report_exception(exc_type, error, traceback):
+              print(f'::error::CODEQL_PROBE_ERROR {exc_type.__name__}: {error}')
+              sys.__excepthook__(exc_type, error, traceback)
+
+          sys.excepthook = report_exception
           repository = os.environ['GH_REPOSITORY']
           token = os.environ['GH_TOKEN']
           base = f'https://api.github.com/repos/{repository}/code-scanning/alerts'
