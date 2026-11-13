@@ -411,6 +411,14 @@ contains, (c) keep visible attribution where the business model allows it,
 (d) retain server issuance logs/fingerprints for evidence, and (e) monitor and
 enforce outside the page.
 
+**Synthetic-content caveat and further reference.** The StegoMark corpus includes
+synthetic stress hosts, but those fixtures do not establish robustness on
+arbitrary synthetic or AI-generated images; the periodic-text host recovered
+0/11 cases in the recorded matrix. Regeneration can weaken or remove pixel-level
+marks, so test representative catalog assets and retain independent issuance
+records. Related reference supplied for this discussion: [arXiv:2602.22197]
+(February 2026; IEEE SaTML 2026), https://arxiv.org/abs/2602.22197.
+
 Finally, the same product research argues against modal, all-or-nothing
 configuration. A catalogue thumbnail, an editorial hero, a paid product view
 and a pre-release proof need different points on the quality/friction/

@@ -32,7 +32,8 @@
 <main id="top">
 
   <section class="hero hero-doc">
-    <p class="kicker">Documentation · v1.30.3</p>
+    <p class="kicker">Documentation · v1.30.4</p>
+    <p class="doc-index-note">Release candidate documentation. npm currently lists 1.30.3; 1.30.4 is prepared but not published.</p>
     <h1>Use it, <em>step by step.</em></h1>
     <p class="lede">
       Everything you need to protect images with Archnemix — install, a
@@ -203,13 +204,16 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
           <tr><td><code>onAttempt</code></td><td>—</td><td>Callback/DOM events when copy attempts are detected, for your own logging.</td></tr>
         </tbody>
       </table></div>
-      <p>Client options are not a strict unknown-key allowlist: unsupported
-      keys may appear in the returned config or instance-options view without
+      <p><code>Archx.load.image()</code>, <code>Archx.load.gallery()</code>,
+      and <code>Archx.config()</code> emit a non-throwing console warning for
+      unknown top-level keys: <code>[Archx] Unknown option key: "&lt;key&gt;" —
+      check spelling. See the README for valid options.</code> The warning
+      does not make client options a strict allowlist; unsupported keys may
+      still appear in the returned config or instance-options view without
       enabling a corresponding Archx feature. Some invalid enum values
       normalize to a fallback instead of throwing; unknown profile names do
-      throw. Double-check option spelling and verify the behavior you intend.
-      Server middleware configuration is stricter and rejects unknown option
-      keys at startup.</p>
+      throw. Server middleware configuration remains stricter and rejects
+      unknown option keys at startup.</p>
 
       <h2 id="galleries">Galleries &amp; many images</h2>
       <p>Archnemix is built for image-heavy pages. Images load lazily as
@@ -266,7 +270,8 @@ await gallery.ready;   // allSettled: each item can succeed or fail independentl
         may receive native-width pixels when other caps permit. Set it
         below <code>1</code> (for example, <code>0.6</code>) to make
         &ldquo;preview only&rdquo; a server-enforced property, not a client
-        suggestion.</li>
+        suggestion. If the computed fraction is below the supported 64 px
+        minimum, delivery is denied rather than rounded upward.</li>
         <li><strong>Run the production audit in CI.</strong>
         <code>auditArchxProductionConfig(options)</code> returns blockers
         (public masters, query-string tokens, single-instance state behind
@@ -318,6 +323,11 @@ app.get('/healthz', createArchxHealthHandler(handler));</pre>
       <p>The full deployment runbook — CDN rules, multi-instance Redis
       state, key rotation, load testing — is
       <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/OPERATIONS.md" rel="noopener">OPERATIONS.md</a> on GitHub.</p>
+      <p>For contributors testing the Redis adapter, install Redis Server
+      6.0+ and run <code>npm run test:redis:local</code> from a source
+      checkout. The runner creates a temporary loopback-only server, disables
+      persistence, runs the integration suite, and cleans up afterward; see
+      <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/README.md#run-the-real-redis-integration-test-locally" rel="noopener">the local Redis test instructions</a>.</p>
 
       <h2 id="ownership">Ownership proof</h2>
       <p>If a protected picture leaks anyway, three independent layers can
@@ -327,11 +337,13 @@ app.get('/healthz', createArchxHealthHandler(handler));</pre>
         pixels, per-buyer text supported (<code>{buyer}</code> placeholders).</li>
         <li><strong>StegoMark</strong> — an invisible, blind-detectable
         fingerprint carrying an owner/order id. On the recorded 1.30.2
-        StegoMark run (unchanged in 1.30.3), the 99-case fixed image-transform bench (JPEG q80/q50, resize,
+        StegoMark run (unchanged through 1.30.4), the 99-case fixed image-transform bench (JPEG q80/q50, resize,
         center/corner crop+resize, 90&deg; rotation, flop, transpose, and
-        brightness+JPEG), the robust profile recovered 85 marks. The matrix
-        does not include screenshot or camera captures; the benchmark page
-        describes its corpus, timing budgets, and limits.</li>
+        brightness+JPEG), the robust profile recovered 85 marks. The periodic
+        synthetic-text stress host recovered 0/11; that does not predict
+        arbitrary synthetic or AI-generated content. The matrix does not
+        include screenshot or camera captures; see the benchmark and research
+        pages for corpus and limits.</li>
         <li><strong>Perceptual fingerprint</strong> — a content hash that
         recognizes the picture itself even if every mark is stripped, for
         lookup against your own registry.</li>
@@ -344,8 +356,12 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
       published diffusion attacks reduce or remove many tested invisible
       watermark schemes. Archx StegoMark has not been measured against full
       regeneration, so treat it as vulnerable rather than claiming a measured
-      survival rate. The <a href="limits.html">threat-model page</a> gives the
-      evidence boundary for each layer.</p>
+      survival rate. Synthetic fixtures are not a proxy for arbitrary
+      generated content; test representative assets and keep issuance records.
+      Related reference: <a href="https://arxiv.org/abs/2602.22197" rel="noopener">arXiv:2602.22197</a>
+      (February 2026; IEEE SaTML 2026). The
+      <a href="limits.html">threat-model page</a> gives the evidence boundary
+      for each layer.</p>
 
       <h2 id="limits">Honest limits</h2>
       <div class="callout">

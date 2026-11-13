@@ -25,10 +25,11 @@ import {
 // (decryptPayload used by the AES .archx test below)
 import { inspectImageMetadata, scrambleImage, unscrambleImage, prepareDerivativeBase, finishDerivative, configureSharpSecurity } from '../server/scramble-image.js';
 import { buildArchxAssets } from '../server/build-assets.js';
-import {
+import Archx, {
   DEFAULT_SOURCE_WIDTH_BUCKETS, PRESETS, preset,
   TEMPORAL_INTERLACE_PROFILES, normalizeTemporalInterlace, VERSION,
 } from '../src/archx.js';
+import { DEFAULTS } from '../src/client/options.js';
 import {
   createArchxMiddleware, createMemoryStateStore, deriveStegoKey,
   auditArchxServerConfig, auditArchxProductionConfig, withHardenedProductionDefaults,
@@ -5540,6 +5541,28 @@ test('reference chunked transport signs manifests, verifies every chunk, and nev
   await assert.rejects(fetchVerifiedArchx(`${baseUrl}/archx-chunks/catalog-01.manifest`, {
     ...options, fetchImpl: tamperFetch,
   }), /chunk length or digest mismatch/);
+});
+
+test('client API warns on unknown option keys without warning for known keys', () => {
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    assert.doesNotThrow(() => Archx.config({ definitelyNotAnArchxOption: true }));
+    assert.match(warnings[0], /^\[Archx\] Unknown option key: "definitelyNotAnArchxOption" — check spelling\. See the README for valid options\.$/);
+    const warningCount = warnings.length;
+    const knownOptions = {
+      ...Object.fromEntries(Object.keys(DEFAULTS).map((key) => [key, DEFAULTS[key]])),
+      aspectRatio: '16 / 9', height: 240, showBadge: false, swallowClick: true, width: 320,
+    };
+    assert.doesNotThrow(() => Archx.config(knownOptions));
+    assert.equal(warnings.length, warningCount, 'all declared option keys are accepted silently');
+    assert.throws(() => Archx.load.image('#missing-unknown-option-test', '/unused.png', { imageTypo: true }), /document is not defined/);
+    assert.throws(() => Archx.load.gallery('#missing-unknown-option-test', [], { itemClass: 'card', galleryTypo: true }), /document is not defined/);
+    assert.equal(warnings.length, warningCount + 2, 'image and gallery entry points also warn');
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test('release coherence: exported VERSION equals package.json version', () => {

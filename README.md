@@ -12,7 +12,7 @@ Archx.load.image('#hero', { id: 'aurora-valley' }, { mode: 'shield', watermark: 
 
 In the recommended server-delivery mode, no ordinary `<img>` source or master-file URL is exposed: Archx paints an entitled, re-encoded derivative through a guarded viewer. A determined authorized viewer can still reconstruct the derivative they received; client-side scrambling/AES is obfuscation, not DRM. The master file and its metadata stay server-side only when you keep masters outside public routes and use the server middleware.
 
-- 📦 **153.0 KiB minified / 50.5 KiB gzipped**, zero runtime dependencies (browser)
+- 📦 **153.4 KiB minified / 50.7 KiB gzipped**, zero runtime dependencies (browser)
 - ⚡ Built for **image-heavy pages and catalogs**: canonical responsive widths, batch token minting, memory → persistent-disk → shared derivative reuse, optional precomputed CDN assets, lazy loading, a decode concurrency cap, and bitmap/payload caching. The real-Chromium test paints a 100-image gallery with **2 batch mint requests and 0 single mints**. **Loaded images do not reload** on scroll/visibility/ordinary resize, and static WebGL images draw on demand instead of running a 60 fps GPU loop
 - 🖼️ **Quality-first rendering:** quality profiles (`original` = pixel-exact lossless at display size, `high` = q95, `balanced`, `catalog` = q88/device-pixel sampling for listings, `fast`), stable-layout + cover-aware derivative sizing, exact device-pixel canvas sizing where available, DPR up to 3, native/oversampled tile reassembly, and exact/supersampled WebGL sampling — protection should not make fine detail look slurry
 - 🧩 Three canonical profiles — **lite** (CPU/RAM/speed first), **performance** (balanced), **elite** (security first) — layered over the original pipelines (**lite**, **shield**, **vault**, **fortress**) with `mode:'custom'` / a direct `renderer` flag and **direct parameters for every behaviour**, so a profile is a default you refine, never a lock-in; `Archx.config(...)` sets your own house default
@@ -181,6 +181,8 @@ app.use(createArchxMiddleware(withHardenedProductionDefaults({
   // secrets from the viewer.
 })));
 ```
+
+> **Preview-width limit:** `maxWidthFraction` (default `1`; accepted range `0.05`–`1`) caps the derivative against the master's width at both token mint and redemption. A computed cap below the supported 64 px minimum is rejected, never rounded upward. Set it below `1` when native-width pixels must not be delivered.
 
 Run `auditArchxProductionConfig(finalOptions, { expectedInstances })` in deployment tests. Unlike the basic validity audit, it returns production `blockers` for anonymous entitlement mode, query bearer tokens, non-required proof of possession, reusable tokens, GET minting, missing request/site gates, a memory store in a multi-instance topology, and StegoMark without a registry. `withHardenedProductionDefaults()` fills only fields you left undefined; it cannot choose your quotas, authorization policy, shared store, or supported-client proof policy.
 
@@ -438,6 +440,8 @@ Archx.load.image('#hero', '/protected/photo.archx', { key: window.__ARCHX_STATIC
 ```
 
 ### 6 · Prove a leaked copy is yours (StegoMark detection)
+
+> **Synthetic-content caveat:** StegoMark's published measurements are bounded to the documented corpus and transforms, which include synthetic stress hosts; the periodic-text host recovered 0/11 cases. These results do not establish recovery on arbitrary synthetic or AI-generated images. Test representative assets from your own catalog, and retain independent issuance records; image regeneration can weaken or remove pixel-level marks.
 
 ```bash
 # Static/CLI marks. Detection uses the SAME private StegoMark key used
@@ -805,7 +809,7 @@ Fortress is intentionally fail-closed: if its integrity audit sees a hooked fetc
 
 Measured on this repo's test machine (`npm run bench`, `npm run test:browser`):
 
-- Browser bundle: **153.0 KiB minified / 50.5 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
+- Browser bundle: **153.4 KiB minified / 50.7 KiB gzipped**, zero dependencies. The current size buys strict token/manifest validation, bounded streaming/decode budgets, header-token transport, proof-of-possession signing, batch minting, canonical sizing, expanded WebGL integrity reporting, sanitized telemetry/plugins, robust StegoMark detection, fail-closed lifecycle handling, and the optional shader/pre-rendered temporal-interlace engines
 - 100-image protected gallery in headless Chromium: all 100 painted with 0 `<img>` tags, using **2 batch mint requests and 0 single mint requests** (`npm run bench:opt`, deliberately non-lazy catalog load: **2.88 s total / 28.8 ms per image** on the 2-vCPU sandbox, ~2.1 MB JS heap for the whole gallery; production lazy mode streams them on scroll and the gallery helper defaults to catalog 1× device-pixel sampling)
 - Steady-state cost after first paint is deliberately near zero for stills: the browser test measured **0 additional Vault frames over 450 ms** with `renderLoop:'auto'`, while a temporal-shield Fortress intentionally presented 27 frames in the same window. The no-reload browser test also verifies one token + one payload request across strict-memory visibility/resize cycles
 - Cold-transform cost is dominated by Sharp decode/resize/encode, not scrambling (the fused pad+scramble pass is ~2 ms at 960 px): a recorded `npm run bench:opt` on the 1408×768 demo master (2-vCPU test box) measured quality-first q95 at **~74 ms/120 KiB (640 px)** and **~134 ms/250 KiB (960 px)**, versus catalog q88/effort-2 at **~25 ms/83 KiB** and **~46 ms/172 KiB**—about 2.9× faster and one-third smaller at 960 px. The v1.9 optimization round fused pad+scramble+encode-input into one pass (no intermediate frame copies), skips EXIF autorotate when the master has no orientation, drops the synthesized alpha band before WebP/PNG encoding for opaque masters, and prunes sliding-window limiters in place; interleaved old/new A/B runs on this machine measured cold transforms ~3–10% faster (PNG: −34% time, −11% bytes), peak transform RSS a few MB lower, and warm mint+redeem throughput up from **859 to 915 flows/s** over 6,000 loopback requests — with byte-identical WebP/JPEG output (verified against 21 fixture hashes). Reproduce with `npm run bench:opt -- --out=after.json` before/after a change and `--compare=before.json,after.json`. A separate loopback catalog fixture generated six cold canonical derivatives at p50 **87 ms**, then repeated authorized flows from memory and, after a handler restart, from the persistent disk cache at p50 **2.8 ms** per flow. Those loopback numbers exclude a real authorization database, TLS, network, Redis latency, and browser proof signing; use them as regression signals, not a production capacity claim. Precomputed `archx-build` variants remove cold Sharp work from the request path altogether
@@ -861,7 +865,7 @@ tests, and `tools/`; consumers should use the install/import examples in
 npm run lint        # node --check over every shipped/test source file
 npm run docs:check  # version/test-count/enums/exports/bundle-size/SRI agreement across docs, website, and code
 npm run size:browser # pinned fflate gzip-level-9 measurement; 52 KiB budget gate
-npm test            # 161 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
+npm test            # 162 unit/integration tests (scramble/crypto incl. plan v2, fused pad+scramble equality,
                     # delivery quality + AVIF round-trip, cover-aware sizing, server marks,
                     # standard/robust StegoMark survival + crop geometry, perceptual soft bindings,
                     # strict config/claims, hardened production defaults/audit, buyer/order hooks,
@@ -905,6 +909,26 @@ npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload 
                     # bounded local mint+redeem regression load; see docs/OPERATIONS.md
                     # before treating any staging number as a capacity result
 ```
+
+### Run the real-Redis integration test locally
+
+Install Redis Server 6.0 or newer. On macOS, use `brew install redis`; on
+Debian/Ubuntu (including Ubuntu under WSL), use
+`sudo apt-get update && sudo apt-get install redis-server`. From a source
+checkout, install the project test dependencies once with `npm ci`, then run:
+
+```bash
+npm run test:redis:local
+```
+
+The runner starts its own temporary Redis process bound only to loopback,
+uses a random port with persistence disabled, runs the real cross-instance,
+replay-race, shared-quota, and fail-closed integration test, then stops Redis
+and removes its temporary directory. It does not connect to or clear an
+existing Redis service. If `redis-server` is not on `PATH`, set
+`REDIS_SERVER_BIN` to its executable path. For an already-running disposable
+Redis instance, `ARCHX_TEST_REDIS_URL=redis://127.0.0.1:6379 npm run test:redis`
+runs the same test without starting a server.
 
 ## Repository layout
 

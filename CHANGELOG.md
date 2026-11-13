@@ -3,14 +3,40 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status.** npm lists `1.30.2` as the latest published version.
-> This checkout prepares `1.30.3`; publication remains a maintainer action and
+> **Publication status.** npm lists `1.30.3` as the latest published version.
+> This checkout prepares `1.30.4`; publication remains a maintainer action and
 > has not been performed here. Historical version headings may describe
 > GitHub-only development releases later folded into a published version.
 > For example, 1.27.0's changes shipped in 1.28.0; an earlier note
 > incorrectly said 1.27.0 itself had been published.
 
-## [1.30.3] — Unreleased
+## [1.30.4] — Unreleased
+
+Release-preparation updates and documentation corrections:
+
+1. Migrate CodeQL init/analyze workflow steps to Action v4.
+2. Preserve the existing four `js/user-controlled-bypass` false-positive
+   rationales; individual GitHub alert dismissal and zero-open verification
+   remain pending because this environment cannot access the alert API.
+3. Upgrade the development/test dependency to ioredis 6.0.0; adapter
+   contract and real-Redis integration tests pass against Redis Server 6.2.20.
+4. Pin checkout v7.0.1 and setup-node v7.1.0 (both Node 24-capable) while
+   retaining Node 20/22 test jobs.
+5. Warn, without throwing, for unknown keys passed to the public client
+   image, gallery, and config APIs; add a regression test.
+6. Confirm the package description is already substantive and retain it.
+7. Document `maxWidthFraction`'s mint/redemption cap and below-64-pixel
+   denial behavior after the server quick-start example.
+8. Add StegoMark synthetic-content limitations and the supplied arXiv:2602.22197 /
+   IEEE SaTML 2026 reference to the research and website documentation.
+9. Add `npm run test:redis:local`, which launches an isolated local Redis
+   server for the real-Redis integration suite and cleans it up afterward.
+
+This version is prepared but unpublished. Do not treat the recorded
+false-positive classifications or skipped local Redis integration as
+completion of their outstanding release gates.
+
+## [1.30.3] — Published to npm
 
 Targeted server-security fixes and evidence/documentation corrections.
 

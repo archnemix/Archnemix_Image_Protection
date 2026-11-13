@@ -5,11 +5,12 @@ import { chooseAssetVariant, loadAssetManifest, verifyAssetVariantIntegrity } fr
 import { instances } from './registry.js';
 import { $ } from './observers.js';
 import { fetchBounded, fetchControls, nonRetryableError } from './network.js';
-import { DEFAULTS, DEFAULT_SOURCE_WIDTH_BUCKETS, mergeOptions, preset } from './options.js';
+import { DEFAULTS, DEFAULT_SOURCE_WIDTH_BUCKETS, mergeOptions, preset, warnUnknownOptionKeys } from './options.js';
 import { boundedInteger, canonicalSourceWidth, effectiveSampling, fetchPriorityInit, networkConnectionInfo, normalizedHttpCache } from './sampling.js';
 import { ProtectedImage } from './viewer.js';
 
-export function loadImage(target, source, options) {
+export function loadImage(target, source, options = {}) {
+  warnUnknownOptionKeys(options);
   const inst = new ProtectedImage(target, source, options);
   // Return the instance immediately (sync handle) AND make it awaitable
   // via inst.ready. Most callers can fire-and-forget.
@@ -97,6 +98,7 @@ export async function preloadAssets(assetIds, options = {}) {
 }
 
 export function loadGallery(container, items, options = {}) {
+  warnUnknownOptionKeys(options, ['itemClass']);
   const host = $(container);
   if (!host) throw new Error('Archx: gallery container not found');
   const galleryDefaults = {
@@ -124,6 +126,7 @@ export function loadGallery(container, items, options = {}) {
       ('src' in item || 'id' in item || 'assetId' in item || 'asset' in item);
     const src = isObj && 'src' in item ? item.src : item;
     const per = isObj ? { alt: item.alt || '', ...(item.options || {}) } : {};
+    warnUnknownOptionKeys(per);
     return new ProtectedImage(cell, src, { ...galleryDefaults, ...options, ...per });
   });
   return { instances: made, ready: Promise.allSettled(made.map((i) => i.ready)) };

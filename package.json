@@ -1,6 +1,6 @@
 {
   "name": "@archnemix/image-protection",
-  "version": "1.30.3",
+  "version": "1.30.4",
   "description": "Archnemix (Archx) — layered image protection for websites. Keep original files off public routes and deliver authorized derivatives through a guarded canvas viewer with scrambled/encrypted transport, one-time tokens, and attribution marks.",
   "license": "0BSD",
   "author": "Archnemix",
@@ -129,6 +129,7 @@
     "test:types": "tsc --noEmit -p tsconfig.json",
     "test:pack": "node tools/pack-smoke.mjs",
     "test:redis": "node --test tests/redis-integration.test.mjs",
+    "test:redis:local": "node tools/test-redis-local.mjs",
     "bench:stego:evidence": "node tools/stego-evidence.mjs",
     "bench:stego": "node tools/stego-bench.mjs",
     "calibrate:perceptual": "node tools/calibrate-perceptual.mjs",
@@ -156,7 +157,7 @@
     "@types/node": "^22.20.5",
     "esbuild": "^0.25.0",
     "fflate": "0.8.3",
-    "ioredis": "^5.11.1",
+    "ioredis": "^6.0.0",
     "puppeteer-core": "^25.16.0",
     "sharp": "^0.35.5",
     "typescript": "^5.9.3"

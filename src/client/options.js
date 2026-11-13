@@ -101,6 +101,25 @@ export const DEFAULTS = {
   alt: '',
 };
 
+const KNOWN_OPTION_KEYS = new Set([
+  ...Object.keys(DEFAULTS),
+  // Public, optional presentation/click options consumed by ProtectedImage
+  // but intentionally omitted from the shared global defaults.
+  'aspectRatio', 'height', 'showBadge', 'swallowClick', 'width',
+]);
+
+/** Warn about misspelled client options without changing the supplied values. */
+export function warnUnknownOptionKeys(options, additionalKeys = []) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) return;
+  const known = additionalKeys.length
+    ? new Set([...KNOWN_OPTION_KEYS, ...additionalKeys])
+    : KNOWN_OPTION_KEYS;
+  for (const key of Object.keys(options)) {
+    if (!known.has(key)) {
+      console.warn(`[Archx] Unknown option key: "${key}" — check spelling. See the README for valid options.`);
+    }
+  }
+}
 
 let globalConfig = structuredCloneSafe(DEFAULTS);
 
