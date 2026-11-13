@@ -45,7 +45,7 @@ jobs:
           }
           expected = {16: 1787, 17: 1748, 18: 1748, 19: 1758}
           comments = {
-              16: ('False positive: this malformed-batch guard rejects unknown fields or invalid batch metadata; it does not authorize minting. Every accepted item still passes host authorization in mintTokenResponse. The adjacent js/user-controlled-bypass rationale and mixed authorized/denied batch regression cover this path.'),
+              16: ('False positive: this guard rejects malformed or oversized batches; it does not authorize access. Each accepted item still passes host authorization before token minting. See the adjacent rule rationale and mixed authorized/denied batch regression.'),
               17: ('False positive: attacker-controlled Content-Type/Content-Encoding values are used only to reject malformed requests. They cannot authorize a token; successful minting still requires host authorization. See the adjacent js/user-controlled-bypass rationale.'),
               18: ('False positive: attacker-controlled Content-Type/Content-Encoding values are used only to reject malformed requests. They cannot authorize a token; successful minting still requires host authorization. See the adjacent js/user-controlled-bypass rationale.'),
               19: ('False positive: this request marker is not an authorization credential. It only gates request parsing; mintTokenResponse still invokes host authorization before token creation. See the adjacent js/user-controlled-bypass rationale.'),
