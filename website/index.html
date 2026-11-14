@@ -57,17 +57,17 @@
       </div>
       <figcaption class="stage-controls">
         <div class="stage-buttons" role="group" aria-label="Illustration controls">
-          <button type="button" id="btnView" class="btn is-active">Visitor&rsquo;s view</button>
-          <button type="button" id="btnWire" class="btn">On the wire</button>
+          <button type="button" id="btnView" class="btn is-active" aria-pressed="true">Visitor&rsquo;s view</button>
+          <button type="button" id="btnWire" class="btn" aria-pressed="false">On the wire</button>
         </div>
         <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.</p>
       </figcaption>
       <div class="stage-tools">
         <span class="tools-label">Grid</span>
         <span class="seg" id="gridSeg" role="group" aria-label="Tile grid size">
-          <button type="button" data-g="8" class="is-active">8×8</button>
-          <button type="button" data-g="16">16×16</button>
-          <button type="button" data-g="32">32×32</button>
+          <button type="button" data-g="8" class="is-active" aria-pressed="true">8×8</button>
+          <button type="button" data-g="16" aria-pressed="false">16×16</button>
+          <button type="button" data-g="32" aria-pressed="false">32×32</button>
         </span>
         <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
         <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>

@@ -289,6 +289,8 @@ async function startStage() {
       : 'Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.';
     btnView.classList.toggle('is-active', !on);
     btnWire.classList.toggle('is-active', on);
+    btnView.setAttribute('aria-pressed', String(!on));
+    btnWire.setAttribute('aria-pressed', String(on));
   }
   btnView.addEventListener('click', () => { poke(); setScrambled(false); });
   btnWire.addEventListener('click', () => { poke(); setScrambled(true); });
@@ -351,7 +353,11 @@ async function startStage() {
     if (e.key === ' ') { e.preventDefault(); poke(); setScrambled(!scrambled); }
   });
   document.querySelectorAll('#gridSeg button').forEach((b) => b.addEventListener('click', () => {
-    document.querySelectorAll('#gridSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    document.querySelectorAll('#gridSeg button').forEach((x) => {
+      const active = x === b;
+      x.classList.toggle('is-active', active);
+      x.setAttribute('aria-pressed', String(active));
+    });
     poke();
     buildTiles(Number(b.dataset.g));
     setScrambled(scrambled);

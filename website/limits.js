@@ -88,8 +88,11 @@ let current = null;
 
 function render(attacker) {
   current = attacker;
-  grid.querySelectorAll('.attacker').forEach((b) =>
-    b.classList.toggle('is-active', b.dataset.id === attacker.id));
+  grid.querySelectorAll('.attacker').forEach((b) => {
+    const active = b.dataset.id === attacker.id;
+    b.classList.toggle('is-active', active);
+    b.setAttribute('aria-pressed', String(active));
+  });
   const pills = LAYERS.map((l) =>
     `<span class="pill ${attacker.layers[l] ? 'on' : 'off'}">${l}</span>`).join('');
   detailEl.innerHTML = `
@@ -104,6 +107,7 @@ if (grid && detailEl) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'attacker';
+    b.setAttribute('aria-pressed', 'false');
     b.dataset.id = a.id;
     b.innerHTML = `<h3>${a.name}</h3><p class="attacker-sub">${a.sub}</p>`;
     b.addEventListener('click', () => render(a));

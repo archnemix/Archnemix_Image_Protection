@@ -8,6 +8,11 @@
 /* Accordion, generated index, scrollspy, filter                      */
 /* ------------------------------------------------------------------ */
 const decisions = [...document.querySelectorAll('.decision')];
+// Keep visual selection and the accessible pressed state in sync for every
+// segmented option. Flow controls refresh this again when their state changes.
+document.querySelectorAll('.seg button, .tech-toolbar .chip[data-tag]').forEach((button) => {
+  button.setAttribute('aria-pressed', String(button.classList.contains('is-active')));
+});
 const indexNav = document.getElementById('techIndex');
 if (indexNav) {
   let currentGroup = null;
@@ -33,14 +38,21 @@ if (indexNav) {
     indexNav.appendChild(a);
   }
   const links = [...indexNav.querySelectorAll('a')];
-  const spy = new IntersectionObserver((entries) => {
-    for (const en of entries) {
-      if (en.isIntersecting) {
-        links.forEach((l) => l.classList.toggle('is-current', l.dataset.for === en.target.id));
-      }
+  function setCurrent(id) {
+    for (const link of links) {
+      const active = link.dataset.for === id;
+      link.classList.toggle('is-current', active);
+      if (active) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
     }
-  }, { rootMargin: '-30% 0px -60% 0px' });
-  decisions.forEach((d) => spy.observe(d));
+  }
+  links.forEach((link) => link.addEventListener('click', () => setCurrent(link.dataset.for)));
+  if ('IntersectionObserver' in window) {
+    const spy = new IntersectionObserver((entries) => {
+      for (const en of entries) if (en.isIntersecting) setCurrent(en.target.id);
+    }, { rootMargin: '-25% 0px -55% 0px' });
+    decisions.forEach((d) => spy.observe(d));
+  }
 }
 
 function setOpen(card, open) {
@@ -83,8 +95,11 @@ document.querySelectorAll('.tech-toolbar .chip[data-tag]').forEach((chip) => {
   chip.addEventListener('click', () => {
     const tag = chip.dataset.tag;
     activeTag = activeTag === tag ? null : tag;
-    document.querySelectorAll('.tech-toolbar .chip[data-tag]').forEach((c) =>
-      c.classList.toggle('is-active', c.dataset.tag === activeTag));
+    document.querySelectorAll('.tech-toolbar .chip[data-tag]').forEach((c) => {
+      const active = c.dataset.tag === activeTag;
+      c.classList.toggle('is-active', active);
+      c.setAttribute('aria-pressed', String(active));
+    });
     applyFilter();
   });
 });
@@ -256,12 +271,20 @@ if (planCanvas) {
   document.getElementById('planKey')?.addEventListener('input', drawPlan);
   document.querySelectorAll('#planGridSeg button').forEach((b) => b.addEventListener('click', () => {
     planState.grid = Number(b.dataset.g);
-    document.querySelectorAll('#planGridSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    document.querySelectorAll('#planGridSeg button').forEach((x) => {
+      const active = x === b;
+      x.classList.toggle('is-active', active);
+      x.setAttribute('aria-pressed', String(active));
+    });
     drawPlan();
   }));
   document.querySelectorAll('#planVerSeg button').forEach((b) => b.addEventListener('click', () => {
     planState.version = Number(b.dataset.v);
-    document.querySelectorAll('#planVerSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    document.querySelectorAll('#planVerSeg button').forEach((x) => {
+      const active = x === b;
+      x.classList.toggle('is-active', active);
+      x.setAttribute('aria-pressed', String(active));
+    });
     drawPlan();
   }));
   document.getElementById('planRandom')?.addEventListener('click', () => {
@@ -407,7 +430,11 @@ if (document.getElementById('w-saturation')) {
   ['satRps', 'satTtl', 'satMargin'].forEach((id) => document.getElementById(id)?.addEventListener('input', drawSaturation));
   document.querySelectorAll('#satSeg button').forEach((b) => b.addEventListener('click', () => {
     satPolicy = b.dataset.p;
-    document.querySelectorAll('#satSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    document.querySelectorAll('#satSeg button').forEach((x) => {
+      const active = x === b;
+      x.classList.toggle('is-active', active);
+      x.setAttribute('aria-pressed', String(active));
+    });
     drawSaturation();
   }));
   drawSaturation();
@@ -523,7 +550,11 @@ function drawSurvival() {
 if (document.getElementById('w-survival')) {
   document.querySelectorAll('#survSeg button').forEach((b) => b.addEventListener('click', () => {
     survMode = b.dataset.m;
-    document.querySelectorAll('#survSeg button').forEach((x) => x.classList.toggle('is-active', x === b));
+    document.querySelectorAll('#survSeg button').forEach((x) => {
+      const active = x === b;
+      x.classList.toggle('is-active', active);
+      x.setAttribute('aria-pressed', String(active));
+    });
     drawSurvival();
   }));
   document.getElementById('d-classical')?.addEventListener('decision:open', drawSurvival, { once: true });

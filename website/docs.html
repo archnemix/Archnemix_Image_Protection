@@ -464,17 +464,28 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
   var sections = Object.keys(links)
     .map(function (id) { return document.getElementById(id); })
     .filter(Boolean);
-  if (!sections.length || !('IntersectionObserver' in window)) return;
+  if (!sections.length) return;
   var current = null;
+  function setCurrent(id) {
+    var next = links[id];
+    if (!next) return;
+    if (current && current !== next) {
+      current.classList.remove('is-current');
+      current.removeAttribute('aria-current');
+    }
+    current = next;
+    current.classList.add('is-current');
+    current.setAttribute('aria-current', 'location');
+  }
+  Object.keys(links).forEach(function (id) {
+    links[id].addEventListener('click', function () { setCurrent(id); });
+  });
+  if (!('IntersectionObserver' in window)) return;
   var observer = new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
-      if (entry.isIntersecting) {
-        if (current) current.classList.remove('is-current');
-        current = links[entry.target.id];
-        if (current) current.classList.add('is-current');
-      }
+      if (entry.isIntersecting) setCurrent(entry.target.id);
     });
-  }, { rootMargin: '-20% 0px -70% 0px' });
+  }, { rootMargin: '-20% 0px -55% 0px' });
   sections.forEach(function (s) { observer.observe(s); });
 })();
 </script>

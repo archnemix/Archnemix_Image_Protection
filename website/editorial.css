@@ -607,3 +607,61 @@ table.layers td:last-child { color: var(--ink-soft); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* Screenshot audit corrections: remove residual card chrome from the inherited
+   theme, and let comparison tables wrap instead of hiding their right column. */
+.band-dark {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.steps li {
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.honest {
+  margin: 0;
+  padding: 18px 0 0;
+  border: 0;
+  border-top: 1px solid #526064;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.table-wrap {
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+table.layers { width: 100%; table-layout: auto; }
+table.layers th, table.layers td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+table.layers td:first-child, table.layers td:last-child { white-space: normal; }
+table.layers tbody tr:hover { background: #eee8dc; }
+#layers table.layers { table-layout: fixed; }
+#layers table.layers th:first-child { width: 22%; }
+#layers table.layers th:nth-child(2) { width: 51%; }
+#layers table.layers th:nth-child(3) { width: 27%; }
+.alternatives-table table.layers { table-layout: fixed; }
+.alternatives-table table.layers th:first-child { width: 27%; }
+.alternatives-table table.layers th:nth-child(2) { width: 25%; }
+.alternatives-table table.layers th:nth-child(3) { width: 48%; }
+.decision { border-radius: 0; box-shadow: none; overflow: visible; }
+.attacker-detail { border-radius: 0; }
+
+@media (max-width: 560px) {
+  .band-dark { margin: 0; border-radius: 0; }
+  .steps li { padding: 16px 0; }
+  .honest { padding: 16px 0 0; }
+  table.layers { font-size: 11px; }
+  table.layers th, table.layers td { padding: 9px 7px 9px 0; }
+}
