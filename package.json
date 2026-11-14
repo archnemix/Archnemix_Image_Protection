@@ -88,6 +88,7 @@
     "README.md",
     "docs/*.md",
     "!docs/REQUIREMENTS_TRACKER.md",
+    "!docs/RELEASE_STATUS.md",
     "examples/archx-showcase.html",
     "examples/chunked-transport/client.js",
     "examples/chunked-transport/server.mjs",

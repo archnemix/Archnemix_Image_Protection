@@ -49,9 +49,9 @@ npm audit --audit-level=high
 ```
 
 At v1.30.4, the expected suite counts are 169 Node tests (162 unit and
-integration + 7 seeded fuzz) and 129 real-Chromium checks. The npm registry
-currently lists 1.30.3 as latest; 1.30.4 is prepared but unpublished. `npm run verify` also runs lint, build,
-generated-type checks, the docs-consistency gate, and the dependency audit.
+integration + 7 seeded fuzz) and 129 real-Chromium checks. `npm run verify`
+also runs lint, build, generated-type checks, the docs-consistency gate, and
+the dependency audit.
 `npm run test:pack` separately installs the packed tarball in a clean app and
 checks the public entry points, CLIs, worker, SRI, and TypeScript declarations.
 The package intentionally omits repository-only scripts, tests, demo assets,

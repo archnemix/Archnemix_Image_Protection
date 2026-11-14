@@ -10,10 +10,12 @@ and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
   works, measured results, honest limits (readable with no JavaScript at
   all)
 - `docs.html` — the documentation page: install, quick starts, the three
-  profiles, key options, server rules, ownership proof, FAQ. Written for
-  reading (sticky on-this-page index with scroll-spy, 70ch measure) and
-  fully usable with JavaScript disabled; it teaches the guided path and
-  links to the complete reference on GitHub
+  profiles, key options, server rules, ownership proof, FAQ, and the current
+  npm release-status panel. Written for reading (sticky on-this-page index
+  with scroll-spy, 70ch measure) and fully usable with JavaScript disabled;
+  it teaches the guided path and links to the complete reference on GitHub.
+  Keep its status panel aligned with `../docs/RELEASE_STATUS.md` after registry
+  confirmation; that status file is intentionally omitted from npm artifacts.
 - `technical.html` + `technical.js` — the decision atlas: 21 engineering
   decisions (problem / chosen / alternatives rejected / pros / cons /
   evidence), searchable and tag-filtered, with an animated mode/options
@@ -25,7 +27,7 @@ and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
   errors/erasures recovery map, and the measured watermark-survival chart
 - `limits.html` + `limits.js` — threat model: eight-attacker interactive
   matrix, measured edges, and when to choose DRM/C2PA/neural instead
-- `styles.css` — warm-paper editorial theme (shared by all four pages)
+- `styles.css` — responsive product-site design system shared across all four pages, with consistent page headers, cards, tables, spacing, and accessible focus states
 - `main.js` — the 3D tile-scramble hero (procedural painted-valley
   texture, pointer lift field, raycast tile tracing, drag orbit)
 
