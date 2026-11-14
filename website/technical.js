@@ -182,13 +182,13 @@ function drawPlan() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#fffdf7'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
   const g = plan.grid;
   const board = Math.min(H - 56, (W - 180) / 2);
   const cell = board / g;
   const y0 = 40;
   const leftX = 30, rightX = W - 30 - board;
-  ctx.fillStyle = '#191612'; ctx.font = '600 13px Georgia, serif';
+  ctx.fillStyle = '#101a2b'; ctx.font = '600 13px Georgia, serif';
   ctx.fillText('Original tiles', leftX, 22);
   ctx.fillText('On the wire (scrambled positions)', rightX, 22);
   const drawBoard = (ox, scrambledSide) => {
@@ -201,7 +201,7 @@ function drawPlan() {
       ctx.fillStyle = tileColor(tile, plan.count);
       ctx.fillRect(x + 0.5, y + 0.5, cell - 1, cell - 1);
       if (planState.hover === tile) {
-        ctx.strokeStyle = '#b13a22'; ctx.lineWidth = 3;
+        ctx.strokeStyle = '#3868f5'; ctx.lineWidth = 3;
         ctx.strokeRect(x + 1.5, y + 1.5, cell - 3, cell - 3);
       }
       if (cell >= 17) {
@@ -218,7 +218,7 @@ function drawPlan() {
   drawBoard(rightX, true);
   // center arrow
   const midY = y0 + board / 2;
-  ctx.strokeStyle = '#b13a22'; ctx.fillStyle = '#b13a22'; ctx.lineWidth = 2.5;
+  ctx.strokeStyle = '#3868f5'; ctx.fillStyle = '#3868f5'; ctx.lineWidth = 2.5;
   ctx.beginPath(); ctx.moveTo(leftX + board + 18, midY); ctx.lineTo(rightX - 18, midY); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(rightX - 18, midY); ctx.lineTo(rightX - 30, midY - 7); ctx.lineTo(rightX - 30, midY + 7); ctx.closePath(); ctx.fill();
   if (planState.hover >= 0) {
@@ -426,7 +426,7 @@ function drawBch() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#fffdf7'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
   const x0 = 56, y0 = 18, x1 = W - 18, y1 = H - 42;
   const maxS = 130, maxE = 42;
   const X = (v) => x0 + (v / maxS) * (x1 - x0);
@@ -441,7 +441,7 @@ function drawBch() {
   ctx.fillStyle = 'rgba(177,58,34,.38)';
   ctx.beginPath(); ctx.moveTo(X(0), Y(0)); ctx.lineTo(X(36), Y(0)); ctx.lineTo(X(0), Y(18)); ctx.closePath(); ctx.fill();
   // axes + labels
-  ctx.strokeStyle = '#191612'; ctx.fillStyle = '#191612'; ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#101a2b'; ctx.fillStyle = '#101a2b'; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1); ctx.stroke();
   ctx.font = '12px ui-monospace, monospace';
   ctx.fillText('erasures s →', x1 - 90, H - 14);
@@ -451,9 +451,9 @@ function drawBch() {
   ctx.fillText('ISD (probabilistic, budgeted)', X(52), Y(26));
   ctx.fillText('beyond recovery', X(96), Y(36));
   // point
-  ctx.fillStyle = '#191612';
+  ctx.fillStyle = '#101a2b';
   ctx.beginPath(); ctx.arc(X(s), Y(e), 6, 0, 6.29); ctx.fill();
-  ctx.strokeStyle = '#fffdf7'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke();
   const out = document.getElementById('bchOut');
   if (out) {
     let verdict;
@@ -496,21 +496,21 @@ function drawSurvival() {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#fffdf7'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
   const data = SURV[survMode];
-  ctx.fillStyle = '#191612'; ctx.font = '600 14px Georgia, serif';
+  ctx.fillStyle = '#101a2b'; ctx.font = '600 14px Georgia, serif';
   ctx.fillText(data.title, 18, 24);
   const chartX = 190, chartW = W - chartX - 90;
   const top = 48, rowH = Math.min(44, (H - top - 16) / data.bars.length);
   data.bars.forEach(([label, got, of], i) => {
     const y = top + i * rowH;
-    ctx.font = '13px Georgia, serif'; ctx.fillStyle = '#191612';
+    ctx.font = '13px Georgia, serif'; ctx.fillStyle = '#101a2b';
     ctx.fillText(label, 18, y + rowH * 0.62);
     ctx.fillStyle = '#e5dcc6';
     ctx.fillRect(chartX, y + 4, chartW, rowH - 16);
-    ctx.fillStyle = got === 0 ? '#191612' : '#b13a22';
+    ctx.fillStyle = got === 0 ? '#101a2b' : '#3868f5';
     ctx.fillRect(chartX, y + 4, chartW * (got / of), rowH - 16);
-    ctx.fillStyle = '#191612'; ctx.font = '600 13px ui-monospace, monospace';
+    ctx.fillStyle = '#101a2b'; ctx.font = '600 13px ui-monospace, monospace';
     ctx.fillText(`${got}/${of} · ${Math.round((got / of) * 100)}%`, chartX + chartW + 10, y + rowH * 0.62);
   });
   const note = document.getElementById('survNote');
@@ -849,10 +849,10 @@ if (document.getElementById('w-survival')) {
   function drawFlowLock(cx, cy, s = 1) {
     if (!fctx) return;
     fctx.save(); fctx.translate(cx, cy); fctx.scale(s, s);
-    fctx.fillStyle = '#ece3d0'; fctx.strokeStyle = '#191612'; fctx.lineWidth = 2;
+    fctx.fillStyle = '#e7eeff'; fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 2;
     fctx.fillRect(-11, -2, 22, 17); fctx.strokeRect(-11, -2, 22, 17);
     fctx.beginPath(); fctx.arc(0, -3, 7, Math.PI, 0); fctx.stroke();
-    fctx.fillStyle = '#191612'; fctx.beginPath(); fctx.arc(0, 6, 3, 0, 6.3); fctx.fill();
+    fctx.fillStyle = '#101a2b'; fctx.beginPath(); fctx.arc(0, 6, 3, 0, 6.3); fctx.fill();
     fctx.restore();
   }
   function drawFlowImage(art, x, y, w, h, o = {}) {
@@ -885,7 +885,7 @@ if (document.getElementById('w-survival')) {
         const sw = source.width / g, sh = source.height / g;
         const dw = w / g, dh = h / g;
         const e = ease(scramble);
-        fctx.fillStyle = '#191612'; fctx.fillRect(x, y, w, h);
+        fctx.fillStyle = '#101a2b'; fctx.fillRect(x, y, w, h);
         for (let orig = 0; orig < 64; orig++) {
           const dest = flowPlan.inverse[orig];
           const ox = x + (orig % g) * dw, oy = y + Math.floor(orig / g) * dh;
@@ -947,7 +947,7 @@ if (document.getElementById('w-survival')) {
     fctx.strokeStyle = 'rgba(25,22,18,.78)'; fctx.lineWidth = 1;
     fctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
   }
-  function flowText(txt, x, y, font = '12px ui-monospace, monospace', color = '#191612', align = 'left') {
+  function flowText(txt, x, y, font = '12px ui-monospace, monospace', color = '#101a2b', align = 'left') {
     if (!fctx) return;
     fctx.font = font; fctx.fillStyle = color; fctx.textAlign = align;
     fctx.fillText(txt, x, y); fctx.textAlign = 'left';
@@ -956,41 +956,41 @@ if (document.getElementById('w-survival')) {
     if (!fctx) return 0;
     fctx.font = '700 11px ui-monospace, monospace';
     const w = Math.ceil(fctx.measureText(txt).width) + 18;
-    fctx.fillStyle = active ? '#191612' : 'transparent';
-    fctx.strokeStyle = '#191612'; fctx.lineWidth = 1;
+    fctx.fillStyle = active ? '#101a2b' : 'transparent';
+    fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 1;
     fctx.fillRect(x, y, w, 24); fctx.strokeRect(x + 0.5, y + 0.5, w - 1, 23);
-    flowText(txt, x + 9, y + 16, '700 11px ui-monospace, monospace', active ? '#f3ede1' : '#4a453a');
+    flowText(txt, x + 9, y + 16, '700 11px ui-monospace, monospace', active ? '#f4f7fb' : '#4d5b70');
     return w + 8;
   }
   function flowPacket(x, y, w, h, title, lines) {
     if (!fctx) return;
-    fctx.fillStyle = '#fffdf7'; fctx.strokeStyle = '#191612'; fctx.lineWidth = 1.4;
+    fctx.fillStyle = '#ffffff'; fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 1.4;
     fctx.fillRect(x, y, w, h); fctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    fctx.fillStyle = '#b13a22'; fctx.fillRect(x, y, w, 4);
+    fctx.fillStyle = '#3868f5'; fctx.fillRect(x, y, w, 4);
     flowText(title, x + 10, y + 22, '700 12px ui-monospace, monospace');
-    lines.forEach((line, i) => flowText(line, x + 10, y + 41 + i * 16, '11px ui-monospace, monospace', '#4a453a'));
+    lines.forEach((line, i) => flowText(line, x + 10, y + 41 + i * 16, '11px ui-monospace, monospace', '#4d5b70'));
   }
   function flowChecks(x, y, w, title, lines, reveal) {
     if (!fctx) return;
     const h = 40 + lines.length * 22;
-    fctx.fillStyle = '#fffdf7'; fctx.strokeStyle = '#191612'; fctx.lineWidth = 1.3;
+    fctx.fillStyle = '#ffffff'; fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 1.3;
     fctx.fillRect(x, y, w, h); fctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    flowText(title, x + 11, y + 22, '700 12px ui-monospace, monospace', '#b13a22');
+    flowText(title, x + 11, y + 22, '700 12px ui-monospace, monospace', '#3868f5');
     const shown = Math.floor(clamp01(reveal) * lines.length + 0.001);
     lines.forEach((line, i) => {
-      flowText(`${i < shown ? '✓' : '·'} ${line}`, x + 11, y + 46 + i * 22, '11.5px ui-monospace, monospace', i < shown ? '#191612' : '#8a8170');
+      flowText(`${i < shown ? '✓' : '·'} ${line}`, x + 11, y + 46 + i * 22, '11.5px ui-monospace, monospace', i < shown ? '#101a2b' : '#8290a6');
     });
   }
   function flowEmpty(x, y, w, h, lines) {
     if (!fctx) return;
     fctx.save(); fctx.setLineDash([6, 5]);
-    fctx.strokeStyle = '#8a8170'; fctx.lineWidth = 1.2;
+    fctx.strokeStyle = '#8290a6'; fctx.lineWidth = 1.2;
     fctx.strokeRect(x, y, w, h); fctx.restore();
     lines.forEach((line, i) => flowText(line, x + w / 2, y + h / 2 - (lines.length - 1) * 8 + i * 17, '700 11px ui-monospace, monospace', '#6b6352', 'center'));
   }
   function flowArrow(x1, y, x2) {
     if (!fctx) return;
-    fctx.save(); fctx.strokeStyle = '#b13a22'; fctx.fillStyle = '#b13a22'; fctx.lineWidth = 2;
+    fctx.save(); fctx.strokeStyle = '#3868f5'; fctx.fillStyle = '#3868f5'; fctx.lineWidth = 2;
     fctx.beginPath(); fctx.moveTo(x1, y); fctx.lineTo(x2, y); fctx.stroke();
     const dir = x2 >= x1 ? 1 : -1;
     fctx.beginPath(); fctx.moveTo(x2, y); fctx.lineTo(x2 - dir * 9, y - 5); fctx.lineTo(x2 - dir * 9, y + 5); fctx.closePath(); fctx.fill();
@@ -1003,7 +1003,7 @@ if (document.getElementById('w-survival')) {
       v * v * v * p[0][1] + 3 * v * v * u * p[1][1] + 3 * v * u * u * p[2][1] + u * u * u * p[3][1],
     ];
   }
-  function flowCurve(p, progress = 1, color = '#b13a22', dashed = false) {
+  function flowCurve(p, progress = 1, color = '#3868f5', dashed = false) {
     if (!fctx) return;
     const end = clamp01(progress);
     if (end <= 0) return;
@@ -1028,17 +1028,17 @@ if (document.getElementById('w-survival')) {
     fctx.closePath(); fctx.fill();
     fctx.restore();
   }
-  function flowPulse(p, tt, color = '#b13a22', r = 6) {
+  function flowPulse(p, tt, color = '#3868f5', r = 6) {
     if (!fctx) return;
     const [x, y] = flowCurvePoint(p, tt);
     fctx.save();
-    fctx.fillStyle = '#fffdf7'; fctx.strokeStyle = color; fctx.lineWidth = 2;
+    fctx.fillStyle = '#ffffff'; fctx.strokeStyle = color; fctx.lineWidth = 2;
     fctx.beginPath(); fctx.arc(x, y, r, 0, 6.3); fctx.fill(); fctx.stroke();
     fctx.fillStyle = color;
     fctx.beginPath(); fctx.arc(x, y, Math.max(2, r - 3), 0, 6.3); fctx.fill();
     fctx.restore();
   }
-  function flowScanFrame(x, y, w, h, p, color = '#b13a22') {
+  function flowScanFrame(x, y, w, h, p, color = '#3868f5') {
     if (!fctx) return;
     const q = clamp01(p);
     const sx = x + w * q;
@@ -1060,7 +1060,7 @@ if (document.getElementById('w-survival')) {
     if (!fctx) return;
     const q = clamp01(open);
     fctx.save();
-    fctx.strokeStyle = '#191612'; fctx.fillStyle = '#191612'; fctx.lineWidth = 2;
+    fctx.strokeStyle = '#101a2b'; fctx.fillStyle = '#101a2b'; fctx.lineWidth = 2;
     fctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     const bars = 6;
     for (let i = 0; i < bars; i++) {
@@ -1077,11 +1077,11 @@ if (document.getElementById('w-survival')) {
     fctx.save();
     fctx.globalAlpha = Math.min(1, q * 1.4);
     fctx.translate(cx, cy); fctx.scale(0.55 + 0.45 * ease(q), 0.55 + 0.45 * ease(q));
-    fctx.fillStyle = '#b13a22';
+    fctx.fillStyle = '#3868f5';
     fctx.beginPath(); fctx.arc(0, 0, 19, 0, 6.3); fctx.fill();
-    fctx.strokeStyle = '#fffdf7'; fctx.lineWidth = 2;
+    fctx.strokeStyle = '#ffffff'; fctx.lineWidth = 2;
     fctx.beginPath(); fctx.arc(0, 0, 14.5, 0, 6.3); fctx.stroke();
-    fctx.fillStyle = '#fffdf7'; fctx.font = '700 15px ui-monospace, monospace'; fctx.textAlign = 'center';
+    fctx.fillStyle = '#ffffff'; fctx.font = '700 15px ui-monospace, monospace'; fctx.textAlign = 'center';
     fctx.fillText(label, 0, 5.5);
     fctx.restore();
   }
@@ -1095,29 +1095,29 @@ if (document.getElementById('w-survival')) {
     flowState.durations.forEach((ms, i) => {
       const w = totalW * ms / total;
       if (i < flowState.step) {
-        fctx.fillStyle = '#b13a22'; fctx.fillRect(x, y, w, 3);
+        fctx.fillStyle = '#3868f5'; fctx.fillRect(x, y, w, 3);
       } else if (i === flowState.step) {
-        fctx.fillStyle = '#191612'; fctx.fillRect(x, y, w * clamp01(flowState.t), 3);
-        fctx.fillStyle = '#b13a22';
+        fctx.fillStyle = '#101a2b'; fctx.fillRect(x, y, w * clamp01(flowState.t), 3);
+        fctx.fillStyle = '#3868f5';
         fctx.beginPath(); fctx.arc(x + w * clamp01(flowState.t), y + 1.5, 4, 0, 6.3); fctx.fill();
       }
       x += w;
-      fctx.fillStyle = '#fffdf7'; fctx.fillRect(Math.min(961, x - 0.5), y - 2, 1, 7);
+      fctx.fillStyle = '#ffffff'; fctx.fillRect(Math.min(961, x - 0.5), y - 2, 1, 7);
     });
     fctx.restore();
   }
   function drawFlowZones() {
     if (!fctx || !flowCanvas) return;
     fctx.clearRect(0, 0, flowCanvas.width, flowCanvas.height);
-    fctx.fillStyle = '#fffdf7'; fctx.fillRect(0, 0, flowCanvas.width, flowCanvas.height);
+    fctx.fillStyle = '#ffffff'; fctx.fillRect(0, 0, flowCanvas.width, flowCanvas.height);
     fctx.fillStyle = '#f7efdd'; fctx.fillRect(18, 48, 492, 340);
     fctx.fillStyle = '#eef0e3'; fctx.fillRect(594, 48, 368, 340);
-    fctx.strokeStyle = '#191612'; fctx.lineWidth = 1.4;
+    fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 1.4;
     fctx.strokeRect(18.5, 48.5, 491, 339); fctx.strokeRect(594.5, 48.5, 367, 339);
     fctx.save(); fctx.setLineDash([5, 5]); fctx.strokeStyle = '#b9ab8b';
     fctx.strokeRect(510.5, 48.5, 83, 339); fctx.restore();
     flowText('SERVER · MASTERS + MIDDLEWARE + SHARP', 18, 32, '700 13px ui-monospace, monospace');
-    flowText('WIRE', 552, 32, '700 13px ui-monospace, monospace', '#191612', 'center');
+    flowText('WIRE', 552, 32, '700 13px ui-monospace, monospace', '#101a2b', 'center');
     flowText('BROWSER · ARCHX VIEWER', 594, 32, '700 13px ui-monospace, monospace');
     flowText('private master never leaves this side', 18, 410, '11px ui-monospace, monospace', '#6b6352');
     flowText('HTTPS', 552, 410, '11px ui-monospace, monospace', '#6b6352', 'center');
@@ -1134,7 +1134,7 @@ if (document.getElementById('w-survival')) {
     const temporal = flowState.mode === 'fortress';
 
     if (s === 0) {
-      flowText('MASTER · PRIVATE DIRECTORY', 42, 84, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText('MASTER · PRIVATE DIRECTORY', 42, 84, '700 12px ui-monospace, monospace', '#3868f5');
       drawFlowImage(cleanArt, 42, 98, 268, 168);
       flowPacket(336, 106, 148, 126, 'SERVER ONLY', ['no public route', 'read by ID', 'startup checked']);
       drawFlowLock(410, 262, 1.05);
@@ -1142,15 +1142,15 @@ if (document.getElementById('w-survival')) {
          back on itself — denial is a loop, not a slide. */
       flowGate(42, 98, 268, 168, 1 - ease(phase(t, 0.02, 0.48)));
       const denied = [[488, 178], [562, 92], [630, 120], [552, 220]];
-      flowCurve(denied, phase(t, 0.38, 0.9), '#b13a22', true);
+      flowCurve(denied, phase(t, 0.38, 0.9), '#3868f5', true);
       if (t > 0.72 && fctx) {
-        fctx.strokeStyle = '#b13a22'; fctx.lineWidth = 3;
+        fctx.strokeStyle = '#3868f5'; fctx.lineWidth = 3;
         fctx.beginPath(); fctx.moveTo(540, 152); fctx.lineTo(564, 180); fctx.moveTo(564, 152); fctx.lineTo(540, 180); fctx.stroke();
       }
       flowEmpty(648, 98, 268, 168, ['NO PIXELS YET', 'no master URL']);
       flowText('Keep the master outside every public web root.', 42, 356, '600 16px Georgia, serif');
     } else if (s === 1) {
-      flowText('MASTER STAYS PUT', 42, 88, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText('MASTER STAYS PUT', 42, 88, '700 12px ui-monospace, monospace', '#3868f5');
       drawFlowImage(cleanArt, 42, 102, 204, 128, { alpha: 0.72 });
       flowEmpty(648, 88, 268, 168, ['VIEWER BOX', 'CSS × DPR × oversample']);
       /* First the box is measured in place; only then does the little request
@@ -1158,7 +1158,7 @@ if (document.getElementById('w-survival')) {
       flowScanFrame(648, 88, 268, 168, phase(t, 0.02, 0.45));
       const reqPath = [[650, 282], [566, 212], [430, 350], [272, 282]];
       const reqP = ease(phase(t, 0.2, 1));
-      flowCurve(reqPath, reqP, '#b13a22', true);
+      flowCurve(reqPath, reqP, '#3868f5', true);
       const [px, py] = flowCurvePoint(reqPath, reqP);
       flowPacket(px, py, 224, 68, 'TOKEN REQUEST · {id}', ['w · bw · bh · fit', flowState.opts.pop ? '+ proof public key' : 'no pixels · no path']);
       if (flowState.opts.pop) flowSeal(782, 274, phase(t, 0.08, 0.28), 'key');
@@ -1172,7 +1172,7 @@ if (document.getElementById('w-survival')) {
       const tokPath = [[330, 292], [438, 208], [566, 336], [636, 292]];
       const tokP = ease(phase(t, 0.58, 1));
       if (t > 0.52) {
-        flowCurve(tokPath, tokP, '#b13a22', true);
+        flowCurve(tokPath, tokP, '#3868f5', true);
         const [px, py] = flowCurvePoint(tokPath, tokP);
         flowPacket(px, py, 238, 68, 'TOKEN RESPONSE', ['clean URL · key · grid', flowState.opts.encrypt ? 'expiry · + AES key' : 'short expiry']);
       }
@@ -1185,27 +1185,27 @@ if (document.getElementById('w-survival')) {
       flowGate(518, 150, 68, 118, phase(t, 0.24, 0.92));
       const getPath = [[640, 300], [562, 362], [458, 236], [340, 300]];
       const getP = ease(phase(t, 0, 0.62));
-      flowCurve(getPath, getP, '#b13a22', true);
+      flowCurve(getPath, getP, '#3868f5', true);
       const [px, py] = flowCurvePoint(getPath, getP);
       flowPacket(px, py, 238, 64, 'GET PAYLOAD', ['X-Archx-Token', flowState.opts.pop ? '+ signed proof' : 'clean URL']);
       if (t > 0.86) {
         const replay = [[820, 240], [700, 318], [610, 250], [586, 286]];
-        flowCurve(replay, phase(t, 0.86, 1), '#8a8170', true);
-        flowText('replay ✗', 650, 374, '700 11px ui-monospace, monospace', '#8a8170');
+        flowCurve(replay, phase(t, 0.86, 1), '#8290a6', true);
+        flowText('replay ✗', 650, 374, '700 11px ui-monospace, monospace', '#8290a6');
       }
       if (t > 0.82 && fctx) {
         fctx.save(); fctx.translate(459, 332); fctx.rotate(-0.08);
-        fctx.strokeStyle = '#b13a22'; fctx.lineWidth = 2; fctx.strokeRect(-58, -15, 116, 30);
-        flowText('SPENT ONCE', 0, 5, '700 13px ui-monospace, monospace', '#b13a22', 'center');
+        fctx.strokeStyle = '#3868f5'; fctx.lineWidth = 2; fctx.strokeRect(-58, -15, 116, 30);
+        flowText('SPENT ONCE', 0, 5, '700 13px ui-monospace, monospace', '#3868f5', 'center');
         fctx.restore();
       }
       flowEmpty(676, 96, 224, 140, ['TOKEN SENT BACK', 'for one payload']);
     } else if (s === 4) {
       /* Sharp works in place: the master is scanned inside its own dashed
          bounds, then the frame contracts to the entitled derivative size. */
-      flowText(t < 0.5 ? 'MASTER · SNIFF + DECODE SCAN' : 'ENTITLED DERIVATIVE · WIDTH POLICY', 105, 88, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText(t < 0.5 ? 'MASTER · SNIFF + DECODE SCAN' : 'ENTITLED DERIVATIVE · WIDTH POLICY', 105, 88, '700 12px ui-monospace, monospace', '#3868f5');
       if (fctx) {
-        fctx.save(); fctx.setLineDash([6, 5]); fctx.strokeStyle = '#8a8170'; fctx.lineWidth = 1.2;
+        fctx.save(); fctx.setLineDash([6, 5]); fctx.strokeStyle = '#8290a6'; fctx.lineWidth = 1.2;
         fctx.strokeRect(105.5, 102.5, 299, 187); fctx.restore();
       }
       const shrink = ease(phase(t, 0.45, 0.88));
@@ -1220,7 +1220,7 @@ if (document.getElementById('w-survival')) {
       flowText('Only the signed, entitled width is built; preview-only needs a fraction cap.', 38, 366, '600 15px Georgia, serif');
       flowEmpty(676, 102, 224, 140, ['WAITING', 'response not started']);
     } else if (s === 5) {
-      flowText('DERIVATIVE PIXELS · SERVER COPY', 94, 78, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText('DERIVATIVE PIXELS · SERVER COPY', 94, 78, '700 12px ui-monospace, monospace', '#3868f5');
       drawFlowImage(cleanArt, 94, 92, 322, 201);
       /* Each enabled mark arrives as its own translucent sheet and fuses
          into the pixels in server order — cumulative art, one beat each. */
@@ -1240,11 +1240,11 @@ if (document.getElementById('w-survival')) {
         if (flowState.opts.stego) flowText('Rust dots exaggerate the invisible StegoMark.', 94, 368, '11px ui-monospace, monospace', '#6b6352');
       } else {
         flowBadge('all optional marks OFF — pass through', bx, 318, false);
-        flowScanFrame(94, 92, 322, 201, phase(t, 0.1, 0.8), '#8a8170');
+        flowScanFrame(94, 92, 322, 201, phase(t, 0.1, 0.8), '#8290a6');
       }
       flowEmpty(676, 108, 224, 140, ['STILL SERVER-SIDE', 'nothing sent yet']);
     } else if (s === 6) {
-      flowText('.ARCHX PACKAGE', 94, 78, '700 12px ui-monospace, monospace', '#b13a22');
+      flowText('.ARCHX PACKAGE', 94, 78, '700 12px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, 94, 92, 322, 201, {
         scramble: phase(t, 0, 0.68),
         encrypt: flowState.opts.encrypt ? phase(t, 0.68, 1) : 0,
@@ -1255,9 +1255,9 @@ if (document.getElementById('w-survival')) {
         const closeP = ease(phase(t, 0.52, 0.8));
         const inset = lerp(14, 0, closeP);
         fctx.save();
-        fctx.strokeStyle = '#191612'; fctx.lineWidth = 2;
+        fctx.strokeStyle = '#101a2b'; fctx.lineWidth = 2;
         fctx.strokeRect(94 - inset + 0.5, 92 - inset + 0.5, 322 + inset * 2 - 1, 201 + inset * 2 - 1);
-        fctx.fillStyle = '#b13a22';
+        fctx.fillStyle = '#3868f5';
         fctx.fillRect(94, 92, 322 * clamp01(phase(t, 0.52, 0.72)), 6);
         fctx.restore();
       }
@@ -1275,9 +1275,9 @@ if (document.getElementById('w-survival')) {
       const wirePath = [[72, 94], [245, 34], [455, 238], [642, 94]];
       const wireCenter = [[206, 178], [360, 96], [548, 286], [776, 178]];
       const wireP = ease(phase(t, 0, 0.78));
-      flowCurve(wireCenter, wireP, '#b13a22', true);
+      flowCurve(wireCenter, wireP, '#3868f5', true);
       const [px, py] = flowCurvePoint(wirePath, wireP);
-      flowText(wireP < 0.98 ? 'ON THE WIRE' : 'VALIDATE · DECODED · STILL SCRAMBLED', px, Math.max(82, py - 12), '700 12px ui-monospace, monospace', '#b13a22');
+      flowText(wireP < 0.98 ? 'ON THE WIRE' : 'VALIDATE · DECODED · STILL SCRAMBLED', px, Math.max(82, py - 12), '700 12px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, px, py, 268, 168, {
         scramble: 1,
         encrypt: flowState.opts.encrypt ? 1 - phase(t, 0.8, 1) : 0,
@@ -1289,7 +1289,7 @@ if (document.getElementById('w-survival')) {
       drawFlowImage(cleanArt, 42, 108, 178, 111, { alpha: 0.45 });
       flowText('MASTER · SERVER ONLY', 42, 242, '700 11px ui-monospace, monospace', '#6b6352');
       if (effectiveRenderer() === 'canvas') {
-        flowText('PRIVATE CANVAS ASSEMBLY → DISPLAY', 650, 78, '700 12px ui-monospace, monospace', '#b13a22');
+        flowText('PRIVATE CANVAS ASSEMBLY → DISPLAY', 650, 78, '700 12px ui-monospace, monospace', '#3868f5');
         /* Ghost = the private work canvas behind the display. It fades and
            collapses as the visible canvas takes over, then is zeroed. */
         drawFlowImage(markedArt, 634, 82, 268, 168, { scramble: 1, alpha: 0.26 * (1 - phase(t, 0.6, 0.95)) });
@@ -1302,10 +1302,10 @@ if (document.getElementById('w-survival')) {
         bx += flowBadge(client ? 'client forensic baked' : 'client forensic off (Lite)', bx, 290, t > 0.55);
         if (t > 0.78) flowBadge('work canvas zeroed', bx, 290, true);
       } else {
-        flowText('SCRAMBLED TEXTURE', 618, 76, '700 11px ui-monospace, monospace', '#b13a22');
+        flowText('SCRAMBLED TEXTURE', 618, 76, '700 11px ui-monospace, monospace', '#3868f5');
         drawFlowImage(markedArt, 618, 86, 124, 78, { scramble: 1 });
         flowArrow(746, 124, 768);
-        flowText('SHADER OUTPUT', 772, 76, '700 11px ui-monospace, monospace', '#b13a22');
+        flowText('SHADER OUTPUT', 772, 76, '700 11px ui-monospace, monospace', '#3868f5');
         drawFlowImage(markedArt, 772, 86, 168, 105, { client: client && t > 0.5, temporal });
         if (fctx && t < 1) {
           fctx.fillStyle = 'rgba(255,253,247,.72)';
@@ -1314,30 +1314,30 @@ if (document.getElementById('w-survival')) {
         /* Column sweeps stand in for per-fragment tile mapping: the texture
            stays scrambled while the shader resolves the output. */
         flowScanFrame(772, 86, 168, 105, phase(t, 0.05, 0.9));
-        flowPulse([[742, 124], [750, 104], [760, 150], [772, 124]], (t * 1.6) % 1, '#b13a22', 5);
+        flowPulse([[742, 124], [750, 104], [760, 150], [772, 124]], (t * 1.6) % 1, '#3868f5', 5);
         flowPacket(650, 232, 268, 66, 'FRAGMENT SHADER', ['tile map + mirrors per fragment', flowState.mode === 'fortress' && t > 0.74 ? 'source bitmap released' : 'no clean CPU work canvas']);
       }
     } else {
-      flowText('NETWORK CAPTURE', 52, 86, '700 11px ui-monospace, monospace', '#b13a22');
+      flowText('NETWORK CAPTURE', 52, 86, '700 11px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, 52, 96, 190, 119, { scramble: 1, encrypt: flowState.opts.encrypt ? 1 : 0, alpha: ease(phase(t, 0.22, 0.48)) });
-      flowScanFrame(52, 96, 190, 119, phase(t, 0.24, 0.48), '#8a8170');
+      flowScanFrame(52, 96, 190, 119, phase(t, 0.24, 0.48), '#8290a6');
       flowText('MASTER · NEVER SENT', 282, 86, '700 11px ui-monospace, monospace', '#6b6352');
       drawFlowImage(cleanArt, 282, 96, 174, 109, { alpha: 0.52 });
       drawFlowLock(369, 150, 0.9);
-      flowText('VISITOR VIEW · ENTITLED DERIVATIVE', 650, 72, '700 11px ui-monospace, monospace', '#b13a22');
+      flowText('VISITOR VIEW · ENTITLED DERIVATIVE', 650, 72, '700 11px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, 650, 82, 268, 150, { client, temporal, alpha: ease(phase(t, 0.02, 0.26)) });
       /* Extraction attempts branch downward out of the one legitimate view,
          one sink at a time. */
-      flowCurve([[744, 232], [730, 244], [724, 250], [716, 264]], phase(t, 0.48, 0.62), '#b13a22', true);
-      flowCurve([[830, 232], [842, 244], [850, 250], [858, 264]], phase(t, 0.68, 0.82), '#b13a22', true);
-      flowText('READBACK', 650, 254, '700 11px ui-monospace, monospace', '#b13a22');
+      flowCurve([[744, 232], [730, 244], [724, 250], [716, 264]], phase(t, 0.48, 0.62), '#3868f5', true);
+      flowCurve([[830, 232], [842, 244], [850, 250], [858, 264]], phase(t, 0.68, 0.82), '#3868f5', true);
+      flowText('READBACK', 650, 254, '700 11px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, 650, 264, 132, 88, {
         black: flowState.extract === 'black',
         pixelate: flowState.extract !== 'black',
         scramble: flowState.extract === 'scrambled' ? 1 : 0,
         alpha: ease(phase(t, 0.52, 0.74)),
       });
-      flowText('SCREENSHOT', 798, 254, '700 11px ui-monospace, monospace', '#b13a22');
+      flowText('SCREENSHOT', 798, 254, '700 11px ui-monospace, monospace', '#3868f5');
       drawFlowImage(markedArt, 798, 264, 120, 88, { client, temporal, alpha: ease(phase(t, 0.72, 0.94)) });
       flowText('Read-back may be poisoned; screenshots still capture the displayed derivative.', 52, 360, '600 15px Georgia, serif');
     }

@@ -8,14 +8,14 @@
 <!-- Fonts are self-hosted (see @font-face in styles.css, OFL files in
      ./fonts/): this page makes no third-party requests. -->
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3ede1'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23191612'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%23b13a22'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23191612'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4f7fb'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23101a2b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23101a2b'/%3E%3C/svg%3E">
 </head>
 <body>
 
 <header class="masthead">
   <div class="masthead-inner">
     <a class="wordmark" href="index.html" aria-label="Archnemix home">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Technical decisions</p>
@@ -189,7 +189,7 @@
       <nav id="techIndex" aria-label="Decisions index"><noscript><p>Enable JavaScript for the clickable index — all decisions follow in order below.</p></noscript></nav>
       <p class="flow-index-link"><a href="#image-flow">↳ Start with one image, start to finish</a></p>
       <h2>How to read</h2>
-      <p style="font-size:13.5px;color:var(--ink-soft);margin:0">“Evidence” cites the shipped
+      <p class="index-note">“Evidence” cites the shipped
       benchmark/attack suites and <span class="mono">docs/RESEARCH.md</span> sections, so every claim
       can be re-run. Widgets run the real algorithms where noted.</p>
     </aside>
@@ -337,7 +337,7 @@
               <button class="w-btn ghost" id="tokTamper" type="button">Tamper: width 240 → 4000</button>
               <button class="w-btn ghost" id="tokVariant" type="button">Padding-variant re-encode</button>
             </div>
-            <label style="display:grid;gap:5px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:var(--ink-soft)">Claims (JSON — edit me, then re-mint)
+            <label class="widget-label">Claims (JSON — edit me, then re-mint)
               <textarea id="tokClaims" spellcheck="false"></textarea></label>
             <p class="w-out" id="tokOut">Press “Mint token”. Runs 100% locally with WebCrypto; the example secret never leaves this page and no Archx server is contacted.</p>
             <p class="w-note">The local widget checks canonical encoding, HMAC, and core v2 claims (using the default 1920 px width cap); optional-claim value checks are simplified, so this is a teaching model rather than the server validator. The padding variant has a <em>valid</em> MAC but a non-canonical string — watch it fail anyway.</p>
@@ -664,7 +664,7 @@
 <footer class="footer">
   <div class="footer-inner">
     <span class="wordmark wordmark-small">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#b13a22"/><rect x="2" y="17" width="13" height="13" fill="#b13a22"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
     <p><a href="index.html">Overview</a> · <a href="limits.html">Threat model &amp; limits</a> · © 2026 Archnemix contributors · 0BSD</p>

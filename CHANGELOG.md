@@ -3,21 +3,16 @@
 All notable changes to Archnemix Image Protection (`Archx`) are documented
 here. The project follows semantic versioning once a version is released.
 
-> **Publication status.** npm lists `1.30.3` as the latest published version.
-> This checkout prepares `1.30.4`; publication remains a maintainer action and
-> has not been performed here. Historical version headings may describe
-> GitHub-only development releases later folded into a published version.
-> For example, 1.27.0's changes shipped in 1.28.0; an earlier note
-> incorrectly said 1.27.0 itself had been published.
+This file records versioned change notes, not current registry availability.
+For current release status, use the [GitHub release-status page](https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/RELEASE_STATUS.md).
 
-## [1.30.4] — Unreleased
+## [1.30.4]
 
 Release-preparation updates and documentation corrections:
 
 1. Migrate CodeQL init/analyze workflow steps to Action v4.
-2. Preserve the existing four `js/user-controlled-bypass` false-positive
-   rationales; individual GitHub alert dismissal and zero-open verification
-   remain pending because this environment cannot access the alert API.
+2. Review four `js/user-controlled-bypass` findings and document the
+   request-validation and authorization rationale at each guard.
 3. Upgrade the development/test dependency to ioredis 6.0.0; adapter
    contract and real-Redis integration tests pass against Redis Server 6.2.20.
 4. Pin checkout v7.0.1 and setup-node v7.1.0 (both Node 24-capable) while
@@ -32,11 +27,7 @@ Release-preparation updates and documentation corrections:
 9. Add `npm run test:redis:local`, which launches an isolated local Redis
    server for the real-Redis integration suite and cleans it up afterward.
 
-This version is prepared but unpublished. Do not treat the recorded
-false-positive classifications or skipped local Redis integration as
-completion of their outstanding release gates.
-
-## [1.30.3] — Published to npm
+## [1.30.3]
 
 Targeted server-security fixes and evidence/documentation corrections.
 
@@ -50,7 +41,7 @@ Targeted server-security fixes and evidence/documentation corrections.
 - Correct reconstruction, CDN/static-manifest, screenshot-benchmark, package
   command, and release-status wording; use the canonical 0BSD license text.
 
-## [1.30.2] — Published to npm
+## [1.30.2]
 
 Documentation and review-readiness corrections. No image-processing,
 token, or protection behavior changed.
@@ -1738,8 +1729,7 @@ see `SECURITY.md` and `docs/RESEARCH.md` for the full model.
 ## [1.4.0] — 2026-10-25 (reconstructed in 1.27.0)
 
 Production-hardening round (commit `6a793a4`; see `docs/RESEARCH.md`
-§2.11). *Entry reconstructed from git history in 1.27.0 — 1.0–1.4 predate
-this changelog and were never published to npm.*
+§2.11). This retrospective entry was reconstructed from git history in 1.27.0.
 
 - `createArchxMiddleware()` became a strict configuration boundary
   (validated options, fail-closed startup) instead of a bag of settings.

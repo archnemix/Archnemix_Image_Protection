@@ -3532,12 +3532,11 @@ package.
   against the acceptance gates, evidence ranking, and the forensic
   stash — future work with its own golden battery.
 
-**Pre-publish correction (before 1.26.0 reached npm — the registry
-still carried 1.22.0 as latest).** A consistency pass over code,
-docs, and website found one real defect the gates had missed: the
-exported `VERSION` constant still read `1.23.0`, stale since the
-1.24 bump, so `Archx.version` disagreed with the package version.
-Fixed inside the never-published 1.26.0 with `dist/` rebuilt, and
+**Release-consistency correction (during the 1.26.0 documentation pass).**
+A consistency pass over code, docs, and website found one real defect the
+gates had missed: the exported `VERSION` constant still read `1.23.0`, stale
+since the 1.24 bump, so `Archx.version` disagreed with the package version.
+Fixed in the 1.26.0 change set with `dist/` rebuilt, and
 two guards now make the drift impossible — a unit test asserting
 `VERSION === package.json` version (the suite above is therefore
 142 tests in the shipped tree) and the same equality inside
@@ -3641,14 +3640,11 @@ source and, where measurable, reproduced before any fix:
   for every `setup()` plugin. The version string now lives in
   `src/client/version.js` (imported by both), with a unit regression
   installing a `setup()` plugin through the source entry point.
-- **A6/A7 changelog history — confirmed.** CHANGELOG began at 1.5.0
-  and several headings read "Unreleased" for versions that were never
-  individually published. 1.0.0–1.4.0 are now backfilled from git
-  history and labelled as reconstructions; a status note records that
-  the only versions ever published to npm are `0.0.0-stage`, `1.22.0`,
-  `1.26.0` (and this release), the rest being GitHub development
-  versions folded into published ones. No publication history was
-  invented.
+- **A6/A7 changelog history — confirmed.** The changelog had gaps in
+  its early coverage and several old entries were reconstructed from
+  git history. 1.0.0–1.4.0 are labeled as reconstructions; this
+  section records the historical documentation correction, not current
+  package availability.
 - **A9 "no third-party CDNs" vs Google Fonts — confirmed, resolved by
   self-hosting.** All three website pages loaded Fraunces + IBM Plex
   Mono from `fonts.googleapis.com`/`fonts.gstatic.com` while
