@@ -8,7 +8,8 @@
 <!-- Fonts are self-hosted (see @font-face in styles.css): this page makes
      no third-party requests. -->
 <link rel="stylesheet" href="styles.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4f7fb'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23101a2b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23101a2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="editorial.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f5f1e8'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%2319242b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%2319242b'/%3E%3C/svg%3E">
 </head>
 <body>
 
@@ -33,14 +34,15 @@
 
   <section class="hero hero-doc">
     <p class="kicker">Documentation · v1.30.4</p>
-    <div class="release-status" role="status" aria-label="Current npm release status">
+    <div class="release-status" role="status" aria-label="Version 1.30.4 is published on npm">
       <span class="release-status-dot" aria-hidden="true"></span>
       <div class="release-status-copy">
         <span class="release-status-label">Latest on npm</span>
-        <strong>1.30.3</strong>
-        <span class="release-status-next">1.30.4 is ready for maintainer publication</span>
+        <strong>1.30.4</strong>
+        <span class="release-status-next">Published · current latest release</span>
       </div>
-      <a href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/RELEASE_STATUS.md" rel="noopener">Release details <span aria-hidden="true">↗</span></a>
+      <a href="https://www.npmjs.com/package/@archnemix/image-protection" rel="noopener">View package <span aria-hidden="true">↗</span></a>
+      <a class="release-record-link" href="https://github.com/archnemix/Archnemix_Image_Protection/blob/main/docs/RELEASE_STATUS.md" rel="noopener">Release record <span aria-hidden="true">↗</span></a>
     </div>
     <h1>Use it, <em>step by step.</em></h1>
     <p class="lede">
@@ -462,17 +464,28 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
   var sections = Object.keys(links)
     .map(function (id) { return document.getElementById(id); })
     .filter(Boolean);
-  if (!sections.length || !('IntersectionObserver' in window)) return;
+  if (!sections.length) return;
   var current = null;
+  function setCurrent(id) {
+    var next = links[id];
+    if (!next) return;
+    if (current && current !== next) {
+      current.classList.remove('is-current');
+      current.removeAttribute('aria-current');
+    }
+    current = next;
+    current.classList.add('is-current');
+    current.setAttribute('aria-current', 'location');
+  }
+  Object.keys(links).forEach(function (id) {
+    links[id].addEventListener('click', function () { setCurrent(id); });
+  });
+  if (!('IntersectionObserver' in window)) return;
   var observer = new IntersectionObserver(function (entries) {
     entries.forEach(function (entry) {
-      if (entry.isIntersecting) {
-        if (current) current.classList.remove('is-current');
-        current = links[entry.target.id];
-        if (current) current.classList.add('is-current');
-      }
+      if (entry.isIntersecting) setCurrent(entry.target.id);
     });
-  }, { rootMargin: '-20% 0px -70% 0px' });
+  }, { rootMargin: '-20% 0px -55% 0px' });
   sections.forEach(function (s) { observer.observe(s); });
 })();
 </script>
