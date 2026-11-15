@@ -5,22 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Threat model &amp; honest limits — Archnemix Image Protection</title>
 <meta name="description" content="Who Archx stops, who it slows, and who it cannot stop. An interactive attacker matrix, the physics of the analog hole, and when to choose DRM, C2PA, or neural watermarking instead.">
-<!-- Fonts are self-hosted (see @font-face in styles.css, OFL files in
-     ./fonts/): this page makes no third-party requests. -->
-<link rel="stylesheet" href="styles.css">
-<link rel="stylesheet" href="editorial.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f5f1e8'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%2319242b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%2319242b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/pages.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4efe5'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23172026'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%232d529e'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%232d529e'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23172026'/%3E%3C/svg%3E">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="masthead">
   <div class="masthead-inner">
     <a class="wordmark" href="index.html" aria-label="Archnemix home">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Threat model &amp; limits</p>
-    <nav class="masthead-nav" aria-label="Pages">
+    <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="siteNav">Menu</button>
+    <nav class="masthead-nav" id="siteNav" aria-label="Pages">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
       <a href="technical.html">Technical</a>
@@ -28,9 +31,10 @@
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
+  <div class="scroll-progress" aria-hidden="true"></div>
 </header>
 
-<main>
+<main id="main">
   <section class="page-intro">
     <p class="kicker">Read this before you rely on it</p>
     <h1>Who it stops. Who it slows.<br>Who it cannot stop.</h1>
@@ -40,13 +44,13 @@
     with, and what evidence do I hold afterwards?” Pick an attacker:</p>
   </section>
 
-  <section class="simple-band matrix-band">
+  <section class="simple-band matrix-band" data-reveal>
     <div class="attacker-grid" id="attackerGrid" role="group" aria-label="Choose an attacker"></div>
     <div class="attacker-detail" id="attackerDetail" aria-live="polite"></div>
     <noscript><p>The interactive matrix needs JavaScript. In short: casual right-click copying is stopped; bulk scraping can be throttled and limited but not eliminated; determined single-image theft is slowed, degraded, and may be attributable; photographing a screen cannot be prevented by any web technology.</p></noscript>
   </section>
 
-  <section class="band">
+  <section class="band" data-reveal>
     <header class="band-head"><span class="band-no">§</span><h2>The limits, printed in full</h2></header>
     <div class="cols-2">
       <div>
@@ -73,7 +77,7 @@
     </div>
   </section>
 
-  <section class="band">
+  <section class="band" data-reveal>
     <header class="band-head"><span class="band-no">§</span><h2>When to choose something else instead</h2></header>
     <div class="table-wrap alternatives-table">
       <table class="layers">
@@ -95,13 +99,13 @@
 <footer class="footer">
   <div class="footer-inner">
     <span class="wordmark wordmark-small">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
     <p><a href="index.html">Overview</a> · <a href="technical.html">Technical decisions</a> · © 2026 Archnemix contributors · 0BSD</p>
   </div>
 </footer>
 
-<script type="module" src="limits.js"></script>
+<script type="module" src="js/limits/threat-matrix.js"></script>
 </body>
 </html>

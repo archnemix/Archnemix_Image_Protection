@@ -5,31 +5,36 @@ step, no analytics, no third-party CDNs (Three.js is vendored in `vendor/`,
 and the Fraunces / IBM Plex Mono fonts are self-hosted OFL WOFF2 files in
 `fonts/` — pages make no third-party subresource requests at all):
 
-- `index.html` — overview: interactive 3D hero (drag-orbit, per-tile trace
-  readout, 8×8–32×32 grids — the same range the product permits), how it
-  works, measured results, honest limits (readable with no JavaScript at
-  all)
-- `docs.html` — the documentation page: install, quick starts, the three
-  profiles, key options, server rules, ownership proof, FAQ, and the current
-  npm release-status panel. The panel identifies v1.30.4 as the current
-  published npm release. Keep it aligned with `../docs/RELEASE_STATUS.md`;
-  that mutable status note is intentionally omitted from npm artifacts. The
-  page remains fully usable without JS and links to the complete reference
-  on GitHub.
-- `technical.html` + `technical.js` — the decision atlas: 21 engineering
-  decisions (problem / chosen / alternatives rejected / pros / cons /
-  evidence), searchable and tag-filtered, with an animated mode/options
-  delivery flowchart (a local explanation, not a server demo) and five
-  local widgets — a
-  bit-exact port of the shipped scramble-plan builder (parity-verified
-  against `src/core/plan.js`), a WebCrypto token explorer including the
-  canonical-base64url gate, a replay-saturation sizing calculator, a BCH
-  errors/erasures recovery map, and the measured watermark-survival chart
-- `limits.html` + `limits.js` — threat model: eight-attacker interactive
-  matrix, measured edges, and when to choose DRM/C2PA/neural instead
-- `styles.css` + `editorial.css` — shared layout foundation and the hand-tuned field-guide art direction: self-hosted type, paper/ink palette, ruled sections, responsive nav, long-form reading measure, and visible keyboard focus. No remote fonts, scripts, analytics, or image requests.
-- `main.js` — the 3D tile-scramble hero (procedural painted-valley
-  texture, pointer lift field, raycast tile tracing, drag orbit)
+- `index.html` + `js/hero/{painting,tile-stage}.js` — overview:
+  interactive 3D hero (drag-orbit, per-tile trace readout, 8×8–32×32
+  grids — the same range the product permits), how it works, measured
+  results, and honest limits (readable with no JavaScript at all)
+- `docs.html` + `js/docs/docs-page.js` — the documentation page:
+  install, quick starts, the three profiles, key options, server rules,
+  ownership proof, FAQ, and the current npm release-status panel. The
+  panel identifies v1.30.4 as the current published npm release. Keep it
+  aligned with `../docs/RELEASE_STATUS.md`; that mutable status note is
+  intentionally omitted from npm artifacts. The page remains fully usable
+  without JS and links to the complete reference on GitHub.
+- `technical.html` + `js/technical/` — the decision atlas: 21
+  engineering decisions (problem / chosen / alternatives rejected / pros /
+  cons / evidence), searchable and tag-filtered, with an animated
+  mode/options delivery flowchart (`flow-widget.js`, a local explanation,
+  not a server demo) and local widgets (`plan-widget.js`,
+  `token-widget.js`, `saturation-widget.js`, `bch-widget.js`,
+  `survival-widget.js`, orchestrated by `atlas.js` and `index.js`)
+- `limits.html` + `js/limits/threat-matrix.js` — threat model:
+  eight-attacker interactive matrix, measured edges, and when to choose
+  DRM/C2PA/neural instead
+- `js/shared/{ui,plan-port}.js` — shared UI enhancements (scroll-progress
+  hairline, mobile navigation drawer, section reveal) and the verbatim
+  port of `src/core/plan.js` (`cyrb128`, `sfc32`, `mulberry32`,
+  `buildScramblePlan`) used by both the hero stage and the technical atlas
+- `styles/{tokens,base,layout,components,pages}.css` — modular
+  field-guide stylesheets: self-hosted type tokens, paper/ink palette,
+  masthead & grid layout, interactive widgets/tables/callouts, and
+  page-specific rules. No remote fonts, scripts, analytics, or image
+  requests.
 
 ## Run it locally
 

@@ -5,22 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Docs — Archnemix Image Protection</title>
 <meta name="description" content="Readable documentation for Archnemix Image Protection: install, quick starts, the lite/performance/elite profiles, key options, server rules, ownership proof, and honest limits.">
-<!-- Fonts are self-hosted (see @font-face in styles.css): this page makes
-     no third-party requests. -->
-<link rel="stylesheet" href="styles.css">
-<link rel="stylesheet" href="editorial.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f5f1e8'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%2319242b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%2319242b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/pages.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4efe5'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23172026'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%232d529e'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%232d529e'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23172026'/%3E%3C/svg%3E">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="masthead">
   <div class="masthead-inner">
     <a class="wordmark" href="index.html" aria-label="Archnemix home">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height='13' fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
-    <nav class="masthead-nav" aria-label="Pages">
+    <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="siteNav">Menu</button>
+    <nav class="masthead-nav" id="siteNav" aria-label="Pages">
       <a href="index.html">Overview</a>
       <a href="docs.html" aria-current="page">Docs</a>
       <a href="technical.html">Technical</a>
@@ -28,9 +31,11 @@
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
+  <div class="scroll-progress" aria-hidden="true"></div>
 </header>
 
-<main id="top">
+<main id="main">
+  <div id="top"></div>
 
   <section class="hero hero-doc">
     <p class="kicker">Documentation · v1.30.4</p>
@@ -101,6 +106,7 @@
           <tr><td><code>&hellip;/server</code></td><td>The Node middleware that authorizes viewers and serves one-time derivatives.</td></tr>
           <tr><td><code>&hellip;/scramble</code></td><td>The environment-agnostic scramble/encrypt engine used by both sides.</td></tr>
           <tr><td><code>&hellip;/redis</code></td><td>Shared state-store adapter for multi-instance deployments.</td></tr>
+          <tr><td><code>types/index.d.ts</code></td><td>Hand-authored TypeScript declarations (validated in CI via <code>npm run types:check</code>).</td></tr>
         </tbody>
       </table></div>
       <p>Prefer no bundler? The package ships a prebuilt browser bundle at
@@ -136,7 +142,10 @@ npx archx-protect photo.jpg photo.archx --grid 16
 npx archx-build ./masters ./protected</pre>
       <p class="fineprint">Inject that key into <code>window.__ARCHX_STATIC_KEY__</code>
       for the browser. Anyone who can view the page can obtain it, so static
-      scrambling is obfuscation for public previews, not access control.</p>
+      scrambling is obfuscation for public previews, not access control. For
+      built manifests (<code>{ assetId }</code>), <code>assetIntegrity</code>
+      verifies per-variant SHA-256 digests and <code>planVersion</code> selects
+      the plan derivation for container-less scrambled sources.</p>
       <div class="callout">
         <p><strong>Honest note:</strong> there is no live demo on this site.
         A static page cannot authorize viewers or keep masters private, so
@@ -190,10 +199,14 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
       <p>On the server, the matching helpers
       (<code>withLiteDefaults</code>, <code>withPerformanceDefaults</code>,
       <code>withEliteDefaults</code>) converge on the same three profiles.
-      Older mode names (<code>catalog</code>, <code>vault</code>,
-      <code>fortress</code>&hellip;) keep working, and fully custom flag
-      combinations always remain available — profiles are defaults, not
-      cages. You can also set your own page-wide defaults once:</p>
+      Inspectable preset bundles via <code>Archx.preset(name)</code> (such as
+      <code>gallery</code>, <code>catalog</code>, <code>editorial</code>,
+      <code>commerce</code>, <code>marketplace</code>,
+      <code>maxProtection</code>, and <code>screenshotResistant</code>) and
+      older mode names (<code>vault</code>, <code>fortress</code>&hellip;)
+      keep working, and fully custom flag combinations always remain
+      available — profiles are defaults, not cages. You can also set your
+      own page-wide defaults once:</p>
       <pre class="code mono">Archx.config({ profile: 'performance', watermark: '@your-studio' });</pre>
 
       <h2 id="options">Key options</h2>
@@ -210,8 +223,11 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
           <tr><td><code>forensic</code></td><td><code>true</code></td><td>Invisible per-viewer forensic marking layer (the lite profile turns it off).</td></tr>
           <tr><td><code>temporalInterlace</code></td><td><code>null</code></td><td>Splits the picture across alternating 60&nbsp;Hz frames so captures hold only a subset + fill. Elite sets it on.</td></tr>
           <tr><td><code>proofOfPossession</code></td><td><code>'auto'</code></td><td>Binds the token to a non-extractable browser key so a copied URL cannot be redeemed elsewhere.</td></tr>
+          <tr><td><code>taintReadback</code></td><td><code>'auto'</code></td><td>Origin-taints 2D display canvases so even prototype readbacks throw (<code>taintFallback</code> controls fallback when unavailable).</td></tr>
+          <tr><td><code>networkAware</code></td><td><code>false</code></td><td>Honours <code>Save-Data</code> / slow effective connection type with a smaller derivative width.</td></tr>
+          <tr><td><code>aspectRatio</code> / <code>showBadge</code> / <code>swallowClick</code></td><td>unset / <code>false</code> / <code>false</code></td><td>Presentation and click helpers: reserve box aspect ratio before load, toggle a small corner badge, or absorb clicks without bubbling.</td></tr>
           <tr><td><code>guards</code></td><td>most on; DevTools off</td><td>Right-click, drag, copy, long-press, print, blur and screenshot-signal guards are enabled by default; the DevTools-size heuristic is opt-in. Each is independently configurable.</td></tr>
-          <tr><td><code>onAttempt</code></td><td>—</td><td>Callback/DOM events when copy attempts are detected, for your own logging.</td></tr>
+          <tr><td><code>onAttempt</code> / <code>onChallenge</code></td><td>—</td><td>Hooks when copy attempts are detected, or to supply step-up challenge proofs (Turnstile/WebAuthn) on minting.</td></tr>
         </tbody>
       </table></div>
       <p><code>Archx.load.image()</code>, <code>Archx.load.gallery()</code>,
@@ -446,48 +462,13 @@ npx archx-detect suspect.jpg --expect "order-12345"</pre>
 <footer class="footer">
   <div class="footer-inner">
     <span class="wordmark wordmark-small">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
     <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · <a href="index.html">overview</a> · <a href="technical.html">why it is built this way</a> · <a href="limits.html">threat model</a></p>
   </div>
 </footer>
 
-<script>
-// Scroll-spy for the docs index: highlight the section being read.
-// Progressive enhancement only — the page is complete without it.
-(function () {
-  var links = {};
-  document.querySelectorAll('.tech-index a[href^="#"]').forEach(function (a) {
-    links[a.getAttribute('href').slice(1)] = a;
-  });
-  var sections = Object.keys(links)
-    .map(function (id) { return document.getElementById(id); })
-    .filter(Boolean);
-  if (!sections.length) return;
-  var current = null;
-  function setCurrent(id) {
-    var next = links[id];
-    if (!next) return;
-    if (current && current !== next) {
-      current.classList.remove('is-current');
-      current.removeAttribute('aria-current');
-    }
-    current = next;
-    current.classList.add('is-current');
-    current.setAttribute('aria-current', 'location');
-  }
-  Object.keys(links).forEach(function (id) {
-    links[id].addEventListener('click', function () { setCurrent(id); });
-  });
-  if (!('IntersectionObserver' in window)) return;
-  var observer = new IntersectionObserver(function (entries) {
-    entries.forEach(function (entry) {
-      if (entry.isIntersecting) setCurrent(entry.target.id);
-    });
-  }, { rootMargin: '-20% 0px -55% 0px' });
-  sections.forEach(function (s) { observer.observe(s); });
-})();
-</script>
+<script type="module" src="js/docs/docs-page.js"></script>
 </body>
 </html>

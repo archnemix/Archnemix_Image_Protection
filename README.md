@@ -742,7 +742,7 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 
 ### Also
 
-- `Archx.presets` / `Archx.preset(name, overrides?)` / exported `PRESETS` + `preset()` — frozen, inspectable direct-parameter bundles (`gallery`, `editorial`, `commerce`, `screenshotResistant`)
+- `Archx.presets` / `Archx.preset(name, overrides?)` / exported `PRESETS` + `preset()` — frozen, inspectable direct-parameter bundles (`lite`, `performance`, `elite`, `gallery`, `catalog`, `editorial`, `commerce`, `marketplace`, `maxProtection`, `screenshotResistant`)
 - `Archx.temporalInterlaceProfiles` / `Archx.normalizeTemporalInterlace(value)` / exported `TEMPORAL_INTERLACE_PROFILES` + `normalizeTemporalInterlace()` — inspect and bound the 60 Hz-first subset-frame profiles before passing them to an image
 - `Archx.clearCaches()` — clears shared decoded-bitmap/token promises and rotates the page-session scope; call it on logout, tenant switch, or entitlement downgrade. Already-painted instances keep their current private frame until reload/destroy
 - `Archx.preloadAssets(ids, options)` — warms the `archx-build` manifest and browser HTTP caches for `{assetId}` sources without mounting viewers (hero/next-slide prefetch); resolves with per-id `{preloaded, failed}` outcomes, verifies variant integrity like a real load, and skips entirely on Save-Data when `networkAware` is on
@@ -756,7 +756,9 @@ The normalized settings are inspectable before use with `Archx.normalizeTemporal
 - `instance.options` — sanitized per-instance option view with secrets redacted
 - `Archx.load.gallery(container, items, options?)` — items: URLs or `{id|assetId|asset|src, alt, options}` objects; the helper applies catalog sizing/batch defaults unless overridden
 - `Archx.protectAll(selector?, options?)` — upgrade existing `<img data-protect>` in place
-- `<archx-image>` — attributes: `src`, `image-id`, `asset-id`, `asset-manifest`, `token-endpoint`, `token-method`, `token-transport`, `token-batch`, `fetch-priority`, `proof-of-possession`, `cache-scope`, `mode`, `preset`, `quality-profile`, `watermark`, `fit`, `grid`, `key`, `scrambled`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, `temporal-interlace-refresh-hz`, `render-loop`, `reload-on-resize`, `on-extract`, `alt` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
+- Optional host/presentation flags accepted by `Archx.load.image` / `Archx.load.gallery`: `width`, `height`, `aspectRatio` (inline dimensions on the host element), `showBadge` (render the corner `ARCHX PROTECTED` badge), and `swallowClick` (suppress re-dispatching clicks onto the host element while still calling `onClick`)
+- `<archx-image>` — observed attributes: `src`, `image-id`, `asset-id`, `asset-manifest`, `token-endpoint`, `token-method`, `token-transport`, `token-batch`, `fetch-priority`, `proof-of-possession`, `cache-scope`, `mode`, `profile`, `preset`, `renderer`, `quality-profile`, `watermark`, `fit`, `grid`, `plan-version`, `key`, `scrambled`, `taint-readback`, `taint-url`, `lens`, `capture-shield`, `temporal-shield`, `camera-shield`, `temporal-interlace`, `temporal-interlace-engine`, `temporal-interlace-layout`, `temporal-interlace-phases`, `temporal-interlace-cell-size`, `temporal-interlace-fill`, `temporal-interlace-refresh-hz`, `render-loop`, `reload-on-resize`, `on-extract`, `alt`; initial connect-only attributes: `asset-integrity`, `asset-manifest-integrity`, `network-aware` *(prefer `image-id` + tokens: a `src` attribute is visible in page source by definition)*
+- CLI tools (`npx <bin> --help` prints all options): `archx-protect` additionally supports `--grid`, `--plan-version`, `--format`, `--forensic-seed`, `--stego-key`, `--stego-strength`, `--stego-layout`, `--stego-grid-x`, and `--stego-grid-y`; `archx-build` supports `--manifest`, `--grid`, `--plan-version`, `--format`, `--forensic-seed`, `--stego-key`, `--force`, `--no-clean`, `--webp-effort`, `--smart-subsample`, `--resize-kernel`, and `--sharp-concurrency`; `archx-detect` supports `--secret`, `--layout`, `--grid-x`, `--grid-y`, and `--no-search`
 - Server: `createArchxMiddleware(options)` needs `sharp` (optional peer; pinned examples use Sharp 0.35). Important direct controls:
   - **Access:** `secret`, `authorize`, `allowAnonymous`, `imagesDir | imagesDirs | images`, `publicDir | publicDirs`, `basePath`, `ttlSec` (5–900 seconds; default 120, and `authorize()` may set a per-token TTL in the same range), `tokenMethods`, `oneTimeTokens`, `bindTokenTo:{ip,userAgent,session}`, `allowedOrigins`, `requireSameSiteTokenRequests`, `requireTokenRequestHeader`, `allowQueryTokens` (default `false`), `proofOfPossession:'optional'|'required'|'off'` (bare default `'optional'`; hardened defaults select `'required'`), `callbackTimeoutMs`/`authorizeTimeoutMs`, `trustProxy`, `trustedProxyHops`.
   - **Delivery:** `grid` (8–32 tiles per side for new payloads, default 8), `encrypt`, `scrambleKeyMode:'per-image'|'per-token'`, `scramblePlanVersion:1|2` (**2 = 128-bit seed, the default since v1.15** — it needs pv-aware clients ≥ v1.10, which read the version from each container's header; 1 = legacy brute-forceable 32-bit seed, kept only for pre-1.10 cached clients, and the config audit warns when it is selected), `maxWidthCap`, `widthBuckets` (canonical widths, or `null` for exact widths), `batchTokenMaxItems`, `batchTokenMaxBytes`, `quality`, `lossless`, `format:'webp'|'png'|'jpeg'|'avif'` (AVIF is ~40–55% smaller on scrambled tiles but encodes 8–70× slower — best for precomputed catalogs; needs an AVIF-capable browser; `withCatalogThroughputDefaults()` rejects request-path AVIF, including per-item authorization overrides), `allowClientQuality`, `serverWatermark`, `forensic`, `forensicPerToken`, `forensicScope:'viewer'|'image'`, `steganography` (including `scope:'viewer'|'image'`), `onStegoIssue`, `stegoRegistryFailure:'deny'|'allow'`, `onProvenanceIssue`, `provenanceFailure:'deny'|'allow'`, `onDelivery`.
@@ -897,18 +899,23 @@ npm run test:browser  # 129 checks in real headless Chromium (encapsulation, dec
                       # manifest pinning + tampered-variant rejection, network-aware sampling,
                       # asset preload cache warming, catalog sizing, batch-minted 100-image gallery…)
 npm run test:all
+npm run test:pack   # installs packed tarball in an isolated temp app and tests entry points/CLIs/types
+npm run types:generate # regenerate types/*.d.ts from types-src/ (verified by `npm run types:check`)
 npm run load-test -- --requests=500 --concurrency=50 --width=1200
-npm run redteam     # 55-case red-team suite against a live hardened server (forgery, replay races,
-npm run redteam:v2  # 32-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
-                    # surface, attribution abuse (wrong-key lottery, collusion averaging), resource bounds
-                    # malleability, claim fuzzing, keyring confusion, IDOR/batch abuse, slow-trickle
-                    # bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)
-npm run bench:stego # StegoMark survival benchmark (9 images x 11 transforms; --fp for the 369-case
-                    # wrong-key false-positive sweep)
-npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload + Chromium timings/heap, JSON + --compare)
                     # bounded local mint+redeem regression load; see docs/OPERATIONS.md
                     # before treating any staging number as a capacity result
+npm run redteam     # 55-case red-team suite (53 scored defenses + 2 informational) against a live hardened server
+                    # (forgery, replay races, malleability, claim fuzzing, keyring confusion, IDOR/batch abuse,
+                    # slow-trickle bodies, scrape quotas, proof-of-possession theft/replay, pixel bombs, config escapes)
+npm run redteam:v2  # 32-case second suite: HTTP ambiguity, JSON-plane injection, cache/CORS/error
+                    # surface, attribution abuse (wrong-key lottery, collusion averaging), resource bounds
+npm run bench:stego # StegoMark survival benchmark (9 images x 11 transforms; --fp for the 369-case
+                    # wrong-key false-positive sweep; `bench:stego:evidence` updates docs/evidence/stego-bench.json)
+npm run bench:opt   # before/after optimization harness (server CPU/RAM/payload + Chromium timings/heap, JSON + --compare)
+npm run key:rotation-plan # inspect or test a signing-key rotation schedule
 ```
+
+Note on CPU-bound deskew timeout: `v1.30 layout v5 affine deskew` in `tests/unit.test.mjs` uses a `60000 ms` per-subcase budget on Linux (`240000 ms` on Windows); slower 2-vCPU Linux environments can occasionally exceed 60 s on the synthetic 20°+keystone compound subcase under full-suite load, while CI runners pass within budget.
 
 ### Run the real-Redis integration test locally
 
@@ -933,19 +940,22 @@ runs the same test without starting a server.
 ## Repository layout
 
 ```
-src/         browser library (archx.js) + shared scramble/crypto core (scramble.js)
-types/       hand-maintained TypeScript declarations for every public entry point
-             (verified by `npm run test:types`)
-dist/        committed built bundles (ESM / CJS / minified browser-global; regenerate, do not hand-edit)
-server/      token+scramble middleware, responsive asset builder, Redis state-store adapter, image scrambler, archx-protect + archx-build + archx-detect CLIs, demo server
-demo/        interactive demo + attack simulator, automated-test harness
+src/           browser library (archx.js) + shared scramble/crypto core (scramble.js)
+types-src/     source TypeScript declaration templates used by `npm run types:generate`
+types/         generated TypeScript declarations for every public entry point
+               (verified by `npm run types:check` and `npm run test:types`)
+dist/          committed built bundles (ESM / CJS / minified browser-global; regenerate, do not hand-edit)
+server/        token+scramble middleware, responsive asset builder, Redis state-store adapter, image scrambler, archx-protect + archx-build + archx-detect CLIs, demo server
+demo/          interactive demo + attack simulator, automated-test harness
 demo-masters/  three tracked demo originals — deliberately NOT web-accessible; generated gallery is ignored
-docs/        industry-standards checklist (docs/STANDARDS.md), reviewer guide, research,
-             operations, compliance readiness, compatibility matrix, and plain-language IP-holder guide
-examples/    copy-and-run protection ladder and custom-flags showcase
-tests/       unit + seeded fuzz + real-browser suites + TypeScript smoke test
-tools/       build, demo-image generator, benchmarks, bounded load test, red-team attack suite
-website/     static product site (no build step; vendored Three.js; see website/README.md)
+docs/          industry-standards checklist (docs/STANDARDS.md), reviewer guide, research,
+               operations, compliance readiness, compatibility matrix, and plain-language IP-holder guide
+examples/      copy-and-run protection ladder and custom-flags showcase
+tests/         unit + seeded fuzz + real-browser suites + TypeScript smoke test
+tools/         build, type generator, demo-image generator, benchmarks, bounded load test, red-team attack suites
+website/       static product site (no build step; modular ES modules; vendored Three.js; see website/README.md)
+CHANGELOG.md   versioned release notes
+SECURITY.md    security policy, disclosure channel, and threat-model limits
 ```
 
 ## License

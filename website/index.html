@@ -5,22 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Archnemix Image Protection — publish the picture, keep the picture</title>
 <meta name="description" content="Open-source image protection for the web: private masters, authorized scrambled derivatives, a guarded canvas viewer, and measured ownership-fingerprint recovery across common image transforms. 0BSD licensed.">
-<!-- Fonts are self-hosted (see @font-face in styles.css, OFL files in
-     ./fonts/): this page makes no third-party requests. -->
-<link rel="stylesheet" href="styles.css">
-<link rel="stylesheet" href="editorial.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f5f1e8'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%2319242b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%2319242b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/pages.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4efe5'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23172026'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%232d529e'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%232d529e'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23172026'/%3E%3C/svg%3E">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="masthead">
   <div class="masthead-inner">
     <a class="wordmark" href="#top" aria-label="Archnemix home">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Image Protection · Open Source · 0BSD</p>
-    <nav class="masthead-nav" aria-label="Pages">
+    <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="siteNav">Menu</button>
+    <nav class="masthead-nav" id="siteNav" aria-label="Pages">
       <a href="index.html" aria-current="page">Overview</a>
       <a href="docs.html">Docs</a>
       <a href="technical.html">Technical</a>
@@ -28,9 +31,11 @@
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
+  <div class="scroll-progress" aria-hidden="true"></div>
 </header>
 
-<main id="top">
+<main id="main">
+  <div id="top"></div>
 
   <!-- ============ HERO ============ -->
   <section class="hero">
@@ -47,20 +52,21 @@
 
     <figure class="stage" id="stage">
       <div class="stage-frame">
-        <canvas id="gl" tabindex="0" aria-label="Interactive 3D illustration, not a live demo: tiles scramble and reassemble to explain the delivery idea. Drag to orbit, hover a tile to trace it, press space to scatter."></canvas>
+        <canvas id="gl" tabindex="0" aria-label="Interactive 3D illustration, not a live demo: tiles scramble and reassemble to explain the delivery idea. Drag to orbit, hover a tile to trace it, press space to toggle."></canvas>
         <div class="stage-fallback" id="stageFallback" hidden>
           <p>The 3D illustration needs WebGL. The idea, in one line: the picture
           travels as 64 permuted, mirrored tiles and only becomes a picture
           inside the viewer.</p>
         </div>
         <span class="stage-tag" id="stageTag">Your visitor&rsquo;s view</span>
+        <span class="stage-badge-wire" id="stageWireBadge" hidden>plan v2 · 128-bit seed</span>
       </div>
       <figcaption class="stage-controls">
         <div class="stage-buttons" role="group" aria-label="Illustration controls">
           <button type="button" id="btnView" class="btn is-active" aria-pressed="true">Visitor&rsquo;s view</button>
           <button type="button" id="btnWire" class="btn" aria-pressed="false">On the wire</button>
         </div>
-        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit it, hover a tile to trace it, click to scatter.</p>
+        <p class="stage-caption" id="stageCaption">Reassembled, per-viewer, inside a canvas — never as an <span class="mono">&lt;img&gt;</span> with an address. Drag to orbit, hover a tile to trace it, press Space to toggle.</p>
       </figcaption>
       <div class="stage-tools">
         <span class="tools-label">Grid</span>
@@ -70,7 +76,7 @@
           <button type="button" data-g="32" aria-pressed="false">32×32</button>
         </span>
         <span class="stage-readout" id="stageReadout">Hover a tile to trace where it travels.</span>
-        <span class="install-note" id="stageStats">64 tiles · seeded permutation · drag to orbit · hover a tile · space to scatter</span>
+        <span class="install-note" id="stageStats">64 tiles · plan v2 · drag to orbit · hover a tile · space to toggle</span>
       </div>
       <p class="fineprint"><strong>No live demo on this static website:</strong> the hero is an explanatory
       illustration only. There is no Archx server here to authorize a viewer, mint and spend a token,
@@ -89,7 +95,7 @@
   </section>
 
   <!-- ============ 01 PROBLEM ============ -->
-  <section class="band" id="problem">
+  <section class="band" id="problem" data-reveal>
     <header class="band-head"><span class="band-no">01</span><h2>The ordinary ways pictures walk away</h2></header>
     <div class="cols-3">
       <article>
@@ -115,7 +121,7 @@
   </section>
 
   <!-- ============ 02 HOW ============ -->
-  <section class="band" id="how">
+  <section class="band" id="how" data-reveal>
     <header class="band-head"><span class="band-no">02</span><h2>How Archx works</h2></header>
     <ol class="steps">
       <li>
@@ -157,7 +163,7 @@
   </section>
 
   <!-- ============ 03 LAYERS ============ -->
-  <section class="band" id="layers">
+  <section class="band" id="layers" data-reveal>
     <header class="band-head"><span class="band-no">03</span><h2>The layers, in plain terms</h2></header>
     <div class="table-wrap">
       <table class="layers">
@@ -176,7 +182,7 @@
   </section>
 
   <!-- ============ 04 MEASURED ============ -->
-  <section class="band band-dark" id="measured">
+  <section class="band band-dark" id="measured" data-reveal>
     <header class="band-head"><span class="band-no">04</span><h2>Measured, not promised</h2></header>
     <p class="band-intro">Every number below comes from the benchmark and attack
     suites shipped in the repository. Run them yourself:
@@ -201,7 +207,7 @@
   </section>
 
   <!-- ============ 05 USE ============ -->
-  <section class="band" id="use">
+  <section class="band" id="use" data-reveal>
     <header class="band-head"><span class="band-no">05</span><h2>Use it in an afternoon</h2></header>
     <div class="cols-2">
       <div>
@@ -264,7 +270,7 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
   </section>
 
   <!-- ============ 06 LICENSE ============ -->
-  <section class="band" id="license">
+  <section class="band" id="license" data-reveal>
     <header class="band-head"><span class="band-no">06</span><h2>Free as in &ldquo;it&rsquo;s yours&rdquo;</h2></header>
     <div class="cols-2">
       <p class="license-lede">Archnemix Image Protection is released under the
@@ -286,7 +292,7 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
 <footer class="footer">
   <div class="footer-inner">
     <span class="wordmark wordmark-small">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
     <p>Image protection, honestly labelled. © 2026 Archnemix contributors · 0BSD · <a href="technical.html">why every piece is built this way</a> · the 3D tiles above scramble exactly like the real payload does.</p>
@@ -297,7 +303,6 @@ Archx.load.image('#hero-photo', { id: 'aurora-valley' }, {
 { "imports": { "three": "./vendor/three.module.min.js" } }
 </script>
 <script>
-// If the module/CDN never starts the stage, say so instead of showing a void.
 setTimeout(function () {
   if (!window.__archxGlReady) {
     var fb = document.getElementById('stageFallback');
@@ -307,6 +312,6 @@ setTimeout(function () {
   }
 }, 7000);
 </script>
-<script type="module" src="main.js"></script>
+<script type="module" src="js/hero/tile-stage.js"></script>
 </body>
 </html>
