@@ -33,18 +33,19 @@ jobs:
       - run: npm run build
       - run: npm run test:types
       - run: npm run docs:check
-      - run: npm test
+      - name: Run npm test
+        run: node .github/scripts/ci-telemetry.mjs "node-${{ matrix.node-version }}-unit-fuzz" npm test
       - name: Browser tests
         if: matrix.node-version == 22
-        run: npm run test:browser
+        run: node .github/scripts/ci-telemetry.mjs "node-${{ matrix.node-version }}-browser" npm run test:browser
       - name: Real-Redis integration tests
         if: matrix.node-version == 22
         env:
           ARCHX_TEST_REDIS_URL: redis://127.0.0.1:6379
-        run: npm run test:redis
+        run: node .github/scripts/ci-telemetry.mjs "node-${{ matrix.node-version }}-redis" npm run test:redis
       - name: Packaged-artifact smoke test
         if: matrix.node-version == 22
-        run: npm run test:pack
+        run: node .github/scripts/ci-telemetry.mjs "node-${{ matrix.node-version }}-pack" npm run test:pack
       - run: npm audit --audit-level=high
       - name: Generate CycloneDX SBOM
         if: matrix.node-version == 22
@@ -80,5 +81,6 @@ jobs:
       - run: npm run test:types
       - run: npm run docs:check
       - name: Run npm test
-        run: node tools/run-tests-ci.mjs
-      - run: npm run test:pack
+        run: node .github/scripts/ci-telemetry.mjs "windows-node22-unit-fuzz" node tools/run-tests-ci.mjs
+      - name: Packaged-artifact smoke test
+        run: node .github/scripts/ci-telemetry.mjs "windows-node22-pack" npm run test:pack

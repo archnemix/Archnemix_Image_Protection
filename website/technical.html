@@ -5,22 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Technical decisions — Archnemix Image Protection</title>
 <meta name="description" content="Every major engineering decision in Archnemix Image Protection: what was chosen, what was rejected, the pros and cons, and the measured evidence. With an animated end-to-end flow explanation and local interactive widgets.">
-<!-- Fonts are self-hosted (see @font-face in styles.css, OFL files in
-     ./fonts/): this page makes no third-party requests. -->
-<link rel="stylesheet" href="styles.css">
-<link rel="stylesheet" href="editorial.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f5f1e8'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%2319242b'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%233868f5'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%233868f5'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%2319242b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/components.css">
+<link rel="stylesheet" href="styles/pages.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f4efe5'/%3E%3Crect x='3' y='3' width='12' height='12' fill='%23172026'/%3E%3Crect x='17' y='3' width='12' height='12' fill='%232d529e'/%3E%3Crect x='3' y='17' width='12' height='12' fill='%232d529e'/%3E%3Crect x='17' y='17' width='12' height='12' fill='%23172026'/%3E%3C/svg%3E">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="masthead">
   <div class="masthead-inner">
     <a class="wordmark" href="index.html" aria-label="Archnemix home">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       <span>Archnemix</span>
     </a>
     <p class="masthead-meta">Technical decisions</p>
-    <nav class="masthead-nav" aria-label="Pages">
+    <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="siteNav">Menu</button>
+    <nav class="masthead-nav" id="siteNav" aria-label="Pages">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
       <a href="technical.html" aria-current="page">Technical</a>
@@ -28,9 +31,10 @@
       <a class="nav-gh" href="https://github.com/archnemix/Archnemix_Image_Protection" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
+  <div class="scroll-progress" aria-hidden="true"></div>
 </header>
 
-<main>
+<main id="main">
   <section class="page-intro">
     <p class="kicker">The decision atlas</p>
     <h1>Every choice, on the record.</h1>
@@ -40,7 +44,7 @@
     Nothing here is marketing: where a choice costs something, the cost is printed.</p>
   </section>
 
-  <section class="flow-band" id="image-flow" aria-labelledby="flowTitle">
+  <section class="flow-band" id="image-flow" aria-labelledby="flowTitle" data-reveal>
     <header class="band-head"><span class="band-no">↳</span><h2 id="flowTitle">One image, start to finish</h2></header>
     <p class="band-intro">Follow a private master through the recommended <strong>server-delivery
     (<span class="mono">{ id }</span>)</strong> path: permission first, pixels second. Choose a viewer mode,
@@ -172,12 +176,14 @@
         <table class="layers">
           <thead><tr><th scope="col">Preset</th><th scope="col">Base path</th><th scope="col">What the bundle changes</th></tr></thead>
           <tbody>
-            <tr><td><span class="mono">gallery</span> / <span class="mono">catalog</span></td><td>Lite</td><td>Catalog sampling, canonical width buckets, batched token mints, cache/unload budgets for image-heavy pages.</td></tr>
+            <tr><td><span class="mono">lite</span></td><td>Lite</td><td>Canvas renderer, catalog sampling (<span class="mono">sourceOversample: 1</span>, <span class="mono">dprCap: 2</span>), canonical width buckets, <span class="mono">forensic: false</span>, batched mints, and compact bitmap caches (16 entries / 96&nbsp;MiB).</td></tr>
+            <tr><td><span class="mono">performance</span></td><td>Shield</td><td>Balanced Canvas path (<span class="mono">qualityProfile: 'balanced'</span>, <span class="mono">sourceOversample: 1.5</span>, <span class="mono">dprCap: 2.5</span>), <span class="mono">forensic: true</span>, canonical width buckets, batched mints, and 24-entry / 128&nbsp;MiB caches.</td></tr>
+            <tr><td><span class="mono">elite</span></td><td>Fortress</td><td>WebGL renderer (<span class="mono">onExtract: 'black'</span>), <span class="mono">proofOfPossession: 'required'</span>, <span class="mono">60&nbsp;Hz</span> temporal interlace, <span class="mono">captureShield</span>, <span class="mono">integrity: 'lock'</span>, <span class="mono">memory: 'strict'</span>, <span class="mono">localScramble: true</span>, and strike lockouts.</td></tr>
+            <tr><td><span class="mono">gallery</span> / <span class="mono">catalog</span></td><td>Lite</td><td>Catalog sampling, canonical width buckets, batched token mints, <span class="mono">unloadOnExit: true</span>, and 24-entry / 128&nbsp;MiB caches for image-heavy pages.</td></tr>
             <tr><td><span class="mono">editorial</span></td><td>Shield</td><td>Original-quality request profile with the default Canvas path unless a renderer flag says otherwise.</td></tr>
-            <tr><td><span class="mono">commerce</span> / <span class="mono">marketplace</span></td><td>Vault</td><td>WebGL path and capture shield; marketplace also enables batched mints for grids.</td></tr>
-            <tr><td><span class="mono">performance</span></td><td>Shield</td><td>Forces Canvas, catalog sampling, batched mints and smaller bitmap-cache budgets.</td></tr>
-            <tr><td><span class="mono">maxProtection</span></td><td>Vault</td><td>Forces WebGL, requires proof-of-possession, and enables the 60 Hz balanced temporal interlace.</td></tr>
-            <tr><td><span class="mono">screenshotResistant</span></td><td>Fortress</td><td>Adds the pointer Lens to Fortress’s temporal/capture/strike defaults; still not screenshot prevention.</td></tr>
+            <tr><td><span class="mono">commerce</span> / <span class="mono">marketplace</span></td><td>Vault</td><td>WebGL path and capture shield; <span class="mono">marketplace</span> also enables batched mints for grids.</td></tr>
+            <tr><td><span class="mono">maxProtection</span></td><td>Vault</td><td>Forces WebGL, requires proof-of-possession, and enables 60&nbsp;Hz balanced temporal interlace without Fortress&rsquo;s extra <span class="mono">integrity</span>/<span class="mono">strikes</span>/<span class="mono">memory</span> defaults.</td></tr>
+            <tr><td><span class="mono">screenshotResistant</span></td><td>Fortress</td><td>Adds the pointer Lens to Fortress&rsquo;s temporal/capture/strike defaults; still not screenshot prevention.</td></tr>
           </tbody>
         </table>
       </div>
@@ -665,13 +671,13 @@
 <footer class="footer">
   <div class="footer-inner">
     <span class="wordmark wordmark-small">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#3868f5"/><rect x="2" y="17" width="13" height="13" fill="#3868f5"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="13" height="13" fill="currentColor"/><rect x="17" y="2" width="13" height="13" fill="#2d529e"/><rect x="2" y="17" width="13" height="13" fill="#2d529e"/><rect x="17" y="17" width="13" height="13" fill="currentColor"/></svg>
       Archnemix
     </span>
     <p><a href="index.html">Overview</a> · <a href="limits.html">Threat model &amp; limits</a> · © 2026 Archnemix contributors · 0BSD</p>
   </div>
 </footer>
 
-<script type="module" src="technical.js"></script>
+<script type="module" src="js/technical/index.js"></script>
 </body>
 </html>

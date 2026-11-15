@@ -1,5 +1,8 @@
-/* Threat-model page: the interactive attacker matrix. Outcomes are the
- * ones documented in README/RESEARCH — no category is oversold. */
+/* Threat-model page: interactive 8-attacker matrix + shared UI.
+   Outcomes match README / RESEARCH — no category is oversold. */
+import { initSharedUi } from '../shared/ui.js';
+
+initSharedUi();
 
 const LAYERS = [
   'Private masters', 'Resolution cap', 'Tile scramble', 'AES-256-GCM',
@@ -84,10 +87,9 @@ const ATTACKERS = [
 
 const grid = document.getElementById('attackerGrid');
 const detailEl = document.getElementById('attackerDetail');
-let current = null;
 
 function render(attacker) {
-  current = attacker;
+  if (!grid || !detailEl) return;
   grid.querySelectorAll('.attacker').forEach((b) => {
     const active = b.dataset.id === attacker.id;
     b.classList.toggle('is-active', active);
@@ -113,5 +115,5 @@ if (grid && detailEl) {
     b.addEventListener('click', () => render(a));
     grid.appendChild(b);
   }
-  render(ATTACKERS[1]); // start with the DevTools user — the most common real question
+  render(ATTACKERS[1]);
 }
